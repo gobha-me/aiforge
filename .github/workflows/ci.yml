@@ -28,7 +28,8 @@ jobs:
           - compiler: Clang
             build_dir: build-clang
             toolchain: -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain/clang.cmake
-            cxxflags: -stdlib=libc++
+            # libc++ 18 keeps std::stop_token behind this feature gate.
+            cxxflags: -stdlib=libc++ -fexperimental-library
 
     env:
       CXXFLAGS: ${{ matrix.cxxflags }}
