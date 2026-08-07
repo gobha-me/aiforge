@@ -16,9 +16,12 @@ architectural guardrails live in
 - GCC 13+ or Clang 17+ with a C++23 standard library
 - Git when CMake must fetch Catch2
 
-AIForge uses CMake only for dependencies. A configured package is preferred;
-`FetchContent` is the fallback. TermForge and venice-cpp recipes remain in the
-tree for their future adapters but are not active dependencies yet.
+AIForge uses CMake only for dependencies. A configured package is preferred,
+then a sibling checkout, with `FetchContent` as the fallback. TermForge and
+venice-cpp recipes remain in the tree for their future adapters but are not
+active dependencies yet. Their fallbacks are deliberately pinned to compatible
+stable baselines (TermForge v0.7.2 and venice-cpp v0.5.0); upgrades should be
+made only for a documented compatibility need.
 
 ## Build and test
 

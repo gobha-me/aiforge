@@ -16,7 +16,7 @@ project(aiforge
 message(STATUS "${PROJECT_NAME}:${PROJECT_VERSION}")
 
 set(VERSION_HEADER_IN "${CMAKE_CURRENT_LIST_DIR}/include/version.hpp.in.cmake")
-set(VERSION_HEADER "${CMAKE_CURRENT_LIST_DIR}/include/version.hpp")
+set(VERSION_HEADER "${PROJECT_BINARY_DIR}/generated/include/version.hpp")
 configure_file(${VERSION_HEADER_IN} ${VERSION_HEADER} @ONLY)
 
 option(${PROJECT_NAME}_BUILD_BIN "Build the AIForge executable" ${PROJECT_IS_TOP_LEVEL})

@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.compiler }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: GCC
+            build_dir: build-gcc
+            toolchain: ""
+            cxxflags: ""
+          - compiler: Clang
+            build_dir: build-clang
+            toolchain: -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain/clang.cmake
+            # libc++ 18 keeps std::stop_token behind this feature gate.
+            cxxflags: -stdlib=libc++ -fexperimental-library
+
+    env:
+      CXXFLAGS: ${{ matrix.cxxflags }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Clang standard library
+        if: matrix.compiler == 'Clang'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends libc++-18-dev libc++abi-18-dev
+
+      - name: Configure
+        run: cmake -B "${{ matrix.build_dir }}" ${{ matrix.toolchain }}
+
+      - name: Build
+        run: cmake --build "${{ matrix.build_dir }}" --parallel 2
+
+      - name: Test
+        run: ctest --test-dir "${{ matrix.build_dir }}" --output-on-failure
