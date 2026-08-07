@@ -11,7 +11,9 @@ if (NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug)
 endif (NOT CMAKE_BUILD_TYPE)
 
-set(CMAKE_CXX_FLAGS "-Wall -Wnarrowing -Wextra -pedantic")
+# Seed CMake's cache instead of replacing it so CXXFLAGS and explicit
+# CMAKE_CXX_FLAGS values supplied by a consumer remain effective.
+set(CMAKE_CXX_FLAGS_INIT "-Wall -Wnarrowing -Wextra -pedantic")
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "")

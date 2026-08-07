@@ -24,13 +24,24 @@ jobs:
           - compiler: GCC
             build_dir: build-gcc
             toolchain: ""
+            cxxflags: ""
           - compiler: Clang
             build_dir: build-clang
             toolchain: -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain/clang.cmake
+            cxxflags: -stdlib=libc++
+
+    env:
+      CXXFLAGS: ${{ matrix.cxxflags }}
 
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Clang standard library
+        if: matrix.compiler == 'Clang'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends libc++-18-dev libc++abi-18-dev
 
       - name: Configure
         run: cmake -B "${{ matrix.build_dir }}" ${{ matrix.toolchain }}
