@@ -68,8 +68,9 @@ Record the verification commands actually run in PRs.
 
 ## Repository notes
 
-- `include/version.hpp` is generated and ignored. Edit
-  `include/version.hpp.in.cmake`, retaining `<cstdint>`.
+- `version.hpp` is generated under each build tree. Edit
+  `include/version.hpp.in.cmake`, retaining `<cstdint>`; never generate into the
+  source tree.
 - Build directories are ignored and must not be committed.
 - Dependency pins are bumped deliberately, with the compatibility reason noted.
 - Do not select a storage encoding, parser, scripting runtime, or plugin ABI
