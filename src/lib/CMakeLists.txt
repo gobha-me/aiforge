@@ -1,5 +1,8 @@
 add_library(${PROJECT_NAME}_lib STATIC
   bootstrap.cpp
+  event_log.cpp
+  run_projection.cpp
+  scripted_backend.cpp
 )
 add_library(${PROJECT_NAME}::lib ALIAS ${PROJECT_NAME}_lib)
 
