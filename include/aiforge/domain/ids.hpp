@@ -55,6 +55,8 @@ struct SurfaceIdTag;
 struct WorkspaceIdTag;
 struct PersonaIdTag;
 struct PermissionProfileIdTag;
+struct ContextEntryIdTag;
+struct ContextSourceIdTag;
 
 using SessionId = Id<SessionIdTag>;
 using RunId = Id<RunIdTag>;
@@ -70,5 +72,7 @@ using SurfaceId = Id<SurfaceIdTag>;
 using WorkspaceId = Id<WorkspaceIdTag>;
 using PersonaId = Id<PersonaIdTag>;
 using PermissionProfileId = Id<PermissionProfileIdTag>;
+using ContextEntryId = Id<ContextEntryIdTag>;
+using ContextSourceId = Id<ContextSourceIdTag>;
 
 }  // namespace aiforge::domain

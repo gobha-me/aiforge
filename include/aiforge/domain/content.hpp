@@ -33,14 +33,21 @@ struct ArtifactReferenceBlock {
   auto operator==(const ArtifactReferenceBlock&) const -> bool = default;
 };
 
+struct UnknownContentBlock {
+  std::string type_name;
+  auto operator==(const UnknownContentBlock&) const -> bool = default;
+};
+
 using ContentBlock =
-    std::variant<TextBlock, StructuredDataBlock, CitationBlock, ArtifactReferenceBlock>;
+    std::variant<TextBlock, StructuredDataBlock, CitationBlock, ArtifactReferenceBlock,
+                 UnknownContentBlock>;
 
 enum class Role {
   system,
   user,
   assistant,
   tool,
+  evidence,
 };
 
 struct Message {

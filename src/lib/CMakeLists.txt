@@ -1,5 +1,6 @@
 add_library(${PROJECT_NAME}_lib STATIC
   bootstrap.cpp
+  context_builder.cpp
   event_log.cpp
   run_projection.cpp
   scripted_backend.cpp

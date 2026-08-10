@@ -10,6 +10,7 @@
 #include <variant>
 #include <vector>
 
+#include <aiforge/domain/context.hpp>
 #include <aiforge/domain/events.hpp>
 
 namespace aiforge::backend {
@@ -36,7 +37,8 @@ struct ToolDeclaration {
 struct BackendRequest {
   domain::InferenceId inference_id;
   domain::ModelId model_id;
-  std::vector<domain::Message> messages;
+  // Produced by the application runtime before an adapter maps provider roles.
+  domain::ConstructedContext context;
   std::vector<ToolDeclaration> tools;
   GenerationOptions options;
   auto operator==(const BackendRequest&) const -> bool = default;
