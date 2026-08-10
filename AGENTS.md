@@ -1,8 +1,10 @@
 # AGENTS.md — conventions for AI agents working in this repo
 
 AIForge is a C++ terminal AI client built from a provider-neutral run kernel
-outward. Read `docs/ARCHITECTURE-NORTH-STAR.md` before changing architecture;
-where the historical `docs/DESIGN.md` conflicts with it, the north-star wins.
+outward. Read `docs/ARCHITECTURE-NORTH-STAR.md` and accepted ADRs before changing
+architecture. `docs/CONTEXT.md` is a subordinate proposal for repository-aware
+context construction; `docs/DESIGN.md` is historical. Where either conflicts
+with the north star or an accepted ADR, the governing document wins.
 
 ## Current baseline
 

@@ -9,6 +9,10 @@ library, storage format, scripting language, or screen layout.
 The July `DESIGN.md` remains useful historical context. Where it conflicts with
 this document, these guardrails govern.
 
+`CONTEXT.md` applies these guardrails to repository-aware context construction.
+It is a subordinate proposal; accepted ADRs and this north star continue to
+govern where the proposal is incomplete or conflicts.
+
 ## Product model: orthogonal axes
 
 Do not encode the product as two separate Chat and Code applications. The

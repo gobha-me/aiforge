@@ -8,6 +8,7 @@
 > guardrails govern. In particular, workspace is no longer fused to execution
 > mode, tools are not compile-time-only, and frame polling is not the intended
 > long-term worker-to-UI bridge.
+> The later repository-context proposal lives in `CONTEXT.md`.
 
 AIForge is the C++ successor to `venice-cli` (venice-py): a terminal AI chat client
 for the Venice.ai API, built on **termforge** (TUI) and **venice-cpp** (API client).

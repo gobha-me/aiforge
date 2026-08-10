@@ -10,6 +10,13 @@ core executable is available; it does not contact a model provider. The
 architectural guardrails live in
 [`docs/ARCHITECTURE-NORTH-STAR.md`](docs/ARCHITECTURE-NORTH-STAR.md).
 
+Architecture documents have explicit authority levels. The north star and
+accepted records in [`docs/adr/`](docs/adr/) govern. The repository-context
+proposal in [`docs/CONTEXT.md`](docs/CONTEXT.md) elaborates those decisions for
+the Code workspace and reusable context construction. The July
+[`docs/DESIGN.md`](docs/DESIGN.md) is retained only as historical product
+context.
+
 ## Requirements
 
 - CMake 3.28 or newer
