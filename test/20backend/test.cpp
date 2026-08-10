@@ -18,11 +18,42 @@ auto make_id(const std::string& value) -> IdType {
 }
 
 auto request(std::string model = "model") -> backend::BackendRequest {
+  const domain::ContextCapacity capacity{1024, 128, 0};
+  const domain::ConstructedContext context{
+      {domain::ContextEntry{make_id<domain::ContextEntryId>("context-runtime"),
+                            domain::ContextEntryKind::instruction,
+                            domain::InstructionLayer::application_runtime,
+                            domain::Message{make_id<domain::MessageId>("runtime"),
+                                            domain::Role::system,
+                                            {domain::TextBlock{"runtime contract"}},
+                                            std::nullopt},
+                            {make_id<domain::ContextSourceId>("runtime-source"),
+                             std::nullopt, std::nullopt},
+                            0,
+                            1,
+                            1},
+       domain::ContextEntry{make_id<domain::ContextEntryId>("context-user"),
+                            domain::ContextEntryKind::conversation,
+                            std::nullopt,
+                            domain::Message{make_id<domain::MessageId>("user"),
+                                            domain::Role::user,
+                                            {domain::TextBlock{"hello"}},
+                                            std::nullopt},
+                            {make_id<domain::ContextSourceId>("event-user"),
+                             std::nullopt, std::nullopt},
+                            0,
+                            2,
+                            1}},
+      {{make_id<domain::ContextEntryId>("context-runtime"),
+        domain::ContextDecision::admitted, std::nullopt},
+       {make_id<domain::ContextEntryId>("context-user"),
+        domain::ContextDecision::admitted, std::nullopt}},
+      capacity,
+      2};
   return backend::BackendRequest{
       make_id<domain::InferenceId>("inference"),
       make_id<domain::ModelId>(std::move(model)),
-      {domain::Message{make_id<domain::MessageId>("user"), domain::Role::user,
-                       {domain::TextBlock{"hello"}}, std::nullopt}},
+      context,
       {},
       {0.25, 128, 42, {}},
   };
