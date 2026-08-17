@@ -6,8 +6,10 @@ backends, and replayable projections come before the production TUI and Venice
 network adapter.
 
 The current milestone is intentionally offline. Running `aiforge` confirms the
-core executable is available; it does not contact a model provider. The
-architectural guardrails live in
+core executable is available; it does not contact a model provider. The command
+registry also provides generated help and version output. Commands that depend
+on later network, one-shot, or configuration milestones fail explicitly instead
+of reporting false success. The architectural guardrails live in
 [`docs/ARCHITECTURE-NORTH-STAR.md`](docs/ARCHITECTURE-NORTH-STAR.md).
 
 Architecture documents have explicit authority levels. The north star and
@@ -50,7 +52,13 @@ Run the offline executable with:
 
 ```bash
 ./build/src/bin/aiforge
+./build/src/bin/aiforge --help
+./build/src/bin/aiforge --version
 ```
+
+Command-line mistakes write diagnostics to stderr and return exit code 2. Help
+and version output use stdout. The registered `chat`, `models`, and `config`
+commands remain unavailable until their owning feature milestones land.
 
 The default toolchain respects `CXX`. Sanitizer toolchains are opt-in:
 
