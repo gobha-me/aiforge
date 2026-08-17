@@ -9,6 +9,8 @@
 #include <utility>
 
 #include <aiforge/bootstrap.hpp>
+#include <aiforge/config/config.hpp>
+#include <aiforge/config/file_store.hpp>
 #include <version.hpp>
 
 namespace aiforge::cli {
@@ -206,6 +208,171 @@ auto version_handler(CommandContext& context) -> int {
   return success_exit_code;
 }
 
+[[nodiscard]] auto parsed_argument(const ParsedInvocation& invocation,
+                                   const std::string_view id)
+    -> const ParsedArgument* {
+  const auto found =
+      std::ranges::find(invocation.arguments, id, &ParsedArgument::id);
+  return found == invocation.arguments.end() ? nullptr : &*found;
+}
+
+[[nodiscard]] auto parsed_text_values(const ParsedInvocation& invocation,
+                                      const std::string_view id)
+    -> std::optional<std::vector<std::string_view>> {
+  const auto* argument = parsed_argument(invocation, id);
+  if (argument == nullptr) return std::nullopt;
+  std::vector<std::string_view> values;
+  values.reserve(argument->values.size());
+  for (const auto& value : argument->values) {
+    const auto* text = std::get_if<std::string>(&value);
+    if (text == nullptr) return std::nullopt;
+    values.push_back(*text);
+  }
+  return values;
+}
+
+auto write_config_warning(std::ostream& error, const std::string_view message)
+    -> void {
+  error << "aiforge: warning: " << message << '\n';
+}
+
+[[nodiscard]] auto resolved_process_config(std::ostream& error)
+    -> std::expected<config::ResolvedConfig, int> {
+  const auto& registry = config::builtin_config_registry();
+  std::vector<config::ConfigLayer> layers;
+  auto environment = config::environment_config_layer(registry);
+  if (!environment) {
+    error << "aiforge: " << environment.error().message << '\n';
+    return std::unexpected(failure_exit_code);
+  }
+  layers.push_back(std::move(*environment));
+
+  auto path = config::process_config_path();
+  if (!path) {
+    write_config_warning(error, path.error().message);
+  } else {
+    config::JsonConfigFileStore store{*path};
+    auto file = store.load(registry);
+    if (file) {
+      layers.push_back(std::move(*file));
+    } else {
+      write_config_warning(error, file.error().message);
+    }
+  }
+
+  auto resolved = config::resolve_config(registry, layers);
+  if (!resolved) {
+    error << "aiforge: " << resolved.error().message << '\n';
+    return std::unexpected(failure_exit_code);
+  }
+  for (const auto& warning : resolved->diagnostics) {
+    write_config_warning(error, warning.message);
+  }
+  return std::move(*resolved);
+}
+
+auto config_parent_handler(CommandContext& context) -> int {
+  context.error << "aiforge: a config subcommand is required\n";
+  return usage_exit_code;
+}
+
+auto config_show_handler(CommandContext& context) -> int {
+  auto resolved = resolved_process_config(context.error);
+  if (!resolved) return resolved.error();
+  for (const auto& entry : resolved->entries) {
+    context.output << entry.key << '\t';
+    if (entry.sensitive && entry.value) {
+      context.output << "<redacted>";
+    } else if (entry.value) {
+      context.output << config::format_config_value(*entry.value);
+    } else {
+      context.output << "<unset>";
+    }
+    context.output << '\t'
+                   << (entry.source ? config::config_source_name(*entry.source)
+                                    : std::string_view{"unset"})
+                   << '\n';
+  }
+  return success_exit_code;
+}
+
+auto config_get_handler(CommandContext& context) -> int {
+  const auto key = parsed_text_values(context.invocation, "config.get.key");
+  if (!key || key->size() != 1) return usage_exit_code;
+  auto resolved = resolved_process_config(context.error);
+  if (!resolved) return resolved.error();
+  const auto* entry = resolved->find(key->front());
+  if (entry == nullptr) {
+    context.error << "aiforge: unknown configuration key\n";
+    return usage_exit_code;
+  }
+  if (!entry->value) {
+    context.error << "aiforge: configuration key is unset\n";
+    return failure_exit_code;
+  }
+  context.output << (entry->sensitive ? "<redacted>"
+                                      : config::format_config_value(*entry->value))
+                 << '\n';
+  return success_exit_code;
+}
+
+auto config_set_handler(CommandContext& context) -> int {
+  const auto assignment =
+      parsed_text_values(context.invocation, "config.set.assignment");
+  if (!assignment || assignment->size() < 2) return usage_exit_code;
+  const auto key = assignment->front();
+  const auto values = std::span<const std::string_view>{*assignment}.subspan(1);
+  const auto& registry = config::builtin_config_registry();
+  const auto found =
+      std::ranges::find(registry.keys, key, &config::ConfigKeySpec::id);
+  if (found == registry.keys.end() || !found->file_writable || found->sensitive) {
+    context.error << "aiforge: unknown or non-writable configuration key\n";
+    return usage_exit_code;
+  }
+  auto parsed =
+      config::parse_config_value(*found, values, config::ConfigSource::file);
+  if (!parsed) {
+    context.error << "aiforge: " << parsed.error().message << '\n';
+    return usage_exit_code;
+  }
+  auto path = config::process_config_path();
+  if (!path) {
+    context.error << "aiforge: " << path.error().message << '\n';
+    return failure_exit_code;
+  }
+  auto changed = config::JsonConfigFileStore{*path}.set(
+      registry, key, *parsed);
+  if (!changed) {
+    context.error << "aiforge: " << changed.error().message << '\n';
+    return failure_exit_code;
+  }
+  return success_exit_code;
+}
+
+auto config_unset_handler(CommandContext& context) -> int {
+  const auto key = parsed_text_values(context.invocation, "config.unset.key");
+  if (!key || key->size() != 1) return usage_exit_code;
+  const auto& registry = config::builtin_config_registry();
+  const auto found =
+      std::ranges::find(registry.keys, key->front(), &config::ConfigKeySpec::id);
+  if (found == registry.keys.end() || !found->file_writable || found->sensitive) {
+    context.error << "aiforge: unknown or non-writable configuration key\n";
+    return usage_exit_code;
+  }
+  auto path = config::process_config_path();
+  if (!path) {
+    context.error << "aiforge: " << path.error().message << '\n';
+    return failure_exit_code;
+  }
+  auto changed =
+      config::JsonConfigFileStore{*path}.unset(registry, key->front());
+  if (!changed) {
+    context.error << "aiforge: " << changed.error().message << '\n';
+    return failure_exit_code;
+  }
+  return success_exit_code;
+}
+
 }  // namespace
 
 auto make_parser_schema(const CommandRegistry& registry)
@@ -369,8 +536,43 @@ auto builtin_command_registry() -> const CommandRegistry& {
          unavailable_handler},
         {"models", "models", "List available models.", false, {}, {}, {},
          unavailable_handler},
-        {"config", "config", "Inspect or update configuration.", false, {},
-         {}, {}, unavailable_handler},
+        {"config",
+         "config",
+         "Inspect or update configuration.",
+         true,
+         {},
+         {},
+         {{"config-show", "show", "Show resolved configuration.", false, {},
+           {}, {}, config_show_handler},
+          {"config-get",
+           "get",
+           "Get one resolved configuration value.",
+           false,
+           {},
+           {{{"config.get.key", "key", ArgumentValueKind::text, 1, 1},
+             "Dotted configuration key."}},
+           {},
+           config_get_handler},
+          {"config-set",
+           "set",
+           "Set one configuration-file value.",
+           false,
+           {},
+           {{{"config.set.assignment", "key-value", ArgumentValueKind::text,
+              2, 257},
+             "Dotted key followed by its value or list items."}},
+           {},
+           config_set_handler},
+          {"config-unset",
+           "unset",
+           "Remove one configuration-file value.",
+           false,
+           {},
+           {{{"config.unset.key", "key", ArgumentValueKind::text, 1, 1},
+             "Dotted configuration key."}},
+           {},
+           config_unset_handler}},
+         config_parent_handler},
         {"version", "version", "Show version information.", false, {}, {}, {},
          version_handler}},
        default_handler},

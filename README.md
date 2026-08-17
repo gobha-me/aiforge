@@ -57,8 +57,29 @@ Run the offline executable with:
 ```
 
 Command-line mistakes write diagnostics to stderr and return exit code 2. Help
-and version output use stdout. The registered `chat`, `models`, and `config`
-commands remain unavailable until their owning feature milestones land.
+and version output use stdout. The registered `chat` and `models` commands
+remain unavailable until their owning feature milestones land.
+
+## Configuration
+
+AIForge resolves registered settings in command-line, environment, file, then
+compiled-default order and retains the winning source. The first registered
+application setting is the optional `model` value, bound to `AIFORGE_MODEL`.
+
+```bash
+aiforge config show
+aiforge config get model
+aiforge config set model model-id
+aiforge config unset model
+```
+
+The configuration file is `$XDG_CONFIG_HOME/aiforge/config.json`, or
+`$HOME/.config/aiforge/config.json` when the XDG location is unset or relative.
+It is strict UTF-8 JSON. AIForge creates its directory and file with restrictive
+permissions, preserves unknown fields during known updates, and refuses to
+overwrite malformed, symlinked, or loosely permissioned files. Configuration
+diagnostics use stderr; requested values use stdout. Credentials are excluded
+from this file and remain a separate milestone.
 
 The default toolchain respects `CXX`. Sanitizer toolchains are opt-in:
 
