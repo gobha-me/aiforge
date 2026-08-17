@@ -25,6 +25,7 @@ option(${PROJECT_NAME}_TESTS "Build the AIForge test suite" ${PROJECT_IS_TOP_LEV
 # This is the dependency activation point. Recipes not named here are inert.
 set(${PROJECT_NAME}_DEPS
   catch2
+  cli11
 )
 
 if (NOT ${PROJECT_NAME}_TESTS)

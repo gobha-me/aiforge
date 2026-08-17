@@ -1,5 +1,6 @@
 add_library(${PROJECT_NAME}_lib STATIC
   bootstrap.cpp
+  cli11_parser.cpp
   context_builder.cpp
   event_log.cpp
   run_projection.cpp
@@ -14,3 +15,4 @@ target_include_directories(${PROJECT_NAME}_lib
 )
 
 target_compile_features(${PROJECT_NAME}_lib PUBLIC cxx_std_23)
+target_link_libraries(${PROJECT_NAME}_lib PRIVATE CLI11::CLI11)
