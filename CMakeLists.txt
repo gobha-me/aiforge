@@ -26,6 +26,7 @@ option(${PROJECT_NAME}_TESTS "Build the AIForge test suite" ${PROJECT_IS_TOP_LEV
 set(${PROJECT_NAME}_DEPS
   catch2
   cli11
+  nlohmann_json
 )
 
 if (NOT ${PROJECT_NAME}_TESTS)

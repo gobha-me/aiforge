@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <sstream>
 #include <stdexcept>
@@ -200,12 +201,20 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
   const auto schema = make_parser_schema(registry);
   REQUIRE(schema);
   REQUIRE(schema->root.subcommands.size() == 4);
+  const auto config = std::ranges::find(schema->root.subcommands, "config",
+                                        &CommandSchema::id);
+  REQUIRE(config != schema->root.subcommands.end());
+  REQUIRE(config->subcommands.size() == 4);
 
   std::string output;
   std::string error;
   REQUIRE(dispatch(registry, {"chat"}, output, error) == 1);
   REQUIRE(output.empty());
   REQUIRE(error.find("not available in this build") != std::string::npos);
+
+  REQUIRE(dispatch(registry, {"config"}, output, error) == 2);
+  REQUIRE(output.empty());
+  REQUIRE(error.find("requires a subcommand") != std::string::npos);
 
   REQUIRE(dispatch(registry, {"version"}, output, error) == 0);
   REQUIRE(output.starts_with("aiforge "));
