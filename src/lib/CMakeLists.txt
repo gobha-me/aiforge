@@ -1,6 +1,7 @@
 add_library(${PROJECT_NAME}_lib STATIC
   bootstrap.cpp
   cli11_parser.cpp
+  command_registry.cpp
   context_builder.cpp
   event_log.cpp
   run_projection.cpp
