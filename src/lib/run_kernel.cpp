@@ -1003,7 +1003,7 @@ struct RunKernel::Impl {
 
     try {
       operation_stop.emplace();
-      const auto stop_source = *operation_stop;
+      auto stop_source = *operation_stop;
       const auto invocation_id = invocation_copy.invocation_id;
       deadline_worker =
           std::jthread([impl = this, stop_source, invocation_id,
