@@ -6,8 +6,10 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <utility>
 
 #include <aiforge/backend/backend.hpp>
+#include <aiforge/storage/session_store.hpp>
 
 namespace aiforge::surfaces {
 
@@ -35,13 +37,35 @@ struct OneShotLimits {
 };
 
 struct OneShotRequest {
+  enum class SessionMode {
+    create,
+    resume,
+    continue_latest,
+    ephemeral,
+  };
+
+  OneShotRequest(std::string prompt,
+                 std::optional<std::string> stdin_evidence,
+                 domain::ModelId model_id,
+                 SessionMode session_mode = SessionMode::create,
+                 std::optional<domain::SessionId> session_id = std::nullopt)
+      : prompt(std::move(prompt)),
+        stdin_evidence(std::move(stdin_evidence)),
+        model_id(std::move(model_id)),
+        session_mode(session_mode),
+        session_id(std::move(session_id)) {}
+
   std::string prompt;
   std::optional<std::string> stdin_evidence;
   domain::ModelId model_id;
+  SessionMode session_mode{SessionMode::create};
+  std::optional<domain::SessionId> session_id;
 };
 
 struct OneShotResult {
   domain::Usage usage;
+  domain::SessionId session_id;
+  bool durable{};
   auto operator==(const OneShotResult&) const -> bool = default;
 };
 
@@ -49,6 +73,10 @@ class OneShotSurface final {
  public:
   OneShotSurface(backend::Backend& backend,
                  backend::ModelContextProvider& model_context,
+                 OneShotLimits limits = {});
+  OneShotSurface(backend::Backend& backend,
+                 backend::ModelContextProvider& model_context,
+                 storage::SessionStore& session_store,
                  OneShotLimits limits = {});
 
   [[nodiscard]] auto run(OneShotRequest request, std::ostream& output,
@@ -59,6 +87,7 @@ class OneShotSurface final {
  private:
   backend::Backend& m_backend;
   backend::ModelContextProvider& m_model_context;
+  storage::SessionStore* m_session_store{};
   OneShotLimits m_limits;
 };
 

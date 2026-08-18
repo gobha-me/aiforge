@@ -141,7 +141,7 @@ class FixtureBackend final : public backend::Backend,
 
 class FixtureCommand final : public cli::OneShotCommand {
  public:
-  auto execute(const std::string_view prompt,
+  auto execute(Request request,
                cli::CommandEnvironment& environment, std::ostream& output,
                std::ostream& error)
       -> std::expected<void, cli::CommandFailure> override {
@@ -153,8 +153,9 @@ class FixtureCommand final : public cli::OneShotCommand {
     FixtureBackend backend;
     surfaces::OneShotSurface surface{backend, backend};
     auto result = surface.run(
-        {std::string{prompt}, std::move(evidence),
-         make_id<domain::ModelId>("fixture-model")},
+        {std::string{request.prompt}, std::move(evidence),
+         make_id<domain::ModelId>("fixture-model"),
+         surfaces::OneShotRequest::SessionMode::ephemeral},
         output, error, environment.stop_token);
     if (result) return {};
     switch (result.error().code) {

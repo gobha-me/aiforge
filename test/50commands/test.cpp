@@ -33,10 +33,12 @@ auto typed_handler(CommandContext& context) -> int {
 
 class FakeOneShot final : public OneShotCommand {
  public:
-  auto execute(const std::string_view prompt, CommandEnvironment& environment,
+  auto execute(Request request, CommandEnvironment& environment,
                std::ostream& output, std::ostream& error)
       -> std::expected<void, CommandFailure> override {
-    seen_prompt = std::string{prompt};
+    seen_prompt = std::string{request.prompt};
+    seen_session_mode = request.session_mode;
+    seen_session_id = std::move(request.session_id);
     saw_terminal_input = environment.input_is_terminal;
     output << "answer";
     error << "usage\n";
@@ -45,6 +47,8 @@ class FakeOneShot final : public OneShotCommand {
   }
 
   std::string seen_prompt;
+  SessionMode seen_session_mode{SessionMode::create};
+  std::optional<aiforge::domain::SessionId> seen_session_id;
   bool saw_terminal_input{};
   std::optional<CommandFailure> failure;
 };
@@ -278,4 +282,49 @@ TEST_CASE("builtin one-shot routes root and chat prompts through one service",
   REQUIRE(CommandDispatcher{}.dispatch(registry, stop_arguments,
                                        environment, output, error) == 130);
   REQUIRE(error.str().find("request cancelled") != std::string::npos);
+}
+
+TEST_CASE("one-shot session options are explicit and mutually exclusive",
+          "[commands][one-shot][session][failure]") {
+  const auto& registry = builtin_command_registry();
+  FakeOneShot one_shot;
+  std::istringstream input;
+  CommandEnvironment environment{input, true, true, true, {}, &one_shot};
+  std::ostringstream output;
+  std::ostringstream error;
+
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"--ephemeral", "hello"},
+              environment, output, error) == 0);
+  REQUIRE(one_shot.seen_session_mode ==
+          OneShotCommand::SessionMode::ephemeral);
+  REQUIRE_FALSE(one_shot.seen_session_id);
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"chat", "--resume", "saved",
+                                            "again"},
+              environment, output, error) == 0);
+  REQUIRE(one_shot.seen_session_mode == OneShotCommand::SessionMode::resume);
+  REQUIRE(one_shot.seen_session_id ==
+          aiforge::domain::SessionId::from("saved").value());
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"--continue", "--ephemeral",
+                                            "conflict"},
+              environment, output, error) == 2);
+  REQUIRE(error.str().find("mutually exclusive") != std::string::npos);
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry, std::vector<std::string_view>{"--resume", "saved"},
+              environment, output, error) == 2);
+  REQUIRE(error.str().find("prompt is required") != std::string::npos);
 }

@@ -32,8 +32,9 @@ using WorkerUpdate =
 }
 
 [[nodiscard]] auto kernel_error(const RunKernelErrorCode code,
-                                std::string message) -> RunKernelError {
-  return RunKernelError{code, std::move(message)};
+                                std::string message,
+                                const bool retryable = false) -> RunKernelError {
+  return RunKernelError{code, std::move(message), retryable};
 }
 
 [[nodiscard]] auto has_control_character(const std::string_view value) -> bool {
@@ -89,8 +90,16 @@ struct RunKernel::Impl {
     std::map<domain::InvocationId, ToolAssembly> tool_calls;
     bool response_started{};
     bool terminal_seen{};
+    bool cancellation_ack_expected{};
     bool cancel_requested{};
     std::optional<std::string> cancel_reason;
+  };
+
+  struct Transaction {
+    domain::SessionEventLog event_log;
+    std::map<domain::RunId, domain::RunProjection> projections;
+    std::optional<ActiveRun> active;
+    std::vector<domain::RunEvent> events;
   };
 
   Impl(domain::SessionId session_id, backend::Backend& backend,
@@ -102,6 +111,35 @@ struct RunKernel::Impl {
         timestamp(timestamp_source ? std::move(timestamp_source)
                                    : TimestampSource{default_timestamp}),
         limits(limits) {}
+
+  [[nodiscard]] auto transaction() const -> Transaction {
+    return {event_log, projections, active, {}};
+  }
+
+  [[nodiscard]] auto commit(Transaction transaction)
+      -> std::expected<void, RunKernelError> {
+    if (session_store != nullptr && !transaction.events.empty()) {
+      auto appended = session_store->append_events(
+          transaction.event_log.session_id(), transaction.events);
+      if (!appended) {
+        {
+          std::lock_guard lock(queue_mutex);
+          queue_closed = true;
+        }
+        queue_space.notify_all();
+        worker.request_stop();
+        active.reset();
+        unusable = true;
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::storage_failure,
+            "session event persistence failed", appended.error().retryable));
+      }
+    }
+    event_log = std::move(transaction.event_log);
+    projections = std::move(transaction.projections);
+    active = std::move(transaction.active);
+    return {};
+  }
 
   ~Impl() {
     {
@@ -157,16 +195,17 @@ struct RunKernel::Impl {
   }
 
   [[nodiscard]] auto make_event(
-      const domain::RunId& run_id, domain::RunEventPayload payload,
+      const Transaction& transaction, const domain::RunId& run_id,
+      domain::RunEventPayload payload,
       std::optional<domain::InvocationId> invocation_id = std::nullopt)
       -> std::expected<domain::RunEvent, RunKernelError> {
-    if (event_log.last_sequence() ==
+    if (transaction.event_log.last_sequence() ==
         std::numeric_limits<std::uint64_t>::max()) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::event_sequence_overflow,
                        "session event sequence overflow"));
     }
-    const auto sequence = event_log.last_sequence() + 1;
+    const auto sequence = transaction.event_log.last_sequence() + 1;
     auto event_id = domain::EventId::from("event-" + std::to_string(sequence));
     if (!event_id) {
       return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
@@ -181,15 +220,15 @@ struct RunKernel::Impl {
 
   [[nodiscard]] auto record(
       const domain::RunId& run_id, domain::RunEventPayload payload,
-      std::vector<domain::RunEvent>& committed,
+      Transaction& transaction,
       std::optional<domain::InvocationId> invocation_id = std::nullopt)
       -> std::expected<void, RunKernelError> {
-    auto event =
-        make_event(run_id, std::move(payload), std::move(invocation_id));
+    auto event = make_event(transaction, run_id, std::move(payload),
+                            std::move(invocation_id));
     if (!event) return std::unexpected(std::move(event.error()));
 
-    auto projection_candidate = projections.contains(run_id)
-                                    ? projections.at(run_id)
+    auto projection_candidate = transaction.projections.contains(run_id)
+                                    ? transaction.projections.at(run_id)
                                     : domain::RunProjection{};
     auto projected = projection_candidate.apply(*event);
     if (!projected) {
@@ -198,53 +237,59 @@ struct RunKernel::Impl {
                        "run projection rejected a generated event"));
     }
 
-    auto log_candidate = event_log;
-    auto appended = log_candidate.append(*event);
+    auto appended = transaction.event_log.append(*event);
     if (!appended) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::event_log_rejected,
                        "session event log rejected a generated event"));
     }
 
-    event_log = std::move(log_candidate);
-    projections.insert_or_assign(run_id, std::move(projection_candidate));
-    committed.push_back(std::move(*event));
+    transaction.projections.insert_or_assign(
+        run_id, std::move(projection_candidate));
+    transaction.events.push_back(std::move(*event));
     return {};
   }
 
-  [[nodiscard]] auto fail_live_run(std::vector<domain::RunEvent>& committed,
+  [[nodiscard]] auto fail_live_run(Transaction& transaction,
                                    domain::DomainError error)
       -> std::expected<void, RunKernelError> {
-    if (!active || active->terminal_seen) {
+    if (!transaction.active || transaction.active->terminal_seen) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::protocol_failure,
                        "event followed a terminal backend event"));
     }
-    const auto run_id = active->run_id;
-    const auto inference_id = active->inference_id;
+    const auto run_id = transaction.active->run_id;
+    const auto inference_id = transaction.active->inference_id;
     if (auto result = record(
-            run_id, domain::InferenceFailed{inference_id, error}, committed);
+            run_id, domain::InferenceFailed{inference_id, error}, transaction);
         !result) {
       return result;
     }
     if (auto result =
-            record(run_id, domain::RunFailed{std::move(error)}, committed);
+            record(run_id, domain::RunFailed{std::move(error)}, transaction);
         !result) {
       return result;
     }
-    active->terminal_seen = true;
+    transaction.active->terminal_seen = true;
+    transaction.active->cancellation_ack_expected = true;
     worker.request_stop();
     return {};
   }
 
   [[nodiscard]] auto process_event(backend::BackendEvent event,
-                                   std::vector<domain::RunEvent>& committed)
+                                   Transaction& transaction)
       -> std::expected<void, RunKernelError> {
+    auto& active = transaction.active;
     if (!active) {
       return std::unexpected(kernel_error(RunKernelErrorCode::no_active_run,
                                           "backend event has no active run"));
     }
     if (active->terminal_seen) {
+      if (active->cancellation_ack_expected &&
+          std::holds_alternative<backend::ResponseCancelled>(event)) {
+        active->cancellation_ack_expected = false;
+        return {};
+      }
       return std::unexpected(
           kernel_error(RunKernelErrorCode::protocol_failure,
                        "backend event followed a terminal event"));
@@ -254,11 +299,11 @@ struct RunKernel::Impl {
         [&](domain::RunEventPayload payload,
             std::optional<domain::InvocationId> invocation =
                 std::nullopt) -> std::expected<void, RunKernelError> {
-      auto recorded = record(active->run_id, std::move(payload), committed,
-                             std::move(invocation));
-      if (recorded) return {};
-      return fail_live_run(committed, protocol_domain_error());
-    };
+          auto recorded = record(active->run_id, std::move(payload),
+                                 transaction, std::move(invocation));
+          if (recorded) return {};
+          return fail_live_run(transaction, protocol_domain_error());
+        };
 
     return std::visit(
         [&](auto&& value) -> std::expected<void, RunKernelError> {
@@ -266,7 +311,7 @@ struct RunKernel::Impl {
           if constexpr (std::same_as<Value, backend::ResponseStarted>) {
             if (active->response_started || value.response_id.size() > 4096 ||
                 has_control_character(value.response_id)) {
-              return fail_live_run(committed, protocol_domain_error());
+              return fail_live_run(transaction, protocol_domain_error());
             }
             active->response_started = true;
             return record_or_fail(domain::AssistantContentStarted{
@@ -274,41 +319,41 @@ struct RunKernel::Impl {
           } else if constexpr (std::same_as<Value, backend::ContentDelta>) {
             if (!active->response_started ||
                 value.message_id != active->assistant_message_id) {
-              return fail_live_run(committed, protocol_domain_error());
+              return fail_live_run(transaction, protocol_domain_error());
             }
             return record_or_fail(domain::AssistantContentDeltaAdded{
                 value.message_id, active->inference_id,
                 std::move(value.delta)});
           } else if constexpr (std::same_as<Value, backend::ReasoningDelta>) {
             if (!active->response_started) {
-              return fail_live_run(committed, protocol_domain_error());
+              return fail_live_run(transaction, protocol_domain_error());
             }
             return record_or_fail(domain::ReasoningMetadataAdded{
                 active->inference_id, std::move(value.text),
                 std::move(value.metadata)});
           } else if constexpr (std::same_as<Value, backend::CitationObserved>) {
             if (!active->response_started) {
-              return fail_live_run(committed, protocol_domain_error());
+              return fail_live_run(transaction, protocol_domain_error());
             }
             return record_or_fail(domain::AssistantContentDeltaAdded{
                 active->assistant_message_id, active->inference_id,
                 std::move(value.citation)});
           } else if constexpr (std::same_as<Value, backend::UsageObserved>) {
             if (!active->response_started) {
-              return fail_live_run(committed, protocol_domain_error());
+              return fail_live_run(transaction, protocol_domain_error());
             }
             return record_or_fail(
                 domain::UsageRecorded{active->inference_id, value.usage});
           } else if constexpr (std::same_as<Value, backend::ToolCallDelta>) {
             if (!active->response_started || value.tool_name.size() > 256 ||
                 has_control_character(value.tool_name)) {
-              return fail_live_run(committed, protocol_domain_error());
+              return fail_live_run(transaction, protocol_domain_error());
             }
             auto found = active->tool_calls.find(value.invocation_id);
             if (found == active->tool_calls.end()) {
               if (value.tool_name.empty() ||
                   !active->declared_tools.contains(value.tool_name)) {
-                return fail_live_run(committed, protocol_domain_error());
+                return fail_live_run(transaction, protocol_domain_error());
               }
               found = active->tool_calls
                           .emplace(value.invocation_id,
@@ -316,11 +361,11 @@ struct RunKernel::Impl {
                           .first;
             } else if (!value.tool_name.empty() &&
                        found->second.name != value.tool_name) {
-              return fail_live_run(committed, protocol_domain_error());
+              return fail_live_run(transaction, protocol_domain_error());
             }
             if (value.arguments_fragment.size() >
                 limits.tool_argument_bytes - found->second.arguments.size()) {
-              return fail_live_run(committed, protocol_domain_error());
+              return fail_live_run(transaction, protocol_domain_error());
             }
             found->second.arguments.append(value.arguments_fragment);
             return {};
@@ -328,7 +373,7 @@ struct RunKernel::Impl {
             if (!active->response_started ||
                 (value.reason == domain::FinishReason::tool_call) !=
                     !active->tool_calls.empty()) {
-              return fail_live_run(committed, protocol_domain_error());
+              return fail_live_run(transaction, protocol_domain_error());
             }
             for (auto& [invocation_id, assembly] : active->tool_calls) {
               auto effects = active->declared_tools.at(assembly.name);
@@ -380,9 +425,20 @@ struct RunKernel::Impl {
   }
 
   [[nodiscard]] auto process_failure(backend::BackendError error,
-                                     std::vector<domain::RunEvent>& committed)
+                                     Transaction& transaction)
       -> std::expected<void, RunKernelError> {
-    if (!active || active->terminal_seen) {
+    auto& active = transaction.active;
+    if (!active) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::protocol_failure,
+                       "backend failure followed termination"));
+    }
+    if (active->terminal_seen) {
+      if (active->cancellation_ack_expected &&
+          error.kind == backend::BackendErrorKind::cancelled) {
+        active->cancellation_ack_expected = false;
+        return {};
+      }
       return std::unexpected(
           kernel_error(RunKernelErrorCode::protocol_failure,
                        "backend failure followed termination"));
@@ -393,30 +449,31 @@ struct RunKernel::Impl {
       if (auto result =
               record(active->run_id,
                      domain::InferenceCancelled{active->inference_id, reason},
-                     committed);
+                     transaction);
           !result) {
         return result;
       }
       if (auto result =
-              record(active->run_id, domain::RunCancelled{reason}, committed);
+              record(active->run_id, domain::RunCancelled{reason}, transaction);
           !result) {
         return result;
       }
       active->terminal_seen = true;
       return {};
     }
-    return fail_live_run(committed, backend_domain_error(error));
+    return fail_live_run(transaction, backend_domain_error(error));
   }
 
-  [[nodiscard]] auto process_end(std::vector<domain::RunEvent>& committed)
+  [[nodiscard]] auto process_end(Transaction& transaction)
       -> std::expected<void, RunKernelError> {
+    auto& active = transaction.active;
     if (!active) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::no_active_run,
                        "stream ended without an active run"));
     }
     if (!active->terminal_seen) {
-      if (auto failed = fail_live_run(committed, protocol_domain_error());
+      if (auto failed = fail_live_run(transaction, protocol_domain_error());
           !failed) {
         return failed;
       }
@@ -432,7 +489,9 @@ struct RunKernel::Impl {
   RunWakeSink* wake;
   TimestampSource timestamp;
   RunKernelLimits limits;
+  storage::SessionStore* session_store{};
   std::optional<ActiveRun> active;
+  bool unusable{};
   std::jthread worker;
 
   std::mutex queue_mutex;
@@ -447,10 +506,84 @@ RunKernel::RunKernel(domain::SessionId session_id, backend::Backend& backend,
     : m_impl(std::make_unique<Impl>(std::move(session_id), backend, wake_sink,
                                     std::move(timestamp_source), limits)) {}
 
+auto RunKernel::open_durable(DurableSessionOpen session,
+                             storage::SessionStore& store,
+                             backend::Backend& backend,
+                             RunWakeSink* wake_sink,
+                             TimestampSource timestamp_source,
+                             RunKernelLimits limits)
+    -> std::expected<std::unique_ptr<RunKernel>, RunKernelError> {
+  try {
+    auto kernel = std::unique_ptr<RunKernel>{new RunKernel(
+        session.session_id, backend, wake_sink, std::move(timestamp_source),
+        limits)};
+    if (!kernel->m_impl->valid_limits()) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_limits,
+                       "run-kernel limits must be positive"));
+    }
+
+    if (session.mode == DurableSessionMode::create) {
+      auto created = store.create_session(
+          {session.session_id, session.created_at});
+      if (!created) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::storage_failure,
+            "durable session creation failed", created.error().retryable));
+      }
+    } else {
+      auto info = store.open_session(session.session_id);
+      if (!info) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::storage_failure,
+            "durable session could not be opened", info.error().retryable));
+      }
+      auto events = store.replay_events(session.session_id);
+      if (!events) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::storage_failure,
+            "durable session replay failed", events.error().retryable));
+      }
+
+      domain::SessionEventLog event_log{session.session_id};
+      std::map<domain::RunId, domain::RunProjection> projections;
+      for (const auto& event : *events) {
+        auto projection = projections.contains(event.metadata.run_id)
+                              ? projections.at(event.metadata.run_id)
+                              : domain::RunProjection{};
+        if (!projection.apply(event) || !event_log.append(event)) {
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::replay_rejected,
+              "durable session events could not rebuild projections"));
+        }
+        projections.insert_or_assign(event.metadata.run_id,
+                                     std::move(projection));
+      }
+      if (event_log.last_sequence() != info->last_sequence) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::replay_rejected,
+            "durable session catalog disagrees with replayed history"));
+      }
+      kernel->m_impl->event_log = std::move(event_log);
+      kernel->m_impl->projections = std::move(projections);
+    }
+    kernel->m_impl->session_store = &store;
+    return kernel;
+  } catch (...) {
+    return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
+                                        "durable session open failed internally"));
+  }
+}
+
 RunKernel::~RunKernel() = default;
 
 auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
   try {
+    if (m_impl->unusable) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    }
     if (!m_impl->valid_limits()) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_limits,
@@ -480,6 +613,7 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
                            false,
                            false,
                            false,
+                           false,
                            std::nullopt};
     for (const auto& tool : start.request.tools) {
       if (tool.name.empty() || has_control_character(tool.name) ||
@@ -489,20 +623,23 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
       }
     }
 
-    std::vector<domain::RunEvent> ignored;
+    auto transaction = m_impl->transaction();
     if (auto result =
-            m_impl->record(start.run_id, std::move(start.attributes), ignored);
+            m_impl->record(start.run_id, std::move(start.attributes),
+                           transaction);
         !result) {
       return result;
     }
     if (auto result = m_impl->record(
             start.run_id,
-            domain::UserContentAdded{std::move(start.user_message)}, ignored);
+            domain::UserContentAdded{std::move(start.user_message)},
+            transaction);
         !result) {
       return result;
     }
     if (auto result = m_impl->record(start.run_id,
-                                     domain::RunCompletionRequested{}, ignored);
+                                     domain::RunCompletionRequested{},
+                                     transaction);
         !result) {
       return result;
     }
@@ -510,13 +647,17 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
             m_impl->record(start.run_id,
                            domain::InferenceStarted{start.request.inference_id,
                                                     start.request.model_id},
-                           ignored);
+                           transaction);
         !result) {
       return result;
     }
 
+    transaction.active = active;
+    if (auto committed = m_impl->commit(std::move(transaction)); !committed) {
+      return committed;
+    }
+
     if (m_impl->worker.joinable()) m_impl->worker.join();
-    m_impl->active = std::move(active);
     try {
       m_impl->worker = std::jthread(
           [impl = m_impl.get(), request = std::move(start.request)](
@@ -537,8 +678,12 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
           });
     } catch (...) {
       auto error = protocol_domain_error();
-      auto failed = m_impl->fail_live_run(ignored, error);
+      auto failure = m_impl->transaction();
+      auto failed = m_impl->fail_live_run(failure, error);
       if (!failed) return failed;
+      if (auto committed = m_impl->commit(std::move(failure)); !committed) {
+        return committed;
+      }
       return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
                                           "could not start backend worker"));
     }
@@ -554,6 +699,11 @@ auto RunKernel::cancel(const domain::RunId& run_id,
                        std::optional<std::string> reason)
     -> std::expected<void, RunKernelError> {
   try {
+    if (m_impl->unusable) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    }
     if (!m_impl->active) {
       return std::unexpected(kernel_error(RunKernelErrorCode::no_active_run,
                                           "there is no active run"));
@@ -573,14 +723,18 @@ auto RunKernel::cancel(const domain::RunId& run_id,
     }
     if (m_impl->active->cancel_requested) return {};
 
-    std::vector<domain::RunEvent> ignored;
+    auto transaction = m_impl->transaction();
     if (auto result =
-            m_impl->record(run_id, domain::RunCancelRequested{reason}, ignored);
+            m_impl->record(run_id, domain::RunCancelRequested{reason},
+                           transaction);
         !result) {
       return result;
     }
-    m_impl->active->cancel_requested = true;
-    m_impl->active->cancel_reason = std::move(reason);
+    transaction.active->cancel_requested = true;
+    transaction.active->cancel_reason = std::move(reason);
+    if (auto committed = m_impl->commit(std::move(transaction)); !committed) {
+      return committed;
+    }
     m_impl->worker.request_stop();
     return {};
   } catch (...) {
@@ -592,6 +746,11 @@ auto RunKernel::cancel(const domain::RunId& run_id,
 auto RunKernel::drain()
     -> std::expected<std::vector<domain::RunEvent>, RunKernelError> {
   try {
+    if (m_impl->unusable) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    }
     std::deque<WorkerUpdate> updates;
     {
       std::lock_guard lock(m_impl->queue_mutex);
@@ -602,15 +761,29 @@ auto RunKernel::drain()
     std::vector<domain::RunEvent> committed;
     std::optional<RunKernelError> first_error;
     for (auto& update : updates) {
+      auto transaction = m_impl->transaction();
       std::expected<void, RunKernelError> result;
       if (auto* event = std::get_if<backend::BackendEvent>(&update)) {
-        result = m_impl->process_event(std::move(*event), committed);
+        result = m_impl->process_event(std::move(*event), transaction);
       } else if (auto* failure = std::get_if<BackendFailure>(&update)) {
-        result = m_impl->process_failure(std::move(failure->error), committed);
+        result =
+            m_impl->process_failure(std::move(failure->error), transaction);
       } else {
-        result = m_impl->process_end(committed);
+        result = m_impl->process_end(transaction);
       }
-      if (!result && !first_error) first_error = std::move(result.error());
+      if (!result) {
+        if (!first_error) first_error = std::move(result.error());
+        continue;
+      }
+      auto events = transaction.events;
+      auto persisted = m_impl->commit(std::move(transaction));
+      if (!persisted) {
+        first_error = std::move(persisted.error());
+        break;
+      }
+      committed.insert(committed.end(),
+                       std::make_move_iterator(events.begin()),
+                       std::make_move_iterator(events.end()));
     }
     if (first_error) return std::unexpected(std::move(*first_error));
     return committed;

@@ -1,9 +1,11 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <expected>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -92,6 +94,130 @@ class FakeModels final : public backend::ModelContextProvider {
                                  1024};
   std::optional<backend::BackendError> failure;
   std::size_t lookups{};
+};
+
+auto success_items(const domain::MessageId& message_id) -> std::vector<Item>;
+
+class MemoryStore final : public storage::SessionStore {
+ public:
+  auto create_session(storage::SessionCreate session, std::stop_token)
+      -> std::expected<void, storage::SessionStoreError> override {
+    ++calls;
+    if (sessions.contains(session.session_id)) {
+      return std::unexpected(storage::SessionStoreError{
+          storage::SessionStoreErrorCode::already_exists,
+          "session exists", false});
+    }
+    sessions.emplace(session.session_id,
+                     storage::SessionInfo{session.session_id,
+                                          session.created_at,
+                                          session.created_at,
+                                          0});
+    return {};
+  }
+
+  auto open_session(const domain::SessionId& session_id, std::stop_token)
+      -> std::expected<storage::SessionInfo,
+                       storage::SessionStoreError> override {
+    ++calls;
+    const auto found = sessions.find(session_id);
+    if (found == sessions.end()) {
+      return std::unexpected(storage::SessionStoreError{
+          storage::SessionStoreErrorCode::not_found,
+          "session missing", false});
+    }
+    return found->second;
+  }
+
+  auto list_sessions(std::size_t limit, std::stop_token)
+      -> std::expected<std::vector<storage::SessionInfo>,
+                       storage::SessionStoreError> override {
+    ++calls;
+    std::vector<storage::SessionInfo> result;
+    for (const auto& [id, info] : sessions) {
+      static_cast<void>(id);
+      result.push_back(info);
+    }
+    std::ranges::sort(result, [](const auto& left, const auto& right) {
+      if (left.last_activity_at != right.last_activity_at) {
+        return left.last_activity_at > right.last_activity_at;
+      }
+      return left.session_id < right.session_id;
+    });
+    if (result.size() > limit) {
+      result.erase(result.begin() + static_cast<std::ptrdiff_t>(limit),
+                   result.end());
+    }
+    return result;
+  }
+
+  auto append_events(const domain::SessionId& session_id,
+                     std::span<const domain::RunEvent> events,
+                     std::stop_token)
+      -> std::expected<void, storage::SessionStoreError> override {
+    ++calls;
+    ++append_calls;
+    if (append_failure &&
+        (!fail_on_append || append_calls == *fail_on_append)) {
+      return std::unexpected(*append_failure);
+    }
+    const auto found = sessions.find(session_id);
+    if (found == sessions.end()) {
+      return std::unexpected(storage::SessionStoreError{
+          storage::SessionStoreErrorCode::not_found,
+          "session missing", false});
+    }
+    auto& stored = histories[session_id];
+    auto sequence = found->second.last_sequence;
+    for (const auto& event : events) {
+      if (event.metadata.sequence <= sequence) {
+        return std::unexpected(storage::SessionStoreError{
+            storage::SessionStoreErrorCode::conflict,
+            "sequence conflict", false});
+      }
+      sequence = event.metadata.sequence;
+    }
+    stored.insert(stored.end(), events.begin(), events.end());
+    append_batch_sizes.push_back(events.size());
+    if (!events.empty()) {
+      found->second.last_sequence = events.back().metadata.sequence;
+      found->second.last_activity_at = events.back().metadata.timestamp;
+    }
+    return {};
+  }
+
+  auto replay_events(const domain::SessionId& session_id, std::stop_token)
+      -> std::expected<std::vector<domain::RunEvent>,
+                       storage::SessionStoreError> override {
+    ++calls;
+    if (!sessions.contains(session_id)) {
+      return std::unexpected(storage::SessionStoreError{
+          storage::SessionStoreErrorCode::not_found,
+          "session missing", false});
+    }
+    return histories[session_id];
+  }
+
+  std::map<domain::SessionId, storage::SessionInfo> sessions;
+  std::map<domain::SessionId, std::vector<domain::RunEvent>> histories;
+  std::vector<std::size_t> append_batch_sizes;
+  std::optional<storage::SessionStoreError> append_failure;
+  std::optional<std::size_t> fail_on_append;
+  std::size_t append_calls{};
+  std::size_t calls{};
+};
+
+class ConversationBackend final : public backend::Backend {
+ public:
+  auto start(backend::BackendRequest request, std::stop_token)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    const auto assistant = request.assistant_message_id;
+    captured.push_back(std::move(request));
+    return std::make_unique<VectorStream>(success_items(assistant));
+  }
+
+  std::vector<backend::BackendRequest> captured;
 };
 
 auto success_items(const domain::MessageId& message_id) -> std::vector<Item> {
@@ -331,4 +457,246 @@ TEST_CASE("broken output cancels the one-shot operation",
       error);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code == surfaces::OneShotErrorCode::output_failed);
+}
+
+TEST_CASE("durable one-shot sessions resume completed conversation in order",
+          "[one-shot][session]") {
+  FakeModels models;
+  ConversationBackend backend;
+  MemoryStore store;
+  surfaces::OneShotSurface surface{backend, models, store};
+  std::ostringstream output;
+  std::ostringstream error;
+  const auto model = make_id<domain::ModelId>("model");
+
+  auto first = surface.run({"first", std::nullopt, model}, output, error);
+  REQUIRE(first);
+  REQUIRE(first->durable);
+  REQUIRE(store.sessions.contains(first->session_id));
+  REQUIRE(store.append_batch_sizes.front() == 4);
+  REQUIRE(store.append_batch_sizes.back() == 3);
+  REQUIRE(error.str().find("session: " +
+                           std::string{first->session_id.value()}) !=
+          std::string::npos);
+  const auto first_event_count = store.histories[first->session_id].size();
+  REQUIRE(first_event_count > 4);
+
+  output.str({});
+  error.str({});
+  auto resumed = surface.run(
+      {"second", std::nullopt, model,
+       surfaces::OneShotRequest::SessionMode::resume, first->session_id},
+      output, error);
+  REQUIRE(resumed);
+  REQUIRE(resumed->session_id == first->session_id);
+  REQUIRE(backend.captured.size() == 2);
+  std::vector<domain::Role> conversation_roles;
+  for (const auto& entry : backend.captured.back().context.entries) {
+    if (entry.kind == domain::ContextEntryKind::conversation) {
+      conversation_roles.push_back(entry.message.role);
+    }
+  }
+  REQUIRE(conversation_roles ==
+          std::vector{domain::Role::user, domain::Role::assistant,
+                      domain::Role::user});
+  const auto history_source = std::ranges::find_if(
+      backend.captured.back().context.entries, [](const auto& entry) {
+        return entry.provenance.source_location &&
+               entry.provenance.source_location->starts_with("session:");
+      });
+  REQUIRE(history_source != backend.captured.back().context.entries.end());
+
+  const auto& persisted = store.histories[first->session_id];
+  REQUIRE(persisted.size() > first_event_count);
+  for (std::size_t index = 1; index < persisted.size(); ++index) {
+    REQUIRE(persisted[index].metadata.sequence >
+            persisted[index - 1].metadata.sequence);
+  }
+
+  output.str({});
+  error.str({});
+  auto continued = surface.run(
+      {"third", std::nullopt, model,
+       surfaces::OneShotRequest::SessionMode::continue_latest},
+      output, error);
+  REQUIRE(continued);
+  REQUIRE(continued->session_id == first->session_id);
+}
+
+TEST_CASE("ephemeral one-shot bypasses an available durable store",
+          "[one-shot][session]") {
+  FakeModels models;
+  ConversationBackend backend;
+  MemoryStore store;
+  surfaces::OneShotSurface surface{backend, models, store};
+  std::ostringstream output;
+  std::ostringstream error;
+
+  const auto result = surface.run(
+      {"temporary", std::nullopt, make_id<domain::ModelId>("model"),
+       surfaces::OneShotRequest::SessionMode::ephemeral},
+      output, error);
+  REQUIRE(result);
+  REQUIRE_FALSE(result->durable);
+  REQUIRE(store.calls == 0);
+  REQUIRE(error.str().find("(ephemeral)") != std::string::npos);
+}
+
+TEST_CASE("session failures occur before provider start and retain prior truth",
+          "[one-shot][session][failure]") {
+  FakeModels models;
+  ConversationBackend backend;
+  MemoryStore store;
+  store.append_failure = storage::SessionStoreError{
+      storage::SessionStoreErrorCode::io_failure,
+      "sensitive filesystem detail", true};
+  surfaces::OneShotSurface surface{backend, models, store};
+  std::ostringstream output;
+  std::ostringstream error;
+
+  auto result = surface.run(
+      {"never sent", std::nullopt, make_id<domain::ModelId>("model")},
+      output, error);
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == surfaces::OneShotErrorCode::run_failed);
+  REQUIRE(result.error().message.find("sensitive") == std::string::npos);
+  REQUIRE(backend.captured.empty());
+  REQUIRE(store.sessions.size() == 1);
+  REQUIRE(store.histories.empty());
+
+  MemoryStore empty;
+  surfaces::OneShotSurface empty_surface{backend, models, empty};
+  result = empty_surface.run(
+      {"continue", std::nullopt, make_id<domain::ModelId>("model"),
+       surfaces::OneShotRequest::SessionMode::continue_latest},
+      output, error);
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == surfaces::OneShotErrorCode::invalid_input);
+  REQUIRE(backend.captured.empty());
+}
+
+TEST_CASE("terminal persistence failure publishes none of its event batch",
+          "[one-shot][session][failure]") {
+  FakeModels models;
+  ConversationBackend backend;
+  MemoryStore store;
+  store.append_failure = storage::SessionStoreError{
+      storage::SessionStoreErrorCode::io_failure,
+      "sensitive filesystem detail", true};
+  store.fail_on_append = 6;
+  surfaces::OneShotSurface surface{backend, models, store};
+  std::ostringstream output;
+  std::ostringstream error;
+
+  const auto result = surface.run(
+      {"persist atomically", std::nullopt,
+       make_id<domain::ModelId>("model")},
+      output, error);
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == surfaces::OneShotErrorCode::run_failed);
+  REQUIRE(backend.captured.size() == 1);
+  REQUIRE(store.sessions.size() == 1);
+  REQUIRE(store.histories.size() == 1);
+  const auto& events = store.histories.begin()->second;
+  REQUIRE(std::ranges::none_of(events, [](const auto& event) {
+    return std::holds_alternative<domain::AssistantContentFinished>(
+               event.payload) ||
+           std::holds_alternative<domain::InferenceFinished>(event.payload) ||
+           std::holds_alternative<domain::RunCompleted>(event.payload);
+  }));
+}
+
+TEST_CASE("semantically corrupt replay is rejected without provider work",
+          "[one-shot][session][replay][failure]") {
+  FakeModels models;
+  ConversationBackend backend;
+  MemoryStore store;
+  const auto session_id = make_id<domain::SessionId>("corrupt-session");
+  const auto timestamp =
+      domain::EventTimestamp{std::chrono::milliseconds{100}};
+  store.sessions.emplace(
+      session_id,
+      storage::SessionInfo{session_id, timestamp, timestamp, 1});
+  store.histories[session_id] = {domain::RunEvent{
+      {make_id<domain::EventId>("bad-event"),
+       make_id<domain::RunId>("bad-run"), 1, 1, timestamp, std::nullopt,
+       std::nullopt, std::nullopt},
+      domain::RunCompleted{}}};
+  surfaces::OneShotSurface surface{backend, models, store};
+  std::ostringstream output;
+  std::ostringstream error;
+
+  const auto result = surface.run(
+      {"do not send", std::nullopt, make_id<domain::ModelId>("model"),
+       surfaces::OneShotRequest::SessionMode::resume, session_id},
+      output, error);
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == surfaces::OneShotErrorCode::run_failed);
+  REQUIRE(backend.captured.empty());
+}
+
+TEST_CASE("cancelled partial assistant content stays out of resumed context",
+          "[one-shot][session][replay]") {
+  FakeModels models;
+  ConversationBackend backend;
+  MemoryStore store;
+  const auto session_id = make_id<domain::SessionId>("cancelled-session");
+  const auto run_id = make_id<domain::RunId>("cancelled-run");
+  const auto inference_id = make_id<domain::InferenceId>("cancelled-inference");
+  const auto user_id = make_id<domain::MessageId>("cancelled-user");
+  const auto assistant_id = make_id<domain::MessageId>("cancelled-assistant");
+  const auto timestamp =
+      domain::EventTimestamp{std::chrono::milliseconds{100}};
+  const auto event = [&](const std::uint64_t sequence,
+                         domain::RunEventPayload payload) {
+    return domain::RunEvent{
+        {make_id<domain::EventId>("cancelled-event-" +
+                                  std::to_string(sequence)),
+         run_id, sequence, 1,
+         domain::EventTimestamp{std::chrono::milliseconds{sequence}},
+         std::nullopt, std::nullopt, std::nullopt},
+        std::move(payload)};
+  };
+  store.sessions.emplace(
+      session_id,
+      storage::SessionInfo{session_id, timestamp, timestamp, 8});
+  store.histories[session_id] = {
+      event(1, domain::RunStarted{make_id<domain::SurfaceId>("one-shot"),
+                                  make_id<domain::WorkspaceId>("chat"),
+                                  make_id<domain::PermissionProfileId>("observe"),
+                                  std::nullopt}),
+      event(2, domain::UserContentAdded{{user_id, domain::Role::user,
+                                         {domain::TextBlock{"old prompt"}},
+                                         std::nullopt}}),
+      event(3, domain::RunCompletionRequested{}),
+      event(4, domain::InferenceStarted{
+                   inference_id, make_id<domain::ModelId>("old-model")}),
+      event(5, domain::AssistantContentStarted{assistant_id, inference_id}),
+      event(6, domain::AssistantContentDeltaAdded{
+                   assistant_id, inference_id, domain::TextBlock{"partial"}}),
+      event(7, domain::InferenceCancelled{inference_id, "cancelled"}),
+      event(8, domain::RunCancelled{"cancelled"})};
+  surfaces::OneShotSurface surface{backend, models, store};
+  std::ostringstream output;
+  std::ostringstream error;
+
+  const auto result = surface.run(
+      {"new prompt", std::nullopt, make_id<domain::ModelId>("model"),
+       surfaces::OneShotRequest::SessionMode::resume, session_id},
+      output, error);
+  REQUIRE(result);
+  std::vector<domain::Role> roles;
+  for (const auto& entry : backend.captured.back().context.entries) {
+    if (entry.kind == domain::ContextEntryKind::conversation) {
+      roles.push_back(entry.message.role);
+    }
+  }
+  REQUIRE(roles == std::vector{domain::Role::user, domain::Role::user});
+  REQUIRE(std::ranges::none_of(
+      backend.captured.back().context.entries, [](const auto& entry) {
+        return std::ranges::any_of(entry.message.content, [](const auto& block) {
+          const auto* text = std::get_if<domain::TextBlock>(&block);
+          return text != nullptr && text->text == "partial";
+        });
+      }));
 }

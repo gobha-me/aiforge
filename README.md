@@ -2,8 +2,9 @@
 
 AIForge is a C++23 terminal AI client built from a provider-neutral run kernel
 outward. It currently provides a streaming Venice-backed one-shot/pipe surface,
-provider-neutral run events, deterministic backends, replayable run and
-transcript projections, Markdown-lite presentation, and typed configuration.
+durable and resumable sessions, provider-neutral run events, deterministic
+backends, replayable run and transcript projections, Markdown-lite
+presentation, and typed configuration.
 The interactive Chat workspace is the next surface; running `aiforge` without a
 prompt in a terminal still reports the current bootstrap status.
 
@@ -62,6 +63,9 @@ export VENICE_API_KEY=your-key
 
 ./build/src/bin/aiforge "Explain append-only event streams"
 ./build/src/bin/aiforge chat "Explain append-only event streams"
+./build/src/bin/aiforge --continue "Build on the prior answer"
+./build/src/bin/aiforge --resume session-id "Reopen this session"
+./build/src/bin/aiforge --ephemeral "Do not retain this request"
 git diff | ./build/src/bin/aiforge "Review this diff"
 ./build/src/bin/aiforge --help
 ./build/src/bin/aiforge --version
@@ -71,12 +75,13 @@ Prompt text is user conversation content. Non-TTY stdin is bounded to 1 MiB,
 validated as UTF-8 text, and enters model context separately as untrusted
 evidence with stdin provenance. A prompt is required when piping input.
 
-Completion text streams only to stdout. Citations, usage, configuration
-warnings, and failures use stderr, so stdout remains safe to pipe. Unsafe
-terminal control sequences are removed from provider text. Ctrl-C requests
-transport cancellation, preserves already-written partial output, and returns
-130; command-line/input mistakes return 2 and runtime failures return 1. The
-`models` command remains unavailable until its owning model-picker milestone.
+Completion text streams only to stdout. The selected session ID, citations,
+usage, configuration warnings, and failures use stderr, so stdout remains safe
+to pipe. Unsafe terminal control sequences are removed from provider text.
+Ctrl-C requests transport cancellation, preserves already-written partial
+output, and returns 130; command-line/input mistakes return 2 and runtime
+failures return 1. The `models` command remains unavailable until its owning
+model-picker milestone.
 
 ## Run kernel
 
@@ -118,7 +123,7 @@ from this file. The one-shot surface currently reads `VENICE_API_KEY` directly
 from the environment; stored credentials and `login` remain a separate
 milestone.
 
-## Session storage foundation
+## Durable sessions and replay
 
 `aiforge::storage::SessionStore` defines bounded session creation, discovery,
 atomic event append, and ordered replay without exposing SQLite or JSON types.
@@ -129,9 +134,18 @@ unset or relative. It uses restrictive paths and permissions, full synchronous
 rollback-journal transactions, schema migrations, and bounded writer
 contention. Unknown future event payloads remain opaque and replayable.
 
-The current one-shot and interactive bootstrap surfaces do not write to this
-store yet. Runtime write-through and `--resume`/`--continue` are subsequent
-steps under AF-11; replay itself never starts inference or repeats a tool.
+One-shot requests create durable sessions by default. `--resume <session-id>`
+reopens an exact session, `--continue` selects the most recently active session,
+and `--ephemeral` neither creates nor opens the store. These options are
+mutually exclusive and are available on the root and `chat` commands. A resumed
+request rebuilds projections without rerunning inference or tools, then starts a
+new run whose context contains completed prior conversation. Cancelled or
+failed partial assistant output remains inspectable in durable history but is
+not presented to the next model call as a completed answer.
+
+The interactive bootstrap does not yet expose session list/resume/new actions,
+and richer configuration, credential-source, and runtime-version provenance
+remain follow-up work under AF-11.
 
 The default toolchain respects `CXX`. Sanitizer toolchains are opt-in:
 

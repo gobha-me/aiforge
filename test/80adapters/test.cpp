@@ -224,10 +224,12 @@ TEST_CASE("TermForge bridge converts its marker to an owner-thread drain",
 
   const termforge::Event marker = termforge::ErrorEvent{
       termforge::Severity::Info, "aiforge.runtime", "events-ready"};
-  for (int attempt = 0; attempt < 100 && kernel.active_run_id(); ++attempt) {
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (kernel.active_run_id() &&
+         std::chrono::steady_clock::now() < deadline) {
     auto handled = bridge.handle(marker, kernel);
     REQUIRE(handled);
-    std::this_thread::yield();
+    std::this_thread::sleep_for(1ms);
   }
   REQUIRE_FALSE(kernel.active_run_id());
   REQUIRE(kernel.projection(make_id<domain::RunId>("run"))->status() ==
