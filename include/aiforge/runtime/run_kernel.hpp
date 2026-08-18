@@ -11,6 +11,7 @@
 #include <aiforge/backend/backend.hpp>
 #include <aiforge/domain/event_log.hpp>
 #include <aiforge/domain/run_projection.hpp>
+#include <aiforge/storage/session_store.hpp>
 
 namespace aiforge::runtime {
 
@@ -26,13 +27,28 @@ enum class RunKernelErrorCode {
   event_sequence_overflow,
   event_log_rejected,
   projection_rejected,
+  storage_failure,
+  replay_rejected,
   internal_failure,
 };
 
 struct RunKernelError {
   RunKernelErrorCode code;
   std::string message;
+  bool retryable{};
   auto operator==(const RunKernelError&) const -> bool = default;
+};
+
+enum class DurableSessionMode {
+  create,
+  resume,
+};
+
+struct DurableSessionOpen {
+  domain::SessionId session_id;
+  DurableSessionMode mode{DurableSessionMode::create};
+  domain::EventTimestamp created_at;
+  auto operator==(const DurableSessionOpen&) const -> bool = default;
 };
 
 struct RunKernelLimits {
@@ -65,6 +81,12 @@ class RunKernel final {
   RunKernel(domain::SessionId session_id, backend::Backend& backend,
             RunWakeSink* wake_sink = nullptr,
             TimestampSource timestamp_source = {}, RunKernelLimits limits = {});
+
+  [[nodiscard]] static auto open_durable(
+      DurableSessionOpen session, storage::SessionStore& store,
+      backend::Backend& backend, RunWakeSink* wake_sink = nullptr,
+      TimestampSource timestamp_source = {}, RunKernelLimits limits = {})
+      -> std::expected<std::unique_ptr<RunKernel>, RunKernelError>;
   ~RunKernel();
 
   RunKernel(const RunKernel&) = delete;

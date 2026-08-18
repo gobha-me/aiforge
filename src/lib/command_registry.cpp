@@ -235,9 +235,39 @@ auto version_handler(CommandContext& context) -> int {
 auto one_shot_handler(CommandContext& context,
                       const std::string_view argument_id,
                       const bool allow_empty_for_interactive) -> int {
+  const auto session_prefix =
+      argument_id.starts_with("root.") ? "root.session." : "chat.session.";
+  const auto resume = parsed_text_values(
+      context.invocation, std::string{session_prefix} + "resume");
+  const bool continue_latest =
+      parsed_argument(context.invocation,
+                      std::string{session_prefix} + "continue") != nullptr;
+  const bool ephemeral =
+      parsed_argument(context.invocation,
+                      std::string{session_prefix} + "ephemeral") != nullptr;
+  const auto selections = static_cast<int>(resume.has_value()) +
+                          static_cast<int>(continue_latest) +
+                          static_cast<int>(ephemeral);
+  if (selections > 1) {
+    context.error
+        << "aiforge: --resume, --continue, and --ephemeral are mutually exclusive\n";
+    return usage_exit_code;
+  }
+  std::optional<domain::SessionId> resume_id;
+  if (resume) {
+    if (resume->size() != 1) return usage_exit_code;
+    auto parsed = domain::SessionId::from(std::string{resume->front()});
+    if (!parsed) {
+      context.error << "aiforge: session ID is invalid\n";
+      return usage_exit_code;
+    }
+    resume_id = std::move(*parsed);
+  }
+
   const auto prompt = parsed_text_values(context.invocation, argument_id);
   if (!prompt || prompt->empty()) {
-    if (allow_empty_for_interactive && context.environment.input_is_terminal) {
+    if (selections == 0 && allow_empty_for_interactive &&
+        context.environment.input_is_terminal) {
       return default_handler(context);
     }
     context.error << "aiforge: a prompt is required for one-shot input\n";
@@ -250,8 +280,17 @@ auto one_shot_handler(CommandContext& context,
   if (context.environment.one_shot == nullptr) {
     return unavailable_handler(context);
   }
+  auto session_mode = OneShotCommand::SessionMode::create;
+  if (resume_id) {
+    session_mode = OneShotCommand::SessionMode::resume;
+  } else if (continue_latest) {
+    session_mode = OneShotCommand::SessionMode::continue_latest;
+  } else if (ephemeral) {
+    session_mode = OneShotCommand::SessionMode::ephemeral;
+  }
   auto result = context.environment.one_shot->execute(
-      prompt->front(), context.environment, context.output, context.error);
+      {prompt->front(), session_mode, std::move(resume_id)},
+      context.environment, context.output, context.error);
   if (result) return success_exit_code;
   if (!result.error().message.empty()) {
     context.error << "aiforge: " << result.error().message << '\n';
@@ -569,6 +608,21 @@ auto CommandDispatcher::dispatch(
 }
 
 auto builtin_command_registry() -> const CommandRegistry& {
+  const auto session_options = [](const std::string_view prefix) {
+    return std::vector<CommandOptionSpec>{
+        {{std::string{prefix} + ".session.resume",
+          {"--resume"}, ArgumentValueKind::text, 0, 1},
+         "session-id",
+         "Resume an exact durable session."},
+        {{std::string{prefix} + ".session.continue",
+          {"--continue"}, ArgumentValueKind::flag, 0, 1},
+         {},
+         "Continue the most recently active durable session."},
+        {{std::string{prefix} + ".session.ephemeral",
+          {"--ephemeral"}, ArgumentValueKind::flag, 0, 1},
+         {},
+         "Run without creating or opening durable session storage."}};
+  };
   static const CommandRegistry registry{
       std::string{PROGRAM_NAME},
       format_project_version(),
@@ -576,14 +630,14 @@ auto builtin_command_registry() -> const CommandRegistry& {
        "",
        "AIForge terminal AI client.",
        false,
-       {},
+       session_options("root"),
        {{{"root.prompt", "prompt", ArgumentValueKind::text, 0, 1},
          "Prompt text for a one-shot request."}},
        {{"chat",
          "chat",
          "Run a one-shot chat request.",
          false,
-         {},
+         session_options("chat"),
          {{{"chat.prompt", "prompt", ArgumentValueKind::text, 1, 1},
            "Prompt text."}},
          {},

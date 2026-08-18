@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <expected>
 #include <iosfwd>
+#include <optional>
 #include <span>
 #include <stop_token>
 #include <string>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include <aiforge/cli/parser.hpp>
+#include <aiforge/domain/ids.hpp>
 
 namespace aiforge::cli {
 
@@ -31,7 +33,20 @@ class OneShotCommand {
  public:
   virtual ~OneShotCommand() = default;
 
-  [[nodiscard]] virtual auto execute(std::string_view prompt,
+  enum class SessionMode {
+    create,
+    resume,
+    continue_latest,
+    ephemeral,
+  };
+
+  struct Request {
+    std::string_view prompt;
+    SessionMode session_mode{SessionMode::create};
+    std::optional<domain::SessionId> session_id;
+  };
+
+  [[nodiscard]] virtual auto execute(Request request,
                                      CommandEnvironment& environment,
                                      std::ostream& output,
                                      std::ostream& error)

@@ -432,6 +432,7 @@ TEST_CASE("cancellation between deltas preserves partial content",
   const auto inference = make_id<domain::InferenceId>("inference");
 
   REQUIRE(kernel.start(run_start()));
+  std::size_t observed_wakes{};
   for (int attempt = 0; attempt < 100; ++attempt) {
     const auto drained = kernel.drain();
     REQUIRE(drained);
@@ -440,7 +441,8 @@ TEST_CASE("cancellation between deltas preserves partial content",
         !projection->messages().back().content.empty()) {
       break;
     }
-    std::this_thread::yield();
+    static_cast<void>(wake.wait_for_change(observed_wakes));
+    observed_wakes = wake.count();
   }
   REQUIRE(kernel.projection(run)->messages().back().content ==
           std::vector<domain::ContentBlock>{domain::TextBlock{"partial"}});
@@ -467,11 +469,15 @@ TEST_CASE("cancellation after a finish is rejected", "[runtime][failure]") {
 
   REQUIRE(kernel.start(run_start(backend_request)));
   const auto run = make_id<domain::RunId>("run");
+  std::size_t observed_wakes{};
   for (int attempt = 0; attempt < 100 && kernel.projection(run)->status() ==
                                              domain::RunStatus::running;
        ++attempt) {
     REQUIRE(kernel.drain());
-    std::this_thread::yield();
+    if (kernel.projection(run)->status() == domain::RunStatus::running) {
+      static_cast<void>(wake.wait_for_change(observed_wakes));
+    }
+    observed_wakes = wake.count();
   }
   REQUIRE(kernel.projection(run)->status() == domain::RunStatus::completed);
   const auto cancelled =

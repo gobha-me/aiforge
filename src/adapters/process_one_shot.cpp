@@ -10,6 +10,7 @@
 #include <variant>
 #include <vector>
 
+#include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
 #include <aiforge/config/config.hpp>
 #include <aiforge/config/file_store.hpp>
@@ -146,7 +147,7 @@ auto warning(std::ostream& error, const std::string_view message) -> bool {
 
 }  // namespace
 
-auto ProcessOneShotCommand::execute(const std::string_view prompt,
+auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
                                     cli::CommandEnvironment& environment,
                                     std::ostream& output,
                                     std::ostream& error)
@@ -158,9 +159,9 @@ auto ProcessOneShotCommand::execute(const std::string_view prompt,
     }
     auto input = read_stdin(environment, m_maximum_input_bytes);
     if (!input) return std::unexpected(std::move(input.error()));
-    if (prompt.size() > m_maximum_input_bytes ||
+    if (request.prompt.size() > m_maximum_input_bytes ||
         (input->has_value() &&
-         (*input)->size() > m_maximum_input_bytes - prompt.size())) {
+         (*input)->size() > m_maximum_input_bytes - request.prompt.size())) {
       return failure(cli::CommandFailureKind::usage,
                      "one-shot input exceeds 1 MiB");
     }
@@ -184,11 +185,48 @@ auto ProcessOneShotCommand::execute(const std::string_view prompt,
     VeniceBackendOptions backend_options;
     backend_options.api_key = api_key;
     VeniceBackend backend{std::move(backend_options)};
-    surfaces::OneShotSurface surface{
-        backend, backend, {m_maximum_input_bytes, 4096}};
-    auto result = surface.run(
-        {std::string{prompt}, std::move(*input), std::move(*model)}, output,
-        error, environment.stop_token);
+    const auto session_mode = [&] {
+      switch (request.session_mode) {
+        case cli::OneShotCommand::SessionMode::create:
+          return surfaces::OneShotRequest::SessionMode::create;
+        case cli::OneShotCommand::SessionMode::resume:
+          return surfaces::OneShotRequest::SessionMode::resume;
+        case cli::OneShotCommand::SessionMode::continue_latest:
+          return surfaces::OneShotRequest::SessionMode::continue_latest;
+        case cli::OneShotCommand::SessionMode::ephemeral:
+          return surfaces::OneShotRequest::SessionMode::ephemeral;
+      }
+      return surfaces::OneShotRequest::SessionMode::create;
+    }();
+    surfaces::OneShotRequest one_shot_request{
+        std::string{request.prompt}, std::move(*input), std::move(*model),
+        session_mode, std::move(request.session_id)};
+
+    std::expected<surfaces::OneShotResult, surfaces::OneShotError> result =
+        std::unexpected(surfaces::OneShotError{
+            surfaces::OneShotErrorCode::internal_failure,
+            "one-shot session setup failed"});
+    if (session_mode == surfaces::OneShotRequest::SessionMode::ephemeral) {
+      surfaces::OneShotSurface surface{
+          backend, backend, {m_maximum_input_bytes, 4096}};
+      result = surface.run(std::move(one_shot_request), output, error,
+                           environment.stop_token);
+    } else {
+      auto path = process_session_store_path();
+      if (!path) {
+        return failure(cli::CommandFailureKind::runtime,
+                       "session storage path could not be resolved");
+      }
+      auto store = SqliteSessionStore::open(*path);
+      if (!store) {
+        return failure(cli::CommandFailureKind::runtime,
+                       "session storage could not be opened");
+      }
+      surfaces::OneShotSurface surface{
+          backend, backend, **store, {m_maximum_input_bytes, 4096}};
+      result = surface.run(std::move(one_shot_request), output, error,
+                           environment.stop_token);
+    }
     if (!result) return std::unexpected(command_failure(result.error()));
     return {};
   } catch (...) {

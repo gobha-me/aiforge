@@ -4,11 +4,15 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <concepts>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <ostream>
+#include <set>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -118,6 +122,100 @@ template <typename IdType>
   return tick ^ count;
 }
 
+[[nodiscard]] auto content_bytes(
+    const std::vector<domain::ContentBlock>& content)
+    -> std::optional<std::uint64_t> {
+  std::uint64_t total{};
+  for (const auto& block : content) {
+    const auto size = std::visit(
+        [](const auto& value) -> std::optional<std::uint64_t> {
+          using Value = std::remove_cvref_t<decltype(value)>;
+          if constexpr (std::same_as<Value, domain::TextBlock>) {
+            return value.text.size();
+          } else if constexpr (std::same_as<Value,
+                                             domain::StructuredDataBlock>) {
+            return value.media_type.size() + value.data.size();
+          } else if constexpr (std::same_as<Value, domain::CitationBlock>) {
+            return value.uri.size() +
+                   (value.title ? value.title->size() : std::size_t{});
+          } else if constexpr (std::same_as<
+                                   Value, domain::ArtifactReferenceBlock>) {
+            return value.artifact_id.value().size() +
+                   (value.label ? value.label->size() : std::size_t{});
+          } else {
+            return std::nullopt;
+          }
+        },
+        block);
+    if (!size || *size > std::numeric_limits<std::uint64_t>::max() - total) {
+      return std::nullopt;
+    }
+    total += *size;
+  }
+  return total == 0 ? std::nullopt : std::optional{total};
+}
+
+[[nodiscard]] auto replayed_conversation(
+    const domain::SessionEventLog& log, const std::uint64_t suffix)
+    -> std::expected<std::vector<domain::ContextContentInput>, OneShotError> {
+  std::map<domain::RunId, domain::RunProjection> projections;
+  std::vector<domain::RunId> run_order;
+  std::set<domain::RunId> seen;
+  for (const auto& event : log.events()) {
+    if (seen.insert(event.metadata.run_id).second) {
+      run_order.push_back(event.metadata.run_id);
+    }
+    auto projection = projections.contains(event.metadata.run_id)
+                          ? projections.at(event.metadata.run_id)
+                          : domain::RunProjection{};
+    if (!projection.apply(event)) {
+      return one_shot_error(OneShotErrorCode::run_failed,
+                            "session replay could not rebuild conversation");
+    }
+    projections.insert_or_assign(event.metadata.run_id,
+                                 std::move(projection));
+  }
+
+  std::vector<domain::ContextContentInput> result;
+  std::uint64_t order{1};
+  std::uint64_t index{};
+  for (const auto& run_id : run_order) {
+    const auto& projection = projections.at(run_id);
+    for (const auto& message : projection.messages()) {
+      if (!message.complete || (message.role != domain::Role::user &&
+                                message.role != domain::Role::assistant)) {
+        continue;
+      }
+      if (message.role == domain::Role::assistant &&
+          projection.status() != domain::RunStatus::completed) {
+        continue;
+      }
+      auto bytes = content_bytes(message.content);
+      if (!bytes) continue;
+      auto entry_id = make_id<domain::ContextEntryId>(
+          "history-entry", suffix ^ ++index);
+      auto source_id = make_id<domain::ContextSourceId>(
+          "history-source", suffix ^ index);
+      if (!entry_id || !source_id) {
+        return one_shot_error(OneShotErrorCode::internal_failure,
+                              "could not create replay context identity");
+      }
+      result.push_back(
+          {*entry_id,
+           domain::ContextContentKind::conversation,
+           {message.message_id, message.role, message.content, std::nullopt},
+           {*source_id,
+            "session:" + std::string{log.session_id().value()} + "/run:" +
+                std::string{run_id.value()} + "/message:" +
+                std::string{message.message_id.value()},
+            std::nullopt},
+           order++,
+           *bytes});
+    }
+  }
+  return result;
+}
+
 class Wake final : public runtime::RunWakeSink {
  public:
   auto wake() noexcept -> void override {
@@ -198,6 +296,15 @@ OneShotSurface::OneShotSurface(backend::Backend& backend,
       m_model_context(model_context),
       m_limits(limits) {}
 
+OneShotSurface::OneShotSurface(backend::Backend& backend,
+                               backend::ModelContextProvider& model_context,
+                               storage::SessionStore& session_store,
+                               OneShotLimits limits)
+    : m_backend(backend),
+      m_model_context(model_context),
+      m_session_store(&session_store),
+      m_limits(limits) {}
+
 auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                          std::ostream& error,
                          const std::stop_token stop_token)
@@ -255,7 +362,70 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
     }
 
     const auto suffix = next_suffix();
-    auto session_id = make_id<domain::SessionId>("session", suffix);
+    const bool durable =
+        request.session_mode != OneShotRequest::SessionMode::ephemeral &&
+        m_session_store != nullptr;
+    const bool exact_resume =
+        request.session_mode == OneShotRequest::SessionMode::resume;
+    if (exact_resume != request.session_id.has_value()) {
+      return one_shot_error(OneShotErrorCode::invalid_input,
+                            "session selection is invalid");
+    }
+    if (request.session_mode != OneShotRequest::SessionMode::create &&
+        request.session_mode != OneShotRequest::SessionMode::ephemeral &&
+        m_session_store == nullptr) {
+      return one_shot_error(OneShotErrorCode::run_failed,
+                            "durable session storage is unavailable");
+    }
+
+    auto generated_session_id = make_id<domain::SessionId>("session", suffix);
+    if (!generated_session_id) {
+      return one_shot_error(OneShotErrorCode::internal_failure,
+                            "could not create one-shot session identity");
+    }
+    auto session_id = request.session_id.value_or(*generated_session_id);
+    if (request.session_mode ==
+        OneShotRequest::SessionMode::continue_latest) {
+      auto sessions = m_session_store->list_sessions(1, stop_token);
+      if (!sessions) {
+        return one_shot_error(
+            stop_token.stop_requested() ? OneShotErrorCode::cancelled
+                                        : OneShotErrorCode::run_failed,
+            stop_token.stop_requested() ? "request cancelled"
+                                        : "recent sessions could not be listed");
+      }
+      if (sessions->empty()) {
+        return one_shot_error(OneShotErrorCode::invalid_input,
+                              "there is no durable session to continue");
+      }
+      session_id = sessions->front().session_id;
+    }
+
+    Wake wake;
+    std::unique_ptr<runtime::RunKernel> kernel;
+    if (durable) {
+      const auto mode = request.session_mode ==
+                                OneShotRequest::SessionMode::create
+                            ? runtime::DurableSessionMode::create
+                            : runtime::DurableSessionMode::resume;
+      auto opened = runtime::RunKernel::open_durable(
+          {session_id, mode,
+           std::chrono::floor<std::chrono::milliseconds>(
+               std::chrono::system_clock::now())},
+          *m_session_store, m_backend, &wake);
+      if (!opened) {
+        return one_shot_error(
+            stop_token.stop_requested() ? OneShotErrorCode::cancelled
+                                        : OneShotErrorCode::run_failed,
+            stop_token.stop_requested() ? "request cancelled"
+                                        : "durable session could not be opened");
+      }
+      kernel = std::move(*opened);
+    } else {
+      kernel = std::make_unique<runtime::RunKernel>(session_id, m_backend,
+                                                    &wake);
+    }
+
     auto run_id = make_id<domain::RunId>("run", suffix);
     auto inference_id = make_id<domain::InferenceId>("inference", suffix);
     auto user_message_id = make_id<domain::MessageId>("user", suffix);
@@ -272,7 +442,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
     auto workspace_id = make_id<domain::WorkspaceId>("chat", suffix);
     auto permission_id =
         make_id<domain::PermissionProfileId>("observe", suffix);
-    if (!session_id || !run_id || !inference_id || !user_message_id ||
+    if (!run_id || !inference_id || !user_message_id ||
         !assistant_message_id || !runtime_message_id || !runtime_entry_id ||
         !user_entry_id || !runtime_source_id || !user_source_id ||
         !surface_id || !workspace_id || !permission_id) {
@@ -284,6 +454,18 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                                  domain::Role::user,
                                  {domain::TextBlock{request.prompt}},
                                  std::nullopt};
+    auto history = replayed_conversation(kernel->event_log(), suffix);
+    if (!history) return std::unexpected(std::move(history.error()));
+    auto content = std::move(*history);
+    const auto user_order = static_cast<std::uint64_t>(content.size()) + 1;
+    content.push_back(
+        {*user_entry_id,
+         domain::ContextContentKind::conversation,
+         user_message,
+         {*user_source_id, std::string{"command-line"}, std::nullopt},
+         user_order,
+         request.prompt.size()});
+
     domain::ContextBuildInput build_input{
         {model->context_window_tokens, output_tokens, 0},
         {{*runtime_entry_id,
@@ -298,12 +480,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
           0,
           1,
           runtime_contract.size()}},
-        {{*user_entry_id,
-          domain::ContextContentKind::conversation,
-          user_message,
-          {*user_source_id, std::string{"command-line"}, std::nullopt},
-          1,
-          request.prompt.size()}}};
+        std::move(content)};
 
     if (request.stdin_evidence && !request.stdin_evidence->empty()) {
       auto evidence_message_id =
@@ -324,7 +501,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
             {domain::TextBlock{std::move(*request.stdin_evidence)}},
             std::nullopt},
            {*evidence_source_id, std::string{"stdin"}, std::nullopt},
-           2,
+           user_order + 1,
            evidence_size});
     }
 
@@ -341,9 +518,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
         std::move(*context),
         {},
         {std::nullopt, output_tokens, std::nullopt, {}}};
-    Wake wake;
-    runtime::RunKernel kernel{*session_id, m_backend, &wake};
-    auto started = kernel.start({*run_id,
+    auto started = kernel->start({*run_id,
                                  {*surface_id, *workspace_id, *permission_id,
                                   std::nullopt},
                                  std::move(user_message),
@@ -353,16 +528,26 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                             "one-shot run could not start");
     }
 
+    auto session_line = "session: " + std::string{session_id.value()};
+    if (!durable) session_line += " (ephemeral)";
+    session_line.push_back('\n');
+    if (!write(error, session_line)) {
+      static_cast<void>(kernel->cancel(*run_id, *inference_id,
+                                       "diagnostic output failure"));
+      return one_shot_error(OneShotErrorCode::output_failed,
+                            "diagnostic output failed");
+    }
+
     bool cancellation_sent{};
     std::optional<domain::DomainError> run_error;
     auto generation = wake.generation();
-    while (kernel.active_run_id()) {
+    while (kernel->active_run_id()) {
       if (stop_token.stop_requested() && !cancellation_sent) {
-        const auto active_run = kernel.active_run_id();
-        const auto active_inference = kernel.active_inference_id();
+        const auto active_run = kernel->active_run_id();
+        const auto active_inference = kernel->active_inference_id();
         if (active_run && active_inference) {
-          auto cancelled = kernel.cancel(*active_run, *active_inference,
-                                         "interrupt");
+          auto cancelled = kernel->cancel(*active_run, *active_inference,
+                                          "interrupt");
           if (!cancelled) {
             return one_shot_error(OneShotErrorCode::run_failed,
                                   "one-shot cancellation failed");
@@ -370,28 +555,29 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
           cancellation_sent = true;
         }
       }
-      auto events = kernel.drain();
+      auto events = kernel->drain();
       if (!events) {
         return one_shot_error(OneShotErrorCode::run_failed,
                               "one-shot run failed internally");
       }
       auto rendered = render_events(*events, output, error, run_error);
       if (!rendered) {
-        if (const auto active_run = kernel.active_run_id()) {
-          if (const auto active_inference = kernel.active_inference_id()) {
+        if (const auto active_run = kernel->active_run_id()) {
+          if (const auto active_inference = kernel->active_inference_id()) {
             static_cast<void>(
-                kernel.cancel(*active_run, *active_inference, "output failure"));
+                kernel->cancel(*active_run, *active_inference,
+                               "output failure"));
           }
         }
         return std::unexpected(std::move(rendered.error()));
       }
-      if (kernel.active_run_id() && events->empty()) {
+      if (kernel->active_run_id() && events->empty()) {
         wake.wait(generation, stop_token);
       }
       generation = wake.generation();
     }
 
-    const auto* projection = kernel.projection(*run_id);
+    const auto* projection = kernel->projection(*run_id);
     if (projection == nullptr) {
       return one_shot_error(OneShotErrorCode::run_failed,
                             "one-shot run has no projection");
@@ -415,7 +601,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       return one_shot_error(OneShotErrorCode::output_failed,
                             "diagnostic output failed");
     }
-    return OneShotResult{usage};
+    return OneShotResult{usage, session_id, durable};
   } catch (...) {
     return one_shot_error(OneShotErrorCode::internal_failure,
                           "one-shot execution failed internally");

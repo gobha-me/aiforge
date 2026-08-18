@@ -12,7 +12,7 @@ class ProcessOneShotCommand final : public cli::OneShotCommand {
       std::size_t maximum_input_bytes = 1024U * 1024U)
       : m_maximum_input_bytes(maximum_input_bytes) {}
 
-  [[nodiscard]] auto execute(std::string_view prompt,
+  [[nodiscard]] auto execute(cli::OneShotCommand::Request request,
                              cli::CommandEnvironment& environment,
                              std::ostream& output,
                              std::ostream& error)
