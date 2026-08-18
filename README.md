@@ -2,14 +2,16 @@
 
 AIForge is a C++23 foundation for a terminal AI client. The project is being
 built from the durable core outward: provider-neutral run events, deterministic
-backends, and replayable projections come before the production TUI and Venice
-network adapter.
+backends, replayable projections, and a shared streaming run kernel come before
+the production chat surfaces.
 
-The current milestone is intentionally offline. Running `aiforge` confirms the
-core executable is available; it does not contact a model provider. The command
-registry also provides generated help and version output. Commands that depend
-on later network, one-shot, or configuration milestones fail explicitly instead
-of reporting false success. The architectural guardrails live in
+The current command surface is intentionally offline. Running `aiforge`
+confirms the core executable is available; it does not contact a model provider.
+A Venice adapter and TermForge wake/cancellation bridge are built and tested for
+later surfaces, but the current command line does not activate either one. The
+command registry also provides generated help and version output. Commands that
+depend on later network, one-shot, or configuration milestones fail explicitly
+instead of reporting false success. The architectural guardrails live in
 [`docs/ARCHITECTURE-NORTH-STAR.md`](docs/ARCHITECTURE-NORTH-STAR.md).
 
 Architecture documents have explicit authority levels. The north star and
@@ -23,14 +25,14 @@ context.
 
 - CMake 3.28 or newer
 - GCC 13+ or Clang 17+ with a C++23 standard library
-- Git when CMake must fetch Catch2
+- Git when CMake must fetch dependencies
 
 AIForge uses CMake only for dependencies. A configured package is preferred,
-then a sibling checkout, with `FetchContent` as the fallback. TermForge and
-venice-cpp recipes remain in the tree for their future adapters but are not
-active dependencies yet. Their fallbacks are deliberately pinned to compatible
-stable baselines (TermForge v0.7.2 and venice-cpp v0.5.0); upgrades should be
-made only for a documented compatibility need.
+then a sibling checkout, with `FetchContent` as the fallback. Adapter builds use
+TermForge and venice-cpp; consumed core-only builds may set
+`aiforge_BUILD_ADAPTERS=OFF`. Their fallbacks are pinned to the first compatible
+stable baselines: TermForge v0.19.0 for cross-thread posting and venice-cpp
+v0.9.0 for transport cancellation, structured deltas, and tool declarations.
 
 ## Build and test
 
@@ -59,6 +61,21 @@ Run the offline executable with:
 Command-line mistakes write diagnostics to stderr and return exit code 2. Help
 and version output use stdout. The registered `chat` and `models` commands
 remain unavailable until their owning feature milestones land.
+
+## Run kernel
+
+`aiforge::runtime::RunKernel` drives the provider-neutral pull stream on a
+worker, transfers observations through a bounded channel, and commits typed
+events and projections on the owning thread. Cancellation targets stable run
+and inference IDs and preserves partial assistant content. Backend errors are
+mapped to bounded generic domain errors before entering durable or renderable
+state.
+
+The Venice adapter translates neutral context, generation options, tool
+declarations, structured deltas, usage, and transport cancellation without
+exposing Venice types through the runtime API. The TermForge bridge uses
+`App::post` only as a wake signal; event-log, projection, and widget mutation
+remain on the UI thread.
 
 ## Configuration
 
@@ -92,6 +109,7 @@ cmake -B build-tsan -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain/thread.cmake
 
 - `include/aiforge/` contains the provider-independent public API.
 - `src/lib/` implements the run domain and backend ports.
+- `src/adapters/` maps the neutral ports to TermForge and Venice.
 - `src/bin/` is the application entry point.
 - `test/<name>/test.cpp` is auto-discovered after re-running `cmake -B`.
 - `docs/adr/` records decisions that narrow the north-star guardrails.

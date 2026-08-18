@@ -17,7 +17,9 @@ if (NOT TARGET venice-cpp::lib)
     include(FetchContent)
     FetchContent_Declare(venice-cpp
       GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-      GIT_TAG v0.5.0
+      # v0.9.0 combines transport cancellation, structured stream deltas, and
+      # request-side tool declarations required by the neutral adapter.
+      GIT_TAG v0.9.0
       GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(venice-cpp)
   endif ()

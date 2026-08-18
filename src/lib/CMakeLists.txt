@@ -6,6 +6,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   context_builder.cpp
   event_log.cpp
   json_config_file_store.cpp
+  run_kernel.cpp
   run_projection.cpp
   scripted_backend.cpp
 )

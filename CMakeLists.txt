@@ -21,6 +21,7 @@ configure_file(${VERSION_HEADER_IN} ${VERSION_HEADER} @ONLY)
 
 option(${PROJECT_NAME}_BUILD_BIN "Build the AIForge executable" ${PROJECT_IS_TOP_LEVEL})
 option(${PROJECT_NAME}_TESTS "Build the AIForge test suite" ${PROJECT_IS_TOP_LEVEL})
+option(${PROJECT_NAME}_BUILD_ADAPTERS "Build TermForge and Venice adapters" ${PROJECT_IS_TOP_LEVEL})
 
 # This is the dependency activation point. Recipes not named here are inert.
 set(${PROJECT_NAME}_DEPS
@@ -29,6 +30,10 @@ set(${PROJECT_NAME}_DEPS
   nlohmann_json
 )
 
+if (${PROJECT_NAME}_BUILD_ADAPTERS)
+  list(APPEND ${PROJECT_NAME}_DEPS termforge venice_cpp)
+endif ()
+
 if (NOT ${PROJECT_NAME}_TESTS)
   list(REMOVE_ITEM ${PROJECT_NAME}_DEPS catch2)
 endif ()
@@ -36,6 +41,10 @@ endif ()
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/dependencies.cmake)
 
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/src/lib)
+
+if (${PROJECT_NAME}_BUILD_ADAPTERS)
+  add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/src/adapters)
+endif ()
 
 if (${PROJECT_NAME}_BUILD_BIN)
   add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/src/bin)

@@ -52,6 +52,7 @@ auto request(std::string model = "model") -> backend::BackendRequest {
       2};
   return backend::BackendRequest{
       make_id<domain::InferenceId>("inference"),
+      make_id<domain::MessageId>("assistant"),
       make_id<domain::ModelId>(std::move(model)),
       context,
       {},
