@@ -36,6 +36,9 @@ struct ToolDeclaration {
 
 struct BackendRequest {
   domain::InferenceId inference_id;
+  // The runtime owns message identity. Adapters echo this ID on every content
+  // delta instead of deriving a provider-specific identity.
+  domain::MessageId assistant_message_id;
   domain::ModelId model_id;
   // Produced by the application runtime before an adapter maps provider roles.
   domain::ConstructedContext context;
@@ -74,6 +77,8 @@ struct CitationObserved {
 };
 
 struct UsageObserved {
+  // Incremental usage since the previous observation in this stream. Adapters
+  // that receive cumulative provider counters must emit only the difference.
   domain::Usage usage;
   auto operator==(const UsageObserved&) const -> bool = default;
 };

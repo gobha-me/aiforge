@@ -32,5 +32,7 @@ foreach(TEST_DIR ${TEST_DIRS})
     continue()
   endif()
 
-  add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+  if (TARGET ${TEST_NAME})
+    add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+  endif ()
 endforeach()

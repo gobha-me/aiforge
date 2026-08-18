@@ -180,7 +180,7 @@ TEST_CASE("all north-star event families have typed payloads", "[domain]") {
       AssistantContentDeltaAdded{message, inference, TextBlock{"delta"}},
       AssistantContentFinished{message, inference},
       InferenceStarted{inference, make_id<ModelId>("model")},
-      ReasoningMetadataAdded{inference, {{"visibility", "summary"}}},
+      ReasoningMetadataAdded{inference, std::nullopt, {{"visibility", "summary"}}},
       UsageRecorded{inference, Usage{1, 2, 3, 4}},
       InferenceFinished{inference, FinishReason::stop},
       InferenceFailed{inference, error},

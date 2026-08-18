@@ -88,6 +88,7 @@ struct InferenceStarted {
 
 struct ReasoningMetadataAdded {
   InferenceId inference_id;
+  std::optional<std::string> text;
   Metadata metadata;
   auto operator==(const ReasoningMetadataAdded&) const -> bool = default;
 };

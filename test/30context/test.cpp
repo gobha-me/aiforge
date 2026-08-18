@@ -337,6 +337,7 @@ TEST_CASE("scripted backend captures the constructed context and provenance",
 
   const backend::BackendRequest request{
       make_id<domain::InferenceId>("inference"),
+      make_id<domain::MessageId>("assistant"),
       make_id<domain::ModelId>("model"),
       *context,
       {},
