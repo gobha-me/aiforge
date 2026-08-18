@@ -7,9 +7,11 @@ add_library(${PROJECT_NAME}_lib STATIC
   event_log.cpp
   json_config_file_store.cpp
   one_shot.cpp
+  presentation_text.cpp
   run_kernel.cpp
   run_projection.cpp
   scripted_backend.cpp
+  transcript_projection.cpp
 )
 add_library(${PROJECT_NAME}::lib ALIAS ${PROJECT_NAME}_lib)
 

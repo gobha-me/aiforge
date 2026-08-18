@@ -2,10 +2,10 @@
 
 AIForge is a C++23 terminal AI client built from a provider-neutral run kernel
 outward. It currently provides a streaming Venice-backed one-shot/pipe surface,
-provider-neutral run events, deterministic backends, replayable projections,
-and typed configuration. The interactive Chat workspace is the next surface;
-running `aiforge` without a prompt in a terminal still reports the current
-bootstrap status.
+provider-neutral run events, deterministic backends, replayable run and
+transcript projections, Markdown-lite presentation, and typed configuration.
+The interactive Chat workspace is the next surface; running `aiforge` without a
+prompt in a terminal still reports the current bootstrap status.
 
 The command registry provides generated help and version output. Commands that
 depend on later model-picker or interactive milestones fail explicitly instead
@@ -28,9 +28,10 @@ context.
 AIForge uses CMake only for dependencies. A configured package is preferred,
 then a sibling checkout, with `FetchContent` as the fallback. Adapter builds use
 TermForge and venice-cpp; consumed core-only builds may set
-`aiforge_BUILD_ADAPTERS=OFF`. Their fallbacks are pinned to the first compatible
-stable baselines: TermForge v0.19.0 for cross-thread posting and venice-cpp
-v0.9.0 for transport cancellation, structured deltas, and tool declarations.
+`aiforge_BUILD_ADAPTERS=OFF`. Their fallbacks are pinned to compatible stable
+baselines: TermForge v0.44.0 for cross-thread posting, styled word wrapping,
+and bounded mutable transcript streaming; and venice-cpp v0.9.0 for transport
+cancellation, structured deltas, and tool declarations.
 
 ## Build and test
 

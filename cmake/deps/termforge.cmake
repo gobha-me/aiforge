@@ -17,9 +17,10 @@ if (NOT TARGET termforge::lib)
     include(FetchContent)
     FetchContent_Declare(termforge
       GIT_REPOSITORY https://github.com/gobha-me/termforge.git
-      # v0.19.0 is the first release with the cross-thread App::post seam
-      # required by the run-kernel surface bridge.
-      GIT_TAG v0.19.0
+      # v0.44.0 is the first release combining the cross-thread App::post seam
+      # with styled word wrapping and bounded mutable TextBox streaming needed
+      # by the transcript surface.
+      GIT_TAG v0.44.0
       GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(termforge)
   endif ()
