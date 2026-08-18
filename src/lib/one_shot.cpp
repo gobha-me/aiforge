@@ -13,6 +13,7 @@
 #include <variant>
 #include <vector>
 
+#include <aiforge/presentation/text.hpp>
 #include <aiforge/runtime/context_builder.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 
@@ -69,71 +70,22 @@ constexpr std::string_view runtime_contract{
   return true;
 }
 
-[[nodiscard]] auto sanitized(const std::string_view value) -> std::string {
-  std::string result;
-  result.reserve(value.size());
-  std::size_t index{};
-  while (index < value.size()) {
-    const auto first = static_cast<unsigned char>(value[index]);
-    if (first == 0x1BU) {
-      ++index;
-      if (index >= value.size()) break;
-      if (value[index] == '[') {
-        ++index;
-        while (index < value.size()) {
-          const auto byte = static_cast<unsigned char>(value[index++]);
-          if (byte >= 0x40U && byte <= 0x7EU) break;
-        }
-      } else if (value[index] == ']') {
-        ++index;
-        while (index < value.size()) {
-          if (value[index] == '\a') {
-            ++index;
-            break;
-          }
-          if (value[index] == '\x1b' && index + 1 < value.size() &&
-              value[index + 1] == '\\') {
-            index += 2;
-            break;
-          }
-          ++index;
-        }
-      } else {
-        ++index;
-      }
-      continue;
-    }
-    std::size_t length{1};
-    std::uint32_t codepoint{first};
-    if ((first & 0xE0U) == 0xC0U) {
-      length = 2;
-      codepoint = first & 0x1FU;
-    } else if ((first & 0xF0U) == 0xE0U) {
-      length = 3;
-      codepoint = first & 0x0FU;
-    } else if ((first & 0xF8U) == 0xF0U) {
-      length = 4;
-      codepoint = first & 0x07U;
-    }
-    if (length > value.size() - index) break;
-    for (std::size_t offset = 1; offset < length; ++offset) {
-      codepoint = (codepoint << 6U) |
-                  (static_cast<unsigned char>(value[index + offset]) & 0x3FU);
-    }
-    const bool unsafe =
-        (codepoint < 0x20U && codepoint != '\t' && codepoint != '\n') ||
-        (codepoint >= 0x7FU && codepoint <= 0x9FU);
-    if (!unsafe) result.append(value.substr(index, length));
-    index += length;
+[[nodiscard]] auto sanitized(const std::string_view value)
+    -> std::expected<std::string, OneShotError> {
+  auto result = presentation::sanitize_untrusted_text(value);
+  if (!result) {
+    return one_shot_error(OneShotErrorCode::internal_failure,
+                          result.error().message);
   }
-  return result;
+  return std::move(*result);
 }
 
 [[nodiscard]] auto sanitized_inline(const std::string_view value)
-    -> std::string {
+    -> std::expected<std::string, OneShotError> {
   auto result = sanitized(value);
-  std::ranges::replace(result, '\n', ' ');
-  std::ranges::replace(result, '\t', ' ');
+  if (!result) return result;
+  std::ranges::replace(*result, '\n', ' ');
+  std::ranges::replace(*result, '\t', ' ');
   return result;
 }
 
@@ -204,15 +156,21 @@ class Wake final : public runtime::RunWakeSink {
     if (const auto* delta =
             std::get_if<domain::AssistantContentDeltaAdded>(&event.payload)) {
       if (const auto* text = std::get_if<domain::TextBlock>(&delta->delta)) {
-        if (!write(output, sanitized(text->text))) {
+        auto clean = sanitized(text->text);
+        if (!clean) return std::unexpected(std::move(clean.error()));
+        if (!write(output, *clean)) {
           return one_shot_error(OneShotErrorCode::output_failed,
                                 "completion output failed");
         }
       } else if (const auto* citation =
                      std::get_if<domain::CitationBlock>(&delta->delta)) {
-        std::string line = "citation: " + sanitized_inline(citation->uri);
+        auto uri = sanitized_inline(citation->uri);
+        if (!uri) return std::unexpected(std::move(uri.error()));
+        std::string line = "citation: " + *uri;
         if (citation->title) {
-          line += " (" + sanitized_inline(*citation->title) + ')';
+          auto title = sanitized_inline(*citation->title);
+          if (!title) return std::unexpected(std::move(title.error()));
+          line += " (" + *title + ')';
         }
         line.push_back('\n');
         if (!write(error, line)) {

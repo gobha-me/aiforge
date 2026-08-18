@@ -1,6 +1,7 @@
 add_library(${PROJECT_NAME}_adapters STATIC
   process_one_shot.cpp
   termforge_run_bridge.cpp
+  transcript_view.cpp
   venice_backend.cpp
 )
 add_library(${PROJECT_NAME}::adapters ALIAS ${PROJECT_NAME}_adapters)
