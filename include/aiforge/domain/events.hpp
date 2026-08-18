@@ -245,6 +245,10 @@ struct InterRunMessageSent {
 
 struct UnknownEvent {
   std::string type_name;
+  // Persisted readers retain the canonical opaque payload for event types or
+  // schema versions they do not understand. JSON is the storage adapter's
+  // current media type, not a public JSON-library object.
+  StructuredDataBlock payload{"application/json", "null"};
   auto operator==(const UnknownEvent&) const -> bool = default;
 };
 

@@ -10,7 +10,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/version.cmake)
 
 project(aiforge
   VERSION ${VERSION}
-  LANGUAGES CXX
+  LANGUAGES C CXX
 )
 
 message(STATUS "${PROJECT_NAME}:${PROJECT_VERSION}")
@@ -28,6 +28,7 @@ set(${PROJECT_NAME}_DEPS
   catch2
   cli11
   nlohmann_json
+  sqlite3
 )
 
 if (${PROJECT_NAME}_BUILD_ADAPTERS)

@@ -33,6 +33,11 @@ baselines: TermForge v0.44.0 for cross-thread posting, styled word wrapping,
 and bounded mutable transcript streaming; and venice-cpp v0.9.0 for transport
 cancellation, structured deltas, and tool declarations.
 
+Durable session storage uses SQLite 3 behind a neutral storage port. CMake
+prefers an installed SQLite 3.45.1 or newer and otherwise builds the pinned
+official 3.53.4 amalgamation. SQLite and JSON-library types remain private to
+the adapter.
+
 ## Build and test
 
 ```bash
@@ -112,6 +117,21 @@ diagnostics use stderr; requested values use stdout. Credentials are excluded
 from this file. The one-shot surface currently reads `VENICE_API_KEY` directly
 from the environment; stored credentials and `login` remain a separate
 milestone.
+
+## Session storage foundation
+
+`aiforge::storage::SessionStore` defines bounded session creation, discovery,
+atomic event append, and ordered replay without exposing SQLite or JSON types.
+`aiforge::adapters::SqliteSessionStore` implements the accepted ADR 0005
+contract at `$XDG_STATE_HOME/aiforge/sessions.sqlite3`, or
+`$HOME/.local/state/aiforge/sessions.sqlite3` when the XDG state location is
+unset or relative. It uses restrictive paths and permissions, full synchronous
+rollback-journal transactions, schema migrations, and bounded writer
+contention. Unknown future event payloads remain opaque and replayable.
+
+The current one-shot and interactive bootstrap surfaces do not write to this
+store yet. Runtime write-through and `--resume`/`--continue` are subsequent
+steps under AF-11; replay itself never starts inference or repeats a tool.
 
 The default toolchain respects `CXX`. Sanitizer toolchains are opt-in:
 
