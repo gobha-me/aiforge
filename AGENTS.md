@@ -30,6 +30,15 @@ with the north star or an accepted ADR, the governing document wins.
 - Fallible public operations return `std::expected`; exceptions do not cross
   API boundaries.
 
+## Dependency and library ownership
+
+- If a feature needed by AIForge belongs in a dependency we control, agents may
+  file a feature request against that dependency. The currently controlled
+  dependencies are TermForge, RasterForge, and venice-cpp.
+- If functionality being added to AIForge appears broadly reusable as a generic
+  library, raise it with the maintainers before embedding or extracting it. It
+  may warrant a separate project; do not create one without agreement.
+
 ## C++ style
 
 Use `PascalCase` types, `snake_case` functions and members, `m_` private data,
