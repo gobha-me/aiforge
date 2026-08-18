@@ -16,6 +16,7 @@
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
+#include <aiforge/testing/scripted_policy_grant_store.hpp>
 #include <aiforge/testing/scripted_session_store.hpp>
 #include <aiforge/testing/scripted_tool_executor.hpp>
 
@@ -34,7 +35,7 @@ auto declaration(std::string name = "lookup") -> backend::ToolDeclaration {
       "Look up a value",
       {"application/schema+json", R"({"type":"object"})"},
       {domain::Effect::read},
-      {{domain::Effect::read, "root", "/repo"}}};
+      {{domain::Effect::read, "filesystem.root", "/repo"}}};
 }
 
 auto context(std::vector<domain::Message> tool_messages = {})
@@ -250,6 +251,48 @@ auto snapshot_of(const runtime::ToolRegistry& registry)
   return std::move(*snapshot);
 }
 
+auto scope() -> domain::CapabilityScope {
+  return {domain::Effect::read, "filesystem.root", "/repo"};
+}
+
+auto allow_policy() -> std::shared_ptr<runtime::ToolPolicy> {
+  return std::make_shared<runtime::CapabilityPolicy>(
+      runtime::PermissionProfile{
+          make_id<domain::PermissionProfileId>("observe"),
+          {domain::Effect::read}, {scope()}, {}, {}});
+}
+
+auto approval_policy() -> std::shared_ptr<runtime::ToolPolicy> {
+  return std::make_shared<runtime::CapabilityPolicy>(
+      runtime::PermissionProfile{
+          make_id<domain::PermissionProfileId>("observe"), {}, {},
+          {domain::Effect::read}, {scope()}});
+}
+
+class OrderedPolicy final : public runtime::ToolPolicy {
+ public:
+  auto evaluate(const runtime::ToolPolicyRequest& request)
+      -> std::expected<runtime::ToolPolicyResolution,
+                       runtime::ToolPolicyError> override {
+    if (request.tool_name == "first") {
+      return runtime::ToolPolicyResolution{
+          domain::PolicyDecision::deny, {}, "first is denied",
+          domain::PolicyDecisionSource::permission_profile};
+    }
+    return runtime::ToolPolicyResolution{
+        domain::PolicyDecision::allow, request.scopes, "second is allowed",
+        domain::PolicyDecisionSource::permission_profile};
+  }
+
+  auto approve(const runtime::ToolPolicyRequest&, runtime::ToolPolicyApproval)
+      -> std::expected<runtime::ToolPolicyResolution,
+                       runtime::ToolPolicyError> override {
+    return std::unexpected(runtime::ToolPolicyError{
+        runtime::ToolPolicyErrorCode::invalid_request,
+        "approval is not expected", false});
+  }
+};
+
 }  // namespace
 
 TEST_CASE(
@@ -293,7 +336,7 @@ TEST_CASE(
 TEST_CASE("allowed tool results continue the same run in registry order",
           "[tools][runtime]") {
   const auto invocation = make_id<domain::InvocationId>("call");
-  const domain::CapabilityScope scope{domain::Effect::read, "root", "/repo"};
+  const domain::CapabilityScope scope{domain::Effect::read, "filesystem.root", "/repo"};
   const runtime::ToolExecutionLimits limits{4096, 8, 1s};
   const auto tool = declaration();
   auto expected_invocation = runtime::ToolInvocation{
@@ -333,14 +376,11 @@ TEST_CASE("allowed tool results continue the same run in registry order",
   }};
   WakeCounter wake;
   runtime::RunKernel kernel{
-      make_id<domain::SessionId>("session"), backend, &wake, {}, {}, snapshot};
+      make_id<domain::SessionId>("session"), backend, &wake, {}, {}, snapshot,
+      allow_policy()};
 
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
-  REQUIRE(kernel.decide_tool(
-      make_id<domain::RunId>("run"), invocation,
-      {domain::PolicyDecision::allow, {scope}, "test policy"}));
-
   bool continued{};
   std::size_t observed{};
   for (int attempt = 0; attempt < 100 && !continued; ++attempt) {
@@ -384,7 +424,7 @@ TEST_CASE("allowed tool results continue the same run in registry order",
 TEST_CASE("policy and approval decisions are one-shot and cannot widen scope",
           "[tools][policy][failure]") {
   const auto invocation = make_id<domain::InvocationId>("call");
-  const domain::CapabilityScope scope{domain::Effect::read, "root", "/repo"};
+  const domain::CapabilityScope scope{domain::Effect::read, "filesystem.root", "/repo"};
   const auto tool = declaration();
   auto executor = std::make_shared<testing::ScriptedToolExecutor>(
       std::vector<testing::ScriptedToolExchange>{});
@@ -397,30 +437,28 @@ TEST_CASE("policy and approval decisions are one-shot and cannot widen scope",
   }};
   WakeCounter wake;
   runtime::RunKernel kernel{
-      make_id<domain::SessionId>("session"), backend, &wake, {}, {}, snapshot};
+      make_id<domain::SessionId>("session"), backend, &wake, {}, {}, snapshot,
+      approval_policy()};
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
 
-  const domain::CapabilityScope widened{domain::Effect::read, "root",
+  const domain::CapabilityScope widened{domain::Effect::read, "filesystem.root",
                                         "/outside"};
-  auto decision = kernel.decide_tool(
+  auto decision = kernel.decide_approval(
       make_id<domain::RunId>("run"), invocation,
-      {domain::PolicyDecision::allow, {widened}, std::nullopt});
+      {domain::ApprovalDecision::approved, {widened},
+       domain::ApprovalGrantLifetime::invocation});
   REQUIRE_FALSE(decision);
   REQUIRE(decision.error().code ==
           runtime::RunKernelErrorCode::policy_scope_widening);
 
-  REQUIRE(kernel.decide_tool(
-      make_id<domain::RunId>("run"), invocation,
-      {domain::PolicyDecision::require_approval, {scope}, std::nullopt}));
-  decision =
-      kernel.decide_tool(make_id<domain::RunId>("run"), invocation,
-                         {domain::PolicyDecision::deny, {}, std::nullopt});
+  REQUIRE(kernel.decide_approval(make_id<domain::RunId>("run"), invocation,
+                                 {domain::ApprovalDecision::denied, {}}));
+  decision = kernel.decide_approval(make_id<domain::RunId>("run"), invocation,
+                                    {domain::ApprovalDecision::denied, {}});
   REQUIRE_FALSE(decision);
   REQUIRE(decision.error().code ==
           runtime::RunKernelErrorCode::invalid_tool_state);
-  REQUIRE(kernel.decide_approval(make_id<domain::RunId>("run"), invocation,
-                                 {domain::ApprovalDecision::denied, {}}));
   REQUIRE(executor->recorded_invocations().empty());
 
   const auto messages =
@@ -457,13 +495,54 @@ TEST_CASE("invalid arguments fail before policy without leaking validator text",
       std::get<domain::TextBlock>(messages->front().content.front()).text;
   REQUIRE(text == "tool arguments are invalid");
   REQUIRE(text.find("secret-bearing") == std::string::npos);
-  const auto decision =
-      kernel.decide_tool(make_id<domain::RunId>("run"), invocation,
-                         {domain::PolicyDecision::allow, {}, std::nullopt});
-  REQUIRE_FALSE(decision);
-  REQUIRE(decision.error().code ==
-          runtime::RunKernelErrorCode::invalid_tool_state);
   REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "test cleanup"));
+}
+
+TEST_CASE("saved approval failure is durable and does not start the tool",
+          "[tools][policy][storage][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("call");
+  auto executor = std::make_shared<CountingExecutor>();
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(declaration(), executor));
+  const auto snapshot = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
+  testing::ScriptedBackend backend{{
+      {initial, tool_call_script(invocation)},
+  }};
+  testing::ScriptedPolicyGrantStore grants;
+  grants.fail_save({storage::PolicyGrantStoreErrorCode::permission_denied,
+                    "secret-bearing storage detail", false});
+  auto policy = std::make_shared<runtime::CapabilityPolicy>(
+      runtime::PermissionProfile{
+          make_id<domain::PermissionProfileId>("observe"), {}, {},
+          {domain::Effect::read}, {scope()}},
+      &grants);
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
+                            &wake, {}, {}, snapshot, policy};
+  REQUIRE(kernel.start(run_start(initial)));
+  drain_to_inference_boundary(kernel, wake);
+
+  auto result = kernel.decide_approval(
+      make_id<domain::RunId>("run"), invocation,
+      {domain::ApprovalDecision::approved, {scope()},
+       domain::ApprovalGrantLifetime::saved});
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == runtime::RunKernelErrorCode::policy_failure);
+  REQUIRE(executor->starts == 0);
+  REQUIRE(grants.saved_grants().empty());
+  const auto& events = kernel.event_log().events();
+  REQUIRE(std::ranges::count_if(events, [](const auto& event) {
+            return std::holds_alternative<domain::ToolPolicyFailed>(
+                event.payload);
+          }) == 1);
+  const auto failure = std::ranges::find_if(events, [](const auto& event) {
+    return std::holds_alternative<domain::ToolPolicyFailed>(event.payload);
+  });
+  REQUIRE(failure != events.end());
+  REQUIRE(std::get<domain::ToolPolicyFailed>(failure->payload)
+              .error.message.find("secret-bearing") == std::string::npos);
+  REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
 }
 
 TEST_CASE("tool output and deadline limits become one bounded terminal error",
@@ -480,7 +559,7 @@ TEST_CASE("tool output and deadline limits become one bounded terminal error",
                  std::nullopt,
                  "lookup",
                  runtime::ValidatedToolArguments{{"application/json", "{}"}},
-                 {},
+                 {scope()},
                  limits},
              testing::ToolStreamScript{{
                  tool_step(runtime::ToolResult{{domain::TextBlock{"four"}}}),
@@ -500,12 +579,10 @@ TEST_CASE("tool output and deadline limits become one bounded terminal error",
                               &wake,
                               {},
                               {},
-                              snapshot};
+                              snapshot,
+                              allow_policy()};
     REQUIRE(kernel.start(run_start(initial)));
     drain_to_inference_boundary(kernel, wake);
-    REQUIRE(
-        kernel.decide_tool(make_id<domain::RunId>("run"), invocation,
-                           {domain::PolicyDecision::allow, {}, std::nullopt}));
     for (int attempt = 0; attempt < 100; ++attempt) {
       REQUIRE(kernel.drain());
       if (std::ranges::any_of(
@@ -535,7 +612,7 @@ TEST_CASE("tool output and deadline limits become one bounded terminal error",
                  std::nullopt,
                  "lookup",
                  runtime::ValidatedToolArguments{{"application/json", "{}"}},
-                 {},
+                 {scope()},
                  limits},
              runtime::ToolExecutionError{
                  runtime::ToolExecutionErrorCode::unavailable,
@@ -554,12 +631,10 @@ TEST_CASE("tool output and deadline limits become one bounded terminal error",
                               &wake,
                               {},
                               {},
-                              snapshot};
+                              snapshot,
+                              allow_policy()};
     REQUIRE(kernel.start(run_start(initial)));
     drain_to_inference_boundary(kernel, wake);
-    REQUIRE(
-        kernel.decide_tool(make_id<domain::RunId>("run"), invocation,
-                           {domain::PolicyDecision::allow, {}, std::nullopt}));
     for (int attempt = 0; attempt < 100; ++attempt) {
       REQUIRE(kernel.drain());
       if (std::ranges::any_of(
@@ -600,12 +675,10 @@ TEST_CASE("tool output and deadline limits become one bounded terminal error",
                               &wake,
                               {},
                               {},
-                              snapshot};
+                              snapshot,
+                              allow_policy()};
     REQUIRE(kernel.start(run_start(initial)));
     drain_to_inference_boundary(kernel, wake);
-    REQUIRE(
-        kernel.decide_tool(make_id<domain::RunId>("run"), invocation,
-                           {domain::PolicyDecision::allow, {}, std::nullopt}));
     for (int attempt = 0; attempt < 100; ++attempt) {
       REQUIRE(kernel.drain());
       if (std::ranges::any_of(
@@ -638,7 +711,7 @@ TEST_CASE("durable replay rebuilds tool state without validation or execution",
   const auto assistant = make_id<domain::MessageId>("assistant");
   const auto result_message = make_id<domain::MessageId>("tool-message");
   const auto tool = declaration();
-  const domain::CapabilityScope scope{domain::Effect::read, "root", "/repo"};
+  const domain::CapabilityScope scope{domain::Effect::read, "filesystem.root", "/repo"};
   const std::vector<domain::RunEvent> events{
       persisted_event(
           1, domain::RunStarted{make_id<domain::SurfaceId>("test"),
@@ -751,7 +824,7 @@ TEST_CASE("run cancellation before execution never starts the executor",
   }};
   WakeCounter wake;
   runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
-                            &wake, {}, {}, snapshot};
+                            &wake, {}, {}, snapshot, approval_policy()};
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
 
@@ -783,12 +856,9 @@ TEST_CASE("run cancellation terminates tool work exactly once",
   }};
   WakeCounter wake;
   runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
-                            &wake, {}, {}, snapshot};
+                            &wake, {}, {}, snapshot, allow_policy()};
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
-  REQUIRE(kernel.decide_tool(
-      make_id<domain::RunId>("run"), invocation,
-      {domain::PolicyDecision::allow, {}, std::nullopt}));
   REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "user cancelled"));
   drain_to_run_end(kernel, wake);
 
@@ -814,7 +884,7 @@ TEST_CASE("multiple tool calls cannot execute ahead of provider order",
           {runtime::ToolInvocation{
                second, std::nullopt, "second",
                runtime::ValidatedToolArguments{{"application/json", "{}"}},
-               {}, limits},
+               {scope()}, limits},
            testing::ToolStreamScript{{
                tool_step(runtime::ToolResult{{domain::TextBlock{"done"}}}),
                testing::ToolEndOfStream{},
@@ -837,17 +907,11 @@ TEST_CASE("multiple tool calls cannot execute ahead of provider order",
   }};
   WakeCounter wake;
   runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
-                            &wake, {}, {}, snapshot};
+                            &wake, {}, {}, snapshot,
+                            std::make_shared<OrderedPolicy>()};
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
 
-  REQUIRE(kernel.decide_tool(
-      make_id<domain::RunId>("run"), second,
-      {domain::PolicyDecision::allow, {}, std::nullopt}));
-  REQUIRE(executor->recorded_invocations().empty());
-  REQUIRE(kernel.decide_tool(
-      make_id<domain::RunId>("run"), first,
-      {domain::PolicyDecision::deny, {}, std::nullopt}));
   for (int attempt = 0; attempt < 100; ++attempt) {
     REQUIRE(kernel.drain());
     if (std::ranges::any_of(kernel.event_log().events(), [](const auto& event) {

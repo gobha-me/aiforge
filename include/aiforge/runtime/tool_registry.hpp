@@ -48,6 +48,7 @@ struct ToolExecutionError {
 
 struct ValidatedToolArguments {
   domain::StructuredDataBlock value;
+  std::vector<domain::CapabilityScope> required_scopes{};
   auto operator==(const ValidatedToolArguments&) const -> bool = default;
 };
 

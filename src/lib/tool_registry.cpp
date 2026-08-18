@@ -1,4 +1,5 @@
 #include <aiforge/runtime/tool_registry.hpp>
+#include <aiforge/runtime/tool_policy.hpp>
 
 #include <algorithm>
 #include <ranges>
@@ -72,12 +73,16 @@ constexpr std::size_t kMaximumScopeBytes{16U * 1024U};
   std::set<std::pair<domain::Effect, std::pair<std::string, std::string>>>
       scopes;
   for (const auto& scope : declaration.capability_scopes) {
+    const auto normalized = normalize_capability_scope(scope);
     if (!effects.contains(scope.effect) || scope.kind.empty() ||
         scope.value.empty() || scope.kind.size() > kMaximumScopeBytes ||
         scope.value.size() > kMaximumScopeBytes ||
         has_control_character(scope.kind) ||
-        has_control_character(scope.value) ||
-        !scopes.emplace(scope.effect, std::pair{scope.kind, scope.value})
+        has_control_character(scope.value) || !normalized) {
+      return invalid("tool capability scopes are invalid or duplicated");
+    }
+    if (!scopes.emplace(normalized->effect,
+                        std::pair{normalized->kind, normalized->value})
              .second) {
       return invalid("tool capability scopes are invalid or duplicated");
     }

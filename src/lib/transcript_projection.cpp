@@ -372,6 +372,18 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
             }
             return {};
           },
+          [&](const ToolPolicyFailed& failed)
+              -> std::expected<void, TranscriptProjectionError> {
+            if (!invocation_matches(event, failed)) {
+              return transition_error(
+                  "tool event envelope and payload invocation IDs differ");
+            }
+            if (tool(failed.invocation_id) == nullptr) {
+              return error(TranscriptProjectionErrorCode::unknown_invocation,
+                           "policy failure refers to an unknown invocation");
+            }
+            return {};
+          },
           [&](const ToolStarted& started)
               -> std::expected<void, TranscriptProjectionError> {
             if (!invocation_matches(event, started)) {
