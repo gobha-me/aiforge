@@ -17,6 +17,7 @@
 #include <vector>
 
 #include <aiforge/runtime/run_kernel.hpp>
+#include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
 
 namespace {
@@ -199,6 +200,23 @@ class BetweenDeltaBackend final : public backend::Backend {
   }
 };
 
+class PassiveToolExecutor final : public runtime::ToolExecutor {
+ public:
+  auto validate(const domain::StructuredDataBlock& arguments) const
+      -> std::expected<runtime::ValidatedToolArguments,
+                       runtime::ToolExecutionError> override {
+    return runtime::ValidatedToolArguments{arguments};
+  }
+
+  auto start(runtime::ToolInvocation, std::stop_token)
+      -> std::expected<std::unique_ptr<runtime::ToolExecutionStream>,
+                       runtime::ToolExecutionError> override {
+    return std::unexpected(runtime::ToolExecutionError{
+        runtime::ToolExecutionErrorCode::unavailable,
+        "passive test executor", false});
+  }
+};
+
 }  // namespace
 
 TEST_CASE("run kernel rejects invalid limits before starting a worker",
@@ -343,6 +361,9 @@ TEST_CASE("tool fragments assemble once and undeclared tools fail",
       {"application/schema+json", R"({"type":"object"})"},
       {domain::Effect::network},
       {}};
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      declaration, std::make_shared<PassiveToolExecutor>()));
   auto backend_request = request({declaration});
   const auto invocation = make_id<domain::InvocationId>("call");
   testing::ScriptedBackend fake{{testing::ScriptedExchange{
@@ -355,10 +376,22 @@ TEST_CASE("tool fragments assemble once and undeclared tools fail",
           testing::EndOfStream{},
       }}}}};
   WakeCounter wake;
-  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake, &wake};
+  auto snapshot = registry.snapshot();
+  REQUIRE(snapshot);
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake, &wake,
+                            {}, {}, std::move(*snapshot)};
 
   REQUIRE(kernel.start(run_start(backend_request)));
-  static_cast<void>(drain_to_end(kernel, wake));
+  std::size_t observed_wakes{};
+  for (int attempt = 0; attempt < 100 && kernel.active_inference_id();
+       ++attempt) {
+    REQUIRE(kernel.drain());
+    if (kernel.active_inference_id()) {
+      static_cast<void>(wake.wait_for_change(observed_wakes));
+    }
+    observed_wakes = wake.count();
+  }
+  REQUIRE_FALSE(kernel.active_inference_id());
   const auto& events = kernel.event_log().events();
   const auto proposed = std::ranges::find_if(events, [](const auto& event) {
     return std::holds_alternative<domain::ToolProposed>(event.payload);
@@ -366,6 +399,7 @@ TEST_CASE("tool fragments assemble once and undeclared tools fail",
   REQUIRE(proposed != events.end());
   REQUIRE(std::get<domain::ToolProposed>(proposed->payload).arguments.data ==
           R"({"q":"x"})");
+  REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "test cleanup"));
 }
 
 TEST_CASE("undeclared tool calls fail without recording a proposal",

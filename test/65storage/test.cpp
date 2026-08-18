@@ -92,6 +92,8 @@ auto create(storage::SessionStore& store, const std::string& id,
 auto all_payloads() -> std::vector<domain::RunEventPayload> {
   const auto inference = make_id<domain::InferenceId>("inference");
   const auto invocation = make_id<domain::InvocationId>("invocation");
+  const auto parent_invocation =
+      make_id<domain::InvocationId>("parent-invocation");
   const auto question = make_id<domain::QuestionId>("question");
   const auto artifact = make_id<domain::ArtifactId>("artifact");
   const auto view = make_id<domain::ViewId>("view");
@@ -133,7 +135,8 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
       domain::InferenceCancelled{inference, std::string{"cancelled"}},
       domain::ToolProposed{invocation, "read",
                            {"application/json", "{}"},
-                           {domain::Effect::read, domain::Effect::network}},
+                           {domain::Effect::read, domain::Effect::network},
+                           parent_invocation},
       domain::ToolPolicyDecided{invocation, domain::PolicyDecision::allow,
                                 {scope}, std::string{"allowed"}},
       domain::ToolApprovalRequested{invocation, {scope}},
@@ -141,8 +144,9 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
                                   domain::ApprovalDecision::approved, {scope}},
       domain::ToolStarted{invocation},
       domain::ToolProgressed{invocation, {domain::TextBlock{"working"}}},
-      domain::ToolResultRecorded{invocation, {domain::TextBlock{"done"}}},
-      domain::ToolErrored{invocation, error},
+      domain::ToolResultRecorded{invocation, {domain::TextBlock{"done"}},
+                                 message},
+      domain::ToolErrored{invocation, error, message},
       domain::QuestionRequested{definition},
       domain::QuestionAnswered{
           domain::QuestionAnswer{question, {"yes"}, std::string{"other"}}},

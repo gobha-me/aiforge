@@ -100,6 +100,27 @@ conservative input estimate before inference. The TermForge bridge uses
 `App::post` only as a wake signal; event-log, projection, and widget mutation
 remain on the UI thread.
 
+## Tool invocation foundation
+
+`aiforge::runtime::ToolRegistry` is the authoritative source for model-facing
+tool declarations and their executors. Immutable snapshots preserve
+registration order and keep backend schemas, future help/completion surfaces,
+argument validation, and execution dispatch on the same definition. Executors
+receive provider-neutral validated arguments, granted capability scopes,
+deadlines, output budgets, and cancellation tokens; deterministic scripted
+executors cover the boundary without production side effects.
+
+A model tool call records a durable proposal but never grants itself authority.
+The run remains live after the calling inference ends, and an explicit runtime
+policy decision must allow, deny, or request approval before execution. Tool
+progress and exactly one bounded result or redacted error are appended as run
+events. A subsequent inference is explicit and must include every terminal tool
+result as a tool-role context message. Replay rebuilds the same state without
+running validation, policy, tools, or inference again.
+
+No production tool or general capability policy is registered yet. AF-24 owns
+the policy engine and approval rules; AF-25 owns bounded process execution.
+
 ## Configuration
 
 AIForge resolves registered settings in command-line, environment, file, then
