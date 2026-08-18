@@ -122,6 +122,7 @@ struct ToolProposed {
   std::string tool_name;
   StructuredDataBlock arguments;
   std::vector<Effect> declared_effects;
+  std::optional<InvocationId> parent_invocation_id{};
   auto operator==(const ToolProposed&) const -> bool = default;
 };
 
@@ -172,12 +173,14 @@ struct ToolProgressed {
 struct ToolResultRecorded {
   InvocationId invocation_id;
   std::vector<ContentBlock> content;
+  std::optional<MessageId> result_message_id{};
   auto operator==(const ToolResultRecorded&) const -> bool = default;
 };
 
 struct ToolErrored {
   InvocationId invocation_id;
   DomainError error;
+  std::optional<MessageId> result_message_id{};
   auto operator==(const ToolErrored&) const -> bool = default;
 };
 

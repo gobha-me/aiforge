@@ -200,6 +200,42 @@ TEST_CASE("tool summaries enforce one ordered terminal lifecycle",
           summary);
 }
 
+TEST_CASE("cancelled approval accepts one terminal tool error",
+          "[transcript][tool][failure]") {
+  domain::TranscriptProjection projection;
+  const auto invocation = make_id<domain::InvocationId>("invocation");
+  REQUIRE(projection.apply(event(1, started())));
+  REQUIRE(projection.apply(event(
+      2,
+      domain::ToolProposed{invocation, "read", {"application/json", "{}"},
+                           {domain::Effect::read}},
+      {}, "run", invocation)));
+  REQUIRE(projection.apply(event(
+      3,
+      domain::ToolPolicyDecided{invocation,
+                                domain::PolicyDecision::require_approval, {},
+                                std::nullopt},
+      {}, "run", invocation)));
+  REQUIRE(projection.apply(event(
+      4, domain::ToolApprovalRequested{invocation, {}}, {}, "run",
+      invocation)));
+  REQUIRE(projection.apply(event(
+      5,
+      domain::ToolApprovalDecided{invocation,
+                                  domain::ApprovalDecision::cancelled, {}},
+      {}, "run", invocation)));
+  const domain::DomainError cancelled{domain::ErrorCode::cancelled,
+                                      "tool approval cancelled", false};
+  REQUIRE(projection.apply(event(
+      6, domain::ToolErrored{invocation, cancelled}, {}, "run", invocation)));
+  const auto& summary =
+      std::get<domain::TranscriptToolSummary>(projection.items().back());
+  REQUIRE(summary.state == domain::TranscriptToolState::cancelled);
+  REQUIRE(summary.error == cancelled);
+  REQUIRE_FALSE(projection.apply(event(
+      7, domain::ToolErrored{invocation, cancelled}, {}, "run", invocation)));
+}
+
 TEST_CASE("questions and artifacts reject unknown or invalid references",
           "[transcript][question][artifact][failure]") {
   domain::TranscriptProjection projection;

@@ -639,7 +639,9 @@ template <typename Enum>
             return {{"invocation_id", id_text(value.invocation_id)},
                     {"tool_name", value.tool_name},
                     {"arguments", structured_json(value.arguments)},
-                    {"declared_effects", effects_json(value.declared_effects)}};
+                    {"declared_effects", effects_json(value.declared_effects)},
+                    {"parent_invocation_id",
+                     optional_id_json(value.parent_invocation_id)}};
           },
           [](const domain::ToolPolicyDecided& value) -> Json {
             return {{"invocation_id", id_text(value.invocation_id)},
@@ -665,11 +667,15 @@ template <typename Enum>
           },
           [](const domain::ToolResultRecorded& value) -> Json {
             return {{"invocation_id", id_text(value.invocation_id)},
-                    {"content", content_list_json(value.content)}};
+                    {"content", content_list_json(value.content)},
+                    {"result_message_id",
+                     optional_id_json(value.result_message_id)}};
           },
           [](const domain::ToolErrored& value) -> Json {
             return {{"invocation_id", id_text(value.invocation_id)},
-                    {"error", domain_error_json(value.error)}};
+                    {"error", domain_error_json(value.error)},
+                    {"result_message_id",
+                     optional_id_json(value.result_message_id)}};
           },
           [](const domain::QuestionRequested& value) -> Json {
             return {{"question", question_json(value.question)}};
@@ -817,7 +823,11 @@ template <typename Enum>
         parse_id<domain::InvocationId>(value.at("invocation_id")),
         value.at("tool_name").get<std::string>(),
         parse_structured(value.at("arguments")),
-        parse_effects(value.at("declared_effects"))};
+        parse_effects(value.at("declared_effects")),
+        value.contains("parent_invocation_id")
+            ? parse_optional_id<domain::InvocationId>(
+                  value.at("parent_invocation_id"))
+            : std::nullopt};
   }
   if (type == "tool.policy_decided") {
     return domain::ToolPolicyDecided{
@@ -848,12 +858,20 @@ template <typename Enum>
   if (type == "tool.result_recorded") {
     return domain::ToolResultRecorded{
         parse_id<domain::InvocationId>(value.at("invocation_id")),
-        parse_content_list(value.at("content"))};
+        parse_content_list(value.at("content")),
+        value.contains("result_message_id")
+            ? parse_optional_id<domain::MessageId>(
+                  value.at("result_message_id"))
+            : std::nullopt};
   }
   if (type == "tool.errored") {
     return domain::ToolErrored{
         parse_id<domain::InvocationId>(value.at("invocation_id")),
-        parse_domain_error(value.at("error"))};
+        parse_domain_error(value.at("error")),
+        value.contains("result_message_id")
+            ? parse_optional_id<domain::MessageId>(
+                  value.at("result_message_id"))
+            : std::nullopt};
   }
   if (type == "question.requested") {
     return domain::QuestionRequested{parse_question(value.at("question"))};

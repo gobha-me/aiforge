@@ -437,10 +437,16 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
               return error(TranscriptProjectionErrorCode::unknown_invocation,
                            "tool error refers to an unknown invocation");
             }
-            if (target->state != TranscriptToolState::running) {
-              return transition_error("tool error requires a running invocation");
+            if (target->state == TranscriptToolState::complete ||
+                target->state == TranscriptToolState::failed ||
+                target->error) {
+              return transition_error("tool invocation is already terminal");
             }
-            target->state = TranscriptToolState::failed;
+            if (failed.error.code == ErrorCode::cancelled) {
+              target->state = TranscriptToolState::cancelled;
+            } else if (target->state != TranscriptToolState::denied) {
+              target->state = TranscriptToolState::failed;
+            }
             target->error = failed.error;
             return {};
           },

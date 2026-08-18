@@ -12,8 +12,10 @@ add_library(${PROJECT_NAME}_lib STATIC
   run_projection.cpp
   scripted_backend.cpp
   scripted_session_store.cpp
+  scripted_tool_executor.cpp
   sqlite_session_store.cpp
   transcript_projection.cpp
+  tool_registry.cpp
 )
 add_library(${PROJECT_NAME}::lib ALIAS ${PROJECT_NAME}_lib)
 
