@@ -132,17 +132,27 @@ enum class PolicyDecision {
   require_approval,
 };
 
+enum class PolicyDecisionSource {
+  fallback,
+  permission_profile,
+  session_grant,
+  saved_grant,
+  user_approval,
+};
+
 struct ToolPolicyDecided {
   InvocationId invocation_id;
   PolicyDecision decision;
   std::vector<CapabilityScope> scopes;
   std::optional<std::string> reason;
+  PolicyDecisionSource source{PolicyDecisionSource::fallback};
   auto operator==(const ToolPolicyDecided&) const -> bool = default;
 };
 
 struct ToolApprovalRequested {
   InvocationId invocation_id;
   std::vector<CapabilityScope> requested_scopes;
+  std::optional<std::string> reason{};
   auto operator==(const ToolApprovalRequested&) const -> bool = default;
 };
 
@@ -152,11 +162,24 @@ enum class ApprovalDecision {
   cancelled,
 };
 
+enum class ApprovalGrantLifetime {
+  invocation,
+  session,
+  saved,
+};
+
 struct ToolApprovalDecided {
   InvocationId invocation_id;
   ApprovalDecision decision;
   std::vector<CapabilityScope> granted_scopes;
+  ApprovalGrantLifetime lifetime{ApprovalGrantLifetime::invocation};
   auto operator==(const ToolApprovalDecided&) const -> bool = default;
+};
+
+struct ToolPolicyFailed {
+  InvocationId invocation_id;
+  DomainError error;
+  auto operator==(const ToolPolicyFailed&) const -> bool = default;
 };
 
 struct ToolStarted {
@@ -261,10 +284,11 @@ using RunEventPayload = std::variant<
     AssistantContentStarted, AssistantContentDeltaAdded, AssistantContentFinished,
     InferenceStarted, ReasoningMetadataAdded, UsageRecorded, InferenceFinished,
     InferenceFailed, InferenceCancelled, ToolProposed, ToolPolicyDecided,
-    ToolApprovalRequested, ToolApprovalDecided, ToolStarted, ToolProgressed,
-    ToolResultRecorded, ToolErrored, QuestionRequested, QuestionAnswered,
-    QuestionCancelled, ArtifactCreated, ArtifactReferenced, ArtifactDisplayed,
-    ArtifactRemovedFromView, ChildRunCreated, InterRunMessageSent, UnknownEvent>;
+    ToolApprovalRequested, ToolApprovalDecided, ToolPolicyFailed, ToolStarted,
+    ToolProgressed, ToolResultRecorded, ToolErrored, QuestionRequested,
+    QuestionAnswered, QuestionCancelled, ArtifactCreated, ArtifactReferenced,
+    ArtifactDisplayed, ArtifactRemovedFromView, ChildRunCreated,
+    InterRunMessageSent, UnknownEvent>;
 
 struct EventMetadata {
   EventId event_id;

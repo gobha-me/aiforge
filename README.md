@@ -111,15 +111,26 @@ deadlines, output budgets, and cancellation tokens; deterministic scripted
 executors cover the boundary without production side effects.
 
 A model tool call records a durable proposal but never grants itself authority.
-The run remains live after the calling inference ends, and an explicit runtime
-policy decision must allow, deny, or request approval before execution. Tool
-progress and exactly one bounded result or redacted error are appended as run
-events. A subsequent inference is explicit and must include every terminal tool
-result as a tool-role context message. Replay rebuilds the same state without
-running validation, policy, tools, or inference again.
+After validation, the run kernel asks its `ToolPolicy` to allow, deny, or
+request approval; surfaces cannot inject a policy decision. Missing policy
+configuration allows only tools that declare no authority-bearing effects and
+denies effectful work.
 
-No production tool or general capability policy is registered yet. AF-24 owns
-the policy engine and approval rules; AF-25 owns bounded process execution.
+`CapabilityPolicy` applies a typed permission profile with automatic grants and
+an approval ceiling. Filesystem roots use lexical containment, network hosts
+are exact and normalized, commands and artifact or cluster identities are
+exact, and spend scopes use bounded integer microunits. Approved authority can
+last for one invocation, the current session, or an explicitly saved grant.
+Saved grants pass through a neutral `PolicyGrantStore`, are re-intersected with
+the current profile when loaded, and have no selected production encoding yet.
+Policy explanations and storage failures are redacted before becoming durable
+events.
+
+Tool progress and exactly one bounded result or redacted error are appended as
+run events. A subsequent inference is explicit and must include every terminal
+tool result as a tool-role context message. Replay rebuilds the same state
+without running validation, policy, tools, or inference again. AF-25 owns the
+first production bounded process executor.
 
 ## Configuration
 

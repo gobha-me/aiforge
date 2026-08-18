@@ -238,6 +238,32 @@ template <typename Enum>
              {"require_approval", domain::PolicyDecision::require_approval}});
 }
 
+[[nodiscard]] auto policy_source_name(
+    const domain::PolicyDecisionSource value) -> std::string_view {
+  switch (value) {
+    case domain::PolicyDecisionSource::fallback: return "fallback";
+    case domain::PolicyDecisionSource::permission_profile:
+      return "permission_profile";
+    case domain::PolicyDecisionSource::session_grant: return "session_grant";
+    case domain::PolicyDecisionSource::saved_grant: return "saved_grant";
+    case domain::PolicyDecisionSource::user_approval: return "user_approval";
+  }
+  throw CodecFailure{"invalid policy decision source"};
+}
+
+[[nodiscard]] auto parse_policy_source(const Json& value)
+    -> domain::PolicyDecisionSource {
+  const auto name = value.get<std::string>();
+  return enum_value<domain::PolicyDecisionSource>(
+      name, {{"fallback", domain::PolicyDecisionSource::fallback},
+             {"permission_profile",
+              domain::PolicyDecisionSource::permission_profile},
+             {"session_grant", domain::PolicyDecisionSource::session_grant},
+             {"saved_grant", domain::PolicyDecisionSource::saved_grant},
+             {"user_approval",
+              domain::PolicyDecisionSource::user_approval}});
+}
+
 [[nodiscard]] auto approval_name(const domain::ApprovalDecision value)
     -> std::string_view {
   switch (value) {
@@ -255,6 +281,25 @@ template <typename Enum>
       name, {{"approved", domain::ApprovalDecision::approved},
              {"denied", domain::ApprovalDecision::denied},
              {"cancelled", domain::ApprovalDecision::cancelled}});
+}
+
+[[nodiscard]] auto approval_lifetime_name(
+    const domain::ApprovalGrantLifetime value) -> std::string_view {
+  switch (value) {
+    case domain::ApprovalGrantLifetime::invocation: return "invocation";
+    case domain::ApprovalGrantLifetime::session: return "session";
+    case domain::ApprovalGrantLifetime::saved: return "saved";
+  }
+  throw CodecFailure{"invalid approval grant lifetime"};
+}
+
+[[nodiscard]] auto parse_approval_lifetime(const Json& value)
+    -> domain::ApprovalGrantLifetime {
+  const auto name = value.get<std::string>();
+  return enum_value<domain::ApprovalGrantLifetime>(
+      name, {{"invocation", domain::ApprovalGrantLifetime::invocation},
+             {"session", domain::ApprovalGrantLifetime::session},
+             {"saved", domain::ApprovalGrantLifetime::saved}});
 }
 
 [[nodiscard]] auto selection_name(const domain::QuestionSelection value)
@@ -532,6 +577,7 @@ template <typename Enum>
           [](const domain::ToolPolicyDecided&) { return std::string{"tool.policy_decided"}; },
           [](const domain::ToolApprovalRequested&) { return std::string{"tool.approval_requested"}; },
           [](const domain::ToolApprovalDecided&) { return std::string{"tool.approval_decided"}; },
+          [](const domain::ToolPolicyFailed&) { return std::string{"tool.policy_failed"}; },
           [](const domain::ToolStarted&) { return std::string{"tool.started"}; },
           [](const domain::ToolProgressed&) { return std::string{"tool.progressed"}; },
           [](const domain::ToolResultRecorded&) { return std::string{"tool.result_recorded"}; },
@@ -559,7 +605,7 @@ template <typename Enum>
       "inference.reasoning_metadata_added", "inference.usage_recorded",
       "inference.finished", "inference.failed", "inference.cancelled",
       "tool.proposed", "tool.policy_decided", "tool.approval_requested",
-      "tool.approval_decided", "tool.started", "tool.progressed",
+      "tool.approval_decided", "tool.policy_failed", "tool.started", "tool.progressed",
       "tool.result_recorded", "tool.errored", "question.requested",
       "question.answered", "question.cancelled", "artifact.created",
       "artifact.referenced", "artifact.displayed",
@@ -647,16 +693,23 @@ template <typename Enum>
             return {{"invocation_id", id_text(value.invocation_id)},
                     {"decision", policy_name(value.decision)},
                     {"scopes", scopes_json(value.scopes)},
-                    {"reason", optional_string_json(value.reason)}};
+                    {"reason", optional_string_json(value.reason)},
+                    {"source", policy_source_name(value.source)}};
           },
           [](const domain::ToolApprovalRequested& value) -> Json {
             return {{"invocation_id", id_text(value.invocation_id)},
-                    {"requested_scopes", scopes_json(value.requested_scopes)}};
+                    {"requested_scopes", scopes_json(value.requested_scopes)},
+                    {"reason", optional_string_json(value.reason)}};
           },
           [](const domain::ToolApprovalDecided& value) -> Json {
             return {{"invocation_id", id_text(value.invocation_id)},
                     {"decision", approval_name(value.decision)},
-                    {"granted_scopes", scopes_json(value.granted_scopes)}};
+                    {"granted_scopes", scopes_json(value.granted_scopes)},
+                    {"lifetime", approval_lifetime_name(value.lifetime)}};
+          },
+          [](const domain::ToolPolicyFailed& value) -> Json {
+            return {{"invocation_id", id_text(value.invocation_id)},
+                    {"error", domain_error_json(value.error)}};
           },
           [](const domain::ToolStarted& value) -> Json {
             return {{"invocation_id", id_text(value.invocation_id)}};
@@ -833,18 +886,32 @@ template <typename Enum>
     return domain::ToolPolicyDecided{
         parse_id<domain::InvocationId>(value.at("invocation_id")),
         parse_policy(value.at("decision")), parse_scopes(value.at("scopes")),
-        parse_optional_string(value.at("reason"))};
+        parse_optional_string(value.at("reason")),
+        value.contains("source")
+            ? parse_policy_source(value.at("source"))
+            : domain::PolicyDecisionSource::fallback};
   }
   if (type == "tool.approval_requested") {
     return domain::ToolApprovalRequested{
         parse_id<domain::InvocationId>(value.at("invocation_id")),
-        parse_scopes(value.at("requested_scopes"))};
+        parse_scopes(value.at("requested_scopes")),
+        value.contains("reason")
+            ? parse_optional_string(value.at("reason"))
+            : std::nullopt};
   }
   if (type == "tool.approval_decided") {
     return domain::ToolApprovalDecided{
         parse_id<domain::InvocationId>(value.at("invocation_id")),
         parse_approval(value.at("decision")),
-        parse_scopes(value.at("granted_scopes"))};
+        parse_scopes(value.at("granted_scopes")),
+        value.contains("lifetime")
+            ? parse_approval_lifetime(value.at("lifetime"))
+            : domain::ApprovalGrantLifetime::invocation};
+  }
+  if (type == "tool.policy_failed") {
+    return domain::ToolPolicyFailed{
+        parse_id<domain::InvocationId>(value.at("invocation_id")),
+        parse_domain_error(value.at("error"))};
   }
   if (type == "tool.started") {
     return domain::ToolStarted{
