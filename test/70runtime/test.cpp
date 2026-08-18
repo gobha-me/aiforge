@@ -572,10 +572,13 @@ TEST_CASE("duplicate terminal backend events are rejected once",
 
   REQUIRE(kernel.start(run_start(backend_request)));
   bool rejected{};
+  std::size_t observed_wakes{};
   for (int attempt = 0; attempt < 100 && kernel.active_run_id(); ++attempt) {
     const auto drained = kernel.drain();
     rejected = rejected || !drained;
-    std::this_thread::yield();
+    if (kernel.active_run_id())
+      static_cast<void>(wake.wait_for_change(observed_wakes));
+    observed_wakes = wake.count();
   }
   REQUIRE(rejected);
   REQUIRE_FALSE(kernel.active_run_id());

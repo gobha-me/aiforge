@@ -1,5 +1,6 @@
 #include <aiforge/adapters/venice_backend.hpp>
 
+#include <algorithm>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -446,6 +447,62 @@ auto VeniceBackend::start(backend::BackendRequest request,
   } catch (...) {
     return std::unexpected(adapter_error(backend::BackendErrorKind::unavailable,
                                          "Venice stream could not start"));
+  }
+}
+
+auto VeniceBackend::lookup(const domain::ModelId& model_id,
+                           const std::stop_token stop_token)
+    -> std::expected<backend::ModelContextInfo, backend::BackendError> {
+  try {
+    if (stop_token.stop_requested()) {
+      return std::unexpected(adapter_error(backend::BackendErrorKind::cancelled,
+                                           "Venice request cancelled"));
+    }
+    if (m_impl == nullptr) {
+      return std::unexpected(
+          request_error("Venice adapter is not initialized"));
+    }
+
+    venice::CancelToken cancellation;
+    std::stop_callback cancel_callback{stop_token,
+                                       [&cancellation] { cancellation.cancel(); }};
+    const auto models = m_impl->client.models(
+        "text", {m_impl->options.connect_timeout, m_impl->options.read_timeout,
+                 m_impl->options.write_timeout, &cancellation});
+    if (!models) return std::unexpected(map_error(models.error()));
+
+    const auto found = std::ranges::find(*models, model_id.value(),
+                                         &venice::Model::id);
+    if (found == models->end()) {
+      return std::unexpected(
+          request_error("configured Venice model was not found"));
+    }
+    if (found->offline.value_or(false)) {
+      return std::unexpected(adapter_error(
+          backend::BackendErrorKind::unavailable,
+          "configured Venice model is unavailable", true));
+    }
+
+    auto context_tokens = found->available_context_tokens
+                              ? found->available_context_tokens
+                              : found->context_length;
+    if (context_tokens && found->context_length) {
+      context_tokens = std::min(*context_tokens, *found->context_length);
+    }
+    if (!context_tokens || *context_tokens <= 0) {
+      return std::unexpected(
+          request_error("configured Venice model has no context capacity"));
+    }
+    std::optional<std::uint64_t> maximum_output;
+    if (found->max_completion_tokens && *found->max_completion_tokens > 0) {
+      maximum_output =
+          static_cast<std::uint64_t>(*found->max_completion_tokens);
+    }
+    return backend::ModelContextInfo{
+        model_id, static_cast<std::uint64_t>(*context_tokens), maximum_output};
+  } catch (...) {
+    return std::unexpected(adapter_error(backend::BackendErrorKind::unavailable,
+                                         "Venice model lookup failed"));
   }
 }
 

@@ -1,4 +1,5 @@
 add_library(${PROJECT_NAME}_adapters STATIC
+  process_one_shot.cpp
   termforge_run_bridge.cpp
   venice_backend.cpp
 )

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <iostream>
 #include <optional>
 #include <ostream>
 #include <sstream>
@@ -231,6 +232,49 @@ auto version_handler(CommandContext& context) -> int {
   return values;
 }
 
+auto one_shot_handler(CommandContext& context,
+                      const std::string_view argument_id,
+                      const bool allow_empty_for_interactive) -> int {
+  const auto prompt = parsed_text_values(context.invocation, argument_id);
+  if (!prompt || prompt->empty()) {
+    if (allow_empty_for_interactive && context.environment.input_is_terminal) {
+      return default_handler(context);
+    }
+    context.error << "aiforge: a prompt is required for one-shot input\n";
+    return usage_exit_code;
+  }
+  if (prompt->size() != 1 || prompt->front().empty()) {
+    context.error << "aiforge: prompt must be nonempty\n";
+    return usage_exit_code;
+  }
+  if (context.environment.one_shot == nullptr) {
+    return unavailable_handler(context);
+  }
+  auto result = context.environment.one_shot->execute(
+      prompt->front(), context.environment, context.output, context.error);
+  if (result) return success_exit_code;
+  if (!result.error().message.empty()) {
+    context.error << "aiforge: " << result.error().message << '\n';
+  }
+  switch (result.error().kind) {
+    case CommandFailureKind::usage:
+      return usage_exit_code;
+    case CommandFailureKind::cancelled:
+      return 130;
+    case CommandFailureKind::runtime:
+      return failure_exit_code;
+  }
+  return failure_exit_code;
+}
+
+auto root_handler(CommandContext& context) -> int {
+  return one_shot_handler(context, "root.prompt", true);
+}
+
+auto chat_handler(CommandContext& context) -> int {
+  return one_shot_handler(context, "chat.prompt", false);
+}
+
 auto write_config_warning(std::ostream& error, const std::string_view message)
     -> void {
   error << "aiforge: warning: " << message << '\n';
@@ -457,6 +501,15 @@ auto CommandDispatcher::dispatch(
     const CommandRegistry& registry,
     const std::span<const std::string_view> arguments, std::ostream& output,
     std::ostream& error, const ParseLimits limits) const noexcept -> int {
+  CommandEnvironment environment{std::cin, true, true, true, {}, nullptr};
+  return dispatch(registry, arguments, environment, output, error, limits);
+}
+
+auto CommandDispatcher::dispatch(
+    const CommandRegistry& registry,
+    const std::span<const std::string_view> arguments,
+    CommandEnvironment& environment, std::ostream& output,
+    std::ostream& error, const ParseLimits limits) const noexcept -> int {
   try {
     auto schema = make_parser_schema(registry);
     if (!schema) {
@@ -503,7 +556,7 @@ auto CommandDispatcher::dispatch(
                             ": internal command registry error\n");
       return failure_exit_code;
     }
-    CommandContext context{invocation, output, error};
+    CommandContext context{invocation, environment, output, error};
     const auto result = located->command->handler(context);
     return output && error ? result : failure_exit_code;
   } catch (const std::exception&) {
@@ -524,16 +577,17 @@ auto builtin_command_registry() -> const CommandRegistry& {
        "AIForge terminal AI client.",
        false,
        {},
-       {},
+       {{{"root.prompt", "prompt", ArgumentValueKind::text, 0, 1},
+         "Prompt text for a one-shot request."}},
        {{"chat",
          "chat",
          "Run a one-shot chat request.",
          false,
          {},
-         {{{"chat.prompt", "prompt", ArgumentValueKind::text, 0, 1},
+         {{{"chat.prompt", "prompt", ArgumentValueKind::text, 1, 1},
            "Prompt text."}},
          {},
-         unavailable_handler},
+         chat_handler},
         {"models", "models", "List available models.", false, {}, {}, {},
          unavailable_handler},
         {"config",
@@ -575,7 +629,7 @@ auto builtin_command_registry() -> const CommandRegistry& {
          config_parent_handler},
         {"version", "version", "Show version information.", false, {}, {}, {},
          version_handler}},
-       default_handler},
+       root_handler},
       {{ControlRequestKind::help, {"-h", "--help"}},
        {ControlRequestKind::version, {"--version"}}}};
   return registry;
@@ -585,6 +639,13 @@ auto run_cli(const std::span<const std::string_view> arguments,
              std::ostream& output, std::ostream& error) noexcept -> int {
   return CommandDispatcher{}.dispatch(builtin_command_registry(), arguments,
                                       output, error);
+}
+
+auto run_cli(const std::span<const std::string_view> arguments,
+             CommandEnvironment& environment, std::ostream& output,
+             std::ostream& error) noexcept -> int {
+  return CommandDispatcher{}.dispatch(builtin_command_registry(), arguments,
+                                      environment, output, error);
 }
 
 }  // namespace aiforge::cli

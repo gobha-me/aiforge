@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <expected>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -28,6 +30,24 @@ auto typed_handler(CommandContext& context) -> int {
   context.output << "count:" << std::get<std::int64_t>(value) << '\n';
   return 0;
 }
+
+class FakeOneShot final : public OneShotCommand {
+ public:
+  auto execute(const std::string_view prompt, CommandEnvironment& environment,
+               std::ostream& output, std::ostream& error)
+      -> std::expected<void, CommandFailure> override {
+    seen_prompt = std::string{prompt};
+    saw_terminal_input = environment.input_is_terminal;
+    output << "answer";
+    error << "usage\n";
+    if (failure) return std::unexpected(*failure);
+    return {};
+  }
+
+  std::string seen_prompt;
+  bool saw_terminal_input{};
+  std::optional<CommandFailure> failure;
+};
 
 [[nodiscard]] auto root_command(CommandHandler handler = success_handler)
     -> CommandSpec {
@@ -208,7 +228,12 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
 
   std::string output;
   std::string error;
-  REQUIRE(dispatch(registry, {"chat"}, output, error) == 1);
+  REQUIRE(dispatch(registry, {"chat"}, output, error) == 2);
+  REQUIRE(output.empty());
+  REQUIRE((error.find("requires") != std::string::npos ||
+           error.find("required") != std::string::npos));
+
+  REQUIRE(dispatch(registry, {"chat", "hello"}, output, error) == 1);
   REQUIRE(output.empty());
   REQUIRE(error.find("not available in this build") != std::string::npos);
 
@@ -219,4 +244,38 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
   REQUIRE(dispatch(registry, {"version"}, output, error) == 0);
   REQUIRE(output.starts_with("aiforge "));
   REQUIRE(error.empty());
+}
+
+TEST_CASE("builtin one-shot routes root and chat prompts through one service",
+          "[commands][one-shot]") {
+  const auto& registry = builtin_command_registry();
+  FakeOneShot one_shot;
+  std::istringstream input;
+  CommandEnvironment environment{input, false, false, false, {}, &one_shot};
+  std::ostringstream output;
+  std::ostringstream error;
+  const std::vector<std::string_view> root_arguments{"hello"};
+
+  REQUIRE(CommandDispatcher{}.dispatch(registry, root_arguments, environment,
+                                       output, error) == 0);
+  REQUIRE(one_shot.seen_prompt == "hello");
+  REQUIRE_FALSE(one_shot.saw_terminal_input);
+  REQUIRE(output.str() == "answer");
+  REQUIRE(error.str() == "usage\n");
+
+  output.str({});
+  error.str({});
+  const std::vector<std::string_view> chat_arguments{"chat", "again"};
+  REQUIRE(CommandDispatcher{}.dispatch(registry, chat_arguments,
+                                       environment, output, error) == 0);
+  REQUIRE(one_shot.seen_prompt == "again");
+
+  one_shot.failure =
+      CommandFailure{CommandFailureKind::cancelled, "request cancelled"};
+  output.str({});
+  error.str({});
+  const std::vector<std::string_view> stop_arguments{"chat", "stop"};
+  REQUIRE(CommandDispatcher{}.dispatch(registry, stop_arguments,
+                                       environment, output, error) == 130);
+  REQUIRE(error.str().find("request cancelled") != std::string::npos);
 }
