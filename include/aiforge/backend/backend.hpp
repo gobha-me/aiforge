@@ -117,6 +117,13 @@ struct BackendError {
   auto operator==(const BackendError&) const -> bool = default;
 };
 
+struct ModelContextInfo {
+  domain::ModelId model_id;
+  std::uint64_t context_window_tokens{};
+  std::optional<std::uint64_t> maximum_output_tokens;
+  auto operator==(const ModelContextInfo&) const -> bool = default;
+};
+
 class BackendStream {
  public:
   virtual ~BackendStream() = default;
@@ -131,6 +138,15 @@ class Backend {
 
   [[nodiscard]] virtual auto start(BackendRequest request, std::stop_token stop_token)
       -> std::expected<std::unique_ptr<BackendStream>, BackendError> = 0;
+};
+
+class ModelContextProvider {
+ public:
+  virtual ~ModelContextProvider() = default;
+
+  [[nodiscard]] virtual auto lookup(const domain::ModelId& model_id,
+                                    std::stop_token stop_token)
+      -> std::expected<ModelContextInfo, BackendError> = 0;
 };
 
 }  // namespace aiforge::backend

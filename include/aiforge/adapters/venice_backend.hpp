@@ -19,7 +19,8 @@ struct VeniceBackendOptions {
   std::size_t pending_events{256};
 };
 
-class VeniceBackend final : public backend::Backend {
+class VeniceBackend final : public backend::Backend,
+                            public backend::ModelContextProvider {
  public:
   explicit VeniceBackend(VeniceBackendOptions options);
   ~VeniceBackend() override;
@@ -32,6 +33,10 @@ class VeniceBackend final : public backend::Backend {
   [[nodiscard]] auto start(backend::BackendRequest request,
                            std::stop_token stop_token)
       -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override;
+  [[nodiscard]] auto lookup(const domain::ModelId& model_id,
+                            std::stop_token stop_token)
+      -> std::expected<backend::ModelContextInfo,
                        backend::BackendError> override;
 
  private:

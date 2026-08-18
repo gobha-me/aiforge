@@ -63,6 +63,13 @@ auto request(domain::ConstructedContext built = context())
 class LocalServer final {
  public:
   LocalServer() {
+    m_server.Get(
+        "/api/v1/models",
+        [](const httplib::Request&, httplib::Response& response) {
+          response.set_content(
+              R"({"data":[{"id":"test-model","type":"text","context_length":8192,"model_spec":{"availableContextTokens":8192,"maxCompletionTokens":1024,"offline":false}}]})",
+              "application/json");
+        });
     m_server.Post(
         "/api/v1/chat/completions",
         [this](const httplib::Request& request, httplib::Response& response) {
@@ -168,6 +175,27 @@ TEST_CASE("Venice adapter maps structured SSE into neutral events",
   REQUIRE(sent.at("messages").at(0).at("content") == "hello");
   REQUIRE(server.authorization() == "Bearer test-secret");
   REQUIRE(server.body().find("test-secret") == std::string::npos);
+}
+
+TEST_CASE("Venice adapter exposes neutral model context metadata",
+          "[adapter][venice][models]") {
+  LocalServer server;
+  adapters::VeniceBackend backend{
+      {"test-secret", server.base_url(), 1s, 1s, 1s, 8}};
+  const auto model_id = make_id<domain::ModelId>("test-model");
+  const auto context = backend.lookup(model_id, {});
+  REQUIRE(context);
+  REQUIRE(context->model_id == model_id);
+  REQUIRE(context->context_window_tokens == 8192);
+  REQUIRE(context->maximum_output_tokens == 1024);
+
+  const auto missing =
+      backend.lookup(make_id<domain::ModelId>("missing-model"), {});
+  REQUIRE_FALSE(missing);
+  REQUIRE(missing.error().kind ==
+          backend::BackendErrorKind::request_rejected);
+  REQUIRE(missing.error().redacted_message.find("test-secret") ==
+          std::string::npos);
 }
 
 TEST_CASE("TermForge bridge converts its marker to an owner-thread drain",

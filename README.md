@@ -1,17 +1,15 @@
 # AIForge
 
-AIForge is a C++23 foundation for a terminal AI client. The project is being
-built from the durable core outward: provider-neutral run events, deterministic
-backends, replayable projections, and a shared streaming run kernel come before
-the production chat surfaces.
+AIForge is a C++23 terminal AI client built from a provider-neutral run kernel
+outward. It currently provides a streaming Venice-backed one-shot/pipe surface,
+provider-neutral run events, deterministic backends, replayable projections,
+and typed configuration. The interactive Chat workspace is the next surface;
+running `aiforge` without a prompt in a terminal still reports the current
+bootstrap status.
 
-The current command surface is intentionally offline. Running `aiforge`
-confirms the core executable is available; it does not contact a model provider.
-A Venice adapter and TermForge wake/cancellation bridge are built and tested for
-later surfaces, but the current command line does not activate either one. The
-command registry also provides generated help and version output. Commands that
-depend on later network, one-shot, or configuration milestones fail explicitly
-instead of reporting false success. The architectural guardrails live in
+The command registry provides generated help and version output. Commands that
+depend on later model-picker or interactive milestones fail explicitly instead
+of reporting false success. The architectural guardrails live in
 [`docs/ARCHITECTURE-NORTH-STAR.md`](docs/ARCHITECTURE-NORTH-STAR.md).
 
 Architecture documents have explicit authority levels. The north star and
@@ -50,17 +48,29 @@ cmake --build build-clang --parallel
 ctest --test-dir build-clang --output-on-failure
 ```
 
-Run the offline executable with:
+Configure a model and Venice API key, then run a one-shot request:
 
 ```bash
-./build/src/bin/aiforge
+export AIFORGE_MODEL=model-id
+export VENICE_API_KEY=your-key
+
+./build/src/bin/aiforge "Explain append-only event streams"
+./build/src/bin/aiforge chat "Explain append-only event streams"
+git diff | ./build/src/bin/aiforge "Review this diff"
 ./build/src/bin/aiforge --help
 ./build/src/bin/aiforge --version
 ```
 
-Command-line mistakes write diagnostics to stderr and return exit code 2. Help
-and version output use stdout. The registered `chat` and `models` commands
-remain unavailable until their owning feature milestones land.
+Prompt text is user conversation content. Non-TTY stdin is bounded to 1 MiB,
+validated as UTF-8 text, and enters model context separately as untrusted
+evidence with stdin provenance. A prompt is required when piping input.
+
+Completion text streams only to stdout. Citations, usage, configuration
+warnings, and failures use stderr, so stdout remains safe to pipe. Unsafe
+terminal control sequences are removed from provider text. Ctrl-C requests
+transport cancellation, preserves already-written partial output, and returns
+130; command-line/input mistakes return 2 and runtime failures return 1. The
+`models` command remains unavailable until its owning model-picker milestone.
 
 ## Run kernel
 
@@ -72,8 +82,10 @@ mapped to bounded generic domain errors before entering durable or renderable
 state.
 
 The Venice adapter translates neutral context, generation options, tool
-declarations, structured deltas, usage, and transport cancellation without
-exposing Venice types through the runtime API. The TermForge bridge uses
+declarations, structured deltas, usage, model context capacity, and transport
+cancellation without exposing Venice types through the runtime API. The
+one-shot surface uses the selected model's reported context window and a
+conservative input estimate before inference. The TermForge bridge uses
 `App::post` only as a wake signal; event-log, projection, and widget mutation
 remain on the UI thread.
 
@@ -96,7 +108,9 @@ It is strict UTF-8 JSON. AIForge creates its directory and file with restrictive
 permissions, preserves unknown fields during known updates, and refuses to
 overwrite malformed, symlinked, or loosely permissioned files. Configuration
 diagnostics use stderr; requested values use stdout. Credentials are excluded
-from this file and remain a separate milestone.
+from this file. The one-shot surface currently reads `VENICE_API_KEY` directly
+from the environment; stored credentials and `login` remain a separate
+milestone.
 
 The default toolchain respects `CXX`. Sanitizer toolchains are opt-in:
 

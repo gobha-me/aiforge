@@ -4,6 +4,7 @@
 #include <expected>
 #include <iosfwd>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -12,8 +13,43 @@
 
 namespace aiforge::cli {
 
+enum class CommandFailureKind {
+  usage,
+  runtime,
+  cancelled,
+};
+
+struct CommandFailure {
+  CommandFailureKind kind{CommandFailureKind::runtime};
+  std::string message;
+  auto operator==(const CommandFailure&) const -> bool = default;
+};
+
+struct CommandEnvironment;
+
+class OneShotCommand {
+ public:
+  virtual ~OneShotCommand() = default;
+
+  [[nodiscard]] virtual auto execute(std::string_view prompt,
+                                     CommandEnvironment& environment,
+                                     std::ostream& output,
+                                     std::ostream& error)
+      -> std::expected<void, CommandFailure> = 0;
+};
+
+struct CommandEnvironment {
+  std::istream& input;
+  bool input_is_terminal{true};
+  bool output_is_terminal{true};
+  bool error_is_terminal{true};
+  std::stop_token stop_token;
+  OneShotCommand* one_shot{};
+};
+
 struct CommandContext {
   const ParsedInvocation& invocation;
+  CommandEnvironment& environment;
   std::ostream& output;
   std::ostream& error;
 };
@@ -86,11 +122,22 @@ class CommandDispatcher final {
       std::ostream& error,
       ParseLimits limits = {256, 64U * 1024U, 1024U * 1024U}) const noexcept
       -> int;
+  [[nodiscard]] auto dispatch(
+      const CommandRegistry& registry,
+      std::span<const std::string_view> arguments,
+      CommandEnvironment& environment, std::ostream& output,
+      std::ostream& error,
+      ParseLimits limits = {256, 64U * 1024U, 1024U * 1024U}) const noexcept
+      -> int;
 };
 
 [[nodiscard]] auto builtin_command_registry() -> const CommandRegistry&;
 
 [[nodiscard]] auto run_cli(std::span<const std::string_view> arguments,
+                           std::ostream& output,
+                           std::ostream& error) noexcept -> int;
+[[nodiscard]] auto run_cli(std::span<const std::string_view> arguments,
+                           CommandEnvironment& environment,
                            std::ostream& output,
                            std::ostream& error) noexcept -> int;
 

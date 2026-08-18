@@ -1,5 +1,5 @@
 if (TARGET ${PROJECT_NAME})
-  add_test(NAME offline-startup COMMAND ${PROJECT_NAME})
+  add_test(NAME executable-startup COMMAND ${PROJECT_NAME} --version)
 endif ()
 
 file(GLOB TEST_DIRS ${CMAKE_CURRENT_LIST_DIR}/*)
