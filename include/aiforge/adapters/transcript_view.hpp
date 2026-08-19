@@ -55,6 +55,8 @@ class TranscriptView final {
       -> std::expected<void, TranscriptViewError>;
   [[nodiscard]] auto rebuild(std::span<const domain::RunEvent> events)
       -> std::expected<void, TranscriptViewError>;
+  [[nodiscard]] auto clear_view()
+      -> std::expected<void, TranscriptViewError>;
 
   auto set_geometry(termforge::Rect geometry) -> void;
   [[nodiscard]] auto on_event(const termforge::Event& event) -> bool;

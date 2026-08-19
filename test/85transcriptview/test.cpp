@@ -188,6 +188,33 @@ TEST_CASE("TranscriptView rebuild rejects malformed replay without losing state"
   REQUIRE(view.projection().last_sequence() == 1);
 }
 
+TEST_CASE("TranscriptView clear is presentation-only and accepts later runs",
+          "[adapter][transcript][clear]") {
+  adapters::TranscriptView view{adapters::TranscriptRenderMode::plain_text};
+  REQUIRE(view.apply(event(1, started(), std::nullopt, "first-run")));
+  REQUIRE(view.apply(event(
+      2,
+      domain::UserContentAdded{domain::Message{
+          make_id<domain::MessageId>("first-user"), domain::Role::user,
+          {domain::TextBlock{"retained durably"}}, std::nullopt}},
+      std::nullopt, "first-run")));
+  REQUIRE(view.widget().line_count() == 1);
+
+  REQUIRE(view.clear_view());
+  REQUIRE(view.widget().line_count() == 0);
+  REQUIRE(view.session_projection().runs().empty());
+
+  REQUIRE(view.apply(event(4, started(), std::nullopt, "second-run")));
+  REQUIRE(view.apply(event(
+      5,
+      domain::UserContentAdded{domain::Message{
+          make_id<domain::MessageId>("second-user"), domain::Role::user,
+          {domain::TextBlock{"visible after clear"}}, std::nullopt}},
+      std::nullopt, "second-run")));
+  REQUIRE(view.widget().line_count() == 1);
+  REQUIRE(view.session_projection().runs().size() == 1);
+}
+
 TEST_CASE("TranscriptView renders sequential runs incrementally and on replay",
           "[adapter][transcript][session]") {
   const auto first_user = domain::UserContentAdded{domain::Message{
