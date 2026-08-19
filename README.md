@@ -223,6 +223,23 @@ The interactive bootstrap does not yet expose session list/resume/new actions,
 and richer configuration, credential-source, and runtime-version provenance
 remain follow-up work under AF-11.
 
+## Repository snapshot identity
+
+`aiforge::repository::RepositorySnapshotSource` defines a bounded, cancellable
+port for observing repository identity without exposing filesystem or Git
+types. Snapshots distinguish branch, detached, unborn, and non-VCS roots;
+retain staged, worktree, and untracked state; attach algorithm-labelled content
+digests; and compare source state through a canonical root identity plus a
+stable manifest fingerprint. A scripted source covers deterministic callers.
+
+`aiforge::adapters::GitRepositorySnapshotSource` is the first production
+adapter. It receives an explicit Git executable, invokes only bounded argument
+vectors, resolves root aliases, records porcelain-v2 status, and scans non-VCS
+trees without following symlinks. It observes twice and rejects a repository
+that changes between passes. The adapter is not yet registered by a surface;
+project-instruction discovery, evidence selection, caching, and edits remain
+separate milestones.
+
 The default toolchain respects `CXX`. Sanitizer toolchains are opt-in:
 
 ```bash
