@@ -81,8 +81,20 @@ struct RepositorySnapshot {
   auto operator==(const RepositorySnapshot&) const -> bool = default;
 };
 
+struct RepositorySnapshotIdentity {
+  RepositoryId repository_id;
+  ContentDigest fingerprint;
+  auto operator==(const RepositorySnapshotIdentity&) const -> bool = default;
+};
+
+[[nodiscard]] auto snapshot_identity(const RepositorySnapshot& snapshot)
+    -> RepositorySnapshotIdentity;
+
 [[nodiscard]] auto same_source_state(const RepositorySnapshot& left,
                                      const RepositorySnapshot& right) noexcept
     -> bool;
+[[nodiscard]] auto same_source_state(
+    const RepositorySnapshotIdentity& left,
+    const RepositorySnapshotIdentity& right) noexcept -> bool;
 
 }  // namespace aiforge::domain

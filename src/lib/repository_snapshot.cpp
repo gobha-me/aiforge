@@ -8,10 +8,21 @@
 
 namespace aiforge::domain {
 
+auto snapshot_identity(const RepositorySnapshot& snapshot)
+    -> RepositorySnapshotIdentity {
+  return {snapshot.root.repository_id, snapshot.fingerprint};
+}
+
+auto same_source_state(const RepositorySnapshotIdentity& left,
+                       const RepositorySnapshotIdentity& right) noexcept
+    -> bool {
+  return left.repository_id == right.repository_id &&
+         left.fingerprint == right.fingerprint;
+}
+
 auto same_source_state(const RepositorySnapshot& left,
                        const RepositorySnapshot& right) noexcept -> bool {
-  return left.root.repository_id == right.root.repository_id &&
-         left.fingerprint == right.fingerprint;
+  return same_source_state(snapshot_identity(left), snapshot_identity(right));
 }
 
 }  // namespace aiforge::domain
