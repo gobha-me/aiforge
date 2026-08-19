@@ -22,12 +22,13 @@ auto make_id(const std::string& value) -> IdType {
 }
 
 template <typename Payload>
-auto event(const std::uint64_t sequence, Payload payload)
+auto event(const std::uint64_t sequence, Payload payload,
+           std::optional<domain::InvocationId> invocation_id = std::nullopt)
     -> domain::RunEvent {
   return {{make_id<domain::EventId>("event-" + std::to_string(sequence)),
            make_id<domain::RunId>("run"), sequence, 1,
            domain::EventTimestamp{std::chrono::milliseconds{sequence}},
-           std::nullopt, std::nullopt, std::nullopt},
+           std::nullopt, std::nullopt, std::move(invocation_id)},
           std::move(payload)};
 }
 
@@ -127,6 +128,36 @@ TEST_CASE("TranscriptView provides a markup-free plain fallback and resizes",
   view.set_geometry({0, 0, 1, 1});
   screen.resize(1, 1);
   view.draw(screen);
+}
+
+TEST_CASE("TranscriptView groups questions from one invocation",
+          "[adapter][transcript][questions]") {
+  adapters::TranscriptView view{adapters::TranscriptRenderMode::plain_text};
+  const auto invocation = make_id<domain::InvocationId>("ask-call");
+  const auto first = make_id<domain::QuestionId>("first");
+  const auto second = make_id<domain::QuestionId>("second");
+  const auto definition = [](const domain::QuestionId& question_id,
+                             std::string prompt) {
+    return domain::QuestionDefinition{
+        question_id, std::move(prompt), domain::QuestionSelection::one,
+        {{"yes", "Yes", std::nullopt}}, true, 1, 1, std::nullopt};
+  };
+
+  REQUIRE(view.apply(event(1, started())));
+  REQUIRE(view.apply(event(
+      2, domain::QuestionRequested{definition(first, "First?")}, invocation)));
+  REQUIRE(view.apply(event(
+      3, domain::QuestionRequested{definition(second, "Second?")}, invocation)));
+  REQUIRE(view.projection().items().size() == 2);
+  REQUIRE(view.widget().line_count() == 1);
+
+  REQUIRE(view.apply(event(
+      4, domain::QuestionAnswered{{first, {"yes"}, std::nullopt}},
+      invocation)));
+  REQUIRE(view.apply(event(
+      5, domain::QuestionAnswered{{second, {"yes"}, std::nullopt}},
+      invocation)));
+  REQUIRE(view.widget().line_count() == 1);
 }
 
 TEST_CASE("TranscriptView rejects worker-thread projection and widget mutation",

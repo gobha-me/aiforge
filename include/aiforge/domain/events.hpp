@@ -123,6 +123,12 @@ struct ToolProposed {
   StructuredDataBlock arguments;
   std::vector<Effect> declared_effects;
   std::optional<InvocationId> parent_invocation_id{};
+  // Replay may relaunch a queued invocation without validation only when its
+  // validated value was byte-for-byte identical to the recorded arguments.
+  bool arguments_replayable{};
+  std::vector<CapabilityScope> validated_required_scopes{};
+  std::vector<CapabilityScope> requested_scopes{};
+  std::optional<MessageId> result_message_id{};
   auto operator==(const ToolProposed&) const -> bool = default;
 };
 

@@ -16,7 +16,9 @@
 #include <nlohmann/json.hpp>
 
 #include <aiforge/adapters/termforge_run_bridge.hpp>
+#include <aiforge/adapters/ask_user_dialog.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
+#include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
 
 namespace {
@@ -177,6 +179,32 @@ TEST_CASE("Venice adapter maps structured SSE into neutral events",
   REQUIRE(server.body().find("test-secret") == std::string::npos);
 }
 
+TEST_CASE("Venice adapter sends structured tool results as tool messages",
+          "[adapter][venice][tools]") {
+  LocalServer server;
+  adapters::VeniceBackend backend{
+      {"test-secret", server.base_url(), 1s, 1s, 1s, 8}};
+  auto built = context();
+  built.entries.front().kind = domain::ContextEntryKind::tool_result;
+  built.entries.front().message = {
+      make_id<domain::MessageId>("tool-result"), domain::Role::tool,
+      {domain::StructuredDataBlock{"application/json",
+                                   R"({"status":"cancelled"})"}},
+      make_id<domain::InvocationId>("ask-call")};
+  auto started = backend.start(request(std::move(built)), {});
+  REQUIRE(started);
+  while (true) {
+    auto next = (*started)->next({});
+    REQUIRE(next);
+    if (!*next) break;
+  }
+  const auto sent = nlohmann::json::parse(server.body());
+  REQUIRE(sent.at("messages").at(0).at("role") == "tool");
+  REQUIRE(sent.at("messages").at(0).at("tool_call_id") == "ask-call");
+  REQUIRE(sent.at("messages").at(0).at("content") ==
+          R"({"status":"cancelled"})");
+}
+
 TEST_CASE("Venice adapter exposes neutral model context metadata",
           "[adapter][venice][models]") {
   LocalServer server;
@@ -234,4 +262,85 @@ TEST_CASE("TermForge bridge converts its marker to an owner-thread drain",
   REQUIRE_FALSE(kernel.active_run_id());
   REQUIRE(kernel.projection(make_id<domain::RunId>("run"))->status() ==
           domain::RunStatus::completed);
+}
+
+TEST_CASE("ask_user dialog maps recommended indices back to stable IDs",
+          "[adapter][termforge][questions]") {
+  runtime::ToolRegistry registry;
+  REQUIRE(runtime::register_ask_user_tool(registry, true));
+  auto snapshot = registry.snapshot();
+  REQUIRE(snapshot);
+  const auto invocation = make_id<domain::InvocationId>("ask-call");
+  auto backend_request = request();
+  backend_request.tools = snapshot->declarations();
+  testing::ScriptedBackend fake{{testing::ScriptedExchange{
+      backend_request,
+      testing::StreamScript{{
+          backend::ResponseStarted{"response"},
+          backend::ToolCallDelta{
+              invocation, "ask_user",
+              R"({"questions":[{"id":"format","prompt":"Choose output","kind":"one","required":true,"minimum_selections":1,"maximum_selections":1,"options":[{"id":"short","label":"Short","recommended":true},{"id":"long","label":"Long"}]},{"id":"confirm","prompt":"Confirm choice","kind":"one","required":true,"minimum_selections":1,"maximum_selections":1,"options":[{"id":"yes","label":"Yes","recommended":true},{"id":"no","label":"No"}]},{"id":"optional","prompt":"Optional detail","kind":"one","required":false,"minimum_selections":0,"maximum_selections":1,"options":[{"id":"extra","label":"Extra"}]}]})"},
+          backend::ResponseFinished{domain::FinishReason::tool_call},
+          testing::EndOfStream{},
+      }}}}};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake,
+                            nullptr, {}, {}, std::move(*snapshot)};
+  REQUIRE(kernel.start(
+      {make_id<domain::RunId>("run"),
+       {make_id<domain::SurfaceId>("tui"),
+        make_id<domain::WorkspaceId>("chat"),
+        make_id<domain::PermissionProfileId>("observe"), std::nullopt},
+       {make_id<domain::MessageId>("user"), domain::Role::user,
+        {domain::TextBlock{"hello"}}, std::nullopt},
+       backend_request}));
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (!kernel.pending_question_input() &&
+         std::chrono::steady_clock::now() < deadline) {
+    REQUIRE(kernel.drain());
+    std::this_thread::sleep_for(1ms);
+  }
+  const auto pending = kernel.pending_question_input();
+  REQUIRE(pending);
+
+  termforge::ChoiceWizardDialog dialog;
+  adapters::AskUserDialogController controller{dialog};
+  REQUIRE(controller.present(*pending, kernel));
+  termforge::Screen tiny{8, 3};
+  dialog.draw(tiny);
+  REQUIRE(dialog.on_event(termforge::KeyEvent{
+      termforge::Key::Enter, 0, false, false, false,
+      termforge::KeyAction::Press}));
+  REQUIRE(dialog.current_page() == 1);
+  REQUIRE(kernel.pending_question_input());
+  tiny.resize(1, 1);
+  dialog.draw(tiny);
+  tiny.resize(40, 12);
+  dialog.draw(tiny);
+  REQUIRE(dialog.on_event(termforge::KeyEvent{
+      termforge::Key::Enter, 0, false, false, false,
+      termforge::KeyAction::Press}));
+  REQUIRE(dialog.current_page() == 2);
+  REQUIRE(kernel.pending_question_input());
+  REQUIRE(dialog.on_event(termforge::KeyEvent{
+      termforge::Key::Enter, 0, false, false, false,
+      termforge::KeyAction::Press}));
+  REQUIRE_FALSE(controller.last_error());
+  REQUIRE_FALSE(kernel.pending_question_input());
+
+  const auto messages =
+      runtime::tool_result_messages(kernel.event_log().events());
+  REQUIRE(messages);
+  REQUIRE(messages->size() == 1);
+  const auto& result =
+      std::get<domain::StructuredDataBlock>(messages->front().content.front());
+  REQUIRE(result.data.find("short") != std::string::npos);
+  REQUIRE(result.data.find("yes") != std::string::npos);
+  static_cast<void>(dialog.on_event(termforge::KeyEvent{
+      termforge::Key::Enter, 0, false, false, false,
+      termforge::KeyAction::Press}));
+  const auto after_duplicate =
+      runtime::tool_result_messages(kernel.event_log().events());
+  REQUIRE(after_duplicate);
+  REQUIRE(after_duplicate->size() == 1);
+  REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
 }

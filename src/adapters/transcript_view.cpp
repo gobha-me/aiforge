@@ -285,8 +285,11 @@ auto TranscriptView::render(const domain::TranscriptProjection& projection)
       return {};
     };
 
-    for (const auto& item : projection.items()) {
+    for (std::size_t item_index = 0;
+         item_index < projection.items().size(); ++item_index) {
+      const auto& item = projection.items()[item_index];
       termforge::StyledText output;
+      bool entry_live = live(item);
       if (const auto* message = std::get_if<domain::TranscriptMessage>(&item)) {
         const auto base = message->role == domain::Role::user
                               ? m_theme.user
@@ -343,34 +346,75 @@ auto TranscriptView::render(const domain::TranscriptProjection& projection)
         }
       } else if (const auto* question =
                      std::get_if<domain::TranscriptQuestionSummary>(&item)) {
-        auto prompt = sanitized(question->question.prompt);
-        if (!prompt) return std::unexpected(std::move(prompt.error()));
-        append_span(output, "Question: " + *prompt,
+        std::vector<const domain::TranscriptQuestionSummary*> questions{
+            question};
+        if (question->invocation_id) {
+          while (item_index + 1 < projection.items().size()) {
+            const auto* next = std::get_if<domain::TranscriptQuestionSummary>(
+                &projection.items()[item_index + 1]);
+            if (next == nullptr ||
+                next->invocation_id != question->invocation_id) {
+              break;
+            }
+            questions.push_back(next);
+            ++item_index;
+          }
+        }
+        entry_live = std::ranges::any_of(questions, [](const auto* value) {
+          return value->state ==
+                 domain::TranscriptQuestionState::awaiting_answer;
+        });
+        const bool all_answered = std::ranges::all_of(
+            questions, [](const auto* value) {
+              return value->state == domain::TranscriptQuestionState::answered;
+            });
+        const bool all_cancelled = std::ranges::all_of(
+            questions, [](const auto* value) {
+              return value->state == domain::TranscriptQuestionState::cancelled;
+            });
+        append_span(output,
+                    std::string{questions.size() == 1 ? "Question" : "Questions"} +
+                        " — " +
+                        (entry_live ? "awaiting answer"
+                                    : all_answered ? "answered"
+                                    : all_cancelled ? "cancelled" : "resolved"),
                     style(m_theme.question,
                           presentation::TextSemantic::strong));
-        if (question->state == domain::TranscriptQuestionState::answered &&
-            question->answer) {
-          std::vector<std::string> labels;
-          for (const auto& selected : question->answer->selected_option_ids) {
-            const auto found = std::ranges::find(
-                question->question.options, selected,
-                &domain::QuestionOption::option_id);
-            if (found != question->question.options.end()) labels.push_back(found->label);
+        for (std::size_t question_index = 0;
+             question_index < questions.size(); ++question_index) {
+          const auto& current = *questions[question_index];
+          auto prompt = sanitized(current.question.prompt);
+          if (!prompt) return std::unexpected(std::move(prompt.error()));
+          append_span(output,
+                      "\n" + std::to_string(question_index + 1) + ". " +
+                          *prompt,
+                      style(m_theme.question));
+          if (current.state == domain::TranscriptQuestionState::answered &&
+              current.answer) {
+            std::vector<std::string> labels;
+            for (const auto& selected : current.answer->selected_option_ids) {
+              const auto found = std::ranges::find(
+                  current.question.options, selected,
+                  &domain::QuestionOption::option_id);
+              if (found != current.question.options.end()) {
+                labels.push_back(found->label);
+              }
+            }
+            if (current.answer->free_form) {
+              labels.push_back(*current.answer->free_form);
+            }
+            std::string answer = "\n   Answer: ";
+            for (std::size_t index = 0; index < labels.size(); ++index) {
+              auto label = sanitized(labels[index]);
+              if (!label) return std::unexpected(std::move(label.error()));
+              if (index != 0) answer += ", ";
+              answer += *label;
+            }
+            append_span(output, std::move(answer), style(m_theme.question));
+          } else if (current.state ==
+                     domain::TranscriptQuestionState::cancelled) {
+            append_span(output, "\n   [cancelled]", style(m_theme.muted));
           }
-          if (question->answer->free_form) {
-            labels.push_back(*question->answer->free_form);
-          }
-          std::string answer = "\nAnswer: ";
-          for (std::size_t index = 0; index < labels.size(); ++index) {
-            auto label = sanitized(labels[index]);
-            if (!label) return std::unexpected(std::move(label.error()));
-            if (index != 0) answer += ", ";
-            answer += *label;
-          }
-          append_span(output, std::move(answer), style(m_theme.question));
-        } else if (question->state ==
-                   domain::TranscriptQuestionState::cancelled) {
-          append_span(output, "\n[cancelled]", style(m_theme.muted));
         }
       } else if (const auto* artifact =
                      std::get_if<domain::TranscriptArtifactReference>(&item)) {
@@ -396,7 +440,7 @@ auto TranscriptView::render(const domain::TranscriptProjection& projection)
                           presentation::TextSemantic::strong));
       }
       result.push_back(
-          RenderedEntry{output, flatten_rich(output), live(item)});
+          RenderedEntry{output, flatten_rich(output), entry_live});
     }
     return result;
   } catch (...) {

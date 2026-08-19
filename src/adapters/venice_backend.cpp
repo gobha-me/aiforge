@@ -100,6 +100,13 @@ using AdapterItem =
       result.append(text->text);
       continue;
     }
+    if (const auto* structured =
+            std::get_if<domain::StructuredDataBlock>(&block);
+        structured != nullptr && message.role == domain::Role::tool &&
+        structured->media_type == "application/json") {
+      result.append(structured->data);
+      continue;
+    }
     return std::unexpected(request_error(
         "Venice adapter does not support this input content block"));
   }

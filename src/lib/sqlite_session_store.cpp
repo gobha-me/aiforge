@@ -496,14 +496,26 @@ template <typename Enum>
   auto options = Json::array();
   for (const auto& option : question.options) {
     options.push_back({{"option_id", option.option_id}, {"label", option.label},
-                       {"description", optional_string_json(option.description)}});
+                       {"description", optional_string_json(option.description)},
+                       {"recommended", option.recommended}});
+  }
+  Json other = nullptr;
+  if (question.other) {
+    other = {{"label", question.other->label},
+             {"placeholder",
+              optional_string_json(question.other->placeholder)},
+             {"maximum_bytes", question.other->maximum_bytes}};
   }
   return {{"question_id", id_text(question.question_id)},
           {"prompt", question.prompt},
           {"selection", selection_name(question.selection)},
           {"options", std::move(options)},
-          {"free_form_allowed", question.free_form_allowed},
-          {"answer_optional", question.answer_optional}};
+          {"required", question.required},
+          {"minimum_selections", question.minimum_selections},
+          {"maximum_selections",
+           question.maximum_selections ? Json(*question.maximum_selections)
+                                       : Json(nullptr)},
+          {"other", std::move(other)}};
 }
 
 [[nodiscard]] auto parse_question(const Json& value)
@@ -512,13 +524,42 @@ template <typename Enum>
   for (const auto& option : value.at("options")) {
     options.push_back({option.at("option_id").get<std::string>(),
                        option.at("label").get<std::string>(),
-                       parse_optional_string(option.at("description"))});
+                       parse_optional_string(option.at("description")),
+                       option.value("recommended", false)});
+  }
+  if (!value.contains("required")) {
+    const bool free_form = value.at("free_form_allowed").get<bool>();
+    const bool optional = value.at("answer_optional").get<bool>();
+    const auto selection = parse_selection(value.at("selection"));
+    return {parse_id<domain::QuestionId>(value.at("question_id")),
+            value.at("prompt").get<std::string>(), selection,
+            std::move(options), !optional, optional ? 0U : 1U,
+            selection == domain::QuestionSelection::one
+                ? std::optional<std::size_t>{1}
+                : std::optional<std::size_t>{},
+            free_form
+                ? std::optional<domain::QuestionOtherInput>{
+                      domain::QuestionOtherInput{"Other", std::nullopt, 4096}}
+                : std::nullopt};
+  }
+  std::optional<std::size_t> maximum;
+  if (!value.at("maximum_selections").is_null()) {
+    maximum = value.at("maximum_selections").get<std::size_t>();
+  }
+  std::optional<domain::QuestionOtherInput> other;
+  if (value.contains("other") && !value.at("other").is_null()) {
+    const auto& raw = value.at("other");
+    other = domain::QuestionOtherInput{
+        raw.at("label").get<std::string>(),
+        parse_optional_string(raw.at("placeholder")),
+        raw.value("maximum_bytes", std::size_t{4096})};
   }
   return {parse_id<domain::QuestionId>(value.at("question_id")),
           value.at("prompt").get<std::string>(),
           parse_selection(value.at("selection")), std::move(options),
-          value.at("free_form_allowed").get<bool>(),
-          value.at("answer_optional").get<bool>()};
+          value.at("required").get<bool>(),
+          value.at("minimum_selections").get<std::size_t>(), maximum,
+          std::move(other)};
 }
 
 [[nodiscard]] auto artifact_json(const domain::ArtifactMetadata& artifact)
@@ -687,7 +728,13 @@ template <typename Enum>
                     {"arguments", structured_json(value.arguments)},
                     {"declared_effects", effects_json(value.declared_effects)},
                     {"parent_invocation_id",
-                     optional_id_json(value.parent_invocation_id)}};
+                     optional_id_json(value.parent_invocation_id)},
+                    {"arguments_replayable", value.arguments_replayable},
+                    {"validated_required_scopes",
+                     scopes_json(value.validated_required_scopes)},
+                    {"requested_scopes", scopes_json(value.requested_scopes)},
+                    {"result_message_id",
+                     optional_id_json(value.result_message_id)}};
           },
           [](const domain::ToolPolicyDecided& value) -> Json {
             return {{"invocation_id", id_text(value.invocation_id)},
@@ -880,6 +927,17 @@ template <typename Enum>
         value.contains("parent_invocation_id")
             ? parse_optional_id<domain::InvocationId>(
                   value.at("parent_invocation_id"))
+            : std::nullopt,
+        value.value("arguments_replayable", false),
+        value.contains("validated_required_scopes")
+            ? parse_scopes(value.at("validated_required_scopes"))
+            : std::vector<domain::CapabilityScope>{},
+        value.contains("requested_scopes")
+            ? parse_scopes(value.at("requested_scopes"))
+            : std::vector<domain::CapabilityScope>{},
+        value.contains("result_message_id")
+            ? parse_optional_id<domain::MessageId>(
+                  value.at("result_message_id"))
             : std::nullopt};
   }
   if (type == "tool.policy_decided") {

@@ -1,4 +1,5 @@
 add_library(${PROJECT_NAME}_adapters STATIC
+  ask_user_dialog.cpp
   process_one_shot.cpp
   termforge_run_bridge.cpp
   transcript_view.cpp

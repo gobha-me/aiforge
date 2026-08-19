@@ -102,7 +102,8 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
   const domain::CapabilityScope scope{domain::Effect::read, "root", "/workspace"};
   const domain::QuestionDefinition definition{
       question, "Choose", domain::QuestionSelection::one,
-      {{"yes", "Yes", std::string{"recommended"}}}, true, false};
+      {{"yes", "Yes", std::string{"recommended"}}}, true, 1, 1,
+      domain::QuestionOtherInput{"Other", std::nullopt, 4096}};
   const domain::ArtifactMetadata artifact_metadata{
       artifact, "text/plain", 3, "sha256:abc", invocation, 1, 2};
   return {
@@ -136,7 +137,7 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
       domain::ToolProposed{invocation, "read",
                            {"application/json", "{}"},
                            {domain::Effect::read, domain::Effect::network},
-                           parent_invocation},
+                           parent_invocation, true, {scope}, {scope}, message},
       domain::ToolPolicyDecided{invocation, domain::PolicyDecision::allow,
                                 {scope}, std::string{"allowed"},
                                 domain::PolicyDecisionSource::saved_grant},
