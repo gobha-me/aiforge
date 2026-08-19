@@ -7,6 +7,8 @@
 
 namespace aiforge::adapters {
 
+class GitProjectInstructionSource;
+
 class GitRepositorySnapshotSource final
     : public repository::RepositorySnapshotSource {
  public:
@@ -30,6 +32,7 @@ class GitRepositorySnapshotSource final
                        repository::RepositorySnapshotError> override;
 
  private:
+  friend class GitProjectInstructionSource;
   struct Impl;
   explicit GitRepositorySnapshotSource(std::unique_ptr<Impl> impl);
   std::unique_ptr<Impl> m_impl;
