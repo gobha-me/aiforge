@@ -12,12 +12,14 @@ add_library(${PROJECT_NAME}_lib STATIC
   json_config_file_store.cpp
   one_shot.cpp
   presentation_text.cpp
+  project_instructions.cpp
   repository_snapshot.cpp
   run_kernel.cpp
   run_projection.cpp
   scripted_artifact_store.cpp
   scripted_backend.cpp
   scripted_policy_grant_store.cpp
+  scripted_project_instruction_source.cpp
   scripted_repository_snapshot_source.cpp
   scripted_session_store.cpp
   scripted_tool_executor.cpp

@@ -1,3 +1,4 @@
+#include <aiforge/adapters/git_project_instruction_source.hpp>
 #include <aiforge/adapters/git_repository_snapshot_source.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -173,6 +174,156 @@ TEST_CASE("plain repository snapshots hash files and symlinks without following"
   auto changed = observer.observe({directory.path().string(), {}});
   REQUIRE(changed);
   REQUIRE_FALSE(domain::same_source_state(*first, *changed));
+}
+
+TEST_CASE("project instructions are discovered from root to target subtree") {
+  auto directory = initialized_repository();
+  write_file(directory.path() / "AGENTS.md", "root rules\n");
+  write_file(directory.path() / "src" / "AGENTS.md", "nested rules\n");
+  write_file(directory.path() / "sibling" / "AGENTS.md", "sibling rules\n");
+  std::filesystem::create_directories(directory.path() / "src" / "lib");
+
+  auto observer = source();
+  const auto baseline = observer.observe({directory.path().string(), {}});
+  REQUIRE(baseline);
+  adapters::GitProjectInstructionSource instructions{observer};
+  const auto result = instructions.discover({*baseline, "src/lib", {}});
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->source_snapshot == domain::snapshot_identity(*baseline));
+  REQUIRE(result->target_subtree == "src/lib");
+  REQUIRE(result->documents.size() == 2);
+  REQUIRE(result->documents[0].source.relative_path == "AGENTS.md");
+  REQUIRE(result->documents[0].applicable_subtree.empty());
+  REQUIRE(result->documents[0].specificity == 0);
+  REQUIRE(result->documents[0].discovery_order == 1);
+  REQUIRE(result->documents[0].text == "root rules\n");
+  REQUIRE(result->documents[1].source.relative_path == "src/AGENTS.md");
+  REQUIRE(result->documents[1].applicable_subtree == "src");
+  REQUIRE(result->documents[1].specificity == 1);
+  REQUIRE(result->documents[1].discovery_order == 2);
+  REQUIRE(result->documents[1].text == "nested rules\n");
+  REQUIRE(result->documents[0].source.content_digest.byte_size == 11);
+}
+
+TEST_CASE("project instruction discovery fails closed on paths and content") {
+  auto directory = initialized_repository();
+  std::filesystem::create_directories(directory.path() / "target");
+  auto observer = source();
+  auto baseline = observer.observe({directory.path().string(), {}});
+  REQUIRE(baseline);
+  adapters::GitProjectInstructionSource instructions{observer};
+
+  auto invalid = instructions.discover({*baseline, "../escape", {}});
+  REQUIRE_FALSE(invalid);
+  REQUIRE(invalid.error().code ==
+          repository::ProjectInstructionErrorCode::invalid_request);
+
+  auto missing = instructions.discover({*baseline, "missing", {}});
+  REQUIRE_FALSE(missing);
+  REQUIRE(missing.error().code ==
+          repository::ProjectInstructionErrorCode::not_found);
+
+  std::filesystem::create_directory_symlink(directory.path().parent_path(),
+                                            directory.path() / "escape");
+  auto escaped = instructions.discover({*baseline, "escape", {}});
+  REQUIRE_FALSE(escaped);
+  REQUIRE(escaped.error().code ==
+          repository::ProjectInstructionErrorCode::outside_repository);
+
+  std::filesystem::remove(directory.path() / "escape");
+  write_file(directory.path() / "real-agents", "rules\n");
+  std::filesystem::create_symlink("real-agents",
+                                  directory.path() / "AGENTS.md");
+  baseline = observer.observe({directory.path().string(), {}});
+  REQUIRE(baseline);
+  auto symlink = instructions.discover({*baseline, "", {}});
+  REQUIRE_FALSE(symlink);
+  REQUIRE(symlink.error().code ==
+          repository::ProjectInstructionErrorCode::unsupported_entry);
+
+  std::filesystem::remove(directory.path() / "AGENTS.md");
+  write_file(directory.path() / "AGENTS.md", std::string{"bad\0text", 8});
+  baseline = observer.observe({directory.path().string(), {}});
+  REQUIRE(baseline);
+  auto malformed = instructions.discover({*baseline, "", {}});
+  REQUIRE_FALSE(malformed);
+  REQUIRE(malformed.error().code ==
+          repository::ProjectInstructionErrorCode::malformed_text);
+
+  write_file(directory.path() / "AGENTS.md", "12345");
+  baseline = observer.observe({directory.path().string(), {}});
+  REQUIRE(baseline);
+  repository::ProjectInstructionLimits limits;
+  limits.maximum_document_bytes = 4;
+  limits.maximum_total_bytes = 4;
+  auto oversized = instructions.discover({*baseline, "", limits});
+  REQUIRE_FALSE(oversized);
+  REQUIRE(oversized.error().code ==
+          repository::ProjectInstructionErrorCode::resource_exhausted);
+}
+
+TEST_CASE("project instruction discovery detects stale baselines and cancellation") {
+  auto directory = initialized_repository();
+  write_file(directory.path() / "AGENTS.md", "first\n");
+  auto observer = source();
+  const auto baseline = observer.observe({directory.path().string(), {}});
+  REQUIRE(baseline);
+  adapters::GitProjectInstructionSource instructions{observer};
+
+  write_file(directory.path() / "AGENTS.md", "second\n");
+  auto stale = instructions.discover({*baseline, "", {}});
+  REQUIRE_FALSE(stale);
+  REQUIRE(stale.error().code ==
+          repository::ProjectInstructionErrorCode::stale_snapshot);
+
+  const auto current = observer.observe({directory.path().string(), {}});
+  REQUIRE(current);
+  std::stop_source stopped;
+  stopped.request_stop();
+  auto cancelled = instructions.discover({*current, "", {}},
+                                         stopped.get_token());
+  REQUIRE_FALSE(cancelled);
+  REQUIRE(cancelled.error().code ==
+          repository::ProjectInstructionErrorCode::cancelled);
+
+  write_file(directory.path() / "AGENTS.md", "");
+  const auto empty_baseline = observer.observe({directory.path().string(), {}});
+  REQUIRE(empty_baseline);
+  auto empty = instructions.discover({*empty_baseline, "", {}});
+  REQUIRE(empty);
+  REQUIRE(empty->documents.empty());
+}
+
+TEST_CASE("project instruction discovery rejects repository changes during reads") {
+  TemporaryDirectory directory;
+  const auto fake_git = directory.path() / "git";
+  const auto counter = directory.path() / "status-count";
+  const auto canonical = std::filesystem::canonical(directory.path()).string();
+  write_executable(
+      fake_git,
+      "#!/bin/sh\n"
+      "case \"$*\" in\n"
+      "  *--show-toplevel*) printf '%s\\n' '" + canonical + "' ;;\n"
+      "  *--show-object-format*) printf 'sha1\\n' ;;\n"
+      "  *status*) n=0; [ -f '" + counter.string() +
+          "' ] && n=$(cat '" + counter.string() +
+          "'); n=$((n + 1)); printf '%s' \"$n\" > '" + counter.string() +
+          "'; if [ \"$n\" -le 4 ]; then oid=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; "
+          "else oid=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; fi; "
+          "printf '# branch.oid %s\\0# branch.head main\\0' \"$oid\" ;;\n"
+      "  *hash-object*) cat >/dev/null; printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n' ;;\n"
+      "  *) exit 1 ;;\n"
+      "esac\n");
+  auto opened = adapters::GitRepositorySnapshotSource::open(fake_git.string());
+  REQUIRE(opened);
+  const auto baseline = opened->observe({directory.path().string(), {}});
+  REQUIRE(baseline);
+  adapters::GitProjectInstructionSource instructions{*opened};
+  const auto result = instructions.discover({*baseline, "", {}});
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code ==
+          repository::ProjectInstructionErrorCode::unstable);
 }
 
 TEST_CASE("Git snapshots resolve aliases and describe branch dirty and detached state") {

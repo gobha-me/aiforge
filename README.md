@@ -298,6 +298,21 @@ freshness claims, duplicate evidence IDs, and checked byte/token totals. This
 foundation selects no repository cache, persistence encoding, retrieval
 ranking, parser, or provider request mapping.
 
+## Project instruction discovery
+
+`aiforge::repository::ProjectInstructionSource` discovers bounded `AGENTS.md`
+documents from the repository root toward a selected target subtree while
+retaining exact source identity, digest, applicability, specificity, and stable
+order. The Git/filesystem adapter rejects path and symlink escapes, malformed
+text, stale baselines, and repositories that change during discovery; a
+scripted source supports deterministic callers.
+
+The runtime handoff admits these documents only through the accepted project
+instruction layer and requires both a current matching repository snapshot and
+explicit target-model token estimates. Project text does not grant capabilities
+or replace runtime-owned policy. Surface integration remains deferred until the
+Code workspace has an explicit target-selection flow.
+
 The default toolchain respects `CXX`. Sanitizer toolchains are opt-in:
 
 ```bash
