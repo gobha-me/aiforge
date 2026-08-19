@@ -35,6 +35,7 @@ enum class RunKernelErrorCode {
   wrong_invocation,
   policy_scope_widening,
   policy_failure,
+  interactive_input_unavailable,
   continuation_not_ready,
   internal_failure,
 };
@@ -78,6 +79,13 @@ struct ToolApprovalResolution {
   domain::ApprovalGrantLifetime lifetime{
       domain::ApprovalGrantLifetime::invocation};
   auto operator==(const ToolApprovalResolution&) const -> bool = default;
+};
+
+struct PendingQuestionInput {
+  domain::RunId run_id;
+  domain::InvocationId invocation_id;
+  std::vector<domain::QuestionDefinition> questions;
+  auto operator==(const PendingQuestionInput&) const -> bool = default;
 };
 
 // Implementations may be called from a backend worker. They must not mutate
@@ -127,6 +135,16 @@ class RunKernel final {
       const domain::InvocationId& invocation_id,
       ToolApprovalResolution resolution)
       -> std::expected<void, RunKernelError>;
+  [[nodiscard]] auto answer_questions(
+      const domain::RunId& run_id,
+      const domain::InvocationId& invocation_id,
+      std::vector<domain::QuestionAnswer> answers)
+      -> std::expected<void, RunKernelError>;
+  [[nodiscard]] auto cancel_questions(
+      const domain::RunId& run_id,
+      const domain::InvocationId& invocation_id,
+      std::optional<std::string> reason = std::nullopt)
+      -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto continue_run(const domain::RunId& run_id,
                                   backend::BackendRequest request)
       -> std::expected<void, RunKernelError>;
@@ -144,6 +162,8 @@ class RunKernel final {
       -> std::optional<domain::RunId>;
   [[nodiscard]] auto active_inference_id() const noexcept
       -> std::optional<domain::InferenceId>;
+  [[nodiscard]] auto pending_question_input() const
+      -> std::optional<PendingQuestionInput>;
 
  private:
   struct Impl;

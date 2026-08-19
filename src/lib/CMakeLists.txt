@@ -1,4 +1,5 @@
 add_library(${PROJECT_NAME}_lib STATIC
+  ask_user_tool.cpp
   bootstrap.cpp
   cli11_parser.cpp
   command_registry.cpp

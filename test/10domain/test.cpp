@@ -162,7 +162,10 @@ TEST_CASE("all north-star event families have typed payloads", "[domain]") {
   const DomainError error{ErrorCode::backend, "redacted", true};
   const CapabilityScope scope{Effect::read, "root", "/workspace"};
   const QuestionDefinition definition{question, "Choose", QuestionSelection::one,
-                                      {{"yes", "Yes", std::nullopt}}, true, false};
+                                      {{"yes", "Yes", std::nullopt}}, true, 1,
+                                      1,
+                                      QuestionOtherInput{"Other", std::nullopt,
+                                                         4096}};
   const ArtifactMetadata artifact_metadata{artifact, "text/plain", 3, "sha256:abc",
                                            invocation, std::nullopt, std::nullopt};
 

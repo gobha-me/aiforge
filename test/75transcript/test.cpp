@@ -248,7 +248,8 @@ TEST_CASE("questions and artifacts reject unknown or invalid references",
   REQUIRE(projection.apply(event(
       3, domain::QuestionRequested{domain::QuestionDefinition{
              question, "Choose", domain::QuestionSelection::one,
-             {{"yes", "Yes", std::nullopt}}, true, false}})));
+             {{"yes", "Yes", std::nullopt}}, true, 1, 1,
+             domain::QuestionOtherInput{"Other", std::nullopt, 4096}}})));
 
   auto invalid = projection.apply(event(
       4, domain::QuestionAnswered{
@@ -279,6 +280,38 @@ TEST_CASE("questions and artifacts reject unknown or invalid references",
       projection.items().back()));
   REQUIRE(std::get<domain::TranscriptMessage>(projection.items().front())
               .artifacts == std::vector{metadata});
+}
+
+TEST_CASE("question identities are scoped to their tool invocation",
+          "[transcript][question]") {
+  domain::TranscriptProjection projection;
+  const auto question = make_id<domain::QuestionId>("question");
+  const auto first = make_id<domain::InvocationId>("first-call");
+  const auto second = make_id<domain::InvocationId>("second-call");
+  const domain::QuestionDefinition definition{
+      question, "Choose", domain::QuestionSelection::one,
+      {{"yes", "Yes", std::nullopt}}, true, 1, 1, std::nullopt};
+  REQUIRE(projection.apply(event(1, started())));
+  REQUIRE(projection.apply(event(2, domain::QuestionRequested{definition},
+                                 {}, "run", first)));
+  REQUIRE_FALSE(projection.apply(event(
+      3, domain::QuestionAnswered{{question, {"yes"}, std::nullopt}}, {},
+      "run", second)));
+  REQUIRE(projection.last_sequence() == 2);
+  REQUIRE(projection.apply(event(
+      3, domain::QuestionAnswered{{question, {"yes"}, std::nullopt}}, {},
+      "run", first)));
+  REQUIRE(projection.apply(event(4, domain::QuestionRequested{definition},
+                                 {}, "run", second)));
+  REQUIRE(projection.apply(event(
+      5, domain::QuestionCancelled{question, "cancelled"}, {}, "run",
+      second)));
+
+  REQUIRE(projection.items().size() == 2);
+  REQUIRE(std::get<domain::TranscriptQuestionSummary>(projection.items()[0])
+              .invocation_id == first);
+  REQUIRE(std::get<domain::TranscriptQuestionSummary>(projection.items()[1])
+              .invocation_id == second);
 }
 
 TEST_CASE("untrusted text sanitization is deterministic and UTF-8 safe",

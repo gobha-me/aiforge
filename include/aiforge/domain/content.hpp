@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -118,7 +119,15 @@ struct QuestionOption {
   std::string option_id;
   std::string label;
   std::optional<std::string> description;
+  bool recommended{};
   auto operator==(const QuestionOption&) const -> bool = default;
+};
+
+struct QuestionOtherInput {
+  std::string label{"Other"};
+  std::optional<std::string> placeholder;
+  std::size_t maximum_bytes{4096};
+  auto operator==(const QuestionOtherInput&) const -> bool = default;
 };
 
 struct QuestionDefinition {
@@ -126,8 +135,10 @@ struct QuestionDefinition {
   std::string prompt;
   QuestionSelection selection{QuestionSelection::one};
   std::vector<QuestionOption> options;
-  bool free_form_allowed{};
-  bool answer_optional{};
+  bool required{true};
+  std::size_t minimum_selections{1};
+  std::optional<std::size_t> maximum_selections{1};
+  std::optional<QuestionOtherInput> other;
   auto operator==(const QuestionDefinition&) const -> bool = default;
 };
 

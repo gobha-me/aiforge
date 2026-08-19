@@ -20,6 +20,7 @@ enum class ToolRegistryErrorCode {
   invalid_declaration,
   duplicate_name,
   missing_executor,
+  interactive_input_unavailable,
   internal_failure,
 };
 
@@ -79,7 +80,13 @@ struct ToolResult {
   auto operator==(const ToolResult&) const -> bool = default;
 };
 
-using ToolExecutionEvent = std::variant<ToolProgress, ToolResult>;
+struct ToolInputRequested {
+  std::vector<domain::QuestionDefinition> questions;
+  auto operator==(const ToolInputRequested&) const -> bool = default;
+};
+
+using ToolExecutionEvent =
+    std::variant<ToolProgress, ToolInputRequested, ToolResult>;
 
 class ToolExecutionStream {
  public:

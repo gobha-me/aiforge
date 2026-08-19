@@ -19,6 +19,8 @@
 #include <utility>
 #include <variant>
 
+#include <nlohmann/json.hpp>
+
 namespace aiforge::runtime {
 namespace {
 
@@ -174,6 +176,118 @@ using WorkerUpdate =
   return total;
 }
 
+[[nodiscard]] auto valid_question_definitions(
+    const std::vector<domain::QuestionDefinition>& questions) -> bool {
+  if (questions.empty() || questions.size() > 3) return false;
+  std::set<domain::QuestionId> ids;
+  for (const auto& question : questions) {
+    const auto available =
+        question.options.size() + (question.other ? 1U : 0U);
+    if (!ids.insert(question.question_id).second || question.prompt.empty() ||
+        question.prompt.size() > 1024 ||
+        has_control_character(question.prompt) || question.options.empty() ||
+        question.options.size() > 8 ||
+        question.minimum_selections > available ||
+        !question.maximum_selections ||
+        *question.maximum_selections < question.minimum_selections ||
+        *question.maximum_selections > available ||
+        (question.required && question.minimum_selections == 0) ||
+        (!question.required && question.minimum_selections != 0) ||
+        (question.selection == domain::QuestionSelection::one &&
+         *question.maximum_selections != 1)) {
+      return false;
+    }
+    std::set<std::string> option_ids;
+    std::size_t recommended{};
+    for (const auto& option : question.options) {
+      if (option.option_id.empty() || option.option_id.size() > 128 ||
+          has_control_character(option.option_id) || option.label.empty() ||
+          option.label.size() > 256 || has_control_character(option.label) ||
+          (option.description &&
+           (option.description->size() > 1024 ||
+            has_control_character(*option.description))) ||
+          !option_ids.insert(option.option_id).second) {
+        return false;
+      }
+      if (option.recommended) ++recommended;
+    }
+    if (recommended > *question.maximum_selections) return false;
+    if (question.other &&
+        (question.other->label.empty() ||
+         question.other->label.size() > 256 ||
+         has_control_character(question.other->label) ||
+         question.other->maximum_bytes == 0 ||
+         (question.other->placeholder &&
+          (question.other->placeholder->size() > 1024 ||
+           has_control_character(*question.other->placeholder))))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] auto valid_question_answers(
+    const std::vector<domain::QuestionDefinition>& questions,
+    const std::vector<domain::QuestionAnswer>& answers) -> bool {
+  if (answers.size() != questions.size()) return false;
+  std::set<domain::QuestionId> answered_ids;
+  for (const auto& answer : answers) {
+    if (!answered_ids.insert(answer.question_id).second) return false;
+    const auto found = std::ranges::find(
+        questions, answer.question_id,
+        &domain::QuestionDefinition::question_id);
+    if (found == questions.end()) return false;
+    if (answer.free_form &&
+        (answer.free_form->empty() || !found->other ||
+         answer.free_form->size() > found->other->maximum_bytes ||
+         has_control_character(*answer.free_form))) {
+      return false;
+    }
+    std::set<std::string> selected;
+    for (const auto& id : answer.selected_option_ids) {
+      if (!selected.insert(id).second ||
+          std::ranges::none_of(found->options, [&](const auto& option) {
+            return option.option_id == id;
+          })) {
+        return false;
+      }
+    }
+    const auto count = answer.selected_option_ids.size() +
+                       static_cast<std::size_t>(answer.free_form.has_value());
+    if (found->required && count == 0) return false;
+    if (!found->required && count == 0) continue;
+    if (count < found->minimum_selections ||
+        (found->maximum_selections && count > *found->maximum_selections) ||
+        (found->selection == domain::QuestionSelection::one && count > 1)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] auto answered_content(
+    const std::vector<domain::QuestionAnswer>& answers)
+    -> std::vector<domain::ContentBlock> {
+  auto values = nlohmann::json::array();
+  for (const auto& answer : answers) {
+    values.push_back(
+        {{"question_id", std::string{answer.question_id.value()}},
+         {"selected_option_ids", answer.selected_option_ids},
+         {"other", answer.free_form ? nlohmann::json(*answer.free_form)
+                                     : nlohmann::json(nullptr)}});
+  }
+  return {domain::StructuredDataBlock{
+      "application/json",
+      nlohmann::json{{"status", "answered"}, {"answers", std::move(values)}}
+          .dump()}};
+}
+
+[[nodiscard]] auto cancelled_content()
+    -> std::vector<domain::ContentBlock> {
+  return {domain::StructuredDataBlock{
+      "application/json", nlohmann::json{{"status", "cancelled"}}.dump()}};
+}
+
 [[nodiscard]] auto scopes_are_unique(
     const std::vector<domain::CapabilityScope>& scopes) -> bool {
   for (auto current = scopes.begin(); current != scopes.end(); ++current) {
@@ -240,6 +354,7 @@ struct RunKernel::Impl {
     awaiting_approval,
     allowed,
     running,
+    awaiting_input,
     terminal,
   };
 
@@ -258,6 +373,7 @@ struct RunKernel::Impl {
     std::size_t output_bytes{};
     std::size_t progress_events{};
     bool terminal_event_seen{};
+    std::vector<domain::QuestionDefinition> questions;
   };
 
   struct ActiveRun {
@@ -700,24 +816,15 @@ struct RunKernel::Impl {
                 }
                 auto message_id = make_result_message_id(transaction);
                 if (!message_id) return std::unexpected(message_id.error());
-                if (auto result = record_or_fail(
-                        domain::ToolProposed{
-                            invocation_id, assembly.name,
-                            domain::StructuredDataBlock{"application/json",
-                                                        assembly.arguments},
-                            registration->declaration.effects, std::nullopt},
-                        invocation_id);
-                    !result) {
-                  return result;
-                }
+                const domain::StructuredDataBlock raw_arguments{
+                    "application/json", assembly.arguments};
                 std::expected<ValidatedToolArguments, ToolExecutionError>
                     validated = std::unexpected(ToolExecutionError{
                         ToolExecutionErrorCode::internal_failure,
                         "tool validation failed internally", false});
                 try {
-                  validated = registration->executor->validate(
-                      domain::StructuredDataBlock{"application/json",
-                                                  assembly.arguments});
+                  validated =
+                      registration->executor->validate(raw_arguments);
                 } catch (...) {
                 }
                 if (validated &&
@@ -740,13 +847,31 @@ struct RunKernel::Impl {
                       "tool validator returned invalid normalized arguments",
                       false});
                 }
+                auto required_scopes =
+                    validated
+                        ? (validated->required_scopes.empty()
+                               ? registration->declaration.capability_scopes
+                               : validated->required_scopes)
+                        : std::vector<domain::CapabilityScope>{};
+                if (auto result = record_or_fail(
+                        domain::ToolProposed{
+                            invocation_id, assembly.name, raw_arguments,
+                            registration->declaration.effects, std::nullopt,
+                            validated && validated->value == raw_arguments,
+                            validated
+                                ? validated->required_scopes
+                                : std::vector<domain::CapabilityScope>{},
+                            required_scopes, *message_id},
+                        invocation_id);
+                    !result) {
+                  return result;
+                }
                 if (!validated) {
                   PendingInvocation failed{
                       invocation_id,
                       std::nullopt,
                       registration->declaration,
-                      ValidatedToolArguments{domain::StructuredDataBlock{
-                          "application/json", assembly.arguments}},
+                      ValidatedToolArguments{raw_arguments},
                       registration->limits,
                       registration->executor,
                       *message_id,
@@ -756,7 +881,8 @@ struct RunKernel::Impl {
                       InvocationState::proposed,
                       0,
                       0,
-                      false};
+                      false,
+                      {}};
                   if (auto result = record_tool_error(
                           transaction, failed,
                           tool_domain_error(validated.error()));
@@ -765,10 +891,6 @@ struct RunKernel::Impl {
                   }
                   active->invocations.emplace(invocation_id, std::move(failed));
                 } else {
-                  auto required_scopes = validated->required_scopes.empty()
-                                             ? registration->declaration
-                                                   .capability_scopes
-                                             : validated->required_scopes;
                   active->invocations.emplace(
                       invocation_id,
                       PendingInvocation{invocation_id,
@@ -784,7 +906,8 @@ struct RunKernel::Impl {
                                         InvocationState::proposed,
                                         0,
                                         0,
-                                        false});
+                                        false,
+                                        {}});
                 }
                 active->invocation_order.push_back(invocation_id);
               }
@@ -924,47 +1047,76 @@ struct RunKernel::Impl {
     return std::visit(
         [&](auto&& event) -> std::expected<void, RunKernelError> {
           using Event = std::remove_cvref_t<decltype(event)>;
-          const auto bytes = content_bytes(event.content);
-          if (!bytes ||
-              invocation.output_bytes > invocation.limits.output_bytes ||
-              *bytes >
-                  invocation.limits.output_bytes - invocation.output_bytes) {
-            if (operation_stop) operation_stop->request_stop();
-            return record_tool_error(
-                transaction, invocation,
-                tool_domain_error(ToolExecutionError{
-                    ToolExecutionErrorCode::output_limit,
-                    "tool output exceeded its budget", false}));
-          }
-          if constexpr (std::same_as<Event, ToolProgress>) {
-            if (invocation.progress_events >=
-                invocation.limits.progress_events) {
+          if constexpr (std::same_as<Event, ToolInputRequested>) {
+            if (invocation.state != InvocationState::running ||
+                invocation.declaration.name != "ask_user" ||
+                !valid_question_definitions(event.questions)) {
+              return fail_live_run(transaction,
+                                   {domain::ErrorCode::invalid_state,
+                                    "tool input request is invalid", false});
+            }
+            invocation.questions = std::move(event.questions);
+            for (const auto& question : invocation.questions) {
+              if (auto result = record(
+                      active->run_id, domain::QuestionRequested{question},
+                      transaction, invocation.invocation_id);
+                  !result) {
+                return result;
+              }
+            }
+            if (auto result = record(
+                    active->run_id,
+                    domain::RunAwaitingInput{
+                        invocation.questions.front().question_id},
+                    transaction, invocation.invocation_id);
+                !result) {
+              return result;
+            }
+            invocation.state = InvocationState::awaiting_input;
+            return {};
+          } else {
+            const auto bytes = content_bytes(event.content);
+            if (!bytes ||
+                invocation.output_bytes > invocation.limits.output_bytes ||
+                *bytes > invocation.limits.output_bytes -
+                             invocation.output_bytes) {
               if (operation_stop) operation_stop->request_stop();
               return record_tool_error(
                   transaction, invocation,
                   tool_domain_error(ToolExecutionError{
                       ToolExecutionErrorCode::output_limit,
-                      "tool progress exceeded its budget", false}));
+                      "tool output exceeded its budget", false}));
             }
-            ++invocation.progress_events;
-            invocation.output_bytes += *bytes;
-            return record(active->run_id,
-                          domain::ToolProgressed{invocation.invocation_id,
-                                                 std::move(event.content)},
-                          transaction, invocation.invocation_id);
-          } else {
-            invocation.output_bytes += *bytes;
-            auto result =
-                record(active->run_id,
-                       domain::ToolResultRecorded{invocation.invocation_id,
-                                                  std::move(event.content),
-                                                  invocation.result_message_id},
-                       transaction, invocation.invocation_id);
-            if (result) {
-              invocation.state = InvocationState::terminal;
-              invocation.terminal_event_seen = true;
+            if constexpr (std::same_as<Event, ToolProgress>) {
+              if (invocation.progress_events >=
+                  invocation.limits.progress_events) {
+                if (operation_stop) operation_stop->request_stop();
+                return record_tool_error(
+                    transaction, invocation,
+                    tool_domain_error(ToolExecutionError{
+                        ToolExecutionErrorCode::output_limit,
+                        "tool progress exceeded its budget", false}));
+              }
+              ++invocation.progress_events;
+              invocation.output_bytes += *bytes;
+              return record(active->run_id,
+                            domain::ToolProgressed{invocation.invocation_id,
+                                                   std::move(event.content)},
+                            transaction, invocation.invocation_id);
+            } else {
+              invocation.output_bytes += *bytes;
+              auto result = record(
+                  active->run_id,
+                  domain::ToolResultRecorded{invocation.invocation_id,
+                                             std::move(event.content),
+                                             invocation.result_message_id},
+                  transaction, invocation.invocation_id);
+              if (result) {
+                invocation.state = InvocationState::terminal;
+                invocation.terminal_event_seen = true;
+              }
+              return result;
             }
-            return result;
           }
         },
         std::move(update.event));
@@ -1010,7 +1162,8 @@ struct RunKernel::Impl {
                        "tool stream ended for no active invocation"));
     }
     auto& invocation = active->invocations.at(ended.invocation_id);
-    if (!invocation.terminal_event_seen) {
+    if (!invocation.terminal_event_seen &&
+        invocation.state != InvocationState::awaiting_input) {
       if (auto result = record_tool_error(
               transaction, invocation,
               tool_domain_error(ToolExecutionError{
@@ -1323,6 +1476,259 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             RunKernelErrorCode::replay_rejected,
             "durable session catalog disagrees with replayed history"));
       }
+
+      std::optional<domain::RunId> awaiting_run;
+      for (const auto& [run_id, projection] : projections) {
+        if (projection.status() != domain::RunStatus::awaiting_input) continue;
+        if (awaiting_run) {
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::replay_rejected,
+              "durable session contains multiple awaiting runs"));
+        }
+        awaiting_run = run_id;
+      }
+      if (awaiting_run) {
+        std::optional<domain::InvocationId> invocation_id;
+        std::optional<domain::RunStarted> started;
+        std::vector<domain::InvocationId> current_batch;
+        std::map<domain::InvocationId, domain::ToolProposed> proposals;
+        std::map<domain::InvocationId, domain::PolicyDecision>
+            policy_decisions;
+        std::map<domain::InvocationId,
+                 std::vector<domain::CapabilityScope>>
+            policy_scopes;
+        std::map<domain::InvocationId, domain::ApprovalDecision>
+            approval_decisions;
+        std::map<domain::InvocationId,
+                 std::vector<domain::CapabilityScope>>
+            approval_scopes;
+        std::map<domain::InvocationId,
+                 std::vector<domain::QuestionDefinition>>
+            questions;
+        std::map<domain::InvocationId, domain::MessageId>
+            terminal_message_ids;
+        std::set<domain::InvocationId> tool_started;
+        std::set<domain::InvocationId> tool_terminal;
+        for (const auto& event : *events) {
+          if (event.metadata.run_id != *awaiting_run) continue;
+          if (const auto* value =
+                  std::get_if<domain::RunStarted>(&event.payload)) {
+            started = *value;
+          } else if (std::holds_alternative<domain::InferenceStarted>(
+                         event.payload)) {
+            current_batch.clear();
+            proposals.clear();
+            policy_decisions.clear();
+            policy_scopes.clear();
+            approval_decisions.clear();
+            approval_scopes.clear();
+            questions.clear();
+            terminal_message_ids.clear();
+            tool_started.clear();
+            tool_terminal.clear();
+          } else if (const auto* value =
+                         std::get_if<domain::ToolProposed>(&event.payload)) {
+            current_batch.push_back(value->invocation_id);
+            proposals.insert_or_assign(value->invocation_id, *value);
+          } else if (const auto* value =
+                         std::get_if<domain::ToolPolicyDecided>(
+                             &event.payload)) {
+            policy_decisions.insert_or_assign(value->invocation_id,
+                                               value->decision);
+            policy_scopes.insert_or_assign(value->invocation_id,
+                                           value->scopes);
+          } else if (const auto* value =
+                         std::get_if<domain::ToolApprovalDecided>(
+                             &event.payload)) {
+            approval_decisions.insert_or_assign(value->invocation_id,
+                                                 value->decision);
+            approval_scopes.insert_or_assign(value->invocation_id,
+                                             value->granted_scopes);
+          } else if (const auto* value =
+                         std::get_if<domain::ToolStarted>(&event.payload)) {
+            tool_started.insert(value->invocation_id);
+          } else if (const auto* value =
+                         std::get_if<domain::QuestionRequested>(
+                             &event.payload)) {
+            if (event.metadata.invocation_id) {
+              questions[*event.metadata.invocation_id].push_back(
+                  value->question);
+            }
+          } else if (const auto* value =
+                         std::get_if<domain::ToolResultRecorded>(
+                             &event.payload)) {
+            tool_terminal.insert(value->invocation_id);
+            if (value->result_message_id) {
+              terminal_message_ids.insert_or_assign(
+                  value->invocation_id, *value->result_message_id);
+            }
+          } else if (const auto* value =
+                         std::get_if<domain::ToolErrored>(&event.payload)) {
+            tool_terminal.insert(value->invocation_id);
+            if (value->result_message_id) {
+              terminal_message_ids.insert_or_assign(
+                  value->invocation_id, *value->result_message_id);
+            }
+          } else if (std::holds_alternative<domain::RunAwaitingInput>(
+                         event.payload)) {
+            invocation_id = event.metadata.invocation_id;
+          }
+        }
+        if (!invocation_id || !started) {
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::replay_rejected,
+              "awaiting question history lacks runtime identity"));
+        }
+        if (!proposals.contains(*invocation_id) ||
+            !tool_started.contains(*invocation_id) ||
+            tool_terminal.contains(*invocation_id) ||
+            !valid_question_definitions(questions[*invocation_id])) {
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::replay_rejected,
+              "awaiting question history is incomplete"));
+        }
+        std::map<domain::InvocationId, Impl::PendingInvocation> invocations;
+        for (const auto& current_id : current_batch) {
+          const auto proposed = proposals.find(current_id);
+          if (proposed == proposals.end()) {
+            return std::unexpected(kernel_error(
+                RunKernelErrorCode::replay_rejected,
+                "queued tool history lacks its proposal"));
+          }
+          const auto* registration =
+              kernel->m_impl->tools.find(proposed->second.tool_name);
+          if (registration == nullptr) {
+            return std::unexpected(kernel_error(
+                current_id == *invocation_id
+                    ? RunKernelErrorCode::interactive_input_unavailable
+                    : RunKernelErrorCode::replay_rejected,
+                current_id == *invocation_id
+                    ? "pending ask_user input is unavailable on this surface"
+                    : "queued tool is unavailable during replay"));
+          }
+          const auto scopes_are_declared = [&](const auto& scopes) {
+            return std::ranges::all_of(scopes, [&](const auto& requested) {
+              return std::ranges::any_of(
+                  registration->declaration.capability_scopes,
+                  [&](const auto& declared) {
+                    return capability_scope_covers(declared, requested);
+                  });
+            });
+          };
+          if (proposed->second.declared_effects !=
+                  registration->declaration.effects ||
+              !scopes_are_unique(
+                  proposed->second.validated_required_scopes) ||
+              !scopes_are_unique(proposed->second.requested_scopes) ||
+              !scopes_are_declared(
+                  proposed->second.validated_required_scopes) ||
+              !scopes_are_declared(proposed->second.requested_scopes)) {
+            return std::unexpected(kernel_error(
+                RunKernelErrorCode::replay_rejected,
+                "queued tool declaration changed during replay"));
+          }
+
+          auto state = Impl::InvocationState::proposed;
+          std::vector<domain::CapabilityScope> granted_scopes;
+          std::optional<ToolPolicyRequest> policy_request;
+          if (tool_terminal.contains(current_id)) {
+            state = Impl::InvocationState::terminal;
+          } else if (current_id == *invocation_id) {
+            if (proposed->second.tool_name != "ask_user" ||
+                !policy_decisions.contains(current_id) ||
+                policy_decisions.at(current_id) !=
+                    domain::PolicyDecision::allow) {
+              return std::unexpected(kernel_error(
+                  RunKernelErrorCode::replay_rejected,
+                  "pending input lacks an allowed ask_user invocation"));
+            }
+            state = Impl::InvocationState::awaiting_input;
+            granted_scopes = policy_scopes.at(current_id);
+          } else if (tool_started.contains(current_id) ||
+                     (approval_decisions.contains(current_id) &&
+                      approval_decisions.at(current_id) !=
+                          domain::ApprovalDecision::approved)) {
+            return std::unexpected(kernel_error(
+                RunKernelErrorCode::replay_rejected,
+                "queued tool history has an unterminated execution"));
+          } else if (approval_decisions.contains(current_id) &&
+                     approval_decisions.at(current_id) ==
+                         domain::ApprovalDecision::approved) {
+            state = Impl::InvocationState::allowed;
+            granted_scopes = approval_scopes.at(current_id);
+          } else if (policy_decisions.contains(current_id) &&
+                     policy_decisions.at(current_id) ==
+                         domain::PolicyDecision::allow) {
+            state = Impl::InvocationState::allowed;
+            granted_scopes = policy_scopes.at(current_id);
+          } else if (policy_decisions.contains(current_id) &&
+                     policy_decisions.at(current_id) ==
+                         domain::PolicyDecision::require_approval) {
+            state = Impl::InvocationState::awaiting_approval;
+            policy_request = ToolPolicyRequest{
+                event_log.session_id(), *awaiting_run, current_id,
+                started->permission_profile_id,
+                proposed->second.tool_name,
+                proposed->second.declared_effects,
+                proposed->second.requested_scopes};
+          } else {
+            return std::unexpected(kernel_error(
+                RunKernelErrorCode::replay_rejected,
+                "queued tool history has no resumable state"));
+          }
+
+          auto result_message_id = proposed->second.result_message_id;
+          if (!result_message_id &&
+              terminal_message_ids.contains(current_id)) {
+            result_message_id = terminal_message_ids.at(current_id);
+          }
+          if (!result_message_id) {
+            return std::unexpected(kernel_error(
+                RunKernelErrorCode::replay_rejected,
+                "queued tool history lacks a result message identity"));
+          }
+          if (state != Impl::InvocationState::terminal &&
+              !proposed->second.arguments_replayable) {
+            return std::unexpected(kernel_error(
+                RunKernelErrorCode::replay_rejected,
+                "queued tool history lacks normalized arguments"));
+          }
+          auto invocation_questions = questions.contains(current_id)
+                                          ? questions.at(current_id)
+                                          : std::vector<
+                                                domain::QuestionDefinition>{};
+          invocations.emplace(
+              current_id,
+              Impl::PendingInvocation{
+                  current_id, proposed->second.parent_invocation_id,
+                  registration->declaration,
+                  ValidatedToolArguments{
+                      proposed->second.arguments,
+                      proposed->second.validated_required_scopes},
+                  registration->limits, registration->executor,
+                  *result_message_id, proposed->second.requested_scopes,
+                  std::move(granted_scopes), std::move(policy_request), state,
+                  0, 0, tool_terminal.contains(current_id),
+                  std::move(invocation_questions)});
+        }
+        kernel->m_impl->active = Impl::ActiveRun{
+            *awaiting_run,
+            started->permission_profile_id,
+            std::nullopt,
+            std::nullopt,
+            {},
+            {},
+            std::move(invocations),
+            std::move(current_batch),
+            std::nullopt,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            std::nullopt};
+      }
       kernel->m_impl->event_log = std::move(event_log);
       kernel->m_impl->projections = std::move(projections);
       kernel->m_impl->used_invocation_ids = std::move(invocation_ids);
@@ -1495,6 +1901,17 @@ auto RunKernel::cancel_run(const domain::RunId& run_id,
       for (const auto& invocation_id : transaction.active->invocation_order) {
         auto& invocation = transaction.active->invocations.at(invocation_id);
         if (!invocation.terminal_event_seen) {
+          if (invocation.state == Impl::InvocationState::awaiting_input) {
+            for (const auto& question : invocation.questions) {
+              if (auto result = m_impl->record(
+                      run_id,
+                      domain::QuestionCancelled{question.question_id, reason},
+                      transaction, invocation.invocation_id);
+                  !result) {
+                return result;
+              }
+            }
+          }
           if (auto result = m_impl->record_tool_error(
                   transaction, invocation,
                   {domain::ErrorCode::cancelled, "tool execution cancelled",
@@ -1627,6 +2044,150 @@ auto RunKernel::decide_approval(const domain::RunId& run_id,
     return std::unexpected(
         kernel_error(RunKernelErrorCode::internal_failure,
                      "tool approval decision failed internally"));
+  }
+}
+
+auto RunKernel::answer_questions(
+    const domain::RunId& run_id,
+    const domain::InvocationId& invocation_id,
+    std::vector<domain::QuestionAnswer> answers)
+    -> std::expected<void, RunKernelError> {
+  try {
+    if (m_impl->unusable) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    }
+    if (!m_impl->active || m_impl->active->run_id != run_id) {
+      return std::unexpected(
+          kernel_error(m_impl->active ? RunKernelErrorCode::wrong_run
+                                      : RunKernelErrorCode::no_active_run,
+                       "question answer targets no active run"));
+    }
+    const auto found = m_impl->active->invocations.find(invocation_id);
+    if (found == m_impl->active->invocations.end()) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::wrong_invocation,
+                       "question answer targets an unknown invocation"));
+    }
+    if (found->second.state != Impl::InvocationState::awaiting_input ||
+        found->second.terminal_event_seen ||
+        !valid_question_answers(found->second.questions, answers)) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "question answer is invalid or already resolved"));
+    }
+
+    auto transaction = m_impl->transaction();
+    auto& invocation = transaction.active->invocations.at(invocation_id);
+    for (const auto& answer : answers) {
+      if (auto result = m_impl->record(
+              run_id, domain::QuestionAnswered{answer}, transaction,
+              invocation_id);
+          !result) {
+        return result;
+      }
+    }
+    if (auto result = m_impl->record(
+            run_id,
+            domain::ToolResultRecorded{invocation_id,
+                                       answered_content(answers),
+                                       invocation.result_message_id},
+            transaction, invocation_id);
+        !result) {
+      return result;
+    }
+    if (auto result = m_impl->record(
+            run_id,
+            domain::RunResumed{invocation.questions.front().question_id},
+            transaction, invocation_id);
+        !result) {
+      return result;
+    }
+    invocation.state = Impl::InvocationState::terminal;
+    invocation.terminal_event_seen = true;
+    if (auto committed = m_impl->commit(std::move(transaction)); !committed) {
+      return committed;
+    }
+    return m_impl->launch_next_tool();
+  } catch (...) {
+    return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
+                                        "question answer failed internally"));
+  }
+}
+
+auto RunKernel::cancel_questions(
+    const domain::RunId& run_id,
+    const domain::InvocationId& invocation_id,
+    std::optional<std::string> reason)
+    -> std::expected<void, RunKernelError> {
+  try {
+    if (m_impl->unusable) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    }
+    if (reason &&
+        (reason->size() > 4096 || has_control_character(*reason))) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "question cancellation reason is invalid"));
+    }
+    if (!m_impl->active || m_impl->active->run_id != run_id) {
+      return std::unexpected(
+          kernel_error(m_impl->active ? RunKernelErrorCode::wrong_run
+                                      : RunKernelErrorCode::no_active_run,
+                       "question cancellation targets no active run"));
+    }
+    const auto found = m_impl->active->invocations.find(invocation_id);
+    if (found == m_impl->active->invocations.end()) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::wrong_invocation,
+                       "question cancellation targets an unknown invocation"));
+    }
+    if (found->second.state != Impl::InvocationState::awaiting_input ||
+        found->second.terminal_event_seen) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "question invocation is not awaiting input"));
+    }
+
+    auto transaction = m_impl->transaction();
+    auto& invocation = transaction.active->invocations.at(invocation_id);
+    for (const auto& question : invocation.questions) {
+      if (auto result = m_impl->record(
+              run_id,
+              domain::QuestionCancelled{question.question_id, reason},
+              transaction, invocation_id);
+          !result) {
+        return result;
+      }
+    }
+    if (auto result = m_impl->record(
+            run_id,
+            domain::ToolResultRecorded{invocation_id, cancelled_content(),
+                                       invocation.result_message_id},
+            transaction, invocation_id);
+        !result) {
+      return result;
+    }
+    if (auto result = m_impl->record(
+            run_id,
+            domain::RunResumed{invocation.questions.front().question_id},
+            transaction, invocation_id);
+        !result) {
+      return result;
+    }
+    invocation.state = Impl::InvocationState::terminal;
+    invocation.terminal_event_seen = true;
+    if (auto committed = m_impl->commit(std::move(transaction)); !committed) {
+      return committed;
+    }
+    return m_impl->launch_next_tool();
+  } catch (...) {
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::internal_failure,
+                     "question cancellation failed internally"));
   }
 }
 
@@ -1788,6 +2349,20 @@ auto RunKernel::active_run_id() const noexcept -> std::optional<domain::RunId> {
 auto RunKernel::active_inference_id() const noexcept
     -> std::optional<domain::InferenceId> {
   return m_impl->active ? m_impl->active->inference_id : std::nullopt;
+}
+
+auto RunKernel::pending_question_input() const
+    -> std::optional<PendingQuestionInput> {
+  if (!m_impl->active) return std::nullopt;
+  for (const auto& invocation_id : m_impl->active->invocation_order) {
+    const auto& invocation = m_impl->active->invocations.at(invocation_id);
+    if (invocation.state == Impl::InvocationState::awaiting_input &&
+        !invocation.terminal_event_seen) {
+      return PendingQuestionInput{m_impl->active->run_id, invocation_id,
+                                  invocation.questions};
+    }
+  }
+  return std::nullopt;
 }
 
 }  // namespace aiforge::runtime

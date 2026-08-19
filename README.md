@@ -4,7 +4,8 @@ AIForge is a C++23 terminal AI client built from a provider-neutral run kernel
 outward. It currently provides a streaming Venice-backed one-shot/pipe surface,
 durable and resumable sessions, provider-neutral run events, deterministic
 backends, replayable run and transcript projections, Markdown-lite
-presentation, and typed configuration.
+presentation, typed configuration, and a resumable structured `ask_user` tool
+boundary.
 The interactive Chat workspace is the next surface; running `aiforge` without a
 prompt in a terminal still reports the current bootstrap status.
 
@@ -30,8 +31,9 @@ AIForge uses CMake only for dependencies. A configured package is preferred,
 then a sibling checkout, with `FetchContent` as the fallback. Adapter builds use
 TermForge and venice-cpp; consumed core-only builds may set
 `aiforge_BUILD_ADAPTERS=OFF`. Their fallbacks are pinned to compatible stable
-baselines: TermForge v0.44.0 for cross-thread posting, styled word wrapping,
-and bounded mutable transcript streaming; and venice-cpp v0.9.0 for transport
+baselines: TermForge v0.55.0 for cross-thread posting, styled word wrapping,
+bounded mutable transcript streaming, and multi-page choice dialogs; and
+venice-cpp v0.9.0 for transport
 cancellation, structured deltas, and tool declarations.
 
 Durable session storage uses SQLite 3 behind a neutral storage port. CMake
@@ -131,6 +133,24 @@ run events. A subsequent inference is explicit and must include every terminal
 tool result as a tool-role context message. Replay rebuilds the same state
 without running validation, policy, tools, or inference again. AF-25 owns the
 first production bounded process executor.
+
+## Structured user questions
+
+`ask_user` is a no-authority model-facing tool for one or more bounded single-
+or multiple-choice questions, recommended defaults, selection limits, and an
+optional Other answer. The executor emits a typed input request and ends; no
+provider cursor or tool worker stays blocked while a person answers. The run
+kernel records the invocation-scoped questions, enters `awaiting_input`, and
+accepts exactly one answer or cancellation before recording the structured tool
+result and permitting another inference in the same run.
+
+Pending questions replay from the durable event stream without rerunning a
+tool, callback, or inference. The TermForge adapter maps stable question and
+option IDs to the reusable multi-page choice wizard and translates its
+presentation indices back at the runtime boundary. The current one-shot surface
+has no question-input protocol and therefore does not register or advertise
+`ask_user`; resuming a pending interactive question there fails explicitly
+instead of hanging.
 
 ## Configuration
 

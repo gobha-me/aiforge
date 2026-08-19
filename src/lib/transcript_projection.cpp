@@ -80,10 +80,20 @@ Overloaded(Callables...) -> Overloaded<Callables...>;
     }
   }
   const bool has_free_form = answer.free_form && !answer.free_form->empty();
-  if (has_free_form && !question.free_form_allowed) return false;
+  if (has_free_form &&
+      (!question.other ||
+       answer.free_form->size() > question.other->maximum_bytes)) {
+    return false;
+  }
   const auto answer_count =
       answer.selected_option_ids.size() + (has_free_form ? 1U : 0U);
-  if (!question.answer_optional && answer_count == 0) return false;
+  if (question.required && answer_count == 0) return false;
+  if (!question.required && answer_count == 0) return true;
+  if (answer_count < question.minimum_selections ||
+      (question.maximum_selections &&
+       answer_count > *question.maximum_selections)) {
+    return false;
+  }
   if (question.selection == QuestionSelection::one && answer_count > 1) {
     return false;
   }
@@ -125,11 +135,16 @@ auto TranscriptProjection::tool(const InvocationId& id)
   return nullptr;
 }
 
-auto TranscriptProjection::question(const QuestionId& id)
+auto TranscriptProjection::question(
+    const QuestionId& id,
+    const std::optional<InvocationId>& invocation_id)
     -> TranscriptQuestionSummary* {
   for (auto& item : m_items) {
     auto* value = std::get_if<TranscriptQuestionSummary>(&item);
-    if (value != nullptr && value->question.question_id == id) return value;
+    if (value != nullptr && value->question.question_id == id &&
+        value->invocation_id == invocation_id) {
+      return value;
+    }
   }
   return nullptr;
 }
@@ -464,17 +479,20 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
           },
           [&](const QuestionRequested& requested)
               -> std::expected<void, TranscriptProjectionError> {
-            if (question(requested.question.question_id) != nullptr) {
+            if (question(requested.question.question_id,
+                         event.metadata.invocation_id) != nullptr) {
               return transition_error("question is already present");
             }
             m_items.emplace_back(TranscriptQuestionSummary{
                 requested.question, TranscriptQuestionState::awaiting_answer,
-                std::nullopt, std::nullopt});
+                std::nullopt, std::nullopt,
+                event.metadata.invocation_id});
             return {};
           },
           [&](const QuestionAnswered& answered)
               -> std::expected<void, TranscriptProjectionError> {
-            auto* target = question(answered.answer.question_id);
+            auto* target = question(answered.answer.question_id,
+                                    event.metadata.invocation_id);
             if (target == nullptr) {
               return error(TranscriptProjectionErrorCode::unknown_question,
                            "answer refers to an unknown question");
@@ -489,7 +507,8 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
           },
           [&](const QuestionCancelled& cancelled)
               -> std::expected<void, TranscriptProjectionError> {
-            auto* target = question(cancelled.question_id);
+            auto* target = question(cancelled.question_id,
+                                    event.metadata.invocation_id);
             if (target == nullptr) {
               return error(TranscriptProjectionErrorCode::unknown_question,
                            "cancellation refers to an unknown question");
