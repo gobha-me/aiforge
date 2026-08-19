@@ -1,5 +1,4 @@
 #include <aiforge/adapters/termforge_run_bridge.hpp>
-
 #include <string_view>
 #include <variant>
 
@@ -46,6 +45,18 @@ auto TermForgeRunBridge::handle(const termforge::Event& event,
       auto cancelled = kernel.cancel(*run_id, *inference_id, "escape");
       if (!cancelled) return std::unexpected(std::move(cancelled.error()));
     }
+  }
+  return std::vector<domain::RunEvent>{};
+}
+
+auto TermForgeRunBridge::handle(const termforge::Event& event,
+                                surfaces::ChatSession& session)
+    -> std::expected<std::vector<domain::RunEvent>,
+                     surfaces::ChatSessionError> {
+  if (is_wake(event)) return session.drain();
+  if (is_escape(event) && session.active()) {
+    auto cancelled = session.cancel_active("escape");
+    if (!cancelled) return std::unexpected(std::move(cancelled.error()));
   }
   return std::vector<domain::RunEvent>{};
 }

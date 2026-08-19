@@ -1,5 +1,6 @@
 #include <aiforge/cli/command_registry.hpp>
-
+#include <aiforge/config/config.hpp>
+#include <aiforge/config/file_store.hpp>
 #include <algorithm>
 #include <exception>
 #include <iostream>
@@ -8,10 +9,6 @@
 #include <sstream>
 #include <unordered_set>
 #include <utility>
-
-#include <aiforge/bootstrap.hpp>
-#include <aiforge/config/config.hpp>
-#include <aiforge/config/file_store.hpp>
 #include <version.hpp>
 
 namespace aiforge::cli {
@@ -35,11 +32,13 @@ constexpr int usage_exit_code = 2;
   if (command.id.empty() || (root && !command.name.empty()) ||
       (!root && command.name.empty())) {
     return registry_diagnostic(RegistryDiagnosticCode::invalid_command,
-                               "command identity or name is invalid", command.id);
+                               "command identity or name is invalid",
+                               command.id);
   }
   if (!command_ids.insert(command.id).second) {
     return registry_diagnostic(RegistryDiagnosticCode::duplicate_command_id,
-                               "command IDs must be globally unique", command.id);
+                               "command IDs must be globally unique",
+                               command.id);
   }
   if (command.handler == nullptr) {
     return registry_diagnostic(RegistryDiagnosticCode::missing_handler,
@@ -51,7 +50,8 @@ constexpr int usage_exit_code = 2;
   for (const auto& child : command.subcommands) {
     if (!names.insert(child.name).second) {
       return registry_diagnostic(RegistryDiagnosticCode::duplicate_command_name,
-                                 "sibling command names must be unique", child.id);
+                                 "sibling command names must be unique",
+                                 child.id);
     }
     if (auto error = validate_command(child, false, command_ids)) return error;
   }
@@ -95,8 +95,8 @@ struct LocatedCommand {
 
   LocatedCommand result{&registry.root, {}};
   for (const auto& id : command_path.subspan(1)) {
-    const auto found = std::ranges::find(result.command->subcommands, id,
-                                         &CommandSpec::id);
+    const auto found =
+        std::ranges::find(result.command->subcommands, id, &CommandSpec::id);
     if (found == result.command->subcommands.end()) {
       return std::unexpected(registry_diagnostic(
           RegistryDiagnosticCode::unknown_command_path,
@@ -111,8 +111,8 @@ struct LocatedCommand {
 [[nodiscard]] auto control_names(const CommandRegistry& registry,
                                  const ControlRequestKind kind)
     -> std::vector<std::string> {
-  const auto found = std::ranges::find(registry.controls, kind,
-                                       &ControlOptionSchema::kind);
+  const auto found =
+      std::ranges::find(registry.controls, kind, &ControlOptionSchema::kind);
   return found == registry.controls.end() ? std::vector<std::string>{}
                                           : found->names;
 }
@@ -151,7 +151,8 @@ auto append_rows(std::ostringstream& output,
   return result;
 }
 
-[[nodiscard]] auto option_label(const CommandOptionSpec& option) -> std::string {
+[[nodiscard]] auto option_label(const CommandOptionSpec& option)
+    -> std::string {
   auto result = joined(option.parser.names, ", ");
   if (option.parser.value_kind != ArgumentValueKind::flag) {
     result.append(" <");
@@ -161,7 +162,8 @@ auto append_rows(std::ostringstream& output,
   return result;
 }
 
-[[nodiscard]] auto version_text(const CommandRegistry& registry) -> std::string {
+[[nodiscard]] auto version_text(const CommandRegistry& registry)
+    -> std::string {
   return registry.program_name + " " + registry.version + "\n";
 }
 
@@ -190,11 +192,6 @@ auto write_internal_failure(std::ostream& error,
     result += "." + std::to_string(VERSION_TWEAK);
   }
   return result;
-}
-
-auto default_handler(CommandContext& context) -> int {
-  context.error << bootstrap_status() << '\n';
-  return success_exit_code;
 }
 
 auto unavailable_handler(CommandContext& context) -> int {
@@ -249,8 +246,8 @@ auto one_shot_handler(CommandContext& context,
                           static_cast<int>(continue_latest) +
                           static_cast<int>(ephemeral);
   if (selections > 1) {
-    context.error
-        << "aiforge: --resume, --continue, and --ephemeral are mutually exclusive\n";
+    context.error << "aiforge: --resume, --continue, and --ephemeral are "
+                     "mutually exclusive\n";
     return usage_exit_code;
   }
   std::optional<domain::SessionId> resume_id;
@@ -266,9 +263,34 @@ auto one_shot_handler(CommandContext& context,
 
   const auto prompt = parsed_text_values(context.invocation, argument_id);
   if (!prompt || prompt->empty()) {
-    if (selections == 0 && allow_empty_for_interactive &&
-        context.environment.input_is_terminal) {
-      return default_handler(context);
+    if (allow_empty_for_interactive && context.environment.input_is_terminal &&
+        context.environment.output_is_terminal) {
+      if (context.environment.interactive == nullptr) {
+        return unavailable_handler(context);
+      }
+      auto session_mode = InteractiveCommand::SessionMode::create;
+      if (resume_id) {
+        session_mode = InteractiveCommand::SessionMode::resume;
+      } else if (continue_latest) {
+        session_mode = InteractiveCommand::SessionMode::continue_latest;
+      } else if (ephemeral) {
+        session_mode = InteractiveCommand::SessionMode::ephemeral;
+      }
+      auto result = context.environment.interactive->execute(
+          {session_mode, std::move(resume_id)}, context.environment,
+          context.output, context.error);
+      if (result) return success_exit_code;
+      if (!result.error().message.empty()) {
+        context.error << "aiforge: " << result.error().message << '\n';
+      }
+      switch (result.error().kind) {
+        case CommandFailureKind::usage:
+          return usage_exit_code;
+        case CommandFailureKind::cancelled:
+          return 130;
+        case CommandFailureKind::runtime:
+          return failure_exit_code;
+      }
     }
     context.error << "aiforge: a prompt is required for one-shot input\n";
     return usage_exit_code;
@@ -393,8 +415,9 @@ auto config_get_handler(CommandContext& context) -> int {
     context.error << "aiforge: configuration key is unset\n";
     return failure_exit_code;
   }
-  context.output << (entry->sensitive ? "<redacted>"
-                                      : config::format_config_value(*entry->value))
+  context.output << (entry->sensitive
+                         ? "<redacted>"
+                         : config::format_config_value(*entry->value))
                  << '\n';
   return success_exit_code;
 }
@@ -408,7 +431,8 @@ auto config_set_handler(CommandContext& context) -> int {
   const auto& registry = config::builtin_config_registry();
   const auto found =
       std::ranges::find(registry.keys, key, &config::ConfigKeySpec::id);
-  if (found == registry.keys.end() || !found->file_writable || found->sensitive) {
+  if (found == registry.keys.end() || !found->file_writable ||
+      found->sensitive) {
     context.error << "aiforge: unknown or non-writable configuration key\n";
     return usage_exit_code;
   }
@@ -423,8 +447,7 @@ auto config_set_handler(CommandContext& context) -> int {
     context.error << "aiforge: " << path.error().message << '\n';
     return failure_exit_code;
   }
-  auto changed = config::JsonConfigFileStore{*path}.set(
-      registry, key, *parsed);
+  auto changed = config::JsonConfigFileStore{*path}.set(registry, key, *parsed);
   if (!changed) {
     context.error << "aiforge: " << changed.error().message << '\n';
     return failure_exit_code;
@@ -436,9 +459,10 @@ auto config_unset_handler(CommandContext& context) -> int {
   const auto key = parsed_text_values(context.invocation, "config.unset.key");
   if (!key || key->size() != 1) return usage_exit_code;
   const auto& registry = config::builtin_config_registry();
-  const auto found =
-      std::ranges::find(registry.keys, key->front(), &config::ConfigKeySpec::id);
-  if (found == registry.keys.end() || !found->file_writable || found->sensitive) {
+  const auto found = std::ranges::find(registry.keys, key->front(),
+                                       &config::ConfigKeySpec::id);
+  if (found == registry.keys.end() || !found->file_writable ||
+      found->sensitive) {
     context.error << "aiforge: unknown or non-writable configuration key\n";
     return usage_exit_code;
   }
@@ -461,9 +485,9 @@ auto config_unset_handler(CommandContext& context) -> int {
 auto make_parser_schema(const CommandRegistry& registry)
     -> std::expected<ParserSchema, RegistryDiagnostic> {
   if (registry.program_name.empty() || registry.version.empty()) {
-    return std::unexpected(registry_diagnostic(
-        RegistryDiagnosticCode::invalid_program,
-        "the program name and version must be nonempty"));
+    return std::unexpected(
+        registry_diagnostic(RegistryDiagnosticCode::invalid_program,
+                            "the program name and version must be nonempty"));
   }
   std::unordered_set<std::string> command_ids;
   if (auto error = validate_command(registry.root, true, command_ids)) {
@@ -514,7 +538,8 @@ auto render_help(const CommandRegistry& registry,
     option_rows.emplace_back(joined(help_names, ", "),
                              "Show help for this command.");
   }
-  const auto version_names = control_names(registry, ControlRequestKind::version);
+  const auto version_names =
+      control_names(registry, ControlRequestKind::version);
   if (!version_names.empty()) {
     option_rows.emplace_back(joined(version_names, ", "),
                              "Show version information.");
@@ -540,36 +565,39 @@ auto CommandDispatcher::dispatch(
     const CommandRegistry& registry,
     const std::span<const std::string_view> arguments, std::ostream& output,
     std::ostream& error, const ParseLimits limits) const noexcept -> int {
-  CommandEnvironment environment{std::cin, true, true, true, {}, nullptr};
+  CommandEnvironment environment{std::cin, true,    true,   true,
+                                 {},       nullptr, nullptr};
   return dispatch(registry, arguments, environment, output, error, limits);
 }
 
 auto CommandDispatcher::dispatch(
     const CommandRegistry& registry,
     const std::span<const std::string_view> arguments,
-    CommandEnvironment& environment, std::ostream& output,
-    std::ostream& error, const ParseLimits limits) const noexcept -> int {
+    CommandEnvironment& environment, std::ostream& output, std::ostream& error,
+    const ParseLimits limits) const noexcept -> int {
   try {
     auto schema = make_parser_schema(registry);
     if (!schema) {
-      safe_write(error, registry.program_name +
-                            ": internal command registry error\n");
+      safe_write(error,
+                 registry.program_name + ": internal command registry error\n");
       return failure_exit_code;
     }
 
     auto parsed = ArgumentParser{}.parse(*schema, arguments, limits);
     if (!parsed) {
-      const auto internal = parsed.error().code == ParseDiagnosticCode::invalid_schema ||
-                            parsed.error().code == ParseDiagnosticCode::invalid_limits ||
-                            parsed.error().code == ParseDiagnosticCode::adapter_failure;
+      const auto internal =
+          parsed.error().code == ParseDiagnosticCode::invalid_schema ||
+          parsed.error().code == ParseDiagnosticCode::invalid_limits ||
+          parsed.error().code == ParseDiagnosticCode::adapter_failure;
       if (internal) {
         safe_write(error, registry.program_name +
                               ": internal command dispatch error\n");
         return failure_exit_code;
       }
-      auto message = registry.program_name + ": " + parsed.error().message + "\n";
-      message += "Try '" + registry.program_name +
-                 " --help' for more information.\n";
+      auto message =
+          registry.program_name + ": " + parsed.error().message + "\n";
+      message +=
+          "Try '" + registry.program_name + " --help' for more information.\n";
       safe_write(error, message);
       return usage_exit_code;
     }
@@ -591,8 +619,8 @@ auto CommandDispatcher::dispatch(
     auto& invocation = std::get<ParsedInvocation>(*parsed);
     auto located = locate_command(registry, invocation.command_path);
     if (!located || located->command->handler == nullptr) {
-      safe_write(error, registry.program_name +
-                            ": internal command registry error\n");
+      safe_write(error,
+                 registry.program_name + ": internal command registry error\n");
       return failure_exit_code;
     }
     CommandContext context{invocation, environment, output, error};
@@ -611,15 +639,24 @@ auto builtin_command_registry() -> const CommandRegistry& {
   const auto session_options = [](const std::string_view prefix) {
     return std::vector<CommandOptionSpec>{
         {{std::string{prefix} + ".session.resume",
-          {"--resume"}, ArgumentValueKind::text, 0, 1},
+          {"--resume"},
+          ArgumentValueKind::text,
+          0,
+          1},
          "session-id",
          "Resume an exact durable session."},
         {{std::string{prefix} + ".session.continue",
-          {"--continue"}, ArgumentValueKind::flag, 0, 1},
+          {"--continue"},
+          ArgumentValueKind::flag,
+          0,
+          1},
          {},
          "Continue the most recently active durable session."},
         {{std::string{prefix} + ".session.ephemeral",
-          {"--ephemeral"}, ArgumentValueKind::flag, 0, 1},
+          {"--ephemeral"},
+          ArgumentValueKind::flag,
+          0,
+          1},
          {},
          "Run without creating or opening durable session storage."}};
   };
@@ -642,7 +679,13 @@ auto builtin_command_registry() -> const CommandRegistry& {
            "Prompt text."}},
          {},
          chat_handler},
-        {"models", "models", "List available models.", false, {}, {}, {},
+        {"models",
+         "models",
+         "List available models.",
+         false,
+         {},
+         {},
+         {},
          unavailable_handler},
         {"config",
          "config",
@@ -650,8 +693,14 @@ auto builtin_command_registry() -> const CommandRegistry& {
          true,
          {},
          {},
-         {{"config-show", "show", "Show resolved configuration.", false, {},
-           {}, {}, config_show_handler},
+         {{"config-show",
+           "show",
+           "Show resolved configuration.",
+           false,
+           {},
+           {},
+           {},
+           config_show_handler},
           {"config-get",
            "get",
            "Get one resolved configuration value.",
@@ -666,8 +715,8 @@ auto builtin_command_registry() -> const CommandRegistry& {
            "Set one configuration-file value.",
            false,
            {},
-           {{{"config.set.assignment", "key-value", ArgumentValueKind::text,
-              2, 257},
+           {{{"config.set.assignment", "key-value", ArgumentValueKind::text, 2,
+              257},
              "Dotted key followed by its value or list items."}},
            {},
            config_set_handler},
@@ -681,7 +730,13 @@ auto builtin_command_registry() -> const CommandRegistry& {
            {},
            config_unset_handler}},
          config_parent_handler},
-        {"version", "version", "Show version information.", false, {}, {}, {},
+        {"version",
+         "version",
+         "Show version information.",
+         false,
+         {},
+         {},
+         {},
          version_handler}},
        root_handler},
       {{ControlRequestKind::help, {"-h", "--help"}},

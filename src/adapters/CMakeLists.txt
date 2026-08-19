@@ -3,6 +3,8 @@ add_library(${PROJECT_NAME}_adapters STATIC
   git_repository_snapshot_source.cpp
   process_tool.cpp
   process_one_shot.cpp
+  process_draft_editor.cpp
+  process_interactive.cpp
   termforge_run_bridge.cpp
   transcript_view.cpp
   venice_backend.cpp

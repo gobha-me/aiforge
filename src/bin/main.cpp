@@ -1,3 +1,4 @@
+#include <aiforge/cli/command_registry.hpp>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -7,9 +8,8 @@
 #include <thread>
 #include <vector>
 
-#include <aiforge/cli/command_registry.hpp>
-
 #ifdef AIFORGE_HAS_ADAPTERS
+#include <aiforge/adapters/process_interactive.hpp>
 #include <aiforge/adapters/process_one_shot.hpp>
 #endif
 
@@ -63,23 +63,26 @@ auto main(const int argc, char* argv[]) -> int {
 
 #ifdef AIFORGE_HAS_ADAPTERS
   aiforge::adapters::ProcessOneShotCommand one_shot;
+  aiforge::adapters::ProcessInteractiveCommand interactive;
   aiforge::cli::OneShotCommand* one_shot_service = &one_shot;
+  aiforge::cli::InteractiveCommand* interactive_service = &interactive;
 #else
   aiforge::cli::OneShotCommand* one_shot_service = nullptr;
+  aiforge::cli::InteractiveCommand* interactive_service = nullptr;
 #endif
-  aiforge::cli::CommandEnvironment environment{
-      std::cin,
+  aiforge::cli::CommandEnvironment environment{std::cin,
 #ifdef _WIN32
-      true,
-      true,
-      true,
+                                               true,
+                                               true,
+                                               true,
 #else
-      terminal(STDIN_FILENO),
-      terminal(STDOUT_FILENO),
-      terminal(STDERR_FILENO),
+                                               terminal(STDIN_FILENO),
+                                               terminal(STDOUT_FILENO),
+                                               terminal(STDERR_FILENO),
 #endif
-      cancellation.get_token(),
-      one_shot_service};
+                                               cancellation.get_token(),
+                                               one_shot_service,
+                                               interactive_service};
   const auto result =
       aiforge::cli::run_cli(arguments, environment, std::cout, std::cerr);
   signal_watcher.request_stop();

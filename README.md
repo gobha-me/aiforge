@@ -5,9 +5,10 @@ outward. It currently provides a streaming Venice-backed one-shot/pipe surface,
 durable and resumable sessions, provider-neutral run events, deterministic
 backends, replayable run and transcript projections, Markdown-lite
 presentation, typed configuration, and a resumable structured `ask_user` tool
-boundary plus a policy-gated bounded argv process executor.
-The interactive Chat workspace is the next surface; running `aiforge` without a
-prompt in a terminal still reports the current bootstrap status.
+boundary plus a policy-gated bounded argv process executor. The interactive
+Chat workspace uses the same run kernel, context builder, and durable event
+stream as one-shot mode; running `aiforge` without a prompt in a terminal opens
+it.
 
 The command registry provides generated help and version output. Commands that
 depend on later model-picker or interactive milestones fail explicitly instead
@@ -32,7 +33,8 @@ then a sibling checkout, with `FetchContent` as the fallback. Adapter builds use
 TermForge and venice-cpp; consumed core-only builds may set
 `aiforge_BUILD_ADAPTERS=OFF`. Their fallbacks are pinned to compatible stable
 baselines: TermForge v0.55.0 for cross-thread posting, styled word wrapping,
-bounded mutable transcript streaming, and multi-page choice dialogs; and
+bounded mutable transcript streaming, multiline composition, history recall,
+and multi-page choice dialogs; and
 venice-cpp v0.9.0 for transport
 cancellation, structured deltas, and tool declarations.
 
@@ -68,6 +70,8 @@ export VENICE_API_KEY=your-key
 ./build/src/bin/aiforge --continue "Build on the prior answer"
 ./build/src/bin/aiforge --resume session-id "Reopen this session"
 ./build/src/bin/aiforge --ephemeral "Do not retain this request"
+./build/src/bin/aiforge                 # interactive Chat
+./build/src/bin/aiforge --continue      # interactive latest session
 git diff | ./build/src/bin/aiforge "Review this diff"
 ./build/src/bin/aiforge --help
 ./build/src/bin/aiforge --version
@@ -101,6 +105,35 @@ one-shot surface uses the selected model's reported context window and a
 conservative input estimate before inference. The TermForge bridge uses
 `App::post` only as a wake signal; event-log, projection, and widget mutation
 remain on the UI thread.
+
+## Interactive Chat
+
+With terminal input and output and no prompt argument, the root command opens a
+TermForge Chat surface. `--resume <session-id>`, `--continue`, and `--ephemeral`
+select the same session modes as one-shot execution. Empty input without a
+terminal remains an error rather than attempting to start a TUI.
+
+The composer owns multiline UTF-8 editing, bracketed paste, display-width
+wrapping, and draft-local cursor state. Enter submits; Shift+Enter or Alt+Enter
+adds a newline when the terminal can distinguish the modifier. Page Up/Down
+scroll the transcript, and Escape or Ctrl-C cancels an active run. Ctrl-C exits
+when idle. Submission is disabled during inference because steering semantics
+remain a separate runtime milestone.
+
+Prompt recall is rebuilt from ordered `UserContentAdded` events in the selected
+session. Failed validation or persistence leaves the draft intact and creates
+no recall entry. Ctrl+K clears the current recall view without rewriting
+durable history, and Ctrl+H disables or re-enables recall. Cross-session prompt
+history is not retained.
+
+Ctrl+E, or submitting exactly `/edit`, restores the terminal and opens the
+current draft in `$VISUAL` or `$EDITOR`. The setting names one executable only;
+arguments and shell syntax are rejected, and users who need flags may select a
+wrapper executable. The adapter resolves the executable explicitly, uses an
+owned 0700 temporary directory and 0600 draft, passes only selected environment
+variables, validates the bounded edited text, and restores the original draft
+after failure, cancellation, or timeout. General slash-command dispatch remains
+owned by AF-10.
 
 ## Tool invocation foundation
 
@@ -219,9 +252,10 @@ new run whose context contains completed prior conversation. Cancelled or
 failed partial assistant output remains inspectable in durable history but is
 not presented to the next model call as a completed answer.
 
-The interactive bootstrap does not yet expose session list/resume/new actions,
+Interactive startup supports new, exact resume, continue-latest, and ephemeral
+sessions through command-line selection. In-surface session listing/switching
 and richer configuration, credential-source, and runtime-version provenance
-remain follow-up work under AF-11.
+remain follow-up work under AF-10/AF-11.
 
 ## Repository snapshot identity
 

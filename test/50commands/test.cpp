@@ -1,6 +1,6 @@
-#include <catch2/catch_test_macros.hpp>
-
+#include <aiforge/cli/command_registry.hpp>
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <expected>
 #include <optional>
@@ -10,14 +10,13 @@
 #include <string_view>
 #include <vector>
 
-#include <aiforge/cli/command_registry.hpp>
-
 namespace {
 
 using namespace aiforge::cli;
 
 auto success_handler(CommandContext& context) -> int {
-  context.output << "handled:" << context.invocation.command_path.back() << '\n';
+  context.output << "handled:" << context.invocation.command_path.back()
+                 << '\n';
   return 7;
 }
 
@@ -50,6 +49,22 @@ class FakeOneShot final : public OneShotCommand {
   SessionMode seen_session_mode{SessionMode::create};
   std::optional<aiforge::domain::SessionId> seen_session_id;
   bool saw_terminal_input{};
+  std::optional<CommandFailure> failure;
+};
+
+class FakeInteractive final : public InteractiveCommand {
+ public:
+  auto execute(Request request, CommandEnvironment&, std::ostream& output,
+               std::ostream&) -> std::expected<void, CommandFailure> override {
+    seen_session_mode = request.session_mode;
+    seen_session_id = std::move(request.session_id);
+    output << "interactive";
+    if (failure) return std::unexpected(*failure);
+    return {};
+  }
+
+  SessionMode seen_session_mode{SessionMode::create};
+  std::optional<aiforge::domain::SessionId> seen_session_id;
   std::optional<CommandFailure> failure;
 };
 
@@ -94,8 +109,7 @@ TEST_CASE("invalid command registries fail before parser construction",
       {"duplicate", "two", "Two.", false, {}, {}, {}, success_handler}};
   result = make_parser_schema(registry_with(root));
   REQUIRE_FALSE(result);
-  REQUIRE(result.error().code ==
-          RegistryDiagnosticCode::duplicate_command_id);
+  REQUIRE(result.error().code == RegistryDiagnosticCode::duplicate_command_id);
 
   root = root_command();
   root.subcommands = {
@@ -151,8 +165,7 @@ TEST_CASE("command-line failures use stderr and usage exit code",
           "[commands][failure]") {
   auto root = root_command();
   root.subcommands.push_back(
-      {"known", "known", "Known command.", false, {}, {}, {},
-       success_handler});
+      {"known", "known", "Known command.", false, {}, {}, {}, success_handler});
   const auto registry = registry_with(std::move(root));
   std::string output;
   std::string error;
@@ -182,11 +195,12 @@ TEST_CASE("handler exceptions are contained and redacted",
 TEST_CASE("parser-schema defects are internal dispatch failures",
           "[commands][failure]") {
   auto root = root_command();
-  root.options = {
-      {{"duplicate.one", {"--same"}, ArgumentValueKind::flag, 0, 1}, "",
-       "One."},
-      {{"duplicate.two", {"--same"}, ArgumentValueKind::flag, 0, 1}, "",
-       "Two."}};
+  root.options = {{{"duplicate.one", {"--same"}, ArgumentValueKind::flag, 0, 1},
+                   "",
+                   "One."},
+                  {{"duplicate.two", {"--same"}, ArgumentValueKind::flag, 0, 1},
+                   "",
+                   "Two."}};
   const auto registry = registry_with(std::move(root));
   std::string output;
   std::string error;
@@ -199,8 +213,7 @@ TEST_CASE("parser-schema defects are internal dispatch failures",
 TEST_CASE("help and version are generated without dispatch", "[commands]") {
   auto root = root_command(throwing_handler);
   root.subcommands.push_back(
-      {"child", "child", "Child help.", false, {}, {}, {},
-       throwing_handler});
+      {"child", "child", "Child help.", false, {}, {}, {}, throwing_handler});
   const auto registry = registry_with(std::move(root));
   std::string output;
   std::string error;
@@ -225,8 +238,8 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
   const auto schema = make_parser_schema(registry);
   REQUIRE(schema);
   REQUIRE(schema->root.subcommands.size() == 4);
-  const auto config = std::ranges::find(schema->root.subcommands, "config",
-                                        &CommandSchema::id);
+  const auto config =
+      std::ranges::find(schema->root.subcommands, "config", &CommandSchema::id);
   REQUIRE(config != schema->root.subcommands.end());
   REQUIRE(config->subcommands.size() == 4);
 
@@ -270,8 +283,8 @@ TEST_CASE("builtin one-shot routes root and chat prompts through one service",
   output.str({});
   error.str({});
   const std::vector<std::string_view> chat_arguments{"chat", "again"};
-  REQUIRE(CommandDispatcher{}.dispatch(registry, chat_arguments,
-                                       environment, output, error) == 0);
+  REQUIRE(CommandDispatcher{}.dispatch(registry, chat_arguments, environment,
+                                       output, error) == 0);
   REQUIRE(one_shot.seen_prompt == "again");
 
   one_shot.failure =
@@ -279,8 +292,8 @@ TEST_CASE("builtin one-shot routes root and chat prompts through one service",
   output.str({});
   error.str({});
   const std::vector<std::string_view> stop_arguments{"chat", "stop"};
-  REQUIRE(CommandDispatcher{}.dispatch(registry, stop_arguments,
-                                       environment, output, error) == 130);
+  REQUIRE(CommandDispatcher{}.dispatch(registry, stop_arguments, environment,
+                                       output, error) == 130);
   REQUIRE(error.str().find("request cancelled") != std::string::npos);
 }
 
@@ -288,43 +301,75 @@ TEST_CASE("one-shot session options are explicit and mutually exclusive",
           "[commands][one-shot][session][failure]") {
   const auto& registry = builtin_command_registry();
   FakeOneShot one_shot;
+  FakeInteractive interactive;
   std::istringstream input;
-  CommandEnvironment environment{input, true, true, true, {}, &one_shot};
+  CommandEnvironment environment{input, true,      true,        true,
+                                 {},    &one_shot, &interactive};
   std::ostringstream output;
   std::ostringstream error;
 
   REQUIRE(CommandDispatcher{}.dispatch(
-              registry,
-              std::vector<std::string_view>{"--ephemeral", "hello"},
+              registry, std::vector<std::string_view>{"--ephemeral", "hello"},
               environment, output, error) == 0);
-  REQUIRE(one_shot.seen_session_mode ==
-          OneShotCommand::SessionMode::ephemeral);
+  REQUIRE(one_shot.seen_session_mode == OneShotCommand::SessionMode::ephemeral);
   REQUIRE_FALSE(one_shot.seen_session_id);
 
   output.str({});
   error.str({});
-  REQUIRE(CommandDispatcher{}.dispatch(
-              registry,
-              std::vector<std::string_view>{"chat", "--resume", "saved",
-                                            "again"},
-              environment, output, error) == 0);
+  REQUIRE(
+      CommandDispatcher{}.dispatch(
+          registry,
+          std::vector<std::string_view>{"chat", "--resume", "saved", "again"},
+          environment, output, error) == 0);
   REQUIRE(one_shot.seen_session_mode == OneShotCommand::SessionMode::resume);
   REQUIRE(one_shot.seen_session_id ==
           aiforge::domain::SessionId::from("saved").value());
 
   output.str({});
   error.str({});
-  REQUIRE(CommandDispatcher{}.dispatch(
-              registry,
-              std::vector<std::string_view>{"--continue", "--ephemeral",
-                                            "conflict"},
-              environment, output, error) == 2);
+  REQUIRE(
+      CommandDispatcher{}.dispatch(registry,
+                                   std::vector<std::string_view>{
+                                       "--continue", "--ephemeral", "conflict"},
+                                   environment, output, error) == 2);
   REQUIRE(error.str().find("mutually exclusive") != std::string::npos);
 
   output.str({});
   error.str({});
   REQUIRE(CommandDispatcher{}.dispatch(
               registry, std::vector<std::string_view>{"--resume", "saved"},
-              environment, output, error) == 2);
-  REQUIRE(error.str().find("prompt is required") != std::string::npos);
+              environment, output, error) == 0);
+  REQUIRE(output.str() == "interactive");
+  REQUIRE(interactive.seen_session_mode ==
+          InteractiveCommand::SessionMode::resume);
+  REQUIRE(interactive.seen_session_id ==
+          aiforge::domain::SessionId::from("saved").value());
+}
+
+TEST_CASE("empty terminal root input routes to the interactive service",
+          "[commands][interactive]") {
+  const auto& registry = builtin_command_registry();
+  FakeOneShot one_shot;
+  FakeInteractive interactive;
+  std::istringstream input;
+  CommandEnvironment environment{input, true,      true,        true,
+                                 {},    &one_shot, &interactive};
+  std::ostringstream output;
+  std::ostringstream error;
+
+  REQUIRE(CommandDispatcher{}.dispatch(registry, {}, environment, output,
+                                       error) == 0);
+  REQUIRE(output.str() == "interactive");
+  REQUIRE(error.str().empty());
+  REQUIRE(interactive.seen_session_mode ==
+          InteractiveCommand::SessionMode::create);
+
+  output.str({});
+  error.str({});
+  interactive.failure =
+      CommandFailure{CommandFailureKind::cancelled, "stopped"};
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry, std::vector<std::string_view>{"--ephemeral"},
+              environment, output, error) == 130);
+  REQUIRE(error.str().find("stopped") != std::string::npos);
 }
