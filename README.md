@@ -281,6 +281,23 @@ that changes between passes. The adapter is not yet registered by a surface;
 project-instruction discovery, evidence selection, caching, and edits remain
 separate milestones.
 
+## Repository evidence and context parcels
+
+Repository evidence keeps the source state used for one inference distinct
+from durable run history and rebuildable repository knowledge. Exact source,
+diagnostics, diffs, tool results, and derived records carry stable identities,
+snapshot provenance, freshness, producer metadata, and bounded content or
+artifact references. Unknown future evidence kinds remain opaque rather than
+being guessed into a known semantic category.
+
+`aiforge::repository::validate_context_parcel` validates an ordered,
+purpose- and task-phase-labelled working set before a later selection policy
+hands it to context construction. Validation checks repository and content
+identity, half-open source ranges, provenance consistency, artifact linkage,
+freshness claims, duplicate evidence IDs, and checked byte/token totals. This
+foundation selects no repository cache, persistence encoding, retrieval
+ranking, parser, or provider request mapping.
+
 The default toolchain respects `CXX`. Sanitizer toolchains are opt-in:
 
 ```bash

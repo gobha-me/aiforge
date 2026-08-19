@@ -58,6 +58,8 @@ struct PermissionProfileIdTag;
 struct ContextEntryIdTag;
 struct ContextSourceIdTag;
 struct RepositoryIdTag;
+struct EvidenceIdTag;
+struct ContextParcelIdTag;
 
 using SessionId = Id<SessionIdTag>;
 using RunId = Id<RunIdTag>;
@@ -76,5 +78,7 @@ using PermissionProfileId = Id<PermissionProfileIdTag>;
 using ContextEntryId = Id<ContextEntryIdTag>;
 using ContextSourceId = Id<ContextSourceIdTag>;
 using RepositoryId = Id<RepositoryIdTag>;
+using EvidenceId = Id<EvidenceIdTag>;
+using ContextParcelId = Id<ContextParcelIdTag>;
 
 }  // namespace aiforge::domain
