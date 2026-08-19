@@ -162,7 +162,7 @@ auto TranscriptView::rebuild(const std::span<const domain::RunEvent> events)
                  "transcript widgets may be changed only on their owner thread");
   }
   try {
-    auto candidate = domain::TranscriptProjection::rebuild(events);
+    auto candidate = domain::SessionTranscriptProjection::rebuild(events);
     if (!candidate) {
       return error(TranscriptViewErrorCode::projection_rejected,
                    candidate.error().message);
@@ -179,7 +179,25 @@ auto TranscriptView::rebuild(const std::span<const domain::RunEvent> events)
   }
 }
 
-auto TranscriptView::render(const domain::TranscriptProjection& projection)
+auto TranscriptView::render(
+    const domain::SessionTranscriptProjection& projection) const
+    -> std::expected<std::vector<RenderedEntry>, TranscriptViewError> {
+  try {
+    std::vector<RenderedEntry> result;
+    for (const auto& run : projection.runs()) {
+      auto rendered = render_run(run);
+      if (!rendered) return std::unexpected(std::move(rendered.error()));
+      result.reserve(result.size() + rendered->size());
+      for (auto& entry : *rendered) result.push_back(std::move(entry));
+    }
+    return result;
+  } catch (...) {
+    return error(TranscriptViewErrorCode::internal_failure,
+                 "session transcript rendering failed internally");
+  }
+}
+
+auto TranscriptView::render_run(const domain::TranscriptProjection& projection)
     const -> std::expected<std::vector<RenderedEntry>, TranscriptViewError> {
   try {
     std::vector<RenderedEntry> result;

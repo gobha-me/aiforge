@@ -560,4 +560,65 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
   return {};
 }
 
+auto SessionTranscriptProjection::apply(const RunEvent& event)
+    -> std::expected<void, TranscriptProjectionError> {
+  try {
+    auto candidate = *this;
+    if (auto result = candidate.apply_in_place(event); !result) return result;
+    *this = std::move(candidate);
+    return {};
+  } catch (...) {
+    return error(TranscriptProjectionErrorCode::internal_failure,
+                 "session transcript projection failed internally");
+  }
+}
+
+auto SessionTranscriptProjection::rebuild(
+    const std::span<const RunEvent> events)
+    -> std::expected<SessionTranscriptProjection,
+                     TranscriptProjectionError> {
+  try {
+    SessionTranscriptProjection result;
+    for (const auto& event : events) {
+      if (auto applied = result.apply(event); !applied) {
+        return std::unexpected(std::move(applied.error()));
+      }
+    }
+    return result;
+  } catch (...) {
+    return error(TranscriptProjectionErrorCode::internal_failure,
+                 "session transcript rebuild failed internally");
+  }
+}
+
+auto SessionTranscriptProjection::apply_in_place(const RunEvent& event)
+    -> std::expected<void, TranscriptProjectionError> {
+  if (event.metadata.sequence == 0 || event.metadata.schema_version == 0) {
+    return error(TranscriptProjectionErrorCode::invalid_envelope,
+                 "event sequence and schema version must be positive");
+  }
+  if (m_event_ids.contains(event.metadata.event_id)) {
+    return error(TranscriptProjectionErrorCode::duplicate_event,
+                 "event ID is already present in the session transcript");
+  }
+  if (event.metadata.sequence <= m_last_sequence) {
+    return error(TranscriptProjectionErrorCode::non_monotonic_sequence,
+                 "session transcript event sequence did not increase");
+  }
+
+  auto found = m_run_indices.find(event.metadata.run_id);
+  if (found == m_run_indices.end()) {
+    const auto index = m_runs.size();
+    m_runs.emplace_back();
+    found = m_run_indices.emplace(event.metadata.run_id, index).first;
+  }
+  if (auto applied = m_runs[found->second].apply(event); !applied) {
+    return std::unexpected(std::move(applied.error()));
+  }
+
+  m_event_ids.insert(event.metadata.event_id);
+  m_last_sequence = event.metadata.sequence;
+  return {};
+}
+
 }  // namespace aiforge::domain
