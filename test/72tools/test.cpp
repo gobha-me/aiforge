@@ -223,6 +223,85 @@ class CountingExecutor final : public runtime::ToolExecutor {
   std::size_t starts{};
 };
 
+class ImmediateStream final : public runtime::ToolExecutionStream {
+ public:
+  explicit ImmediateStream(runtime::ToolResult result)
+      : m_result(std::move(result)) {}
+
+  auto next(const std::stop_token stop_token)
+      -> std::expected<std::optional<runtime::ToolExecutionEvent>,
+                       runtime::ToolExecutionError> override {
+    if (stop_token.stop_requested()) {
+      return std::unexpected(runtime::ToolExecutionError{
+          runtime::ToolExecutionErrorCode::cancelled,
+          "immediate tool cancelled", false});
+    }
+    if (!m_result) return std::optional<runtime::ToolExecutionEvent>{};
+    auto result = std::move(*m_result);
+    m_result.reset();
+    return std::optional<runtime::ToolExecutionEvent>{std::move(result)};
+  }
+
+ private:
+  std::optional<runtime::ToolResult> m_result;
+};
+
+class ImmediateExecutor final : public runtime::ToolExecutor {
+ public:
+  ImmediateExecutor(std::vector<domain::CapabilityScope> scopes,
+                    std::vector<domain::Effect> effects,
+                    runtime::ToolResult result)
+      : m_scopes(std::move(scopes)),
+        m_effects(std::move(effects)),
+        m_result(std::move(result)) {}
+
+  auto validate(const domain::StructuredDataBlock& arguments) const
+      -> std::expected<runtime::ValidatedToolArguments,
+                       runtime::ToolExecutionError> override {
+    return runtime::ValidatedToolArguments{arguments, m_scopes, m_effects};
+  }
+
+  auto start(runtime::ToolInvocation invocation, std::stop_token)
+      -> std::expected<std::unique_ptr<runtime::ToolExecutionStream>,
+                       runtime::ToolExecutionError> override {
+    m_invocations.push_back(std::move(invocation));
+    return std::make_unique<ImmediateStream>(m_result);
+  }
+
+  [[nodiscard]] auto invocations() const
+      -> const std::vector<runtime::ToolInvocation>& {
+    return m_invocations;
+  }
+
+ private:
+  std::vector<domain::CapabilityScope> m_scopes;
+  std::vector<domain::Effect> m_effects;
+  runtime::ToolResult m_result;
+  std::vector<runtime::ToolInvocation> m_invocations;
+};
+
+class RecordingPolicy final : public runtime::ToolPolicy {
+ public:
+  auto evaluate(const runtime::ToolPolicyRequest& request)
+      -> std::expected<runtime::ToolPolicyResolution,
+                       runtime::ToolPolicyError> override {
+    requests.push_back(request);
+    return runtime::ToolPolicyResolution{
+        domain::PolicyDecision::allow, request.scopes, "allowed by test",
+        domain::PolicyDecisionSource::permission_profile};
+  }
+
+  auto approve(const runtime::ToolPolicyRequest&, runtime::ToolPolicyApproval)
+      -> std::expected<runtime::ToolPolicyResolution,
+                       runtime::ToolPolicyError> override {
+    return std::unexpected(runtime::ToolPolicyError{
+        runtime::ToolPolicyErrorCode::invalid_request,
+        "approval is not expected", false});
+  }
+
+  std::vector<runtime::ToolPolicyRequest> requests;
+};
+
 template <typename Payload>
 auto persisted_event(const std::uint64_t sequence, Payload payload,
                      std::optional<domain::InvocationId> invocation_id =
@@ -925,4 +1004,189 @@ TEST_CASE("multiple tool calls cannot execute ahead of provider order",
   REQUIRE(executor->recorded_invocations().size() == 1);
   REQUIRE(executor->recorded_invocations().front().invocation_id == second);
   REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
+}
+
+TEST_CASE("argument validation can narrow a declaration's effects",
+          "[tools][policy][effects]") {
+  const auto invocation = make_id<domain::InvocationId>("narrow-call");
+  const auto read_scope = scope();
+  const domain::CapabilityScope write_scope{domain::Effect::write,
+                                             "filesystem.root", "/repo"};
+  auto tool = declaration("narrow");
+  tool.effects.push_back(domain::Effect::write);
+  tool.capability_scopes.push_back(write_scope);
+  auto executor = std::make_shared<ImmediateExecutor>(
+      std::vector<domain::CapabilityScope>{read_scope},
+      std::vector<domain::Effect>{domain::Effect::read},
+      runtime::ToolResult{{domain::TextBlock{"done"}}});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(tool, executor,
+                                 runtime::ToolExecutionLimits{128, 2, 1s}));
+  const auto snapshot = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1",
+                         snapshot.declarations());
+  testing::ScriptedBackend backend{{
+      {initial,
+       testing::StreamScript{{
+           step(backend::ResponseStarted{"response"}),
+           step(backend::ToolCallDelta{invocation, "narrow", "{}"}),
+           step(backend::ResponseFinished{domain::FinishReason::tool_call}),
+           testing::EndOfStream{},
+       }}},
+  }};
+  auto policy = std::make_shared<RecordingPolicy>();
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
+                            &wake, {}, {}, snapshot, policy};
+  REQUIRE(kernel.start(run_start(initial)));
+  drain_to_inference_boundary(kernel, wake);
+  for (int attempt = 0; attempt < 100 && executor->invocations().empty();
+       ++attempt) {
+    REQUIRE(kernel.drain());
+    if (executor->invocations().empty()) wake.wait_for_change(wake.count());
+  }
+  REQUIRE(policy->requests.size() == 1);
+  REQUIRE(policy->requests.front().effects ==
+          std::vector<domain::Effect>{domain::Effect::read});
+  REQUIRE(policy->requests.front().scopes ==
+          std::vector<domain::CapabilityScope>{read_scope});
+  const auto proposed = std::ranges::find_if(
+      kernel.event_log().events(), [](const auto& event) {
+        return std::holds_alternative<domain::ToolProposed>(event.payload);
+      });
+  REQUIRE(proposed != kernel.event_log().events().end());
+  REQUIRE(std::get<domain::ToolProposed>(proposed->payload).declared_effects ==
+          std::vector<domain::Effect>{domain::Effect::read});
+  REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
+}
+
+TEST_CASE("argument validation cannot widen a declaration's effects",
+          "[tools][policy][effects][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("widen-call");
+  const domain::CapabilityScope write_scope{domain::Effect::write,
+                                             "filesystem.root", "/repo"};
+  auto executor = std::make_shared<ImmediateExecutor>(
+      std::vector<domain::CapabilityScope>{write_scope},
+      std::vector<domain::Effect>{domain::Effect::write},
+      runtime::ToolResult{{domain::TextBlock{"must not run"}}});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(declaration(), executor,
+                                 runtime::ToolExecutionLimits{128, 2, 1s}));
+  const auto snapshot = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1",
+                         snapshot.declarations());
+  testing::ScriptedBackend backend{{
+      {initial, tool_call_script(invocation)},
+  }};
+  auto policy = std::make_shared<RecordingPolicy>();
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
+                            &wake, {}, {}, snapshot, policy};
+  REQUIRE(kernel.start(run_start(initial)));
+  drain_to_inference_boundary(kernel, wake);
+  REQUIRE(policy->requests.empty());
+  REQUIRE(executor->invocations().empty());
+  REQUIRE(std::ranges::count_if(kernel.event_log().events(), [](const auto& event) {
+            return std::holds_alternative<domain::ToolErrored>(event.payload);
+          }) == 1);
+  REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
+}
+
+TEST_CASE("tool-created artifacts are recorded before their terminal result",
+          "[tools][artifact][events]") {
+  const auto invocation = make_id<domain::InvocationId>("artifact-call");
+  const auto artifact = make_id<domain::ArtifactId>("artifact-output");
+  const domain::ArtifactMetadata metadata{
+      artifact, "application/octet-stream", 4, "sha256:test", invocation,
+      std::nullopt, std::nullopt};
+  auto executor = std::make_shared<ImmediateExecutor>(
+      std::vector<domain::CapabilityScope>{},
+      std::vector<domain::Effect>{},
+      runtime::ToolResult{
+          {domain::StructuredDataBlock{"application/json", "{}"},
+           domain::ArtifactReferenceBlock{artifact, std::string{"stdout"}}},
+          {metadata}});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(declaration(), executor,
+                                 runtime::ToolExecutionLimits{1024, 2, 1s}));
+  const auto snapshot = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1",
+                         snapshot.declarations());
+  testing::ScriptedBackend backend{{
+      {initial, tool_call_script(invocation)},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
+                            &wake, {}, {}, snapshot, allow_policy()};
+  REQUIRE(kernel.start(run_start(initial)));
+  drain_to_inference_boundary(kernel, wake);
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    REQUIRE(kernel.drain());
+    if (std::ranges::any_of(kernel.event_log().events(), [](const auto& event) {
+          return std::holds_alternative<domain::ToolResultRecorded>(
+              event.payload);
+        })) {
+      break;
+    }
+    wake.wait_for_change(wake.count());
+  }
+
+  std::vector<std::size_t> sequences;
+  for (const auto& event : kernel.event_log().events()) {
+    if (std::holds_alternative<domain::ArtifactCreated>(event.payload) ||
+        std::holds_alternative<domain::ArtifactReferenced>(event.payload) ||
+        std::holds_alternative<domain::ToolResultRecorded>(event.payload)) {
+      sequences.push_back(event.metadata.sequence);
+    }
+  }
+  REQUIRE(sequences.size() == 3);
+  REQUIRE(sequences[1] == sequences[0] + 1);
+  REQUIRE(sequences[2] == sequences[1] + 1);
+  const auto messages =
+      runtime::tool_result_messages(kernel.event_log().events());
+  REQUIRE(messages);
+  REQUIRE(messages->size() == 1);
+  REQUIRE(std::ranges::any_of(messages->front().content, [&](const auto& block) {
+    const auto* reference =
+        std::get_if<domain::ArtifactReferenceBlock>(&block);
+    return reference != nullptr && reference->artifact_id == artifact;
+  }));
+  REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
+}
+
+TEST_CASE("invalid tool artifact metadata fails the run without a reference",
+          "[tools][artifact][protocol][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("artifact-call");
+  const auto artifact = make_id<domain::ArtifactId>("artifact-output");
+  auto executor = std::make_shared<ImmediateExecutor>(
+      std::vector<domain::CapabilityScope>{},
+      std::vector<domain::Effect>{},
+      runtime::ToolResult{
+          {domain::ArtifactReferenceBlock{artifact, std::string{"stdout"}}},
+          {domain::ArtifactMetadata{
+              artifact, "application/octet-stream", 4, "sha256:test",
+              make_id<domain::InvocationId>("wrong-call"), std::nullopt,
+              std::nullopt}}});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(declaration(), executor,
+                                 runtime::ToolExecutionLimits{1024, 2, 1s}));
+  const auto snapshot = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1",
+                         snapshot.declarations());
+  testing::ScriptedBackend backend{{
+      {initial, tool_call_script(invocation)},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
+                            &wake, {}, {}, snapshot, allow_policy()};
+  REQUIRE(kernel.start(run_start(initial)));
+  drain_to_inference_boundary(kernel, wake);
+  drain_to_run_end(kernel, wake);
+  REQUIRE(std::ranges::none_of(kernel.event_log().events(), [](const auto& event) {
+    return std::holds_alternative<domain::ArtifactCreated>(event.payload) ||
+           std::holds_alternative<domain::ArtifactReferenced>(event.payload);
+  }));
+  REQUIRE(std::ranges::any_of(kernel.event_log().events(), [](const auto& event) {
+    return std::holds_alternative<domain::RunFailed>(event.payload);
+  }));
 }
