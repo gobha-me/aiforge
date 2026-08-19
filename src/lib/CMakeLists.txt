@@ -2,7 +2,9 @@ add_library(${PROJECT_NAME}_lib STATIC
   ask_user_tool.cpp
   bootstrap.cpp
   cli11_parser.cpp
+  chat_session.cpp
   command_registry.cpp
+  conversation_context.cpp
   config.cpp
   context_builder.cpp
   event_log.cpp

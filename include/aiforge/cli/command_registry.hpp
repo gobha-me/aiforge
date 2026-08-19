@@ -1,5 +1,7 @@
 #pragma once
 
+#include <aiforge/cli/parser.hpp>
+#include <aiforge/domain/ids.hpp>
 #include <cstddef>
 #include <expected>
 #include <iosfwd>
@@ -9,9 +11,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include <aiforge/cli/parser.hpp>
-#include <aiforge/domain/ids.hpp>
 
 namespace aiforge::cli {
 
@@ -48,8 +47,29 @@ class OneShotCommand {
 
   [[nodiscard]] virtual auto execute(Request request,
                                      CommandEnvironment& environment,
-                                     std::ostream& output,
-                                     std::ostream& error)
+                                     std::ostream& output, std::ostream& error)
+      -> std::expected<void, CommandFailure> = 0;
+};
+
+class InteractiveCommand {
+ public:
+  virtual ~InteractiveCommand() = default;
+
+  enum class SessionMode {
+    create,
+    resume,
+    continue_latest,
+    ephemeral,
+  };
+
+  struct Request {
+    SessionMode session_mode{SessionMode::create};
+    std::optional<domain::SessionId> session_id;
+  };
+
+  [[nodiscard]] virtual auto execute(Request request,
+                                     CommandEnvironment& environment,
+                                     std::ostream& output, std::ostream& error)
       -> std::expected<void, CommandFailure> = 0;
 };
 
@@ -60,6 +80,7 @@ struct CommandEnvironment {
   bool error_is_terminal{true};
   std::stop_token stop_token;
   OneShotCommand* one_shot{};
+  InteractiveCommand* interactive{};
 };
 
 struct CommandContext {
@@ -88,7 +109,8 @@ struct CommandPositionalSpec {
 
 struct CommandSpec {
   std::string id;
-  // The root command has an empty name. Every nested command has one token name.
+  // The root command has an empty name. Every nested command has one token
+  // name.
   std::string name;
   std::string help;
   bool subcommand_required{};
@@ -131,29 +153,29 @@ struct RegistryDiagnostic {
 
 class CommandDispatcher final {
  public:
-  [[nodiscard]] auto dispatch(
-      const CommandRegistry& registry,
-      std::span<const std::string_view> arguments, std::ostream& output,
-      std::ostream& error,
-      ParseLimits limits = {256, 64U * 1024U, 1024U * 1024U}) const noexcept
-      -> int;
-  [[nodiscard]] auto dispatch(
-      const CommandRegistry& registry,
-      std::span<const std::string_view> arguments,
-      CommandEnvironment& environment, std::ostream& output,
-      std::ostream& error,
-      ParseLimits limits = {256, 64U * 1024U, 1024U * 1024U}) const noexcept
-      -> int;
+  [[nodiscard]] auto dispatch(const CommandRegistry& registry,
+                              std::span<const std::string_view> arguments,
+                              std::ostream& output, std::ostream& error,
+                              ParseLimits limits = {
+                                  256, 64U * 1024U,
+                                  1024U * 1024U}) const noexcept -> int;
+  [[nodiscard]] auto dispatch(const CommandRegistry& registry,
+                              std::span<const std::string_view> arguments,
+                              CommandEnvironment& environment,
+                              std::ostream& output, std::ostream& error,
+                              ParseLimits limits = {
+                                  256, 64U * 1024U,
+                                  1024U * 1024U}) const noexcept -> int;
 };
 
 [[nodiscard]] auto builtin_command_registry() -> const CommandRegistry&;
 
 [[nodiscard]] auto run_cli(std::span<const std::string_view> arguments,
-                           std::ostream& output,
-                           std::ostream& error) noexcept -> int;
+                           std::ostream& output, std::ostream& error) noexcept
+    -> int;
 [[nodiscard]] auto run_cli(std::span<const std::string_view> arguments,
                            CommandEnvironment& environment,
-                           std::ostream& output,
-                           std::ostream& error) noexcept -> int;
+                           std::ostream& output, std::ostream& error) noexcept
+    -> int;
 
 }  // namespace aiforge::cli

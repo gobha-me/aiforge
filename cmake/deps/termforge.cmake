@@ -17,8 +17,8 @@ if (NOT TARGET termforge::lib)
     include(FetchContent)
     FetchContent_Declare(termforge
       GIT_REPOSITORY https://github.com/gobha-me/termforge.git
-      # v0.55.0 retains the transcript seams and adds the reusable multi-page
-      # choice wizard required by the ask_user presentation adapter.
+      # v0.55.0 retains the Composer/transcript seams and adds the reusable
+      # multi-page choice wizard required by the ask_user presentation adapter.
       GIT_TAG v0.55.0
       GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(termforge)

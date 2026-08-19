@@ -1,10 +1,10 @@
 #pragma once
 
-#include <expected>
-#include <vector>
-
 #include <aiforge/runtime/run_kernel.hpp>
+#include <aiforge/surfaces/chat_session.hpp>
+#include <expected>
 #include <termforge/core/app.hpp>
+#include <vector>
 
 namespace aiforge::adapters {
 
@@ -19,6 +19,10 @@ class TermForgeRunBridge final : public runtime::RunWakeSink {
   [[nodiscard]] auto handle(const termforge::Event& event,
                             runtime::RunKernel& kernel)
       -> std::expected<std::vector<domain::RunEvent>, runtime::RunKernelError>;
+  [[nodiscard]] auto handle(const termforge::Event& event,
+                            surfaces::ChatSession& session)
+      -> std::expected<std::vector<domain::RunEvent>,
+                       surfaces::ChatSessionError>;
 
  private:
   termforge::App& m_app;
