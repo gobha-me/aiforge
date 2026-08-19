@@ -62,6 +62,11 @@ class TranscriptView final {
 
   [[nodiscard]] auto projection() const noexcept
       -> const domain::TranscriptProjection& {
+    const auto runs = m_projection.runs();
+    return runs.empty() ? m_empty_projection : runs.back();
+  }
+  [[nodiscard]] auto session_projection() const noexcept
+      -> const domain::SessionTranscriptProjection& {
     return m_projection;
   }
   [[nodiscard]] auto widget() noexcept -> termforge::TextBox& {
@@ -74,7 +79,11 @@ class TranscriptView final {
  private:
   struct RenderedEntry;
 
-  [[nodiscard]] auto render(const domain::TranscriptProjection& projection)
+  [[nodiscard]] auto render(
+      const domain::SessionTranscriptProjection& projection)
+      const -> std::expected<std::vector<RenderedEntry>, TranscriptViewError>;
+  [[nodiscard]] auto render_run(
+      const domain::TranscriptProjection& projection)
       const -> std::expected<std::vector<RenderedEntry>, TranscriptViewError>;
   [[nodiscard]] auto sync(std::vector<RenderedEntry> next)
       -> std::expected<void, TranscriptViewError>;
@@ -85,7 +94,8 @@ class TranscriptView final {
   TranscriptRenderMode m_mode;
   TranscriptTheme m_theme;
   std::thread::id m_owner;
-  domain::TranscriptProjection m_projection;
+  domain::SessionTranscriptProjection m_projection;
+  domain::TranscriptProjection m_empty_projection;
   termforge::TextBox m_text_box;
   std::vector<RenderedEntry> m_rendered;
   termforge::TextEntryHandle m_live;

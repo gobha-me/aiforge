@@ -23,10 +23,11 @@ auto make_id(const std::string& value) -> IdType {
 
 template <typename Payload>
 auto event(const std::uint64_t sequence, Payload payload,
-           std::optional<domain::InvocationId> invocation_id = std::nullopt)
+           std::optional<domain::InvocationId> invocation_id = std::nullopt,
+           std::string run_id = "run")
     -> domain::RunEvent {
   return {{make_id<domain::EventId>("event-" + std::to_string(sequence)),
-           make_id<domain::RunId>("run"), sequence, 1,
+           make_id<domain::RunId>(std::move(run_id)), sequence, 1,
            domain::EventTimestamp{std::chrono::milliseconds{sequence}},
            std::nullopt, std::nullopt, std::move(invocation_id)},
           std::move(payload)};
@@ -185,4 +186,41 @@ TEST_CASE("TranscriptView rebuild rejects malformed replay without losing state"
   const auto rebuilt = view.rebuild(malformed);
   REQUIRE_FALSE(rebuilt);
   REQUIRE(view.projection().last_sequence() == 1);
+}
+
+TEST_CASE("TranscriptView renders sequential runs incrementally and on replay",
+          "[adapter][transcript][session]") {
+  const auto first_user = domain::UserContentAdded{domain::Message{
+      make_id<domain::MessageId>("first-user"), domain::Role::user,
+      {domain::TextBlock{"first"}}, std::nullopt}};
+  const auto second_user = domain::UserContentAdded{domain::Message{
+      make_id<domain::MessageId>("second-user"), domain::Role::user,
+      {domain::TextBlock{"second"}}, std::nullopt}};
+  const std::vector events{
+      event(1, started(), std::nullopt, "first-run"),
+      event(2, first_user, std::nullopt, "first-run"),
+      event(3, domain::RunCompleted{}, std::nullopt, "first-run"),
+      event(4, started(), std::nullopt, "second-run"),
+      event(5, second_user, std::nullopt, "second-run"),
+  };
+
+  adapters::TranscriptView incremental{
+      adapters::TranscriptRenderMode::plain_text};
+  for (const auto& value : events) REQUIRE(incremental.apply(value));
+  REQUIRE(incremental.session_projection().runs().size() == 2);
+  REQUIRE(incremental.widget().line_count() == 2);
+
+  adapters::TranscriptView replayed{
+      adapters::TranscriptRenderMode::plain_text};
+  REQUIRE(replayed.rebuild(events));
+  REQUIRE(replayed.session_projection().runs().size() == 2);
+  REQUIRE(replayed.widget().line_count() == 2);
+
+  replayed.set_geometry({0, 0, 32, 3});
+  termforge::Screen screen{32, 3};
+  replayed.draw(screen);
+  const auto visible = row_text(screen, 0) + row_text(screen, 1) +
+                       row_text(screen, 2);
+  REQUIRE(visible.find("You: first") != std::string::npos);
+  REQUIRE(visible.find("You: second") != std::string::npos);
 }

@@ -119,6 +119,73 @@ TEST_CASE("transcript rebuild equals deterministic incremental application",
   REQUIRE(answer.usage == domain::Usage{4, 2, 1, 0});
 }
 
+TEST_CASE("session transcript composes sequential and interleaved runs",
+          "[transcript][session]") {
+  const std::vector events{
+      event(1, started(), "first-start", "first-run"),
+      event(2, started(), "second-start", "second-run"),
+      event(3, domain::UnknownEvent{"future.event"}, "future", "first-run"),
+      event(4,
+            domain::UserContentAdded{
+                message("first-user", domain::Role::user, "first")},
+            "first-message", "first-run"),
+      event(5,
+            domain::UserContentAdded{
+                message("second-user", domain::Role::user, "second")},
+            "second-message", "second-run"),
+      event(6, domain::RunCompleted{}, "first-complete", "first-run"),
+      event(7, domain::RunCompleted{}, "second-complete", "second-run"),
+  };
+
+  domain::SessionTranscriptProjection incremental;
+  for (const auto& value : events) REQUIRE(incremental.apply(value));
+  const auto rebuilt = domain::SessionTranscriptProjection::rebuild(events);
+  REQUIRE(rebuilt);
+  REQUIRE(rebuilt->runs().size() == 2);
+  REQUIRE(rebuilt->last_sequence() == 7);
+  REQUIRE(rebuilt->runs()[0].run_id() ==
+          make_id<domain::RunId>("first-run"));
+  REQUIRE(rebuilt->runs()[1].run_id() ==
+          make_id<domain::RunId>("second-run"));
+  REQUIRE(rebuilt->runs()[0].items() == incremental.runs()[0].items());
+  REQUIRE(rebuilt->runs()[1].items() == incremental.runs()[1].items());
+}
+
+TEST_CASE("session transcript rejects cross-run envelope failures transactionally",
+          "[transcript][session][failure]") {
+  domain::SessionTranscriptProjection projection;
+  REQUIRE(projection.apply(event(1, started(), "start", "first-run")));
+  REQUIRE(projection.apply(
+      event(3, domain::RunCompleted{}, "complete", "first-run")));
+
+  auto rejected = projection.apply(
+      event(4, started(), "start", "second-run"));
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code ==
+          domain::TranscriptProjectionErrorCode::duplicate_event);
+  REQUIRE(projection.last_sequence() == 3);
+  REQUIRE(projection.runs().size() == 1);
+
+  rejected = projection.apply(
+      event(2, started(), "second-start", "second-run"));
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code ==
+          domain::TranscriptProjectionErrorCode::non_monotonic_sequence);
+  REQUIRE(projection.last_sequence() == 3);
+  REQUIRE(projection.runs().size() == 1);
+
+  rejected = projection.apply(event(
+      4,
+      domain::UserContentAdded{
+          message("orphan", domain::Role::user, "missing start")},
+      "orphan-message", "second-run"));
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code ==
+          domain::TranscriptProjectionErrorCode::invalid_transition);
+  REQUIRE(projection.last_sequence() == 3);
+  REQUIRE(projection.runs().size() == 1);
+}
+
 TEST_CASE("unfinished and cancelled assistant content remains visible",
           "[transcript][failure][cancel]") {
   domain::TranscriptProjection projection;

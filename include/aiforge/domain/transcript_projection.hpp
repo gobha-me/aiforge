@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <map>
@@ -154,6 +155,36 @@ class TranscriptProjection final {
   std::set<EventId> m_event_ids;
   std::map<InferenceId, Usage> m_inference_usage;
   std::map<ArtifactId, ArtifactMetadata> m_artifacts;
+};
+
+// Composes the per-run transcript reducer over an ordered session event
+// stream. Runs retain their first-observed order while each reducer accepts
+// session-sequence gaps caused by events belonging to other runs.
+class SessionTranscriptProjection final {
+ public:
+  [[nodiscard]] auto apply(const RunEvent& event)
+      -> std::expected<void, TranscriptProjectionError>;
+
+  [[nodiscard]] static auto rebuild(std::span<const RunEvent> events)
+      -> std::expected<SessionTranscriptProjection,
+                       TranscriptProjectionError>;
+
+  [[nodiscard]] auto runs() const noexcept
+      -> std::span<const TranscriptProjection> {
+    return m_runs;
+  }
+  [[nodiscard]] auto last_sequence() const noexcept -> std::uint64_t {
+    return m_last_sequence;
+  }
+
+ private:
+  [[nodiscard]] auto apply_in_place(const RunEvent& event)
+      -> std::expected<void, TranscriptProjectionError>;
+
+  std::vector<TranscriptProjection> m_runs;
+  std::map<RunId, std::size_t> m_run_indices;
+  std::set<EventId> m_event_ids;
+  std::uint64_t m_last_sequence{};
 };
 
 }  // namespace aiforge::domain
