@@ -7,6 +7,7 @@
 #include <aiforge/config/config.hpp>
 #include <aiforge/config/file_store.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
+#include <aiforge/surfaces/slash_commands.hpp>
 #include <algorithm>
 #include <cstdlib>
 #include <memory>
@@ -16,6 +17,7 @@
 #include <termforge/core/app.hpp>
 #include <termforge/widgets/composer.hpp>
 #include <termforge/widgets/focus_ring.hpp>
+#include <termforge/widgets/text_box.hpp>
 #include <utility>
 #include <variant>
 
@@ -35,6 +37,30 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
   } catch (...) {
     return false;
   }
+}
+
+[[nodiscard]] auto common_prefix(const std::vector<std::string>& values)
+    -> std::string {
+  if (values.empty()) return {};
+  auto result = values.front();
+  for (const auto& value : values) {
+    const auto length = std::mismatch(result.begin(), result.end(),
+                                      value.begin(), value.end())
+                            .first -
+                        result.begin();
+    result.resize(static_cast<std::size_t>(length));
+  }
+  return result;
+}
+
+[[nodiscard]] auto completion_status(const std::vector<std::string>& values)
+    -> std::string {
+  std::string result{"Matches:"};
+  for (const auto& value : values) {
+    result += " /";
+    result += value;
+  }
+  return result;
 }
 
 [[nodiscard]] auto load_config(std::ostream& diagnostics)
@@ -183,7 +209,11 @@ class ChatApp final : public termforge::App {
       if (mouse->pressed && !m_session->active()) {
         static_cast<void>(m_focus.focus_at(mouse->x, mouse->y));
       }
-      static_cast<void>(m_transcript.on_event(event));
+      if (m_help_visible) {
+        static_cast<void>(m_help.on_event(event));
+      } else {
+        static_cast<void>(m_transcript.on_event(event));
+      }
       if (!m_session->active()) {
         route_mouse(*mouse, {&m_composer});
       }
@@ -193,6 +223,11 @@ class ChatApp final : public termforge::App {
     if (const auto* key = std::get_if<termforge::KeyEvent>(&event)) {
       if (key->action != termforge::KeyAction::Press) return;
       if (key->key == termforge::Key::Escape && m_session->active()) return;
+      if (key->key == termforge::Key::Escape && m_help_visible) {
+        m_help_visible = false;
+        m_status = "Ready";
+        return;
+      }
       if (key->ctrl && key->key == termforge::Key::Char && key->ch == U'c') {
         if (m_session->active()) {
           auto cancelled = m_session->cancel_active("interrupt");
@@ -223,11 +258,15 @@ class ChatApp final : public termforge::App {
         return;
       }
       if (key->key == termforge::Key::PageUp) {
-        m_transcript.widget().scroll(-10);
+        active_text_box().scroll(-10);
         return;
       }
       if (key->key == termforge::Key::PageDown) {
-        m_transcript.widget().scroll(10);
+        active_text_box().scroll(10);
+        return;
+      }
+      if (!m_session->active() && key->key == termforge::Key::Tab &&
+          complete_command()) {
         return;
       }
     }
@@ -277,14 +316,21 @@ class ChatApp final : public termforge::App {
         std::min(usable, m_composer.preferred_height(columns));
     const int transcript_rows = usable - composer_rows;
     m_transcript.set_geometry({0, 1, columns, transcript_rows});
+    m_help.set_geometry({0, 1, columns, transcript_rows});
     m_composer.set_geometry({0, 1 + transcript_rows, columns, composer_rows});
-    m_transcript.draw(screen);
+    if (m_help_visible) {
+      m_help.draw(screen);
+    } else {
+      m_transcript.draw(screen);
+    }
     m_composer.draw(screen);
 
     std::string footer =
         m_session->active()
             ? "Running — Esc cancels"
-            : "Enter submit | Shift/Alt+Enter newline | Ctrl+E or /edit editor";
+            : m_help_visible
+                  ? "Slash command help — Esc closes"
+                  : "Enter submit | Tab complete | /help commands | Ctrl+E editor";
     if (!m_status.empty()) footer += " | " + m_status;
     screen.write_text(0, rows - 1, footer, termforge::theme::kDim,
                       termforge::theme::kBg);
@@ -296,14 +342,131 @@ class ChatApp final : public termforge::App {
     quit();
   }
 
+  [[nodiscard]] auto active_text_box() -> termforge::TextBox& {
+    return m_help_visible ? m_help : m_transcript.widget();
+  }
+
+  auto show_help(const std::optional<std::string>& subject) -> bool {
+    const auto descriptions = m_slash_commands.describe(
+        subject ? std::optional<std::string_view>{*subject} : std::nullopt,
+        {.run_active = m_session->active(),
+         .editor_available = true,
+         .stop_token = m_stop_token});
+    if (!descriptions) {
+      m_status = descriptions.error().message;
+      return false;
+    }
+    m_help.clear();
+    m_help.append(subject ? "Slash command" : "Slash commands");
+    for (const auto& command : *descriptions) {
+      std::string line{"/"};
+      line += command.name;
+      if (!command.arguments.empty()) {
+        line += ' ';
+        line += command.arguments;
+      }
+      line += " — ";
+      line += command.help;
+      if (!command.available) line += " (unavailable)";
+      m_help.append(std::move(line));
+    }
+    m_help_visible = true;
+    m_help.scroll(-1000000);
+    m_status = "Help is not added to session history";
+    return true;
+  }
+
+  auto complete_command() -> bool {
+    const auto draft = m_composer.text();
+    if (draft.empty() || draft.front() != '/' ||
+        m_composer.cursor_pos() != draft.size() ||
+        draft.find_first_of(" \t\n") != std::string::npos) {
+      return false;
+    }
+    const auto matches =
+        m_slash_commands.complete(
+            draft,
+            {.run_active = m_session->active(),
+             .editor_available = true,
+             .stop_token = m_stop_token});
+    if (!matches) {
+      m_status = matches.error().message;
+      return true;
+    }
+    if (matches->empty()) {
+      m_status = "No matching slash command";
+      return true;
+    }
+    if (matches->size() == 1) {
+      const auto description = m_slash_commands.describe(
+          matches->front(),
+          {.run_active = m_session->active(),
+           .editor_available = true,
+           .stop_token = m_stop_token});
+      if (!description) {
+        m_status = description.error().message;
+        return true;
+      }
+      auto replacement = "/" + matches->front();
+      if (!description->front().arguments.empty()) replacement += ' ';
+      m_composer.set_text(std::move(replacement));
+      m_status = "Command completed";
+      return true;
+    }
+    const auto shared = common_prefix(*matches);
+    if (shared.size() + 1 > draft.size()) m_composer.set_text('/' + shared);
+    m_status = completion_status(*matches);
+    return true;
+  }
+
+  auto execute_command(const surfaces::SlashCommandResult& command) -> bool {
+    switch (command.action) {
+      case surfaces::SlashCommandAction::show_help:
+        if (!show_help(command.subject)) return false;
+        m_composer.clear();
+        return true;
+      case surfaces::SlashCommandAction::quit:
+        m_composer.clear();
+        quit();
+        return true;
+      case surfaces::SlashCommandAction::clear_view: {
+        auto cleared = m_transcript.clear_view();
+        if (!cleared) {
+          m_status = cleared.error().message;
+          return false;
+        }
+        m_help_visible = false;
+        m_composer.clear();
+        m_status = "Transcript view cleared; durable events retained";
+        return true;
+      }
+      case surfaces::SlashCommandAction::edit_draft:
+        m_help_visible = false;
+        m_composer.clear();
+        request_edit();
+        return true;
+    }
+    m_status = "Slash command result is unsupported";
+    return false;
+  }
+
   auto submit() -> void {
     const std::string draft = m_composer.text();
     if (draft.empty()) {
       m_status = "Draft is empty";
       return;
     }
-    if (draft == "/edit") {
-      request_edit();
+    const auto command = m_slash_commands.dispatch(
+        draft,
+        {.run_active = m_session->active(),
+         .editor_available = true,
+         .stop_token = m_stop_token});
+    if (!command) {
+      m_status = command.error().message;
+      return;
+    }
+    if (command->has_value()) {
+      static_cast<void>(execute_command(**command));
       return;
     }
     auto submitted = m_session->submit(draft);
@@ -312,6 +475,7 @@ class ChatApp final : public termforge::App {
       return;
     }
     if (!apply_events(submitted->committed_events)) return;
+    m_help_visible = false;
     m_composer.clear();
     sync_history();
     m_transcript.widget().scroll_to_bottom();
@@ -360,13 +524,17 @@ class ChatApp final : public termforge::App {
   surfaces::DraftEditor& m_editor;
   std::stop_token m_stop_token;
   TranscriptView m_transcript;
+  termforge::TextBox m_help;
   termforge::Composer m_composer;
   termforge::FocusRing m_focus;
   std::unique_ptr<surfaces::ChatSession> m_session;
   std::optional<cli::CommandFailure> m_setup_error;
   std::optional<cli::CommandFailure> m_failure;
   std::string m_status;
+  const surfaces::SlashCommandRegistry& m_slash_commands{
+      surfaces::builtin_slash_command_registry()};
   bool m_pending_edit{};
+  bool m_help_visible{};
   bool m_history_enabled{true};
   std::size_t m_history_cutoff{};
 };

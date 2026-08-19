@@ -8,7 +8,8 @@ presentation, typed configuration, and a resumable structured `ask_user` tool
 boundary plus a policy-gated bounded argv process executor. The interactive
 Chat workspace uses the same run kernel, context builder, and durable event
 stream as one-shot mode; running `aiforge` without a prompt in a terminal opens
-it.
+it. Its slash-command registry keeps dispatch, help, completion, and command
+availability on one provider- and terminal-neutral definition.
 
 The command registry provides generated help and version output. Commands that
 depend on later model-picker or interactive milestones fail explicitly instead
@@ -126,14 +127,20 @@ no recall entry. Ctrl+K clears the current recall view without rewriting
 durable history, and Ctrl+H disables or re-enables recall. Cross-session prompt
 history is not retained.
 
-Ctrl+E, or submitting exactly `/edit`, restores the terminal and opens the
-current draft in `$VISUAL` or `$EDITOR`. The setting names one executable only;
-arguments and shell syntax are rejected, and users who need flags may select a
-wrapper executable. The adapter resolves the executable explicitly, uses an
-owned 0700 temporary directory and 0600 draft, passes only selected environment
-variables, validates the bounded edited text, and restores the original draft
-after failure, cancellation, or timeout. General slash-command dispatch remains
-owned by AF-10.
+Tab completes slash-command names from the same registry used by dispatch and
+help. `/help [command]` opens transient help that never enters session history;
+`/quit` exits; `/clear` clears only the visible transcript projection while
+retaining durable events and prompt recall; and `/edit` opens an empty external
+draft. Unknown, unavailable, malformed, and oversized slash commands are
+rejected locally and never become model content.
+
+Ctrl+E restores the terminal and opens the current draft in `$VISUAL` or
+`$EDITOR`. The editor setting names one executable only; arguments and shell
+syntax are rejected, and users who need flags may select a wrapper executable.
+The adapter resolves the executable explicitly, uses an owned 0700 temporary
+directory and 0600 draft, passes only selected environment variables, validates
+the bounded edited text, and restores the original draft after failure,
+cancellation, or timeout.
 
 ## Tool invocation foundation
 
@@ -255,7 +262,7 @@ not presented to the next model call as a completed answer.
 Interactive startup supports new, exact resume, continue-latest, and ephemeral
 sessions through command-line selection. In-surface session listing/switching
 and richer configuration, credential-source, and runtime-version provenance
-remain follow-up work under AF-10/AF-11.
+remain follow-up work under AF-11 and their owning feature issues.
 
 ## Repository snapshot identity
 

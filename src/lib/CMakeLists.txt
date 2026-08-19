@@ -20,6 +20,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   scripted_repository_snapshot_source.cpp
   scripted_session_store.cpp
   scripted_tool_executor.cpp
+  slash_commands.cpp
   sqlite_session_store.cpp
   transcript_projection.cpp
   tool_policy.cpp

@@ -179,6 +179,25 @@ auto TranscriptView::rebuild(const std::span<const domain::RunEvent> events)
   }
 }
 
+auto TranscriptView::clear_view()
+    -> std::expected<void, TranscriptViewError> {
+  if (!owner_thread()) {
+    return error(TranscriptViewErrorCode::wrong_thread,
+                 "transcript widgets may be changed only on their owner thread");
+  }
+  try {
+    m_text_box.clear();
+    m_projection = {};
+    m_empty_projection = {};
+    m_rendered.clear();
+    m_live = {};
+    return {};
+  } catch (...) {
+    return error(TranscriptViewErrorCode::internal_failure,
+                 "transcript view clear failed internally");
+  }
+}
+
 auto TranscriptView::render(
     const domain::SessionTranscriptProjection& projection) const
     -> std::expected<std::vector<RenderedEntry>, TranscriptViewError> {
