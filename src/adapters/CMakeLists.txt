@@ -1,5 +1,6 @@
 add_library(${PROJECT_NAME}_adapters STATIC
   ask_user_dialog.cpp
+  process_tool.cpp
   process_one_shot.cpp
   termforge_run_bridge.cpp
   transcript_view.cpp
@@ -16,5 +17,6 @@ target_compile_features(${PROJECT_NAME}_adapters PUBLIC cxx_std_23)
 target_link_libraries(${PROJECT_NAME}_adapters
   PUBLIC ${PROJECT_NAME}::lib
   PUBLIC termforge::lib
+  PRIVATE nlohmann_json::nlohmann_json
   PRIVATE venice-cpp::lib
 )

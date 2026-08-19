@@ -11,6 +11,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   presentation_text.cpp
   run_kernel.cpp
   run_projection.cpp
+  scripted_artifact_store.cpp
   scripted_backend.cpp
   scripted_policy_grant_store.cpp
   scripted_session_store.cpp

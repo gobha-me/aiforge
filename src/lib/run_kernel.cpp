@@ -65,6 +65,23 @@ using WorkerUpdate =
   });
 }
 
+[[nodiscard]] auto effects_are_unique(
+    const std::vector<domain::Effect>& effects) -> bool {
+  std::set<domain::Effect> unique;
+  return std::ranges::all_of(
+      effects, [&](const auto effect) { return unique.insert(effect).second; });
+}
+
+[[nodiscard]] auto effects_are_declared(
+    const std::vector<domain::Effect>& requested,
+    const std::vector<domain::Effect>& declared) -> bool {
+  if (requested.empty()) return declared.empty();
+  return effects_are_unique(requested) &&
+         std::ranges::all_of(requested, [&](const auto effect) {
+           return std::ranges::find(declared, effect) != declared.end();
+         });
+}
+
 [[nodiscard]] auto backend_domain_error(const backend::BackendError& error)
     -> domain::DomainError {
   switch (error.kind) {
@@ -174,6 +191,51 @@ using WorkerUpdate =
     if (!checked_add(total, size)) return std::nullopt;
   }
   return total;
+}
+
+[[nodiscard]] auto valid_created_artifacts(
+    const std::vector<domain::ArtifactMetadata>& artifacts,
+    const std::vector<domain::ContentBlock>& content,
+    const domain::InvocationId& invocation_id,
+    const domain::SessionEventLog& event_log) -> bool {
+  constexpr std::size_t maximum_artifacts{16};
+  if (artifacts.size() > maximum_artifacts) return false;
+
+  std::set<domain::ArtifactId> existing;
+  for (const auto& event : event_log.events()) {
+    if (const auto* created =
+            std::get_if<domain::ArtifactCreated>(&event.payload)) {
+      existing.insert(created->artifact.artifact_id);
+    }
+  }
+
+  std::set<domain::ArtifactId> created_ids;
+  for (const auto& artifact : artifacts) {
+    const bool dimensions_match = artifact.width.has_value() ==
+                                  artifact.height.has_value();
+    if (!artifact.producing_invocation_id ||
+        *artifact.producing_invocation_id != invocation_id ||
+        artifact.media_type.empty() || artifact.media_type.size() > 255 ||
+        has_control_character(artifact.media_type) || artifact.byte_size == 0 ||
+        artifact.digest.empty() || artifact.digest.size() > 512 ||
+        has_control_character(artifact.digest) || !dimensions_match ||
+        (artifact.width && (*artifact.width == 0 || *artifact.height == 0)) ||
+        existing.contains(artifact.artifact_id) ||
+        !created_ids.insert(artifact.artifact_id).second) {
+      return false;
+    }
+  }
+
+  std::set<domain::ArtifactId> referenced;
+  for (const auto& block : content) {
+    if (const auto* reference =
+            std::get_if<domain::ArtifactReferenceBlock>(&block)) {
+      referenced.insert(reference->artifact_id);
+    }
+  }
+  return std::ranges::all_of(created_ids, [&](const auto& id) {
+    return referenced.contains(id);
+  });
 }
 
 [[nodiscard]] auto valid_question_definitions(
@@ -366,6 +428,7 @@ struct RunKernel::Impl {
     ToolExecutionLimits limits;
     std::shared_ptr<ToolExecutor> executor;
     domain::MessageId result_message_id;
+    std::vector<domain::Effect> requested_effects;
     std::vector<domain::CapabilityScope> requested_scopes;
     std::vector<domain::CapabilityScope> granted_scopes;
     std::optional<ToolPolicyRequest> policy_request;
@@ -670,6 +733,12 @@ struct RunKernel::Impl {
     transaction.active->backend_terminal_seen = true;
     transaction.active->cancellation_ack_expected = true;
     transaction.active->run_terminal = true;
+    if (transaction.active->active_tool_id) {
+      auto& invocation = transaction.active->invocations.at(
+          *transaction.active->active_tool_id);
+      invocation.state = InvocationState::terminal;
+      invocation.terminal_event_seen = true;
+    }
     stop_workers();
     return {};
   }
@@ -832,6 +901,10 @@ struct RunKernel::Impl {
                      validated->value.data.empty() ||
                      validated->value.data.size() >
                          limits.tool_argument_bytes ||
+                     (!validated->required_effects.empty() &&
+                      !effects_are_declared(
+                          validated->required_effects,
+                          registration->declaration.effects)) ||
                      (!validated->required_scopes.empty() &&
                       std::ranges::any_of(
                           validated->required_scopes, [&](const auto& scope) {
@@ -841,6 +914,16 @@ struct RunKernel::Impl {
                                   return capability_scope_covers(declared,
                                                                  scope);
                                 });
+                          })) ||
+                     (!validated->required_scopes.empty() &&
+                      std::ranges::any_of(
+                          validated->required_scopes, [&](const auto& scope) {
+                            const auto& effects =
+                                validated->required_effects.empty()
+                                    ? registration->declaration.effects
+                                    : validated->required_effects;
+                            return std::ranges::find(effects, scope.effect) ==
+                                   effects.end();
                           })))) {
                   validated = std::unexpected(ToolExecutionError{
                       ToolExecutionErrorCode::protocol_failure,
@@ -853,10 +936,16 @@ struct RunKernel::Impl {
                                ? registration->declaration.capability_scopes
                                : validated->required_scopes)
                         : std::vector<domain::CapabilityScope>{};
+                auto required_effects =
+                    validated
+                        ? (validated->required_effects.empty()
+                               ? registration->declaration.effects
+                               : validated->required_effects)
+                        : std::vector<domain::Effect>{};
                 if (auto result = record_or_fail(
                         domain::ToolProposed{
                             invocation_id, assembly.name, raw_arguments,
-                            registration->declaration.effects, std::nullopt,
+                            required_effects, std::nullopt,
                             validated && validated->value == raw_arguments,
                             validated
                                 ? validated->required_scopes
@@ -875,6 +964,7 @@ struct RunKernel::Impl {
                       registration->limits,
                       registration->executor,
                       *message_id,
+                      {},
                       {},
                       {},
                       std::nullopt,
@@ -900,6 +990,7 @@ struct RunKernel::Impl {
                                         registration->limits,
                                         registration->executor,
                                         *message_id,
+                                        std::move(required_effects),
                                         std::move(required_scopes),
                                         {},
                                         std::nullopt,
@@ -1035,8 +1126,7 @@ struct RunKernel::Impl {
                        "tool update targets no active invocation"));
     }
     auto& invocation = active->invocations.at(update.invocation_id);
-    if (active->run_terminal && active->cancel_requested &&
-        invocation.terminal_event_seen) {
+    if (active->run_terminal && invocation.terminal_event_seen) {
       return {};
     }
     if (invocation.terminal_event_seen) {
@@ -1105,6 +1195,33 @@ struct RunKernel::Impl {
                             transaction, invocation.invocation_id);
             } else {
               invocation.output_bytes += *bytes;
+              if (!valid_created_artifacts(
+                      event.created_artifacts, event.content,
+                      invocation.invocation_id, transaction.event_log)) {
+                return fail_live_run(
+                    transaction,
+                    tool_domain_error(ToolExecutionError{
+                        ToolExecutionErrorCode::protocol_failure,
+                        "tool executor returned invalid artifact metadata",
+                        false}));
+              }
+              for (auto& artifact : event.created_artifacts) {
+                const auto artifact_id = artifact.artifact_id;
+                if (auto created = record(
+                        active->run_id,
+                        domain::ArtifactCreated{std::move(artifact)},
+                        transaction, invocation.invocation_id);
+                    !created) {
+                  return created;
+                }
+                if (auto referenced = record(
+                        active->run_id,
+                        domain::ArtifactReferenced{artifact_id, std::nullopt},
+                        transaction, invocation.invocation_id);
+                    !referenced) {
+                  return referenced;
+                }
+              }
               auto result = record(
                   active->run_id,
                   domain::ToolResultRecorded{invocation.invocation_id,
@@ -1196,7 +1313,7 @@ struct RunKernel::Impl {
           transaction.event_log.session_id(), transaction.active->run_id,
           invocation.invocation_id,
           transaction.active->permission_profile_id,
-          invocation.declaration.name, invocation.declaration.effects,
+          invocation.declaration.name, invocation.requested_effects,
           invocation.requested_scopes};
 
       std::expected<ToolPolicyResolution, ToolPolicyError> resolution =
@@ -1615,14 +1732,22 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                   });
             });
           };
-          if (proposed->second.declared_effects !=
-                  registration->declaration.effects ||
+          if (!effects_are_declared(
+                  proposed->second.declared_effects,
+                  registration->declaration.effects) ||
               !scopes_are_unique(
                   proposed->second.validated_required_scopes) ||
               !scopes_are_unique(proposed->second.requested_scopes) ||
               !scopes_are_declared(
                   proposed->second.validated_required_scopes) ||
-              !scopes_are_declared(proposed->second.requested_scopes)) {
+              !scopes_are_declared(proposed->second.requested_scopes) ||
+              std::ranges::any_of(
+                  proposed->second.requested_scopes, [&](const auto& scope) {
+                    return std::ranges::find(
+                               proposed->second.declared_effects,
+                               scope.effect) ==
+                           proposed->second.declared_effects.end();
+                  })) {
             return std::unexpected(kernel_error(
                 RunKernelErrorCode::replay_rejected,
                 "queued tool declaration changed during replay"));
@@ -1704,9 +1829,11 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                   registration->declaration,
                   ValidatedToolArguments{
                       proposed->second.arguments,
-                      proposed->second.validated_required_scopes},
+                      proposed->second.validated_required_scopes,
+                      proposed->second.declared_effects},
                   registration->limits, registration->executor,
-                  *result_message_id, proposed->second.requested_scopes,
+                  *result_message_id, proposed->second.declared_effects,
+                  proposed->second.requested_scopes,
                   std::move(granted_scopes), std::move(policy_request), state,
                   0, 0, tool_terminal.contains(current_id),
                   std::move(invocation_questions)});

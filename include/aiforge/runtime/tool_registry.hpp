@@ -50,6 +50,9 @@ struct ToolExecutionError {
 struct ValidatedToolArguments {
   domain::StructuredDataBlock value;
   std::vector<domain::CapabilityScope> required_scopes{};
+  // Empty retains the declaration's complete effect set. A validator may
+  // return a nonempty subset when arguments narrow a tool's effects.
+  std::vector<domain::Effect> required_effects{};
   auto operator==(const ValidatedToolArguments&) const -> bool = default;
 };
 
@@ -77,6 +80,7 @@ struct ToolProgress {
 
 struct ToolResult {
   std::vector<domain::ContentBlock> content;
+  std::vector<domain::ArtifactMetadata> created_artifacts{};
   auto operator==(const ToolResult&) const -> bool = default;
 };
 

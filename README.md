@@ -5,7 +5,7 @@ outward. It currently provides a streaming Venice-backed one-shot/pipe surface,
 durable and resumable sessions, provider-neutral run events, deterministic
 backends, replayable run and transcript projections, Markdown-lite
 presentation, typed configuration, and a resumable structured `ask_user` tool
-boundary.
+boundary plus a policy-gated bounded argv process executor.
 The interactive Chat workspace is the next surface; running `aiforge` without a
 prompt in a terminal still reports the current bootstrap status.
 
@@ -131,8 +131,32 @@ events.
 Tool progress and exactly one bounded result or redacted error are appended as
 run events. A subsequent inference is explicit and must include every terminal
 tool result as a tool-role context message. Replay rebuilds the same state
-without running validation, policy, tools, or inference again. AF-25 owns the
-first production bounded process executor.
+without running validation, policy, tools, or inference again. Validators may
+narrow a declaration's effect set for a specific invocation, and tool-created
+artifact metadata is committed before the terminal result that references it.
+
+## Bounded process execution
+
+`aiforge::adapters::register_process_tool` adds the model-facing `run_process`
+tool from caller-supplied command, filesystem-root, environment, time, and
+output ceilings. Each invocation provides one exact executable and argument
+vector, a normalized absolute working directory, narrowed readable/writable
+roots, selected environment-variable names, closed stdin, and smaller runtime
+and output limits. Execution uses no implicit shell and inherits neither the
+ambient environment nor unrelated file descriptors.
+
+The POSIX adapter rechecks command and configured-root identity at the effect
+boundary, runs each child in its own process group, captures stdout and stderr
+independently without blocking, and terminates descendants on cancellation,
+timeout, or output exhaustion. Small safe UTF-8 streams remain inline; binary
+or larger streams pass through a caller-supplied neutral `ArtifactStore` and
+enter the event stream as typed creation and reference records. No production
+artifact encoding is selected yet.
+
+Filesystem roots are capability-policy authority and constrain the working
+directory; they are not an operating-system sandbox. The current one-shot
+surface does not register `run_process` because it has no process approval or
+artifact-storage profile.
 
 ## Structured user questions
 
