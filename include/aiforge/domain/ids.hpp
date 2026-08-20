@@ -61,6 +61,8 @@ struct RepositoryIdTag;
 struct EvidenceIdTag;
 struct ContextParcelIdTag;
 struct ProjectInstructionIdTag;
+struct KnowledgeRecordIdTag;
+struct KnowledgeEntityIdTag;
 
 using SessionId = Id<SessionIdTag>;
 using RunId = Id<RunIdTag>;
@@ -82,5 +84,7 @@ using RepositoryId = Id<RepositoryIdTag>;
 using EvidenceId = Id<EvidenceIdTag>;
 using ContextParcelId = Id<ContextParcelIdTag>;
 using ProjectInstructionId = Id<ProjectInstructionIdTag>;
+using KnowledgeRecordId = Id<KnowledgeRecordIdTag>;
+using KnowledgeEntityId = Id<KnowledgeEntityIdTag>;
 
 }  // namespace aiforge::domain

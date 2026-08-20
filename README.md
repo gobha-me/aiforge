@@ -306,6 +306,22 @@ cost, and identity ordering. Per-class token ceilings and an explainable result
 record every admission or omission. Editing requires current exact source, and
 repository text always enters as untrusted evidence rather than instructions.
 
+## Derived repository knowledge
+
+`aiforge::domain::RepositoryKnowledgeGraph` represents rebuildable symbols,
+relationships, diagnostics, semantic summaries, and opaque future records
+without turning them into durable run history. Records retain exact repository
+and source identities, producer and build-configuration versions, derivation
+dependencies, confidence, freshness, and explicit invalidation rules.
+
+Repository knowledge validation rejects malformed or conflicting identities,
+unbounded metadata, missing current dependencies, and cycles in the derivation
+graph while allowing ordinary semantic cycles such as mutually calling
+functions. Pure freshness assessment distinguishes current, uncertain, stale,
+and unavailable inputs. Atomic generation-checked updates provide deterministic
+replacement and rebuild semantics without selecting a persistent cache or
+storage encoding.
+
 ## Project instruction discovery
 
 `aiforge::repository::ProjectInstructionSource` discovers bounded `AGENTS.md`
