@@ -8,6 +8,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   config.cpp
   context_builder.cpp
   context_parcel.cpp
+  context_selection.cpp
   event_log.cpp
   json_config_file_store.cpp
   one_shot.cpp

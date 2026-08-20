@@ -291,12 +291,20 @@ artifact references. Unknown future evidence kinds remain opaque rather than
 being guessed into a known semantic category.
 
 `aiforge::repository::validate_context_parcel` validates an ordered,
-purpose- and task-phase-labelled working set before a later selection policy
-hands it to context construction. Validation checks repository and content
+purpose- and task-phase-labelled working set before the runtime hands it to
+context construction. Validation checks repository and content
 identity, half-open source ranges, provenance consistency, artifact linkage,
 freshness claims, duplicate evidence IDs, and checked byte/token totals. This
 foundation selects no repository cache, persistence encoding, retrieval
 ranking, parser, or provider request mapping.
+
+`aiforge::runtime::ContextBuilder::select_and_build` combines validated parcels
+with candidate conversation, summaries, tool results, and attachments under the
+actual model capacity. Mandatory inputs fail rather than disappear; optional
+inputs receive deterministic task-phase, freshness, relevance, representation,
+cost, and identity ordering. Per-class token ceilings and an explainable result
+record every admission or omission. Editing requires current exact source, and
+repository text always enters as untrusted evidence rather than instructions.
 
 ## Project instruction discovery
 

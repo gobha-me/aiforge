@@ -5,6 +5,7 @@
 #include <string>
 
 #include <aiforge/domain/context.hpp>
+#include <aiforge/runtime/context_selection.hpp>
 
 namespace aiforge::runtime {
 
@@ -36,6 +37,8 @@ class ContextBuilder final {
  public:
   [[nodiscard]] auto build(domain::ContextBuildInput input) const
       -> std::expected<domain::ConstructedContext, ContextBuildError>;
+  [[nodiscard]] auto select_and_build(ContextSelectionRequest request) const
+      -> std::expected<ContextSelectionResult, ContextSelectionError>;
 };
 
 }  // namespace aiforge::runtime
