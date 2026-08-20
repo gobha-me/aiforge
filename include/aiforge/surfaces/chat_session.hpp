@@ -4,7 +4,9 @@
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/storage/session_store.hpp>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stop_token>
@@ -55,15 +57,25 @@ struct ChatSubmission {
   std::vector<domain::RunEvent> committed_events;
 };
 
+using ChatIdentitySuffixSource = std::function<std::uint64_t()>;
+
+struct ChatSessionDependencies {
+  ChatIdentitySuffixSource identity_suffix_source;
+  runtime::TimestampSource timestamp_source;
+  runtime::RunKernelLimits run_limits{};
+  runtime::ToolRegistrySnapshot tools{};
+  std::shared_ptr<runtime::ToolPolicy> tool_policy;
+};
+
 class ChatSession final {
  public:
-  [[nodiscard]] static auto open(ChatSessionOpen request,
-                                 backend::Backend& backend,
-                                 backend::ModelContextProvider& model_context,
-                                 storage::SessionStore* session_store = nullptr,
-                                 runtime::RunWakeSink* wake_sink = nullptr,
-                                 std::stop_token stop_token = {},
-                                 ChatSessionLimits limits = {})
+  [[nodiscard]] static auto open(
+      ChatSessionOpen request, backend::Backend& backend,
+      backend::ModelContextProvider& model_context,
+      storage::SessionStore* session_store = nullptr,
+      runtime::RunWakeSink* wake_sink = nullptr,
+      std::stop_token stop_token = {}, ChatSessionLimits limits = {},
+      ChatSessionDependencies dependencies = {})
       -> std::expected<std::unique_ptr<ChatSession>, ChatSessionError>;
 
   ~ChatSession();

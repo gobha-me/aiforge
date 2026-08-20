@@ -380,6 +380,30 @@ This boundary does not select a build system, CI service, diagnostic parser, or
 new executor. Producers use the shared tool invocation, policy, and artifact
 lifecycle.
 
+## Deterministic TUI scenarios
+
+`aiforge::testing::run_tui_scenario` drives versioned, bounded application
+scenarios over TermForge's synthetic clock and input-trace seam. A scenario
+orders semantic input, terminal resize, and scripted backend/tool releases at
+stable rendered-frame boundaries. The runner records an opaque TermForge trace,
+then replays it against a fresh application and fresh fakes.
+
+Results retain the scenario/corpus/application identities, terminal
+capabilities, bounded normalized frames, rendered bytes, semantic state, and
+`fnv1a64` trace/script identities. The FNV values identify reproducibility
+inputs; they are not signatures or trust evidence. Record and replay must agree
+byte-for-byte and semantically. Malformed traces, incompatible capabilities,
+changed scenario provenance, script mismatch or exhaustion, resource overruns,
+and replay divergence are typed failures. Result-aware replay verifies all
+recorded provenance and digests before starting the application.
+
+Interactive chat exposes deterministic identity, timestamp, tool-registry, and
+policy injection only through explicit dependencies; ordinary construction
+keeps the production defaults. During playback its live wake post is disabled
+because the recorded wake marker is the source of frame ordering. Scenario
+artifacts are test evidence, not durable session events or another persistence
+format.
+
 ## Project instruction discovery
 
 `aiforge::repository::ProjectInstructionSource` discovers bounded `AGENTS.md`
