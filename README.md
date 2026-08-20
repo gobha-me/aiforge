@@ -322,6 +322,21 @@ and unavailable inputs. Atomic generation-checked updates provide deterministic
 replacement and rebuild semantics without selecting a persistent cache or
 storage encoding.
 
+## Language-analysis capability port
+
+`aiforge::repository::LanguageAnalysisSource` lets optional language-specific
+adapters advertise symbols, references, relationships, signatures, and
+diagnostics for an exact repository source and build configuration. Typed
+queries return the neutral repository-knowledge records above; parser,
+compiler, and language-server types remain behind adapters.
+
+Capability and result validation preserves analyzer producer, snapshot, source,
+and build provenance; bounds records and diagnostic notices; and represents
+partial, ambiguous, unsupported, and temporarily unavailable analysis without
+guessing. A deterministic scripted source covers callers before a production
+analyzer is selected. When no analyzer is present, repository traversal, exact
+search and reads, build evidence, and VCS observations remain available.
+
 ## Project instruction discovery
 
 `aiforge::repository::ProjectInstructionSource` discovers bounded `AGENTS.md`

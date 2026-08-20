@@ -11,6 +11,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   context_selection.cpp
   event_log.cpp
   json_config_file_store.cpp
+  language_analysis.cpp
   one_shot.cpp
   presentation_text.cpp
   project_instructions.cpp
@@ -20,6 +21,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   run_projection.cpp
   scripted_artifact_store.cpp
   scripted_backend.cpp
+  scripted_language_analysis_source.cpp
   scripted_policy_grant_store.cpp
   scripted_project_instruction_source.cpp
   scripted_repository_snapshot_source.cpp
