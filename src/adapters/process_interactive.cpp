@@ -1,3 +1,4 @@
+#include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/process_draft_editor.hpp>
 #include <aiforge/adapters/process_interactive.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
@@ -136,19 +137,26 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
   }
 }
 
-class ChatApp final : public termforge::App {
+class ChatAppImpl final : public InteractiveChatApp {
  public:
-  ChatApp(backend::Backend& backend,
-          backend::ModelContextProvider& model_context,
-          storage::SessionStore* session_store, surfaces::ChatSessionOpen open,
-          surfaces::DraftEditor& editor, const std::stop_token stop_token)
-      : m_bridge(*this), m_editor(editor), m_stop_token(stop_token) {
+  ChatAppImpl(backend::Backend& backend,
+              backend::ModelContextProvider& model_context,
+              storage::SessionStore* session_store,
+              surfaces::ChatSessionOpen open, surfaces::DraftEditor& editor,
+              const std::stop_token stop_token,
+              InteractiveChatAppOptions options)
+      : m_bridge(*this, options.live_wake_enabled,
+                 std::move(options.wake_observer)),
+        m_editor(editor),
+        m_stop_token(stop_token), m_rendered_output(options.rendered_output),
+        m_rendered_frame(std::move(options.rendered_frame)),
+        m_poll_worker_updates(options.poll_worker_updates) {
     set_frame_ms(33);
     m_composer.set_max_height(8);
     m_focus.add(&m_composer);
-    auto session =
-        surfaces::ChatSession::open(std::move(open), backend, model_context,
-                                    session_store, &m_bridge, stop_token);
+    auto session = surfaces::ChatSession::open(
+        std::move(open), backend, model_context, session_store, &m_bridge,
+        stop_token, {}, std::move(options.session_dependencies));
     if (!session) {
       m_setup_error = session_error(session.error());
       return;
@@ -166,20 +174,20 @@ class ChatApp final : public termforge::App {
     m_status = "Ready";
   }
 
-  [[nodiscard]] auto ready() const noexcept -> bool {
+  [[nodiscard]] auto ready() const noexcept -> bool override {
     return m_session != nullptr && !m_setup_error.has_value();
   }
 
-  [[nodiscard]] auto setup_error() const -> cli::CommandFailure {
+  [[nodiscard]] auto setup_error() const -> cli::CommandFailure override {
     return m_setup_error.value_or(cli::CommandFailure{
         cli::CommandFailureKind::runtime, "interactive session setup failed"});
   }
 
-  [[nodiscard]] auto pending_edit() const noexcept -> bool {
+  [[nodiscard]] auto pending_edit() const noexcept -> bool override {
     return m_pending_edit;
   }
 
-  auto perform_edit() -> void {
+  auto perform_edit() -> void override {
     m_pending_edit = false;
     const auto original = m_composer.text();
     auto edited = m_editor.edit(original, m_stop_token);
@@ -192,8 +200,37 @@ class ChatApp final : public termforge::App {
   }
 
   [[nodiscard]] auto failure_state() const
-      -> std::optional<cli::CommandFailure> {
+      -> std::optional<cli::CommandFailure> override {
     return m_failure;
+  }
+
+  [[nodiscard]] auto events() const noexcept
+      -> std::span<const domain::RunEvent> override {
+    if (!m_session) return {};
+    return m_session->event_log().events();
+  }
+
+  [[nodiscard]] auto status_text() const noexcept -> std::string_view override {
+    return m_status;
+  }
+
+  [[nodiscard]] auto configure_terminal_for_scenario(
+      const termforge::TerminalIo io,
+      const termforge::Capabilities& capabilities)
+      -> std::expected<void, std::string> override {
+    auto configured_io = terminal().set_io(io);
+    if (!configured_io) {
+      return std::unexpected(configured_io.error().message);
+    }
+    auto configured_capabilities = terminal().set_capabilities(capabilities);
+    if (!configured_capabilities) {
+      return std::unexpected(configured_capabilities.error().message);
+    }
+    return {};
+  }
+
+  auto on_start() -> void override {
+    if (m_rendered_output != nullptr) driver().set_output(m_rendered_output);
   }
 
   auto on_event(const termforge::Event& event) -> void override {
@@ -283,12 +320,14 @@ class ChatApp final : public termforge::App {
 
   auto on_tick(std::chrono::duration<double>) -> void override {
     if (!m_session) return;
-    auto drained = m_session->drain();
-    if (!drained) {
-      fail(session_error(drained.error()));
-      return;
+    if (m_poll_worker_updates) {
+      auto drained = m_session->drain();
+      if (!drained) {
+        fail(session_error(drained.error()));
+        return;
+      }
+      if (!apply_events(*drained)) return;
     }
-    if (!apply_events(*drained)) return;
     if (m_stop_token.stop_requested()) {
       if (m_session->active()) {
         auto cancelled = m_session->cancel_active("interrupt");
@@ -334,6 +373,7 @@ class ChatApp final : public termforge::App {
     if (!m_status.empty()) footer += " | " + m_status;
     screen.write_text(0, rows - 1, footer, termforge::theme::kDim,
                       termforge::theme::kBg);
+    if (m_rendered_frame) m_rendered_frame(screen);
   }
 
  private:
@@ -523,6 +563,9 @@ class ChatApp final : public termforge::App {
   TermForgeRunBridge m_bridge;
   surfaces::DraftEditor& m_editor;
   std::stop_token m_stop_token;
+  termforge::ByteSink* m_rendered_output{};
+  std::function<void(const termforge::Screen&)> m_rendered_frame;
+  bool m_poll_worker_updates{true};
   TranscriptView m_transcript;
   termforge::TextBox m_help;
   termforge::Composer m_composer;
@@ -540,6 +583,16 @@ class ChatApp final : public termforge::App {
 };
 
 }  // namespace
+
+auto make_interactive_chat_app(
+    backend::Backend& backend, backend::ModelContextProvider& model_context,
+    storage::SessionStore* session_store, surfaces::ChatSessionOpen open,
+    surfaces::DraftEditor& editor, const std::stop_token stop_token,
+    InteractiveChatAppOptions options) -> std::unique_ptr<InteractiveChatApp> {
+  return std::make_unique<ChatAppImpl>(backend, model_context, session_store,
+                                       std::move(open), editor, stop_token,
+                                       std::move(options));
+}
 
 auto ProcessInteractiveCommand::execute(Request request,
                                         cli::CommandEnvironment& environment,
@@ -603,22 +656,23 @@ auto ProcessInteractiveCommand::execute(Request request,
       store = std::move(*opened);
     }
 
-    ChatApp app{backend,         backend, store.get(),
-                std::move(open), editor,  environment.stop_token};
-    if (!app.ready()) return std::unexpected(app.setup_error());
+    auto app = make_interactive_chat_app(backend, backend, store.get(),
+                                         std::move(open), editor,
+                                         environment.stop_token);
+    if (!app->ready()) return std::unexpected(app->setup_error());
     for (;;) {
-      const int result = app.run();
-      if (app.failure_state()) {
-        return std::unexpected(*app.failure_state());
+      const int result = app->run();
+      if (app->failure_state()) {
+        return std::unexpected(*app->failure_state());
       }
-      if (!app.pending_edit()) {
+      if (!app->pending_edit()) {
         if (result != 0) {
           return failure(cli::CommandFailureKind::runtime,
                          "interactive terminal setup failed");
         }
         return {};
       }
-      app.perform_edit();
+      app->perform_edit();
       if (environment.stop_token.stop_requested()) {
         return failure(cli::CommandFailureKind::cancelled,
                        "interactive chat cancelled");

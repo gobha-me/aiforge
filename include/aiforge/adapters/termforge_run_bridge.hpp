@@ -3,7 +3,9 @@
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
 #include <expected>
+#include <functional>
 #include <termforge/core/app.hpp>
+#include <utility>
 #include <vector>
 
 namespace aiforge::adapters {
@@ -12,7 +14,11 @@ namespace aiforge::adapters {
 // allowing a worker to touch widgets or projections.
 class TermForgeRunBridge final : public runtime::RunWakeSink {
  public:
-  explicit TermForgeRunBridge(termforge::App& app) : m_app(app) {}
+  explicit TermForgeRunBridge(termforge::App& app,
+                              const bool live_wake_enabled = true,
+                              std::function<void()> wake_observer = {})
+      : m_app(app), m_live_wake_enabled(live_wake_enabled),
+        m_wake_observer(std::move(wake_observer)) {}
 
   auto wake() noexcept -> void override;
 
@@ -26,6 +32,8 @@ class TermForgeRunBridge final : public runtime::RunWakeSink {
 
  private:
   termforge::App& m_app;
+  bool m_live_wake_enabled{true};
+  std::function<void()> m_wake_observer;
 };
 
 }  // namespace aiforge::adapters

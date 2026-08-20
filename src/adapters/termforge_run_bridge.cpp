@@ -24,9 +24,12 @@ constexpr std::string_view kWakeMessage{"events-ready"};
 
 auto TermForgeRunBridge::wake() noexcept -> void {
   try {
-    m_app.post(termforge::ErrorEvent{termforge::Severity::Info,
-                                     std::string{kWakeSource},
-                                     std::string{kWakeMessage}});
+    if (m_live_wake_enabled) {
+      m_app.post(termforge::ErrorEvent{termforge::Severity::Info,
+                                       std::string{kWakeSource},
+                                       std::string{kWakeMessage}});
+    }
+    if (m_wake_observer) m_wake_observer();
   } catch (...) {
     // App::post may allocate. Continuous-mode surfaces still call drain from
     // their tick path, so an allocation failure may delay but cannot corrupt a

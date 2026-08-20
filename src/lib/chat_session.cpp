@@ -95,6 +95,7 @@ struct ChatSession::Impl {
   std::uint64_t output_tokens{};
   ChatSessionLimits limits;
   bool is_durable{};
+  ChatIdentitySuffixSource identity_suffix_source;
   std::unique_ptr<runtime::RunKernel> kernel;
 };
 
@@ -107,7 +108,8 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
                        storage::SessionStore* session_store,
                        runtime::RunWakeSink* wake_sink,
                        const std::stop_token stop_token,
-                       const ChatSessionLimits limits)
+                       const ChatSessionLimits limits,
+                       ChatSessionDependencies dependencies)
     -> std::expected<std::unique_ptr<ChatSession>, ChatSessionError> {
   try {
     if (limits.maximum_input_bytes == 0 ||
@@ -153,7 +155,10 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
                    "model context capacity is too small");
     }
 
-    const auto suffix = next_suffix();
+    if (!dependencies.identity_suffix_source) {
+      dependencies.identity_suffix_source = next_suffix;
+    }
+    const auto suffix = dependencies.identity_suffix_source();
     auto generated = make_id<domain::SessionId>("session", suffix);
     if (!generated) return std::unexpected(std::move(generated.error()));
     auto selected = request.session_id.value_or(*generated);
@@ -185,7 +190,9 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
           {selected, mode,
            std::chrono::floor<std::chrono::milliseconds>(
                std::chrono::system_clock::now())},
-          *session_store, backend, wake_sink);
+          *session_store, backend, wake_sink,
+          std::move(dependencies.timestamp_source), dependencies.run_limits,
+          std::move(dependencies.tools), std::move(dependencies.tool_policy));
       if (!opened) {
         return error(ChatSessionErrorCode::session_failed,
                      "durable session could not be opened",
@@ -193,13 +200,15 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
       }
       kernel = std::move(*opened);
     } else {
-      kernel =
-          std::make_unique<runtime::RunKernel>(selected, backend, wake_sink);
+      kernel = std::make_unique<runtime::RunKernel>(
+          selected, backend, wake_sink,
+          std::move(dependencies.timestamp_source), dependencies.run_limits,
+          std::move(dependencies.tools), std::move(dependencies.tool_policy));
     }
 
-    auto impl =
-        std::make_unique<Impl>(Impl{request.model_id, *model, output_tokens,
-                                    limits, durable, std::move(kernel)});
+    auto impl = std::make_unique<Impl>(Impl{
+        request.model_id, *model, output_tokens, limits, durable,
+        std::move(dependencies.identity_suffix_source), std::move(kernel)});
     return std::unique_ptr<ChatSession>{new ChatSession{std::move(impl)}};
   } catch (...) {
     return error(ChatSessionErrorCode::internal_failure,
@@ -223,7 +232,7 @@ auto ChatSession::submit(std::string prompt)
                    "another interactive run is active");
     }
 
-    const auto suffix = next_suffix();
+    const auto suffix = m_impl->identity_suffix_source();
     auto run_id = make_id<domain::RunId>("run", suffix);
     auto inference_id = make_id<domain::InferenceId>("inference", suffix);
     auto user_message_id = make_id<domain::MessageId>("user", suffix);

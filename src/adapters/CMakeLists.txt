@@ -7,6 +7,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   process_interactive.cpp
   termforge_run_bridge.cpp
   transcript_view.cpp
+  tui_scenario.cpp
   venice_backend.cpp
 )
 add_library(${PROJECT_NAME}::adapters ALIAS ${PROJECT_NAME}_adapters)

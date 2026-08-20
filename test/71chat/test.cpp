@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
+#include <cstdint>
 #include <expected>
 #include <map>
 #include <memory>
@@ -234,6 +235,31 @@ TEST_CASE("interactive turns stream and reuse completed conversation context",
           std::vector<std::string>{"answer-1"});
   REQUIRE((*session)->submitted_prompts() ==
           std::vector<std::string>{"first\nline", "second"});
+}
+
+TEST_CASE("interactive sessions accept deterministic identity and time sources",
+          "[chat][scenario]") {
+  Backend backend;
+  std::uint64_t suffix{};
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.identity_suffix_source = [&suffix] { return ++suffix; };
+  const domain::EventTimestamp timestamp{123ms};
+  dependencies.timestamp_source = [timestamp] { return timestamp; };
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
+      backend, backend, nullptr, nullptr, {}, {}, std::move(dependencies));
+  REQUIRE(session);
+  REQUIRE((*session)->session_id() == make_id<domain::SessionId>("session-1"));
+  const auto submitted = (*session)->submit("deterministic");
+  REQUIRE(submitted);
+  REQUIRE(submitted->run_id == make_id<domain::RunId>("run-2"));
+  drain_to_end(**session);
+  REQUIRE(suffix == 2);
+  REQUIRE(std::ranges::all_of((*session)->event_log().events(),
+                              [timestamp](const auto& event) {
+                                return event.metadata.timestamp == timestamp;
+                              }));
 }
 
 TEST_CASE("durable interactive resume rebuilds history without inference",
