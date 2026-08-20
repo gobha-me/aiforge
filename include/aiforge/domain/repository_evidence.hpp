@@ -12,21 +12,6 @@
 
 namespace aiforge::domain {
 
-struct SourceByteRange {
-  // Zero-based, half-open byte offsets into content_digest's exact bytes.
-  std::uint64_t begin{};
-  std::uint64_t end{};
-  auto operator==(const SourceByteRange&) const -> bool = default;
-};
-
-struct RepositorySourceIdentity {
-  RepositorySnapshotIdentity snapshot;
-  std::string relative_path;
-  ContentDigest content_digest;
-  std::optional<SourceByteRange> range;
-  auto operator==(const RepositorySourceIdentity&) const -> bool = default;
-};
-
 enum class TaskPhase {
   orientation,
   diagnosis,

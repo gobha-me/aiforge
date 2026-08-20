@@ -14,6 +14,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   one_shot.cpp
   presentation_text.cpp
   project_instructions.cpp
+  repository_knowledge.cpp
   repository_snapshot.cpp
   run_kernel.cpp
   run_projection.cpp
