@@ -359,6 +359,27 @@ and record the receipt through the ordinary invocation lifecycle. File creation,
 deletion, rename, multi-file transactions, merge resolution, and patch-language
 selection remain outside this boundary.
 
+## Code verification evidence
+
+Build, test, static-analysis, diagnostic, diff, and runtime observations use
+provider-neutral `VerificationEvidence` records tied to an exact repository
+snapshot, optional build configuration, producing tool invocation, observation
+time, bounded output excerpts, structured diagnostics, and artifact references.
+The corresponding typed run event is stored and replayed through the existing
+append-only session stream; replay projects a transcript summary and never
+re-executes the producing tool.
+
+Validation rejects malformed provenance, unsafe or oversized text, duplicate
+invocation or artifact identities, invalid diagnostics, and inconsistent diff
+snapshots. Freshness is assessed against the current repository,
+configuration, and artifact availability without rewriting the recorded
+observation. Valid records can enter verification and review context parcels as
+untrusted evidence, where they receive phase-specific selection priority.
+
+This boundary does not select a build system, CI service, diagnostic parser, or
+new executor. Producers use the shared tool invocation, policy, and artifact
+lifecycle.
+
 ## Project instruction discovery
 
 `aiforge::repository::ProjectInstructionSource` discovers bounded `AGENTS.md`

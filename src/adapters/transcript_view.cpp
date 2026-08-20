@@ -57,6 +57,34 @@ namespace {
   return "unknown";
 }
 
+[[nodiscard]] auto verification_kind(const domain::VerificationKind kind)
+    -> std::string_view {
+  switch (kind) {
+    case domain::VerificationKind::build: return "build";
+    case domain::VerificationKind::test: return "test";
+    case domain::VerificationKind::static_analysis: return "static analysis";
+    case domain::VerificationKind::diagnostic: return "diagnostic";
+    case domain::VerificationKind::diff: return "diff";
+    case domain::VerificationKind::runtime: return "runtime";
+    case domain::VerificationKind::unknown: return "verification";
+  }
+  return "verification";
+}
+
+[[nodiscard]] auto verification_outcome(
+    const domain::VerificationOutcome outcome) -> std::string_view {
+  switch (outcome) {
+    case domain::VerificationOutcome::passed: return "passed";
+    case domain::VerificationOutcome::failed: return "failed";
+    case domain::VerificationOutcome::partial: return "partial";
+    case domain::VerificationOutcome::cancelled: return "cancelled";
+    case domain::VerificationOutcome::timed_out: return "timed out";
+    case domain::VerificationOutcome::unavailable: return "unavailable";
+    case domain::VerificationOutcome::unknown: return "unknown";
+  }
+  return "unknown";
+}
+
 [[nodiscard]] auto live(const domain::TranscriptItem& item) -> bool {
   if (const auto* message = std::get_if<domain::TranscriptMessage>(&item)) {
     return message->state == domain::TranscriptMessageState::streaming;
@@ -463,6 +491,21 @@ auto TranscriptView::render_run(const domain::TranscriptProjection& projection)
                         artifact->artifact.artifact_id.value(), *media,
                         artifact->artifact.byte_size),
             style(m_theme.artifact, presentation::TextSemantic::strong));
+      } else if (const auto* verification =
+                     std::get_if<domain::TranscriptVerificationSummary>(&item)) {
+        auto summary = sanitized(verification->evidence.summary);
+        if (!summary) return std::unexpected(std::move(summary.error()));
+        append_span(
+            output,
+            std::format("Verification {} — {}\n{}",
+                        verification_kind(verification->evidence.kind),
+                        verification_outcome(verification->evidence.outcome),
+                        *summary),
+            style(verification->evidence.outcome ==
+                          domain::VerificationOutcome::passed
+                      ? m_theme.artifact
+                      : m_theme.tool,
+                  presentation::TextSemantic::strong));
       } else if (const auto* notice =
                      std::get_if<domain::TranscriptNotice>(&item)) {
         auto message = sanitized(notice->message);

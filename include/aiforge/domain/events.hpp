@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <aiforge/domain/content.hpp>
+#include <aiforge/domain/verification_evidence.hpp>
 
 namespace aiforge::domain {
 
@@ -264,6 +265,11 @@ struct ArtifactRemovedFromView {
   auto operator==(const ArtifactRemovedFromView&) const -> bool = default;
 };
 
+struct VerificationEvidenceRecorded {
+  VerificationEvidence evidence;
+  auto operator==(const VerificationEvidenceRecorded&) const -> bool = default;
+};
+
 struct ChildRunCreated {
   RunId child_run_id;
   auto operator==(const ChildRunCreated&) const -> bool = default;
@@ -293,7 +299,8 @@ using RunEventPayload = std::variant<
     ToolApprovalRequested, ToolApprovalDecided, ToolPolicyFailed, ToolStarted,
     ToolProgressed, ToolResultRecorded, ToolErrored, QuestionRequested,
     QuestionAnswered, QuestionCancelled, ArtifactCreated, ArtifactReferenced,
-    ArtifactDisplayed, ArtifactRemovedFromView, ChildRunCreated,
+    ArtifactDisplayed, ArtifactRemovedFromView, VerificationEvidenceRecorded,
+    ChildRunCreated,
     InterRunMessageSent, UnknownEvent>;
 
 struct EventMetadata {

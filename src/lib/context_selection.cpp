@@ -177,6 +177,9 @@ struct CandidateState {
           return "invocation:" + std::string{value.invocation_id.value()};
         } else if constexpr (std::same_as<Reference, DerivedRecordEvidence>) {
           return value.record_type + ':' + value.record_id;
+        } else if constexpr (std::same_as<Reference,
+                                            VerificationEvidenceReference>) {
+          return "verification:" + std::string{value.evidence_id.value()};
         } else {
           return "unknown:" + value.type_name;
         }
@@ -198,26 +201,27 @@ struct CandidateState {
                                       const TaskPhase phase) -> std::uint32_t {
   if (!reference) return 3;
   const auto kind = reference->index();
-  // Variant order: exact, diagnostic, diff, tool result, derived, unknown.
+  // Variant order: exact, diagnostic, diff, tool result, derived,
+  // verification, unknown.
   switch (phase) {
     case TaskPhase::orientation: {
-      constexpr std::uint32_t ranks[]{1, 4, 3, 4, 0, 5};
+      constexpr std::uint32_t ranks[]{1, 4, 3, 4, 0, 5, 6};
       return ranks[kind];
     }
     case TaskPhase::diagnosis: {
-      constexpr std::uint32_t ranks[]{2, 0, 3, 1, 4, 5};
+      constexpr std::uint32_t ranks[]{2, 0, 3, 1, 4, 2, 5};
       return ranks[kind];
     }
     case TaskPhase::editing: {
-      constexpr std::uint32_t ranks[]{0, 2, 1, 3, 4, 5};
+      constexpr std::uint32_t ranks[]{0, 2, 1, 3, 4, 5, 6};
       return ranks[kind];
     }
     case TaskPhase::verification: {
-      constexpr std::uint32_t ranks[]{3, 1, 0, 2, 4, 5};
+      constexpr std::uint32_t ranks[]{4, 2, 1, 3, 5, 0, 6};
       return ranks[kind];
     }
     case TaskPhase::review: {
-      constexpr std::uint32_t ranks[]{2, 1, 0, 3, 4, 5};
+      constexpr std::uint32_t ranks[]{3, 2, 1, 4, 5, 0, 6};
       return ranks[kind];
     }
     case TaskPhase::unknown:
