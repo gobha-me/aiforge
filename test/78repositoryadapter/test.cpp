@@ -1,3 +1,4 @@
+#include <aiforge/adapters/git_exact_source_editor.hpp>
 #include <aiforge/adapters/git_project_instruction_source.hpp>
 #include <aiforge/adapters/git_repository_snapshot_source.hpp>
 
@@ -8,6 +9,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <thread>
 #include <stop_token>
 #include <string>
@@ -68,6 +70,13 @@ auto write_file(const std::filesystem::path& path, const std::string_view text)
   REQUIRE(output);
   output.write(text.data(), static_cast<std::streamsize>(text.size()));
   REQUIRE(output);
+}
+
+auto read_file(const std::filesystem::path& path) -> std::string {
+  std::ifstream input{path, std::ios::binary};
+  REQUIRE(input);
+  return {std::istreambuf_iterator<char>{input},
+          std::istreambuf_iterator<char>{}};
 }
 
 auto shell_quote(const std::filesystem::path& path) -> std::string {
@@ -166,6 +175,10 @@ TEST_CASE("plain repository snapshots hash files and symlinks without following"
   REQUIRE(link != first->changes.end());
   REQUIRE(link->entry_kind == domain::RepositoryEntryKind::symbolic_link);
   REQUIRE(link->worktree_digest->byte_size == 5);
+  const auto file = std::ranges::find(first->changes, "a.txt",
+                                      &domain::RepositoryChange::relative_path);
+  REQUIRE(file != first->changes.end());
+  REQUIRE(file->worktree_digest != link->worktree_digest);
 
   auto second = observer.observe({directory.path().string(), {}});
   REQUIRE(second);
@@ -185,6 +198,7 @@ TEST_CASE("project instructions are discovered from root to target subtree") {
 
   auto observer = source();
   const auto baseline = observer.observe({directory.path().string(), {}});
+  INFO((baseline ? std::string{} : baseline.error().message));
   REQUIRE(baseline);
   adapters::GitProjectInstructionSource instructions{observer};
   const auto result = instructions.discover({*baseline, "src/lib", {}});
@@ -509,4 +523,241 @@ TEST_CASE("Git repository source bounds malformed oversized and slow commands") 
   REQUIRE(unstable.error().code ==
           repository::RepositorySnapshotErrorCode::unstable);
   REQUIRE(unstable.error().retryable);
+}
+
+TEST_CASE("exact-source reads fail closed on missing unsupported and aliased paths",
+          "[repository][edit][failure]") {
+  auto directory = initialized_repository();
+  TemporaryDirectory outside;
+  write_file(outside.path() / "file.cpp", "outside\n");
+  std::filesystem::create_directories(directory.path() / "folder");
+  write_file(directory.path() / "linked-target", "linked\n");
+  std::filesystem::create_symlink("linked-target",
+                                  directory.path() / "symbolic");
+  write_file(directory.path() / "aliased", "alias\n");
+  std::filesystem::create_hard_link(directory.path() / "aliased",
+                                    directory.path() / "hard-link");
+  std::filesystem::create_directory_symlink(outside.path(),
+                                            directory.path() / "escape");
+
+  auto observer = source();
+  const auto baseline = observer.observe({directory.path().string(), {}});
+  INFO((baseline ? std::string{} : baseline.error().message));
+  REQUIRE(baseline);
+  adapters::GitExactSourceEditor editor{observer};
+
+  const auto missing = editor.read({*baseline, "missing.cpp", {}});
+  REQUIRE_FALSE(missing);
+  REQUIRE(missing.error().code ==
+          repository::ExactSourceEditErrorCode::not_found);
+  const auto directory_result = editor.read({*baseline, "folder", {}});
+  REQUIRE_FALSE(directory_result);
+  REQUIRE(directory_result.error().code ==
+          repository::ExactSourceEditErrorCode::unsupported_entry);
+  const auto symlink = editor.read({*baseline, "symbolic", {}});
+  REQUIRE_FALSE(symlink);
+  REQUIRE(symlink.error().code ==
+          repository::ExactSourceEditErrorCode::outside_repository);
+  const auto escaped = editor.read({*baseline, "escape/file.cpp", {}});
+  REQUIRE_FALSE(escaped);
+  REQUIRE(escaped.error().code ==
+          repository::ExactSourceEditErrorCode::outside_repository);
+  const auto hard_link = editor.read({*baseline, "aliased", {}});
+  REQUIRE_FALSE(hard_link);
+  REQUIRE(hard_link.error().code ==
+          repository::ExactSourceEditErrorCode::outside_repository);
+  const auto traversal = editor.read({*baseline, "../tracked.txt", {}});
+  REQUIRE_FALSE(traversal);
+  REQUIRE(traversal.error().code ==
+          repository::ExactSourceEditErrorCode::invalid_request);
+}
+
+TEST_CASE("exact-source edits reject stale repository and preserve user content",
+          "[repository][edit][failure]") {
+  auto directory = initialized_repository();
+  auto observer = source();
+  const auto baseline = observer.observe({directory.path().string(), {}});
+  REQUIRE(baseline);
+  adapters::GitExactSourceEditor editor{observer};
+  const auto exact = editor.read({*baseline, "tracked.txt", {}});
+  REQUIRE(exact);
+
+  write_file(directory.path() / "tracked.txt", "user edit\n");
+  const repository::ExactSourceEditRequest request{
+      *baseline, exact->source, {0, 5}, "agent", {}};
+  const auto stale = editor.apply(request);
+  REQUIRE_FALSE(stale);
+  REQUIRE(stale.error().code ==
+          repository::ExactSourceEditErrorCode::stale_snapshot);
+  REQUIRE_FALSE(stale.error().may_have_applied);
+  REQUIRE(read_file(directory.path() / "tracked.txt") == "user edit\n");
+
+  auto second_directory = initialized_repository();
+  auto second_observer = source();
+  const auto second_baseline =
+      second_observer.observe({second_directory.path().string(), {}});
+  REQUIRE(second_baseline);
+  adapters::GitExactSourceEditor second_editor{second_observer};
+  const auto second_exact =
+      second_editor.read({*second_baseline, "tracked.txt", {}});
+  REQUIRE(second_exact);
+  write_file(second_directory.path() / "unrelated.txt", "new\n");
+  const auto unrelated = second_editor.apply(
+      {*second_baseline, second_exact->source, {0, 5}, "agent", {}});
+  REQUIRE_FALSE(unrelated);
+  REQUIRE(unrelated.error().code ==
+          repository::ExactSourceEditErrorCode::stale_snapshot);
+  REQUIRE(read_file(second_directory.path() / "tracked.txt") == "first\n");
+}
+
+TEST_CASE("exact-source edits reject deleted renamed branch and digest conflicts",
+          "[repository][edit][failure]") {
+  auto deleted_directory = initialized_repository();
+  auto deleted_observer = source();
+  const auto deleted_baseline =
+      deleted_observer.observe({deleted_directory.path().string(), {}});
+  REQUIRE(deleted_baseline);
+  adapters::GitExactSourceEditor deleted_editor{deleted_observer};
+  const auto deleted_source =
+      deleted_editor.read({*deleted_baseline, "tracked.txt", {}});
+  REQUIRE(deleted_source);
+  std::filesystem::remove(deleted_directory.path() / "tracked.txt");
+  const auto deleted = deleted_editor.apply(
+      {*deleted_baseline, deleted_source->source, {0, 5}, "agent", {}});
+  REQUIRE_FALSE(deleted);
+  REQUIRE(deleted.error().code ==
+          repository::ExactSourceEditErrorCode::stale_snapshot);
+  REQUIRE_FALSE(std::filesystem::exists(deleted_directory.path() / "tracked.txt"));
+
+  auto renamed_directory = initialized_repository();
+  auto renamed_observer = source();
+  const auto renamed_baseline =
+      renamed_observer.observe({renamed_directory.path().string(), {}});
+  REQUIRE(renamed_baseline);
+  adapters::GitExactSourceEditor renamed_editor{renamed_observer};
+  const auto renamed_source =
+      renamed_editor.read({*renamed_baseline, "tracked.txt", {}});
+  REQUIRE(renamed_source);
+  std::filesystem::rename(renamed_directory.path() / "tracked.txt",
+                          renamed_directory.path() / "moved.txt");
+  const auto renamed = renamed_editor.apply(
+      {*renamed_baseline, renamed_source->source, {0, 5}, "agent", {}});
+  REQUIRE_FALSE(renamed);
+  REQUIRE(renamed.error().code ==
+          repository::ExactSourceEditErrorCode::stale_snapshot);
+  REQUIRE(read_file(renamed_directory.path() / "moved.txt") == "first\n");
+
+  auto branch_directory = initialized_repository();
+  auto branch_observer = source();
+  const auto branch_baseline =
+      branch_observer.observe({branch_directory.path().string(), {}});
+  REQUIRE(branch_baseline);
+  adapters::GitExactSourceEditor branch_editor{branch_observer};
+  const auto branch_source =
+      branch_editor.read({*branch_baseline, "tracked.txt", {}});
+  REQUIRE(branch_source);
+  git(branch_directory.path(), "switch -qc other");
+  const auto changed_branch = branch_editor.apply(
+      {*branch_baseline, branch_source->source, {0, 5}, "agent", {}});
+  REQUIRE_FALSE(changed_branch);
+  REQUIRE(changed_branch.error().code ==
+          repository::ExactSourceEditErrorCode::stale_snapshot);
+  REQUIRE(read_file(branch_directory.path() / "tracked.txt") == "first\n");
+
+  auto mismatch_directory = initialized_repository();
+  auto mismatch_observer = source();
+  const auto mismatch_baseline =
+      mismatch_observer.observe({mismatch_directory.path().string(), {}});
+  REQUIRE(mismatch_baseline);
+  adapters::GitExactSourceEditor mismatch_editor{mismatch_observer};
+  const auto mismatch_source =
+      mismatch_editor.read({*mismatch_baseline, "tracked.txt", {}});
+  REQUIRE(mismatch_source);
+  auto invented = mismatch_source->source;
+  invented.content_digest.value = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const auto mismatch = mismatch_editor.apply(
+      {*mismatch_baseline, invented, {0, 5}, "agent", {}});
+  REQUIRE_FALSE(mismatch);
+  REQUIRE(mismatch.error().code ==
+          repository::ExactSourceEditErrorCode::source_mismatch);
+  REQUIRE(mismatch.error().observed_source == mismatch_source->source);
+  REQUIRE(read_file(mismatch_directory.path() / "tracked.txt") == "first\n");
+}
+
+TEST_CASE("exact-source edits serialize shared baselines and preserve permissions",
+          "[repository][edit][concurrency]") {
+  auto directory = initialized_repository();
+  const auto target = directory.path() / "tracked.txt";
+  std::filesystem::permissions(
+      target, std::filesystem::perms::owner_read |
+                  std::filesystem::perms::owner_write |
+                  std::filesystem::perms::group_read);
+  auto first_observer = source();
+  auto second_observer = source();
+  const auto baseline =
+      first_observer.observe({directory.path().string(), {}});
+  REQUIRE(baseline);
+  adapters::GitExactSourceEditor first_editor{first_observer};
+  adapters::GitExactSourceEditor second_editor{second_observer};
+  const auto exact = first_editor.read({*baseline, "tracked.txt", {}});
+  REQUIRE(exact);
+
+  const repository::ExactSourceEditRequest request{
+      *baseline, exact->source, {0, 5}, "second", {}};
+  const auto applied = first_editor.apply(request);
+  INFO((applied ? std::string{} : applied.error().message));
+  REQUIRE(applied);
+  REQUIRE(read_file(target) == "second\n");
+  REQUIRE(applied->previous_source == exact->source);
+  REQUIRE(applied->replaced_range == domain::SourceByteRange{0, 5});
+  REQUIRE(applied->resulting_range == domain::SourceByteRange{0, 6});
+  REQUIRE(applied->resulting_source.content_digest.byte_size == 7);
+  const auto permissions = std::filesystem::status(target).permissions();
+  REQUIRE((permissions & std::filesystem::perms::owner_write) !=
+          std::filesystem::perms::none);
+  REQUIRE((permissions & std::filesystem::perms::group_read) !=
+          std::filesystem::perms::none);
+
+  const auto conflicted = second_editor.apply(request);
+  REQUIRE_FALSE(conflicted);
+  REQUIRE(conflicted.error().code ==
+          repository::ExactSourceEditErrorCode::stale_snapshot);
+  REQUIRE(read_file(target) == "second\n");
+}
+
+TEST_CASE("exact-source reads accept captured dirty state and edits support insertion",
+          "[repository][edit][smoke]") {
+  auto directory = initialized_repository();
+  write_file(directory.path() / "tracked.txt", "dirty\n");
+  auto observer = source();
+  const auto baseline = observer.observe({directory.path().string(), {}});
+  REQUIRE(baseline);
+  REQUIRE_FALSE(baseline->changes.empty());
+  adapters::GitExactSourceEditor editor{observer};
+  const auto exact = editor.read({*baseline, "tracked.txt", {}});
+  INFO((exact ? std::string{} : exact.error().message));
+  REQUIRE(exact);
+  REQUIRE(exact->content == "dirty\n");
+  REQUIRE(exact->source.content_digest.byte_size == 6);
+
+  const repository::ExactSourceEditRequest insert{
+      *baseline, exact->source, {6, 6}, "tail\n", {}};
+  const auto applied = editor.apply(insert);
+  INFO((applied ? std::string{} : applied.error().message));
+  REQUIRE(applied);
+  REQUIRE(read_file(directory.path() / "tracked.txt") == "dirty\ntail\n");
+  REQUIRE(applied->resulting_source.content_digest.byte_size == 11);
+  REQUIRE(std::ranges::none_of(
+      std::filesystem::directory_iterator{directory.path() / ".git"},
+      [](const auto& entry) {
+        return entry.path().filename().string().starts_with(".aiforge-edit-");
+      }));
+
+  std::stop_source cancelled;
+  cancelled.request_stop();
+  const auto stopped = editor.read(
+      {*baseline, "tracked.txt", {}}, cancelled.get_token());
+  REQUIRE_FALSE(stopped);
+  REQUIRE(stopped.error().code ==
+          repository::ExactSourceEditErrorCode::cancelled);
 }
