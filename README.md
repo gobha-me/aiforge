@@ -337,6 +337,28 @@ guessing. A deterministic scripted source covers callers before a production
 analyzer is selected. When no analyzer is present, repository traversal, exact
 search and reads, build evidence, and VCS observations remain available.
 
+## Exact-source edit guard
+
+`aiforge::repository::ExactSourceEditor` reads bounded complete files against a
+captured repository snapshot and applies byte-range replacements only when the
+repository identity and whole-file digest still match. Existing dirty state is
+valid when it is part of the baseline; later branch, worktree, index, untracked,
+path-identity, or target-content changes fail closed.
+
+`aiforge::adapters::GitExactSourceEditor` rejects traversal, symlink, hard-link,
+and non-regular targets, serializes cooperating writers, prepares replacement
+bytes outside the observed worktree, and rechecks the snapshot and source at the
+effect boundary before an atomic rename. Preparatory failures leave the target
+unchanged. Errors after commit are marked as potentially applied so callers do
+not retry blindly. Successful receipts retain the prior and resulting source
+and snapshot identities for later tool-result evidence.
+
+The editor does not grant write authority or register a model-facing tool. A
+future executor must first receive the applicable `Effect::write` capability
+and record the receipt through the ordinary invocation lifecycle. File creation,
+deletion, rename, multi-file transactions, merge resolution, and patch-language
+selection remain outside this boundary.
+
 ## Project instruction discovery
 
 `aiforge::repository::ProjectInstructionSource` discovers bounded `AGENTS.md`
