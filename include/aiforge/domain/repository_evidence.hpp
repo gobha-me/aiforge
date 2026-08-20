@@ -9,6 +9,7 @@
 
 #include <aiforge/domain/content.hpp>
 #include <aiforge/domain/repository.hpp>
+#include <aiforge/domain/verification_evidence.hpp>
 
 namespace aiforge::domain {
 
@@ -75,7 +76,7 @@ struct UnknownRepositoryEvidence {
 using RepositoryEvidenceReference =
     std::variant<ExactSourceEvidence, DiagnosticEvidence, DiffEvidence,
                  ToolResultEvidence, DerivedRecordEvidence,
-                 UnknownRepositoryEvidence>;
+                 VerificationEvidenceReference, UnknownRepositoryEvidence>;
 
 struct EvidenceProvenance {
   EvidenceDerivation derivation{EvidenceDerivation::observed};

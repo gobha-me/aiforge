@@ -161,6 +161,51 @@ TEST_CASE("TranscriptView groups questions from one invocation",
   REQUIRE(view.widget().line_count() == 1);
 }
 
+TEST_CASE("TranscriptView renders replayed verification summaries safely",
+          "[adapter][transcript][verification]") {
+  adapters::TranscriptView view{adapters::TranscriptRenderMode::plain_text};
+  view.set_geometry({0, 0, 64, 6});
+  const auto invocation = make_id<domain::InvocationId>("verification-call");
+  REQUIRE(view.apply(event(1, started())));
+  REQUIRE(view.apply(event(
+      2,
+      domain::ToolProposed{invocation, "run_process",
+                           {"application/json", "{}"}, {}},
+      invocation)));
+  REQUIRE(view.apply(event(
+      3, domain::ToolPolicyDecided{invocation, domain::PolicyDecision::allow,
+                                   {}, std::nullopt},
+      invocation)));
+  REQUIRE(view.apply(event(4, domain::ToolStarted{invocation}, invocation)));
+  REQUIRE(view.apply(event(
+      5, domain::ToolResultRecorded{invocation, {domain::TextBlock{"passed"}}},
+      invocation)));
+  const domain::VerificationEvidence evidence{
+      make_id<domain::VerificationEvidenceId>("verification"),
+      domain::VerificationKind::test,
+      std::nullopt,
+      domain::VerificationOutcome::passed,
+      {make_id<domain::RepositoryId>("repository"),
+       {"sha256", "aaaaaaaaaaaaaaaa", 0}},
+      std::nullopt,
+      std::nullopt,
+      {"ctest", "3.28", "run_process", invocation},
+      std::chrono::sys_time<std::chrono::milliseconds>{
+          std::chrono::milliseconds{100}},
+      "29/29 passed",
+      {},
+      {},
+      {}};
+  REQUIRE(view.apply(event(
+      6, domain::VerificationEvidenceRecorded{evidence}, invocation)));
+
+  termforge::Screen screen{64, 6};
+  view.draw(screen);
+  const auto visible = row_text(screen, 1) + row_text(screen, 2);
+  REQUIRE(visible.find("Verification test") != std::string::npos);
+  REQUIRE(visible.find("29/29 passed") != std::string::npos);
+}
+
 TEST_CASE("TranscriptView rejects worker-thread projection and widget mutation",
           "[adapter][transcript][failure][thread]") {
   adapters::TranscriptView view;

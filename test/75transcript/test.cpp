@@ -49,6 +49,27 @@ auto message(const std::string& id, const domain::Role role,
           {domain::TextBlock{std::move(text)}}, std::nullopt};
 }
 
+auto verification(const domain::InvocationId& invocation,
+                  const domain::ArtifactId& artifact)
+    -> domain::VerificationEvidence {
+  return {make_id<domain::VerificationEvidenceId>("verification"),
+          domain::VerificationKind::test,
+          std::nullopt,
+          domain::VerificationOutcome::passed,
+          {make_id<domain::RepositoryId>("repository"),
+           {"sha256", "aaaaaaaaaaaaaaaa", 0}},
+          std::nullopt,
+          std::nullopt,
+          {"ctest", "3.28", "run_process", invocation},
+          std::chrono::sys_time<std::chrono::milliseconds>{
+              std::chrono::milliseconds{100}},
+          "all tests passed",
+          {{domain::VerificationOutputStream::standard_output, "passed", 6,
+            false, std::nullopt}},
+          {},
+          {artifact}};
+}
+
 }  // namespace
 
 TEST_CASE("transcript projection rejects invalid ordering transactionally",
@@ -347,6 +368,88 @@ TEST_CASE("questions and artifacts reject unknown or invalid references",
       projection.items().back()));
   REQUIRE(std::get<domain::TranscriptMessage>(projection.items().front())
               .artifacts == std::vector{metadata});
+}
+
+TEST_CASE("verification evidence replays after its terminal invocation",
+          "[transcript][verification]") {
+  domain::TranscriptProjection projection;
+  const auto invocation = make_id<domain::InvocationId>("verification-call");
+  const auto artifact = make_id<domain::ArtifactId>("verification-output");
+  const auto recorded = verification(invocation, artifact);
+  const std::vector events{
+      event(1, started()),
+      event(2,
+            domain::ToolProposed{invocation, "run_process",
+                                 {"application/json", "{}"}, {}},
+            {}, "run", invocation),
+      event(3,
+            domain::ToolPolicyDecided{invocation,
+                                      domain::PolicyDecision::allow, {},
+                                      std::nullopt},
+            {}, "run", invocation),
+      event(4, domain::ToolStarted{invocation}, {}, "run", invocation),
+      event(5,
+            domain::ArtifactCreated{{artifact, "text/plain", 6,
+                                     "sha256:passed", invocation,
+                                     std::nullopt, std::nullopt}},
+            "artifact", "run", invocation),
+      event(6,
+            domain::ToolResultRecorded{invocation,
+                                       {domain::TextBlock{"passed"}}},
+            {}, "run", invocation),
+      event(7, domain::VerificationEvidenceRecorded{recorded}, {}, "run",
+            invocation),
+  };
+  for (const auto& value : events) REQUIRE(projection.apply(value));
+
+  REQUIRE(std::holds_alternative<domain::TranscriptVerificationSummary>(
+      projection.items().back()));
+  REQUIRE(std::get<domain::TranscriptVerificationSummary>(
+              projection.items().back())
+              .evidence == recorded);
+  const auto replayed = domain::TranscriptProjection::rebuild(events);
+  REQUIRE(replayed);
+  REQUIRE(replayed->items() == projection.items());
+
+  const auto duplicate = projection.apply(event(
+      8, domain::VerificationEvidenceRecorded{recorded}, {}, "run",
+      invocation));
+  REQUIRE_FALSE(duplicate);
+  REQUIRE(projection.last_sequence() == 7);
+}
+
+TEST_CASE("verification evidence rejects live invocations and unknown artifacts",
+          "[transcript][verification][failure]") {
+  domain::TranscriptProjection projection;
+  const auto invocation = make_id<domain::InvocationId>("verification-call");
+  const auto artifact = make_id<domain::ArtifactId>("missing-output");
+  REQUIRE(projection.apply(event(1, started())));
+  REQUIRE(projection.apply(event(
+      2,
+      domain::ToolProposed{invocation, "run_process",
+                           {"application/json", "{}"}, {}},
+      {}, "run", invocation)));
+  REQUIRE(projection.apply(event(
+      3, domain::ToolPolicyDecided{invocation, domain::PolicyDecision::allow,
+                                   {}, std::nullopt},
+      {}, "run", invocation)));
+  REQUIRE(projection.apply(
+      event(4, domain::ToolStarted{invocation}, {}, "run", invocation)));
+  auto rejected = projection.apply(event(
+      5, domain::VerificationEvidenceRecorded{verification(invocation, artifact)},
+      {}, "run", invocation));
+  REQUIRE_FALSE(rejected);
+  REQUIRE(projection.last_sequence() == 4);
+
+  REQUIRE(projection.apply(event(
+      5, domain::ToolResultRecorded{invocation, {domain::TextBlock{"passed"}}},
+      "result", "run", invocation)));
+  rejected = projection.apply(event(
+      6, domain::VerificationEvidenceRecorded{verification(invocation, artifact)},
+      "verification", "run", invocation));
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code ==
+          domain::TranscriptProjectionErrorCode::unknown_artifact);
 }
 
 TEST_CASE("question identities are scoped to their tool invocation",

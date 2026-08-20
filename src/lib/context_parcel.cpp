@@ -142,7 +142,7 @@ using namespace domain;
 
 struct ReferenceFacts {
   std::optional<RepositorySnapshotIdentity> source_snapshot;
-  std::optional<ArtifactId> artifact_id;
+  std::vector<ArtifactId> artifact_ids;
 };
 
 [[nodiscard]] auto validate_reference(
@@ -171,7 +171,7 @@ struct ReferenceFacts {
                            "exact source evidence must contain text blocks",
                            item.evidence_id);
           }
-          return ReferenceFacts{reference.source.snapshot, std::nullopt};
+          return ReferenceFacts{reference.source.snapshot, {}};
         } else if constexpr (std::is_same_v<Reference,
                                             DiagnosticEvidence>) {
           if (reference.source) {
@@ -189,7 +189,7 @@ struct ReferenceFacts {
                   ? std::optional<RepositorySnapshotIdentity>{
                         reference.source->snapshot}
                   : item.provenance.source_snapshot,
-              reference.artifact_id};
+              {reference.artifact_id}};
         } else if constexpr (std::is_same_v<Reference, DiffEvidence>) {
           if (!valid_snapshot(reference.base_snapshot,
                               limits.maximum_total_bytes) ||
@@ -206,7 +206,7 @@ struct ReferenceFacts {
                            item.evidence_id);
           }
           return ReferenceFacts{reference.target_snapshot,
-                                reference.artifact_id};
+                                {reference.artifact_id}};
         } else if constexpr (std::is_same_v<Reference,
                                             ToolResultEvidence>) {
           if (!item.provenance.producing_invocation_id ||
@@ -217,8 +217,10 @@ struct ReferenceFacts {
                            "tool-result evidence invocation is inconsistent",
                            item.evidence_id);
           }
-          return ReferenceFacts{item.provenance.source_snapshot,
-                                reference.artifact_id};
+          return ReferenceFacts{
+              item.provenance.source_snapshot,
+              reference.artifact_id ? std::vector<ArtifactId>{*reference.artifact_id}
+                                    : std::vector<ArtifactId>{}};
         } else if constexpr (std::is_same_v<Reference,
                                             DerivedRecordEvidence>) {
           if (!bounded_text(reference.record_type,
@@ -231,8 +233,23 @@ struct ReferenceFacts {
                            "derived repository evidence is invalid",
                            item.evidence_id);
           }
+          return ReferenceFacts{
+              item.provenance.source_snapshot,
+              reference.artifact_id ? std::vector<ArtifactId>{*reference.artifact_id}
+                                    : std::vector<ArtifactId>{}};
+        } else if constexpr (std::is_same_v<Reference,
+                                            VerificationEvidenceReference>) {
+          const std::set<ArtifactId> artifacts{reference.artifact_ids.begin(),
+                                               reference.artifact_ids.end()};
+          if (!item.provenance.producing_invocation_id ||
+              item.provenance.derivation != EvidenceDerivation::observed ||
+              artifacts.size() != reference.artifact_ids.size()) {
+            return failure(ContextParcelErrorCode::invalid_reference,
+                           "verification evidence reference is invalid",
+                           item.evidence_id);
+          }
           return ReferenceFacts{item.provenance.source_snapshot,
-                                reference.artifact_id};
+                                reference.artifact_ids};
         } else {
           if (!bounded_text(reference.type_name,
                             limits.maximum_metadata_bytes)) {
@@ -240,8 +257,10 @@ struct ReferenceFacts {
                            "unknown repository evidence type is invalid",
                            item.evidence_id);
           }
-          return ReferenceFacts{item.provenance.source_snapshot,
-                                reference.artifact_id};
+          return ReferenceFacts{
+              item.provenance.source_snapshot,
+              reference.artifact_id ? std::vector<ArtifactId>{*reference.artifact_id}
+                                    : std::vector<ArtifactId>{}};
         }
       },
       item.reference);
@@ -249,11 +268,10 @@ struct ReferenceFacts {
 
 [[nodiscard]] auto content_bytes(
     const ContextParcelItem& item, const ContextParcelLimits& limits,
-    const std::optional<ArtifactId>& expected_artifact)
+    const std::vector<ArtifactId>& expected_artifacts)
     -> std::expected<std::uint64_t, ContextParcelError> {
   std::uint64_t total{};
-  std::size_t artifact_count{};
-  bool artifact_matches{true};
+  std::vector<ArtifactId> actual_artifacts;
   for (const auto& block : item.content) {
     std::uint64_t bytes{};
     const bool valid = std::visit(
@@ -276,9 +294,7 @@ struct ReferenceFacts {
                                  limits.maximum_metadata_bytes));
           } else if constexpr (std::is_same_v<Block,
                                               ArtifactReferenceBlock>) {
-            ++artifact_count;
-            artifact_matches = artifact_matches && expected_artifact &&
-                               value.artifact_id == *expected_artifact;
+            actual_artifacts.push_back(value.artifact_id);
             bytes = value.artifact_id.value().size() +
                     (value.label ? value.label->size() : std::size_t{});
             return !value.label ||
@@ -301,9 +317,7 @@ struct ReferenceFacts {
                      item.evidence_id);
     }
   }
-  if ((expected_artifact &&
-       (artifact_count != 1 || !artifact_matches)) ||
-      (!expected_artifact && artifact_count != 0)) {
+  if (actual_artifacts != expected_artifacts) {
     return failure(ContextParcelErrorCode::invalid_reference,
                    "artifact content does not match its evidence reference",
                    item.evidence_id);
@@ -455,7 +469,7 @@ struct ReferenceFacts {
                      item.evidence_id);
     }
 
-    auto inline_size = content_bytes(item, limits, facts->artifact_id);
+    auto inline_size = content_bytes(item, limits, facts->artifact_ids);
     if (!inline_size) return std::unexpected(inline_size.error());
     if (const auto* exact =
             std::get_if<ExactSourceEvidence>(&item.reference)) {

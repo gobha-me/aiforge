@@ -101,6 +101,34 @@ auto exact_item(std::string name = "exact",
           freshness == domain::EvidenceFreshness::unavailable ? 0U : 4U};
 }
 
+auto verification_item(std::string name = "verification")
+    -> domain::ContextParcelItem {
+  auto provenance = evidence_provenance();
+  provenance.producer = "ctest";
+  provenance.producing_invocation_id =
+      id<domain::InvocationId>(name + "-invocation");
+  return {id<domain::EvidenceId>(name),
+          domain::VerificationEvidenceReference{
+              id<domain::VerificationEvidenceId>(name + "-record"), {}},
+          domain::EvidenceFreshness::current,
+          std::move(provenance),
+          {domain::TextBlock{"tests passed"}},
+          12,
+          4};
+}
+
+auto diff_item(std::string name = "diff") -> domain::ContextParcelItem {
+  const auto artifact = id<domain::ArtifactId>(name + "-artifact");
+  return {id<domain::EvidenceId>(name),
+          domain::DiffEvidence{snapshot("cccccccccccccccc"), snapshot(),
+                               artifact},
+          domain::EvidenceFreshness::current,
+          evidence_provenance(),
+          {domain::ArtifactReferenceBlock{artifact, std::nullopt}},
+          64,
+          4};
+}
+
 auto binding(
     std::string name, const std::uint64_t order, const bool required = false,
     const runtime::ContextRepresentation representation = runtime::ContextRepresentation::exact,
@@ -278,6 +306,38 @@ TEST_CASE("verification prioritizes repository evidence over conversation",
           runtime::ContextSelectionDecision::admitted);
   REQUIRE(decision(*result, "conversation-entry") ==
           runtime::ContextSelectionDecision::omitted_budget);
+}
+
+TEST_CASE("verification and review prioritize recorded verification results",
+          "[context][selection][verification][review]") {
+  for (const auto phase : {domain::TaskPhase::verification,
+                           domain::TaskPhase::review}) {
+    auto value = request(phase);
+    value.capacity = {40, 5, 5};
+    value.budgets.repository_evidence_tokens = 4;
+    value.parcels = {
+        parcel_selection(phase, diff_item(),
+                         binding("diff", 3, false,
+                                 runtime::ContextRepresentation::direct)),
+        parcel_selection(phase, verification_item(),
+                         binding("verification", 2, false,
+                                 runtime::ContextRepresentation::direct)),
+    };
+
+    const auto result = runtime::ContextBuilder{}.select_and_build(std::move(value));
+    const auto selection_message = result.has_value()
+                                       ? std::string{"selection succeeded"}
+                                       : result.error().message;
+    INFO(selection_message);
+    REQUIRE(result);
+    REQUIRE(decision(*result, "verification-entry") ==
+            runtime::ContextSelectionDecision::admitted);
+    REQUIRE(decision(*result, "diff-entry") ==
+            runtime::ContextSelectionDecision::omitted_class_budget);
+    REQUIRE(result->context.entries.back().kind ==
+            domain::ContextEntryKind::evidence);
+    REQUIRE_FALSE(result->context.entries.back().instruction_layer);
+  }
 }
 
 TEST_CASE("alternative representations fall back when the preferred one is too large",

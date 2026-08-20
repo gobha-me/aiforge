@@ -1,4 +1,5 @@
 #include <aiforge/domain/transcript_projection.hpp>
+#include <aiforge/repository/verification_evidence.hpp>
 
 #include <algorithm>
 #include <limits>
@@ -546,6 +547,59 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
             }
             m_items.emplace_back(
                 TranscriptArtifactReference{found->second, referenced.message_id});
+            return {};
+          },
+          [&](const VerificationEvidenceRecorded& recorded)
+              -> std::expected<void, TranscriptProjectionError> {
+            const auto& evidence = recorded.evidence;
+            if (!event.metadata.invocation_id ||
+                *event.metadata.invocation_id !=
+                    evidence.producer.invocation_id) {
+              return transition_error(
+                  "verification event envelope and producer invocation differ");
+            }
+            const auto* invocation = tool(evidence.producer.invocation_id);
+            if (invocation == nullptr ||
+                invocation->tool_name != evidence.producer.tool_name) {
+              return error(TranscriptProjectionErrorCode::unknown_invocation,
+                           "verification evidence has no matching tool invocation");
+            }
+            if (invocation->state != TranscriptToolState::complete &&
+                invocation->state != TranscriptToolState::failed &&
+                invocation->state != TranscriptToolState::cancelled &&
+                invocation->state != TranscriptToolState::denied) {
+              return transition_error(
+                  "verification evidence requires a terminal tool invocation");
+            }
+            if (!repository::validate_verification_evidence(evidence)) {
+              return error(TranscriptProjectionErrorCode::invalid_verification,
+                           "verification evidence is invalid");
+            }
+            if (m_verification_ids.contains(evidence.evidence_id) ||
+                m_verification_invocations.contains(
+                    evidence.producer.invocation_id)) {
+              return transition_error(
+                  "verification evidence or producing invocation is duplicated");
+            }
+            auto artifact_exists = [&](const ArtifactId& id) {
+              return m_artifacts.contains(id);
+            };
+            for (const auto& artifact : evidence.artifacts) {
+              if (!artifact_exists(artifact)) {
+                return error(TranscriptProjectionErrorCode::unknown_artifact,
+                             "verification evidence references an unknown artifact");
+              }
+            }
+            for (const auto& output : evidence.output) {
+              if (output.complete_artifact_id &&
+                  !artifact_exists(*output.complete_artifact_id)) {
+                return error(TranscriptProjectionErrorCode::unknown_artifact,
+                             "verification output references an unknown artifact");
+              }
+            }
+            m_verification_ids.insert(evidence.evidence_id);
+            m_verification_invocations.insert(evidence.producer.invocation_id);
+            m_items.emplace_back(TranscriptVerificationSummary{evidence});
             return {};
           },
           [&](const UnknownEvent&)

@@ -76,6 +76,11 @@ struct TranscriptArtifactReference {
   auto operator==(const TranscriptArtifactReference&) const -> bool = default;
 };
 
+struct TranscriptVerificationSummary {
+  VerificationEvidence evidence;
+  auto operator==(const TranscriptVerificationSummary&) const -> bool = default;
+};
+
 enum class TranscriptNoticeKind {
   failed,
   cancelled,
@@ -90,7 +95,7 @@ struct TranscriptNotice {
 using TranscriptItem =
     std::variant<TranscriptMessage, TranscriptToolSummary,
                  TranscriptQuestionSummary, TranscriptArtifactReference,
-                 TranscriptNotice>;
+                 TranscriptVerificationSummary, TranscriptNotice>;
 
 enum class TranscriptProjectionErrorCode {
   invalid_envelope,
@@ -103,6 +108,7 @@ enum class TranscriptProjectionErrorCode {
   unknown_invocation,
   unknown_question,
   unknown_artifact,
+  invalid_verification,
   usage_overflow,
   internal_failure,
 };
@@ -155,6 +161,8 @@ class TranscriptProjection final {
   std::set<EventId> m_event_ids;
   std::map<InferenceId, Usage> m_inference_usage;
   std::map<ArtifactId, ArtifactMetadata> m_artifacts;
+  std::set<VerificationEvidenceId> m_verification_ids;
+  std::set<InvocationId> m_verification_invocations;
 };
 
 // Composes the per-run transcript reducer over an ordered session event

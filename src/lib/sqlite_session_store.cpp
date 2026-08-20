@@ -1,4 +1,5 @@
 #include <aiforge/adapters/sqlite_session_store.hpp>
+#include <aiforge/repository/verification_evidence.hpp>
 
 #include <algorithm>
 #include <cerrno>
@@ -592,6 +593,271 @@ template <typename Enum>
           parse_optional_u32(value.at("height"))};
 }
 
+[[nodiscard]] auto digest_json(const domain::ContentDigest& digest) -> Json {
+  return {{"algorithm", digest.algorithm},
+          {"value", digest.value},
+          {"byte_size", digest.byte_size}};
+}
+
+[[nodiscard]] auto parse_digest(const Json& value) -> domain::ContentDigest {
+  return {value.at("algorithm").get<std::string>(),
+          value.at("value").get<std::string>(),
+          value.at("byte_size").get<std::uint64_t>()};
+}
+
+[[nodiscard]] auto snapshot_json(
+    const domain::RepositorySnapshotIdentity& snapshot) -> Json {
+  return {{"repository_id", id_text(snapshot.repository_id)},
+          {"fingerprint", digest_json(snapshot.fingerprint)}};
+}
+
+[[nodiscard]] auto parse_snapshot(const Json& value)
+    -> domain::RepositorySnapshotIdentity {
+  return {parse_id<domain::RepositoryId>(value.at("repository_id")),
+          parse_digest(value.at("fingerprint"))};
+}
+
+[[nodiscard]] auto optional_snapshot_json(
+    const std::optional<domain::RepositorySnapshotIdentity>& snapshot) -> Json {
+  return snapshot ? snapshot_json(*snapshot) : Json(nullptr);
+}
+
+[[nodiscard]] auto parse_optional_snapshot(const Json& value)
+    -> std::optional<domain::RepositorySnapshotIdentity> {
+  if (value.is_null()) return std::nullopt;
+  return parse_snapshot(value);
+}
+
+[[nodiscard]] auto optional_digest_json(
+    const std::optional<domain::ContentDigest>& digest) -> Json {
+  return digest ? digest_json(*digest) : Json(nullptr);
+}
+
+[[nodiscard]] auto parse_optional_digest(const Json& value)
+    -> std::optional<domain::ContentDigest> {
+  if (value.is_null()) return std::nullopt;
+  return parse_digest(value);
+}
+
+[[nodiscard]] auto source_json(const domain::RepositorySourceIdentity& source)
+    -> Json {
+  Json range = nullptr;
+  if (source.range) {
+    range = {{"begin", source.range->begin}, {"end", source.range->end}};
+  }
+  return {{"snapshot", snapshot_json(source.snapshot)},
+          {"relative_path", source.relative_path},
+          {"content_digest", digest_json(source.content_digest)},
+          {"range", std::move(range)}};
+}
+
+[[nodiscard]] auto parse_source(const Json& value)
+    -> domain::RepositorySourceIdentity {
+  std::optional<domain::SourceByteRange> range;
+  if (!value.at("range").is_null()) {
+    range = domain::SourceByteRange{
+        value.at("range").at("begin").get<std::uint64_t>(),
+        value.at("range").at("end").get<std::uint64_t>()};
+  }
+  return {parse_snapshot(value.at("snapshot")),
+          value.at("relative_path").get<std::string>(),
+          parse_digest(value.at("content_digest")), range};
+}
+
+[[nodiscard]] auto verification_kind_name(const domain::VerificationKind value)
+    -> std::string_view {
+  switch (value) {
+    case domain::VerificationKind::build: return "build";
+    case domain::VerificationKind::test: return "test";
+    case domain::VerificationKind::static_analysis: return "static_analysis";
+    case domain::VerificationKind::diagnostic: return "diagnostic";
+    case domain::VerificationKind::diff: return "diff";
+    case domain::VerificationKind::runtime: return "runtime";
+    case domain::VerificationKind::unknown: return "unknown";
+  }
+  throw CodecFailure{"invalid verification kind"};
+}
+
+[[nodiscard]] auto parse_verification_kind(const Json& value)
+    -> domain::VerificationKind {
+  return enum_value<domain::VerificationKind>(
+      value.get<std::string>(),
+      {{"build", domain::VerificationKind::build},
+       {"test", domain::VerificationKind::test},
+       {"static_analysis", domain::VerificationKind::static_analysis},
+       {"diagnostic", domain::VerificationKind::diagnostic},
+       {"diff", domain::VerificationKind::diff},
+       {"runtime", domain::VerificationKind::runtime},
+       {"unknown", domain::VerificationKind::unknown}});
+}
+
+[[nodiscard]] auto verification_outcome_name(
+    const domain::VerificationOutcome value) -> std::string_view {
+  switch (value) {
+    case domain::VerificationOutcome::passed: return "passed";
+    case domain::VerificationOutcome::failed: return "failed";
+    case domain::VerificationOutcome::partial: return "partial";
+    case domain::VerificationOutcome::cancelled: return "cancelled";
+    case domain::VerificationOutcome::timed_out: return "timed_out";
+    case domain::VerificationOutcome::unavailable: return "unavailable";
+    case domain::VerificationOutcome::unknown: return "unknown";
+  }
+  throw CodecFailure{"invalid verification outcome"};
+}
+
+[[nodiscard]] auto parse_verification_outcome(const Json& value)
+    -> domain::VerificationOutcome {
+  return enum_value<domain::VerificationOutcome>(
+      value.get<std::string>(),
+      {{"passed", domain::VerificationOutcome::passed},
+       {"failed", domain::VerificationOutcome::failed},
+       {"partial", domain::VerificationOutcome::partial},
+       {"cancelled", domain::VerificationOutcome::cancelled},
+       {"timed_out", domain::VerificationOutcome::timed_out},
+       {"unavailable", domain::VerificationOutcome::unavailable},
+       {"unknown", domain::VerificationOutcome::unknown}});
+}
+
+[[nodiscard]] auto verification_stream_name(
+    const domain::VerificationOutputStream value) -> std::string_view {
+  switch (value) {
+    case domain::VerificationOutputStream::standard_output: return "stdout";
+    case domain::VerificationOutputStream::standard_error: return "stderr";
+  }
+  throw CodecFailure{"invalid verification output stream"};
+}
+
+[[nodiscard]] auto parse_verification_stream(const Json& value)
+    -> domain::VerificationOutputStream {
+  return enum_value<domain::VerificationOutputStream>(
+      value.get<std::string>(),
+      {{"stdout", domain::VerificationOutputStream::standard_output},
+       {"stderr", domain::VerificationOutputStream::standard_error}});
+}
+
+[[nodiscard]] auto verification_severity_name(
+    const domain::VerificationDiagnosticSeverity value) -> std::string_view {
+  switch (value) {
+    case domain::VerificationDiagnosticSeverity::note: return "note";
+    case domain::VerificationDiagnosticSeverity::warning: return "warning";
+    case domain::VerificationDiagnosticSeverity::error: return "error";
+    case domain::VerificationDiagnosticSeverity::fatal: return "fatal";
+    case domain::VerificationDiagnosticSeverity::unknown: return "unknown";
+  }
+  throw CodecFailure{"invalid verification diagnostic severity"};
+}
+
+[[nodiscard]] auto parse_verification_severity(const Json& value)
+    -> domain::VerificationDiagnosticSeverity {
+  return enum_value<domain::VerificationDiagnosticSeverity>(
+      value.get<std::string>(),
+      {{"note", domain::VerificationDiagnosticSeverity::note},
+       {"warning", domain::VerificationDiagnosticSeverity::warning},
+       {"error", domain::VerificationDiagnosticSeverity::error},
+       {"fatal", domain::VerificationDiagnosticSeverity::fatal},
+       {"unknown", domain::VerificationDiagnosticSeverity::unknown}});
+}
+
+[[nodiscard]] auto verification_json(
+    const domain::VerificationEvidence& evidence) -> Json {
+  if (!repository::validate_verification_evidence(evidence)) {
+    throw CodecFailure{"verification evidence is invalid"};
+  }
+  Json output = Json::array();
+  for (const auto& excerpt : evidence.output) {
+    output.push_back(
+        {{"stream", verification_stream_name(excerpt.stream)},
+         {"text", excerpt.text},
+         {"represented_bytes", excerpt.represented_bytes},
+         {"truncated", excerpt.truncated},
+         {"complete_artifact_id",
+          optional_id_json(excerpt.complete_artifact_id)}});
+  }
+  Json diagnostics = Json::array();
+  for (const auto& diagnostic : evidence.diagnostics) {
+    diagnostics.push_back(
+        {{"severity", verification_severity_name(diagnostic.severity)},
+         {"code", diagnostic.code},
+         {"message", diagnostic.message},
+         {"source", diagnostic.source ? source_json(*diagnostic.source)
+                                       : Json(nullptr)}});
+  }
+  Json artifacts = Json::array();
+  for (const auto& artifact : evidence.artifacts) {
+    artifacts.push_back(id_text(artifact));
+  }
+  return {{"evidence_id", id_text(evidence.evidence_id)},
+          {"kind", verification_kind_name(evidence.kind)},
+          {"extension_name", optional_string_json(evidence.extension_name)},
+          {"outcome", verification_outcome_name(evidence.outcome)},
+          {"source_snapshot", snapshot_json(evidence.source_snapshot)},
+          {"baseline_snapshot",
+           optional_snapshot_json(evidence.baseline_snapshot)},
+          {"build_configuration",
+           optional_digest_json(evidence.build_configuration)},
+          {"producer",
+           {{"name", evidence.producer.name},
+            {"version", evidence.producer.version},
+            {"tool_name", evidence.producer.tool_name},
+            {"invocation_id", id_text(evidence.producer.invocation_id)}}},
+          {"observed_at_ms", evidence.observed_at.time_since_epoch().count()},
+          {"summary", evidence.summary},
+          {"output", std::move(output)},
+          {"diagnostics", std::move(diagnostics)},
+          {"artifacts", std::move(artifacts)}};
+}
+
+[[nodiscard]] auto parse_verification(const Json& value)
+    -> domain::VerificationEvidence {
+  std::vector<domain::VerificationOutputExcerpt> output;
+  for (const auto& excerpt : value.at("output")) {
+    output.push_back({
+        parse_verification_stream(excerpt.at("stream")),
+        excerpt.at("text").get<std::string>(),
+        excerpt.at("represented_bytes").get<std::uint64_t>(),
+        excerpt.at("truncated").get<bool>(),
+        parse_optional_id<domain::ArtifactId>(
+            excerpt.at("complete_artifact_id"))});
+  }
+  std::vector<domain::VerificationDiagnostic> diagnostics;
+  for (const auto& diagnostic : value.at("diagnostics")) {
+    std::optional<domain::RepositorySourceIdentity> source;
+    if (!diagnostic.at("source").is_null()) {
+      source = parse_source(diagnostic.at("source"));
+    }
+    diagnostics.push_back({
+        parse_verification_severity(diagnostic.at("severity")),
+        diagnostic.at("code").get<std::string>(),
+        diagnostic.at("message").get<std::string>(), std::move(source)});
+  }
+  std::vector<domain::ArtifactId> artifacts;
+  for (const auto& artifact : value.at("artifacts")) {
+    artifacts.push_back(parse_id<domain::ArtifactId>(artifact));
+  }
+  const auto observed_count = value.at("observed_at_ms").get<std::int64_t>();
+  domain::VerificationEvidence result{
+      parse_id<domain::VerificationEvidenceId>(value.at("evidence_id")),
+      parse_verification_kind(value.at("kind")),
+      parse_optional_string(value.at("extension_name")),
+      parse_verification_outcome(value.at("outcome")),
+      parse_snapshot(value.at("source_snapshot")),
+      parse_optional_snapshot(value.at("baseline_snapshot")),
+      parse_optional_digest(value.at("build_configuration")),
+      {value.at("producer").at("name").get<std::string>(),
+       value.at("producer").at("version").get<std::string>(),
+       value.at("producer").at("tool_name").get<std::string>(),
+       parse_id<domain::InvocationId>(
+           value.at("producer").at("invocation_id"))},
+      std::chrono::sys_time<std::chrono::milliseconds>{
+          std::chrono::milliseconds{observed_count}},
+      value.at("summary").get<std::string>(), std::move(output),
+      std::move(diagnostics), std::move(artifacts)};
+  if (!repository::validate_verification_evidence(result)) {
+    throw CodecFailure{"verification evidence is invalid"};
+  }
+  return result;
+}
+
 [[nodiscard]] auto payload_type(const domain::RunEventPayload& payload)
     -> std::string {
   return std::visit(
@@ -630,6 +896,9 @@ template <typename Enum>
           [](const domain::ArtifactReferenced&) { return std::string{"artifact.referenced"}; },
           [](const domain::ArtifactDisplayed&) { return std::string{"artifact.displayed"}; },
           [](const domain::ArtifactRemovedFromView&) { return std::string{"artifact.removed_from_view"}; },
+          [](const domain::VerificationEvidenceRecorded&) {
+            return std::string{"verification.evidence_recorded"};
+          },
           [](const domain::ChildRunCreated&) { return std::string{"run.child_created"}; },
           [](const domain::InterRunMessageSent&) { return std::string{"run.inter_message_sent"}; },
           [](const domain::UnknownEvent& value) { return value.type_name; }},
@@ -650,7 +919,8 @@ template <typename Enum>
       "tool.result_recorded", "tool.errored", "question.requested",
       "question.answered", "question.cancelled", "artifact.created",
       "artifact.referenced", "artifact.displayed",
-      "artifact.removed_from_view", "run.child_created",
+      "artifact.removed_from_view", "verification.evidence_recorded",
+      "run.child_created",
       "run.inter_message_sent"};
   return types.contains(type);
 }
@@ -804,6 +1074,9 @@ template <typename Enum>
           [](const domain::ArtifactRemovedFromView& value) -> Json {
             return {{"artifact_id", id_text(value.artifact_id)},
                     {"view_id", id_text(value.view_id)}};
+          },
+          [](const domain::VerificationEvidenceRecorded& value) -> Json {
+            return {{"evidence", verification_json(value.evidence)}};
           },
           [](const domain::ChildRunCreated& value) -> Json {
             return {{"child_run_id", id_text(value.child_run_id)}};
@@ -1030,6 +1303,10 @@ template <typename Enum>
     return domain::ArtifactRemovedFromView{
         parse_id<domain::ArtifactId>(value.at("artifact_id")),
         parse_id<domain::ViewId>(value.at("view_id"))};
+  }
+  if (type == "verification.evidence_recorded") {
+    return domain::VerificationEvidenceRecorded{
+        parse_verification(value.at("evidence"))};
   }
   if (type == "run.child_created") {
     return domain::ChildRunCreated{

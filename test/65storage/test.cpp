@@ -72,6 +72,29 @@ auto started() -> domain::RunStarted {
           make_id<domain::PermissionProfileId>("observe"), std::nullopt};
 }
 
+auto verification_payload(const domain::InvocationId& invocation,
+                          const domain::ArtifactId& artifact)
+    -> domain::VerificationEvidenceRecorded {
+  return {domain::VerificationEvidence{
+      make_id<domain::VerificationEvidenceId>("verification"),
+      domain::VerificationKind::test,
+      std::nullopt,
+      domain::VerificationOutcome::passed,
+      {make_id<domain::RepositoryId>("repository"),
+       {"sha256", "aaaaaaaaaaaaaaaa", 0}},
+      std::nullopt,
+      domain::ContentDigest{"sha256", "bbbbbbbbbbbbbbbb", 12},
+      {"ctest", "3.28", "read", invocation},
+      std::chrono::sys_time<std::chrono::milliseconds>{
+          std::chrono::milliseconds{1200}},
+      "tests passed",
+      {{domain::VerificationOutputStream::standard_output, "passed", 6,
+        false, std::nullopt}},
+      {{domain::VerificationDiagnosticSeverity::warning, "W1", "warning",
+        std::nullopt}},
+      {artifact}}};
+}
+
 auto open_store(const std::filesystem::path& path,
                 storage::SessionStoreLimits limits = {})
     -> std::unique_ptr<adapters::SqliteSessionStore> {
@@ -160,6 +183,7 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
       domain::ArtifactReferenced{artifact, message},
       domain::ArtifactDisplayed{artifact, view, "right-pane"},
       domain::ArtifactRemovedFromView{artifact, view},
+      verification_payload(invocation, artifact),
       domain::ChildRunCreated{make_id<domain::RunId>("child")},
       domain::InterRunMessageSent{make_id<domain::RunId>("target"),
                                   {domain::TextBlock{"message"}}},
@@ -318,6 +342,17 @@ TEST_CASE("append validation and constraints leave prior history readable",
   REQUIRE_FALSE(appended);
   REQUIRE(appended.error().code ==
           storage::SessionStoreErrorCode::resource_exhausted);
+
+  auto invalid_verification = verification_payload(
+      make_id<domain::InvocationId>("verification-invocation"),
+      make_id<domain::ArtifactId>("verification-artifact"));
+  invalid_verification.evidence.summary.clear();
+  appended = store->append_events(
+      session, std::array{event(2, std::move(invalid_verification),
+                                "invalid-verification")});
+  REQUIRE_FALSE(appended);
+  REQUIRE(appended.error().code ==
+          storage::SessionStoreErrorCode::invalid_argument);
 
   std::stop_source cancellation;
   cancellation.request_stop();
