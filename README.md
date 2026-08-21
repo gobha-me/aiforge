@@ -5,7 +5,9 @@ outward. It currently provides a streaming Venice-backed one-shot/pipe surface,
 durable and resumable sessions, provider-neutral run events, deterministic
 backends, replayable run and transcript projections, Markdown-lite
 presentation, typed configuration, and a resumable structured `ask_user` tool
-boundary plus a policy-gated bounded argv process executor. The interactive
+boundary plus a policy-gated bounded argv process executor. Exact-candidate
+review receipts now materialize merge authorization only from current required
+evidence or an explicit trusted override. The interactive
 Chat workspace uses the same run kernel, context builder, and durable event
 stream as one-shot mode; running `aiforge` without a prompt in a terminal opens
 it. Its slash-command registry keeps dispatch, help, completion, and command
@@ -403,6 +405,27 @@ keeps the production defaults. During playback its live wake post is disabled
 because the recorded wake marker is the source of frame ordering. Scenario
 artifacts are test evidence, not durable session events or another persistence
 format.
+
+## Review receipts and merge authorization
+
+Review receipts bind an exact repository snapshot and candidate revision to
+versioned verification and scenario requirements, result digests, and artifact
+digests. Scenario bindings also retain the application revision, fake-script
+digest, terminal-capabilities digest, and corpus version. Drafting, review
+requests, findings, resolutions, verdicts,
+revocations, and explicit human overrides are append-only run events. The
+`ReviewReceiptProjection` rebuilds lifecycle state without rerunning a test,
+scenario, hosted check, or merge operation.
+
+`ReviewMergeGate` materializes an opaque `MergeAuthorization` only for the
+exact current candidate when every policy-required result remains available
+and unchanged, no finding is open, and one active approving verdict exists.
+Candidate drift, stale verifier or corpus versions, missing artifacts,
+conflicting verdicts, and revoked approval fail closed. Human overrides are
+candidate-bound, reason-bearing, visibly identified, and usable only for an
+explicitly configured trusted actor. A provider-neutral hosted-check port can
+make successful publication part of authorization without exposing GitHub or
+another forge's types through the domain API.
 
 ## Project instruction discovery
 
