@@ -95,6 +95,30 @@ auto verification_payload(const domain::InvocationId& invocation,
       {artifact}}};
 }
 
+auto review_draft() -> domain::ReviewReceiptDraft {
+  const auto receipt = make_id<domain::ReviewReceiptId>("review-receipt");
+  const auto requirement =
+      make_id<domain::ReviewRequirementId>("review-requirement");
+  const auto artifact = make_id<domain::ArtifactId>("review-artifact");
+  return {
+      receipt,
+      {{make_id<domain::RepositoryId>("review-repository"),
+        {"sha256", "aaaaaaaaaaaaaaaa", 0}},
+       "0123456789abcdef"},
+      {{requirement,
+        domain::ReviewEvidenceKind::verification,
+        "ctest",
+        "3.28",
+        make_id<domain::VerificationEvidenceId>("review-verification"),
+        std::nullopt,
+        std::nullopt,
+        std::nullopt,
+        std::nullopt,
+        std::nullopt,
+        {"sha256", "bbbbbbbbbbbbbbbb", 64},
+        {{artifact, {"sha256", "cccccccccccccccc", 128}}}}}};
+}
+
 auto open_store(const std::filesystem::path& path,
                 storage::SessionStoreLimits limits = {})
     -> std::unique_ptr<adapters::SqliteSessionStore> {
@@ -184,6 +208,33 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
       domain::ArtifactDisplayed{artifact, view, "right-pane"},
       domain::ArtifactRemovedFromView{artifact, view},
       verification_payload(invocation, artifact),
+      domain::ReviewReceiptDrafted{review_draft()},
+      domain::ReviewRequested{review_draft().receipt_id,
+                              {"reviewer", "Reviewer"}},
+      domain::ReviewFindingOpened{
+          review_draft().receipt_id,
+          {make_id<domain::ReviewFindingId>("review-finding"), "finding",
+           make_id<domain::VerificationEvidenceId>("review-verification"),
+           {make_id<domain::ArtifactId>("review-artifact")}}},
+      domain::ReviewFindingResolved{
+          review_draft().receipt_id,
+          make_id<domain::ReviewFindingId>("review-finding"),
+          {"reviewer", "Reviewer"}, std::string{"resolved"}},
+      domain::ReviewVerdictRecorded{review_draft().receipt_id,
+                                    domain::ReviewVerdict::approved,
+                                    {"reviewer", "Reviewer"}},
+      domain::ReviewVerdictRevoked{
+          review_draft().receipt_id,
+          make_id<domain::EventId>("review-verdict-event"),
+          {"reviewer", "Reviewer"}, "revoked"},
+      domain::ReviewOverrideRecorded{domain::ReviewOverride{
+          make_id<domain::ReviewOverrideId>("review-override"),
+          review_draft().receipt_id, review_draft().candidate,
+          {"maintainer", "Maintainer"}, "explicit override"}},
+      domain::ReviewOverrideRevoked{
+          review_draft().receipt_id,
+          make_id<domain::ReviewOverrideId>("review-override"),
+          {"maintainer", "Maintainer"}, "override revoked"},
       domain::ChildRunCreated{make_id<domain::RunId>("child")},
       domain::InterRunMessageSent{make_id<domain::RunId>("target"),
                                   {domain::TextBlock{"message"}}},
@@ -350,6 +401,27 @@ TEST_CASE("append validation and constraints leave prior history readable",
   appended = store->append_events(
       session, std::array{event(2, std::move(invalid_verification),
                                 "invalid-verification")});
+  REQUIRE_FALSE(appended);
+  REQUIRE(appended.error().code ==
+          storage::SessionStoreErrorCode::invalid_argument);
+
+  auto invalid_review = review_draft();
+  invalid_review.candidate.revision.clear();
+  appended = store->append_events(
+      session,
+      std::array{event(2, domain::ReviewReceiptDrafted{invalid_review},
+                       "invalid-review")});
+  REQUIRE_FALSE(appended);
+  REQUIRE(appended.error().code ==
+          storage::SessionStoreErrorCode::invalid_argument);
+
+  appended = store->append_events(
+      session,
+      std::array{event(
+          2,
+          domain::ReviewRequested{review_draft().receipt_id,
+                                  {"forged\nactor", "Reviewer"}},
+          "invalid-review-actor")});
   REQUIRE_FALSE(appended);
   REQUIRE(appended.error().code ==
           storage::SessionStoreErrorCode::invalid_argument);

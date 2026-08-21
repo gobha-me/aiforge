@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <aiforge/domain/content.hpp>
+#include <aiforge/domain/review_receipt.hpp>
 #include <aiforge/domain/verification_evidence.hpp>
 
 namespace aiforge::domain {
@@ -270,6 +271,59 @@ struct VerificationEvidenceRecorded {
   auto operator==(const VerificationEvidenceRecorded&) const -> bool = default;
 };
 
+struct ReviewReceiptDrafted {
+  ReviewReceiptDraft draft;
+  auto operator==(const ReviewReceiptDrafted&) const -> bool = default;
+};
+
+struct ReviewRequested {
+  ReviewReceiptId receipt_id;
+  ReviewActor requested_by;
+  auto operator==(const ReviewRequested&) const -> bool = default;
+};
+
+struct ReviewFindingOpened {
+  ReviewReceiptId receipt_id;
+  ReviewFinding finding;
+  auto operator==(const ReviewFindingOpened&) const -> bool = default;
+};
+
+struct ReviewFindingResolved {
+  ReviewReceiptId receipt_id;
+  ReviewFindingId finding_id;
+  ReviewActor resolved_by;
+  std::optional<std::string> reason;
+  auto operator==(const ReviewFindingResolved&) const -> bool = default;
+};
+
+struct ReviewVerdictRecorded {
+  ReviewReceiptId receipt_id;
+  ReviewVerdict verdict{ReviewVerdict::rejected};
+  ReviewActor reviewer;
+  auto operator==(const ReviewVerdictRecorded&) const -> bool = default;
+};
+
+struct ReviewVerdictRevoked {
+  ReviewReceiptId receipt_id;
+  EventId verdict_event_id;
+  ReviewActor revoked_by;
+  std::string reason;
+  auto operator==(const ReviewVerdictRevoked&) const -> bool = default;
+};
+
+struct ReviewOverrideRecorded {
+  ReviewOverride override;
+  auto operator==(const ReviewOverrideRecorded&) const -> bool = default;
+};
+
+struct ReviewOverrideRevoked {
+  ReviewReceiptId receipt_id;
+  ReviewOverrideId override_id;
+  ReviewActor revoked_by;
+  std::string reason;
+  auto operator==(const ReviewOverrideRevoked&) const -> bool = default;
+};
+
 struct ChildRunCreated {
   RunId child_run_id;
   auto operator==(const ChildRunCreated&) const -> bool = default;
@@ -300,7 +354,9 @@ using RunEventPayload = std::variant<
     ToolProgressed, ToolResultRecorded, ToolErrored, QuestionRequested,
     QuestionAnswered, QuestionCancelled, ArtifactCreated, ArtifactReferenced,
     ArtifactDisplayed, ArtifactRemovedFromView, VerificationEvidenceRecorded,
-    ChildRunCreated,
+    ReviewReceiptDrafted, ReviewRequested, ReviewFindingOpened,
+    ReviewFindingResolved, ReviewVerdictRecorded, ReviewVerdictRevoked,
+    ReviewOverrideRecorded, ReviewOverrideRevoked, ChildRunCreated,
     InterRunMessageSent, UnknownEvent>;
 
 struct EventMetadata {

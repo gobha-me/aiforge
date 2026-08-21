@@ -64,6 +64,10 @@ struct ProjectInstructionIdTag;
 struct KnowledgeRecordIdTag;
 struct KnowledgeEntityIdTag;
 struct VerificationEvidenceIdTag;
+struct ReviewReceiptIdTag;
+struct ReviewRequirementIdTag;
+struct ReviewFindingIdTag;
+struct ReviewOverrideIdTag;
 
 using SessionId = Id<SessionIdTag>;
 using RunId = Id<RunIdTag>;
@@ -88,5 +92,9 @@ using ProjectInstructionId = Id<ProjectInstructionIdTag>;
 using KnowledgeRecordId = Id<KnowledgeRecordIdTag>;
 using KnowledgeEntityId = Id<KnowledgeEntityIdTag>;
 using VerificationEvidenceId = Id<VerificationEvidenceIdTag>;
+using ReviewReceiptId = Id<ReviewReceiptIdTag>;
+using ReviewRequirementId = Id<ReviewRequirementIdTag>;
+using ReviewFindingId = Id<ReviewFindingIdTag>;
+using ReviewOverrideId = Id<ReviewOverrideIdTag>;
 
 }  // namespace aiforge::domain

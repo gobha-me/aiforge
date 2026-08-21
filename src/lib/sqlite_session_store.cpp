@@ -1,4 +1,5 @@
 #include <aiforge/adapters/sqlite_session_store.hpp>
+#include <aiforge/repository/review_receipt.hpp>
 #include <aiforge/repository/verification_evidence.hpp>
 
 #include <algorithm>
@@ -639,6 +640,233 @@ template <typename Enum>
   return parse_digest(value);
 }
 
+[[nodiscard]] auto review_evidence_kind_name(
+    const domain::ReviewEvidenceKind value) -> std::string_view {
+  switch (value) {
+    case domain::ReviewEvidenceKind::verification: return "verification";
+    case domain::ReviewEvidenceKind::scenario: return "scenario";
+  }
+  throw CodecFailure{"invalid review evidence kind"};
+}
+
+[[nodiscard]] auto parse_review_evidence_kind(const Json& value)
+    -> domain::ReviewEvidenceKind {
+  return enum_value<domain::ReviewEvidenceKind>(
+      value.get<std::string>(),
+      {{"verification", domain::ReviewEvidenceKind::verification},
+       {"scenario", domain::ReviewEvidenceKind::scenario}});
+}
+
+[[nodiscard]] auto review_verdict_name(const domain::ReviewVerdict value)
+    -> std::string_view {
+  switch (value) {
+    case domain::ReviewVerdict::approved: return "approved";
+    case domain::ReviewVerdict::changes_requested: return "changes_requested";
+    case domain::ReviewVerdict::rejected: return "rejected";
+  }
+  throw CodecFailure{"invalid review verdict"};
+}
+
+[[nodiscard]] auto parse_review_verdict(const Json& value)
+    -> domain::ReviewVerdict {
+  return enum_value<domain::ReviewVerdict>(
+      value.get<std::string>(),
+      {{"approved", domain::ReviewVerdict::approved},
+       {"changes_requested", domain::ReviewVerdict::changes_requested},
+       {"rejected", domain::ReviewVerdict::rejected}});
+}
+
+[[nodiscard]] auto review_actor_json(const domain::ReviewActor& actor) -> Json {
+  if (!repository::validate_review_actor(actor)) {
+    throw CodecFailure{"review actor is invalid"};
+  }
+  return {{"actor_id", actor.actor_id}, {"display_name", actor.display_name}};
+}
+
+[[nodiscard]] auto parse_review_actor(const Json& value)
+    -> domain::ReviewActor {
+  domain::ReviewActor result{value.at("actor_id").get<std::string>(),
+                             value.at("display_name").get<std::string>()};
+  if (!repository::validate_review_actor(result)) {
+    throw CodecFailure{"review actor is invalid"};
+  }
+  return result;
+}
+
+[[nodiscard]] auto review_candidate_json(
+    const domain::ReviewCandidate& candidate) -> Json {
+  if (!repository::validate_review_candidate(candidate)) {
+    throw CodecFailure{"review candidate is invalid"};
+  }
+  return {{"snapshot", snapshot_json(candidate.snapshot)},
+          {"revision", candidate.revision}};
+}
+
+[[nodiscard]] auto parse_review_candidate(const Json& value)
+    -> domain::ReviewCandidate {
+  domain::ReviewCandidate result{parse_snapshot(value.at("snapshot")),
+                                 value.at("revision").get<std::string>()};
+  if (!repository::validate_review_candidate(result)) {
+    throw CodecFailure{"review candidate is invalid"};
+  }
+  return result;
+}
+
+[[nodiscard]] auto review_artifact_digest_json(
+    const domain::ReviewArtifactDigest& artifact) -> Json {
+  return {{"artifact_id", id_text(artifact.artifact_id)},
+          {"digest", digest_json(artifact.digest)}};
+}
+
+[[nodiscard]] auto parse_review_artifact_digest(const Json& value)
+    -> domain::ReviewArtifactDigest {
+  return {parse_id<domain::ArtifactId>(value.at("artifact_id")),
+          parse_digest(value.at("digest"))};
+}
+
+[[nodiscard]] auto review_evidence_json(
+    const domain::ReviewEvidenceBinding& binding) -> Json {
+  if (!repository::validate_review_evidence_binding(binding)) {
+    throw CodecFailure{"review evidence binding is invalid"};
+  }
+  Json artifacts = Json::array();
+  for (const auto& artifact : binding.artifacts) {
+    artifacts.push_back(review_artifact_digest_json(artifact));
+  }
+  return {{"requirement_id", id_text(binding.requirement_id)},
+          {"kind", review_evidence_kind_name(binding.kind)},
+          {"producer_name", binding.producer_name},
+          {"producer_version", binding.producer_version},
+          {"verification_evidence_id",
+           optional_id_json(binding.verification_evidence_id)},
+          {"scenario_id", optional_string_json(binding.scenario_id)},
+          {"scenario_corpus_version",
+           optional_string_json(binding.scenario_corpus_version)},
+          {"scenario_application_revision",
+           optional_string_json(binding.scenario_application_revision)},
+          {"scenario_fake_script_digest",
+           optional_digest_json(binding.scenario_fake_script_digest)},
+          {"scenario_terminal_capabilities_digest",
+           optional_digest_json(binding.scenario_terminal_capabilities_digest)},
+          {"result_digest", digest_json(binding.result_digest)},
+          {"artifacts", std::move(artifacts)}};
+}
+
+[[nodiscard]] auto parse_review_evidence(const Json& value)
+    -> domain::ReviewEvidenceBinding {
+  std::vector<domain::ReviewArtifactDigest> artifacts;
+  for (const auto& artifact : value.at("artifacts")) {
+    artifacts.push_back(parse_review_artifact_digest(artifact));
+  }
+  domain::ReviewEvidenceBinding result{
+      parse_id<domain::ReviewRequirementId>(value.at("requirement_id")),
+      parse_review_evidence_kind(value.at("kind")),
+      value.at("producer_name").get<std::string>(),
+      value.at("producer_version").get<std::string>(),
+      parse_optional_id<domain::VerificationEvidenceId>(
+          value.at("verification_evidence_id")),
+      parse_optional_string(value.at("scenario_id")),
+      parse_optional_string(value.at("scenario_corpus_version")),
+      parse_optional_string(value.at("scenario_application_revision")),
+      parse_optional_digest(value.at("scenario_fake_script_digest")),
+      parse_optional_digest(
+          value.at("scenario_terminal_capabilities_digest")),
+      parse_digest(value.at("result_digest")), std::move(artifacts)};
+  if (!repository::validate_review_evidence_binding(result)) {
+    throw CodecFailure{"review evidence binding is invalid"};
+  }
+  return result;
+}
+
+[[nodiscard]] auto review_draft_json(
+    const domain::ReviewReceiptDraft& draft) -> Json {
+  if (!repository::validate_review_receipt_draft(draft)) {
+    throw CodecFailure{"review receipt draft is invalid"};
+  }
+  Json evidence = Json::array();
+  for (const auto& binding : draft.evidence) {
+    evidence.push_back(review_evidence_json(binding));
+  }
+  return {{"receipt_id", id_text(draft.receipt_id)},
+          {"candidate", review_candidate_json(draft.candidate)},
+          {"evidence", std::move(evidence)}};
+}
+
+[[nodiscard]] auto parse_review_draft(const Json& value)
+    -> domain::ReviewReceiptDraft {
+  std::vector<domain::ReviewEvidenceBinding> evidence;
+  for (const auto& binding : value.at("evidence")) {
+    evidence.push_back(parse_review_evidence(binding));
+  }
+  domain::ReviewReceiptDraft result{
+      parse_id<domain::ReviewReceiptId>(value.at("receipt_id")),
+      parse_review_candidate(value.at("candidate")), std::move(evidence)};
+  if (!repository::validate_review_receipt_draft(result)) {
+    throw CodecFailure{"review receipt draft is invalid"};
+  }
+  return result;
+}
+
+[[nodiscard]] auto review_finding_json(const domain::ReviewFinding& finding)
+    -> Json {
+  if (!repository::validate_review_finding(finding)) {
+    throw CodecFailure{"review finding is invalid"};
+  }
+  Json artifacts = Json::array();
+  for (const auto& artifact : finding.artifacts) {
+    artifacts.push_back(id_text(artifact));
+  }
+  return {{"finding_id", id_text(finding.finding_id)},
+          {"summary", finding.summary},
+          {"verification_evidence_id",
+           optional_id_json(finding.verification_evidence_id)},
+          {"artifacts", std::move(artifacts)}};
+}
+
+[[nodiscard]] auto parse_review_finding(const Json& value)
+    -> domain::ReviewFinding {
+  std::vector<domain::ArtifactId> artifacts;
+  for (const auto& artifact : value.at("artifacts")) {
+    artifacts.push_back(parse_id<domain::ArtifactId>(artifact));
+  }
+  domain::ReviewFinding result{
+      parse_id<domain::ReviewFindingId>(value.at("finding_id")),
+      value.at("summary").get<std::string>(),
+      parse_optional_id<domain::VerificationEvidenceId>(
+          value.at("verification_evidence_id")),
+      std::move(artifacts)};
+  if (!repository::validate_review_finding(result)) {
+    throw CodecFailure{"review finding is invalid"};
+  }
+  return result;
+}
+
+[[nodiscard]] auto review_override_json(
+    const domain::ReviewOverride& value) -> Json {
+  if (!repository::validate_review_override(value)) {
+    throw CodecFailure{"review override is invalid"};
+  }
+  return {{"override_id", id_text(value.override_id)},
+          {"receipt_id", id_text(value.receipt_id)},
+          {"candidate", review_candidate_json(value.candidate)},
+          {"actor", review_actor_json(value.actor)},
+          {"reason", value.reason}};
+}
+
+[[nodiscard]] auto parse_review_override(const Json& value)
+    -> domain::ReviewOverride {
+  domain::ReviewOverride result{
+      parse_id<domain::ReviewOverrideId>(value.at("override_id")),
+      parse_id<domain::ReviewReceiptId>(value.at("receipt_id")),
+      parse_review_candidate(value.at("candidate")),
+      parse_review_actor(value.at("actor")),
+      value.at("reason").get<std::string>()};
+  if (!repository::validate_review_override(result)) {
+    throw CodecFailure{"review override is invalid"};
+  }
+  return result;
+}
+
 [[nodiscard]] auto source_json(const domain::RepositorySourceIdentity& source)
     -> Json {
   Json range = nullptr;
@@ -899,6 +1127,30 @@ template <typename Enum>
           [](const domain::VerificationEvidenceRecorded&) {
             return std::string{"verification.evidence_recorded"};
           },
+          [](const domain::ReviewReceiptDrafted&) {
+            return std::string{"review.receipt_drafted"};
+          },
+          [](const domain::ReviewRequested&) {
+            return std::string{"review.requested"};
+          },
+          [](const domain::ReviewFindingOpened&) {
+            return std::string{"review.finding_opened"};
+          },
+          [](const domain::ReviewFindingResolved&) {
+            return std::string{"review.finding_resolved"};
+          },
+          [](const domain::ReviewVerdictRecorded&) {
+            return std::string{"review.verdict_recorded"};
+          },
+          [](const domain::ReviewVerdictRevoked&) {
+            return std::string{"review.verdict_revoked"};
+          },
+          [](const domain::ReviewOverrideRecorded&) {
+            return std::string{"review.override_recorded"};
+          },
+          [](const domain::ReviewOverrideRevoked&) {
+            return std::string{"review.override_revoked"};
+          },
           [](const domain::ChildRunCreated&) { return std::string{"run.child_created"}; },
           [](const domain::InterRunMessageSent&) { return std::string{"run.inter_message_sent"}; },
           [](const domain::UnknownEvent& value) { return value.type_name; }},
@@ -920,6 +1172,10 @@ template <typename Enum>
       "question.answered", "question.cancelled", "artifact.created",
       "artifact.referenced", "artifact.displayed",
       "artifact.removed_from_view", "verification.evidence_recorded",
+      "review.receipt_drafted", "review.requested",
+      "review.finding_opened", "review.finding_resolved",
+      "review.verdict_recorded", "review.verdict_revoked",
+      "review.override_recorded", "review.override_revoked",
       "run.child_created",
       "run.inter_message_sent"};
   return types.contains(type);
@@ -1077,6 +1333,43 @@ template <typename Enum>
           },
           [](const domain::VerificationEvidenceRecorded& value) -> Json {
             return {{"evidence", verification_json(value.evidence)}};
+          },
+          [](const domain::ReviewReceiptDrafted& value) -> Json {
+            return {{"draft", review_draft_json(value.draft)}};
+          },
+          [](const domain::ReviewRequested& value) -> Json {
+            return {{"receipt_id", id_text(value.receipt_id)},
+                    {"requested_by", review_actor_json(value.requested_by)}};
+          },
+          [](const domain::ReviewFindingOpened& value) -> Json {
+            return {{"receipt_id", id_text(value.receipt_id)},
+                    {"finding", review_finding_json(value.finding)}};
+          },
+          [](const domain::ReviewFindingResolved& value) -> Json {
+            return {{"receipt_id", id_text(value.receipt_id)},
+                    {"finding_id", id_text(value.finding_id)},
+                    {"resolved_by", review_actor_json(value.resolved_by)},
+                    {"reason", optional_string_json(value.reason)}};
+          },
+          [](const domain::ReviewVerdictRecorded& value) -> Json {
+            return {{"receipt_id", id_text(value.receipt_id)},
+                    {"verdict", review_verdict_name(value.verdict)},
+                    {"reviewer", review_actor_json(value.reviewer)}};
+          },
+          [](const domain::ReviewVerdictRevoked& value) -> Json {
+            return {{"receipt_id", id_text(value.receipt_id)},
+                    {"verdict_event_id", id_text(value.verdict_event_id)},
+                    {"revoked_by", review_actor_json(value.revoked_by)},
+                    {"reason", value.reason}};
+          },
+          [](const domain::ReviewOverrideRecorded& value) -> Json {
+            return {{"override", review_override_json(value.override)}};
+          },
+          [](const domain::ReviewOverrideRevoked& value) -> Json {
+            return {{"receipt_id", id_text(value.receipt_id)},
+                    {"override_id", id_text(value.override_id)},
+                    {"revoked_by", review_actor_json(value.revoked_by)},
+                    {"reason", value.reason}};
           },
           [](const domain::ChildRunCreated& value) -> Json {
             return {{"child_run_id", id_text(value.child_run_id)}};
@@ -1307,6 +1600,51 @@ template <typename Enum>
   if (type == "verification.evidence_recorded") {
     return domain::VerificationEvidenceRecorded{
         parse_verification(value.at("evidence"))};
+  }
+  if (type == "review.receipt_drafted") {
+    return domain::ReviewReceiptDrafted{
+        parse_review_draft(value.at("draft"))};
+  }
+  if (type == "review.requested") {
+    return domain::ReviewRequested{
+        parse_id<domain::ReviewReceiptId>(value.at("receipt_id")),
+        parse_review_actor(value.at("requested_by"))};
+  }
+  if (type == "review.finding_opened") {
+    return domain::ReviewFindingOpened{
+        parse_id<domain::ReviewReceiptId>(value.at("receipt_id")),
+        parse_review_finding(value.at("finding"))};
+  }
+  if (type == "review.finding_resolved") {
+    return domain::ReviewFindingResolved{
+        parse_id<domain::ReviewReceiptId>(value.at("receipt_id")),
+        parse_id<domain::ReviewFindingId>(value.at("finding_id")),
+        parse_review_actor(value.at("resolved_by")),
+        parse_optional_string(value.at("reason"))};
+  }
+  if (type == "review.verdict_recorded") {
+    return domain::ReviewVerdictRecorded{
+        parse_id<domain::ReviewReceiptId>(value.at("receipt_id")),
+        parse_review_verdict(value.at("verdict")),
+        parse_review_actor(value.at("reviewer"))};
+  }
+  if (type == "review.verdict_revoked") {
+    return domain::ReviewVerdictRevoked{
+        parse_id<domain::ReviewReceiptId>(value.at("receipt_id")),
+        parse_id<domain::EventId>(value.at("verdict_event_id")),
+        parse_review_actor(value.at("revoked_by")),
+        value.at("reason").get<std::string>()};
+  }
+  if (type == "review.override_recorded") {
+    return domain::ReviewOverrideRecorded{
+        parse_review_override(value.at("override"))};
+  }
+  if (type == "review.override_revoked") {
+    return domain::ReviewOverrideRevoked{
+        parse_id<domain::ReviewReceiptId>(value.at("receipt_id")),
+        parse_id<domain::ReviewOverrideId>(value.at("override_id")),
+        parse_review_actor(value.at("revoked_by")),
+        value.at("reason").get<std::string>()};
   }
   if (type == "run.child_created") {
     return domain::ChildRunCreated{
