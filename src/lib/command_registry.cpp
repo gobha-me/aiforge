@@ -184,16 +184,6 @@ auto write_internal_failure(std::ostream& error,
   safe_write(error, ": command failed internally\n");
 }
 
-[[nodiscard]] auto format_project_version() -> std::string {
-  auto result = std::to_string(VERSION_MAJOR) + "." +
-                std::to_string(VERSION_MINOR) + "." +
-                std::to_string(VERSION_PATCH);
-  if (VERSION_TWEAK != 0) {
-    result += "." + std::to_string(VERSION_TWEAK);
-  }
-  return result;
-}
-
 auto unavailable_handler(CommandContext& context) -> int {
   const auto& command = context.invocation.command_path.back();
   context.error << "aiforge: '" << command
@@ -202,7 +192,7 @@ auto unavailable_handler(CommandContext& context) -> int {
 }
 
 auto version_handler(CommandContext& context) -> int {
-  context.output << PROGRAM_NAME << ' ' << format_project_version() << '\n';
+  context.output << PROGRAM_NAME << ' ' << project_version() << '\n';
   return success_exit_code;
 }
 
@@ -662,7 +652,7 @@ auto builtin_command_registry() -> const CommandRegistry& {
   };
   static const CommandRegistry registry{
       std::string{PROGRAM_NAME},
-      format_project_version(),
+      project_version(),
       {"root",
        "",
        "AIForge terminal AI client.",
@@ -755,6 +745,16 @@ auto run_cli(const std::span<const std::string_view> arguments,
              std::ostream& error) noexcept -> int {
   return CommandDispatcher{}.dispatch(builtin_command_registry(), arguments,
                                       environment, output, error);
+}
+
+auto project_version() -> std::string {
+  auto result = std::to_string(VERSION_MAJOR) + "." +
+                std::to_string(VERSION_MINOR) + "." +
+                std::to_string(VERSION_PATCH);
+  if (VERSION_TWEAK != 0) {
+    result += "." + std::to_string(VERSION_TWEAK);
+  }
+  return result;
 }
 
 }  // namespace aiforge::cli

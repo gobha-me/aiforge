@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
 #include <barrier>
 #include <cstdlib>
@@ -7,6 +8,7 @@
 #include <fstream>
 #include <iterator>
 #include <optional>
+#include <ranges>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -19,6 +21,7 @@
 #include <aiforge/cli/command_registry.hpp>
 #include <aiforge/config/config.hpp>
 #include <aiforge/config/file_store.hpp>
+#include <aiforge/config/provenance.hpp>
 
 namespace {
 
@@ -288,6 +291,68 @@ TEST_CASE("environment input is typed and sensitive values stay marked",
   for (const auto& diagnostic : resolved->diagnostics) {
     REQUIRE(diagnostic.message.find("do-not-render") == std::string::npos);
   }
+}
+
+TEST_CASE("configuration provenance keeps decisions and drops sensitive values",
+          "[config][provenance][failure]") {
+  const auto registry = test_registry();
+  const ConfigLayer file{ConfigSource::file,
+                         {candidate("model", std::string{"file-model"}),
+                          rejected("count", ConfigSource::file)},
+                         {}};
+  const ConfigLayer environment{
+      ConfigSource::environment,
+      {candidate("model", std::string{"environment-model"}),
+       candidate("credential", std::string{"do-not-record"})},
+      {}};
+  const std::array layers{file, environment};
+  const auto resolved = resolve_config(registry, layers);
+  REQUIRE(resolved);
+
+  const auto provenance = configuration_provenance(*resolved);
+  REQUIRE(provenance.size() == resolved->entries.size());
+
+  const auto find = [&](const std::string_view key) {
+    const auto found = std::ranges::find(provenance, key,
+                                         &aiforge::domain::
+                                             ConfigurationProvenanceEntry::key);
+    REQUIRE(found != provenance.end());
+    return *found;
+  };
+
+  // A sensitive key keeps presence, source, and its decision trail. Its
+  // resolved value is structurally absent, not filtered by a message check.
+  const auto credential = find("credential");
+  REQUIRE(credential.sensitive);
+  REQUIRE(credential.value_present);
+  REQUIRE_FALSE(credential.value.has_value());
+  REQUIRE(credential.source == aiforge::domain::ProvenanceSource::environment);
+  REQUIRE_FALSE(credential.decisions.empty());
+
+  // Environment wins over file, and the shadowed candidate stays visible.
+  const auto model = find("model");
+  REQUIRE_FALSE(model.sensitive);
+  REQUIRE(model.value == "environment-model");
+  REQUIRE(model.source == aiforge::domain::ProvenanceSource::environment);
+  REQUIRE(model.decisions.size() == resolved->find("model")->decisions.size());
+  REQUIRE(std::ranges::any_of(model.decisions, [](const auto& decision) {
+    return decision.source == aiforge::domain::ProvenanceSource::file &&
+           decision.disposition ==
+               aiforge::domain::ProvenanceDisposition::shadowed;
+  }));
+
+  // A rejected candidate carries its diagnostic code, without its text.
+  const auto count = find("count");
+  REQUIRE(std::ranges::any_of(count.decisions, [](const auto& decision) {
+    return decision.disposition ==
+               aiforge::domain::ProvenanceDisposition::rejected &&
+           decision.diagnostic_code ==
+               aiforge::domain::ProvenanceDiagnosticCode::invalid_value;
+  }));
+
+  const auto optional_key = find("optional");
+  REQUIRE_FALSE(optional_key.value_present);
+  REQUIRE_FALSE(optional_key.value.has_value());
 }
 
 TEST_CASE("configuration path resolution follows XDG without relative escape",

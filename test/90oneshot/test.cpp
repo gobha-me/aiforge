@@ -28,6 +28,25 @@ auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
+auto run_provenance() -> domain::RunProvenance {
+  return {"0.10.0",
+          "venice",
+          std::nullopt,
+          make_id<domain::ModelId>("model"),
+          domain::CredentialSourceReference{
+              domain::CredentialSourceKind::environment, "VENICE_API_KEY"},
+          {{"model", std::string{"venice-model"}, true,
+            domain::ProvenanceSource::environment, false,
+            {{domain::ProvenanceSource::environment,
+              domain::ProvenanceDisposition::selected, std::nullopt}}},
+           {"credential", std::nullopt, true, domain::ProvenanceSource::environment,
+            true,
+            {{domain::ProvenanceSource::environment,
+              domain::ProvenanceDisposition::selected, std::nullopt}}}},
+          {{"aiforge", "0.10.0"}},
+          {}};
+}
+
 struct End {};
 using Item = std::variant<backend::BackendEvent, backend::BackendError, End>;
 
@@ -521,6 +540,51 @@ TEST_CASE("durable one-shot sessions resume completed conversation in order",
       output, error);
   REQUIRE(continued);
   REQUIRE(continued->session_id == first->session_id);
+}
+
+TEST_CASE("one-shot runs persist provenance and refuse a sensitive value",
+          "[one-shot][session][provenance][failure]") {
+  FakeModels models;
+  ConversationBackend backend;
+  MemoryStore store;
+  surfaces::OneShotSurface surface{backend, models, store};
+  std::ostringstream output;
+  std::ostringstream error;
+  const auto model = make_id<domain::ModelId>("model");
+
+  auto secret = run_provenance();
+  secret.configuration.front().sensitive = true;
+  const auto refused = surface.run(
+      {"first", std::nullopt, model,
+       surfaces::OneShotRequest::SessionMode::create, std::nullopt, secret},
+      output, error);
+  REQUIRE_FALSE(refused);
+  REQUIRE(refused.error().code == surfaces::OneShotErrorCode::run_failed);
+  for (const auto& [session, history] : store.histories) {
+    static_cast<void>(session);
+    REQUIRE(history.empty());
+  }
+
+  output.str({});
+  error.str({});
+  const auto result = surface.run(
+      {"first", std::nullopt, model,
+       surfaces::OneShotRequest::SessionMode::create, std::nullopt,
+       run_provenance()},
+      output, error);
+  REQUIRE(result);
+  const auto& persisted = store.histories[result->session_id];
+  REQUIRE(persisted.size() > 1);
+  REQUIRE(std::holds_alternative<domain::RunStarted>(persisted[0].payload));
+  const auto* recorded =
+      std::get_if<domain::RunProvenanceRecorded>(&persisted[1].payload);
+  REQUIRE(recorded != nullptr);
+  REQUIRE(recorded->provenance.backend_id == "venice");
+  REQUIRE(recorded->provenance.credential_source->identity ==
+          "VENICE_API_KEY");
+  // Only the locator is durable; a sensitive key keeps presence without value.
+  REQUIRE(recorded->provenance.configuration.back().sensitive);
+  REQUIRE_FALSE(recorded->provenance.configuration.back().value.has_value());
 }
 
 TEST_CASE("ephemeral one-shot bypasses an available durable store",

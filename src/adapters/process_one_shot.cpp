@@ -10,6 +10,7 @@
 #include <variant>
 #include <vector>
 
+#include <aiforge/adapters/process_provenance.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
 #include <aiforge/config/config.hpp>
@@ -198,9 +199,14 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
       }
       return surfaces::OneShotRequest::SessionMode::create;
     }();
+    // The variable name only. The key itself never leaves `api_key`.
+    auto credential_source = domain::CredentialSourceReference{
+        domain::CredentialSourceKind::environment, "VENICE_API_KEY"};
+    auto provenance = process_run_provenance(*resolved, *model, "venice",
+                                             std::move(credential_source));
     surfaces::OneShotRequest one_shot_request{
         std::string{request.prompt}, std::move(*input), std::move(*model),
-        session_mode, std::move(request.session_id)};
+        session_mode, std::move(request.session_id), std::move(provenance)};
 
     std::expected<surfaces::OneShotResult, surfaces::OneShotError> result =
         std::unexpected(surfaces::OneShotError{

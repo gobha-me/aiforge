@@ -1,7 +1,11 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -12,11 +16,15 @@
 #include <variant>
 #include <vector>
 
+#include <unistd.h>
+
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
 #include <aiforge/adapters/termforge_run_bridge.hpp>
 #include <aiforge/adapters/ask_user_dialog.hpp>
+#include <aiforge/adapters/process_provenance.hpp>
+#include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
 #include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
@@ -343,4 +351,86 @@ TEST_CASE("ask_user dialog maps recommended indices back to stable IDs",
   REQUIRE(after_duplicate);
   REQUIRE(after_duplicate->size() == 1);
   REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
+}
+
+TEST_CASE("process provenance names a credential source without its secret",
+          "[adapters][provenance][failure]") {
+  const std::string secret{"venice-secret-value-do-not-persist"};
+  const config::ConfigRegistry registry{
+      {{"model", config::ConfigValueKind::text, "AIFORGE_MODEL",
+        config::ConfigValue{"default"}, false, true, 64, 4},
+       {"credential", config::ConfigValueKind::text, "SECRET_TOKEN",
+        std::nullopt, true, false, 64, 4}}};
+  const config::ConfigLayer environment{
+      config::ConfigSource::environment,
+      {{"model", config::ConfigValue{std::string{"venice-model"}}, std::nullopt},
+       {"credential", config::ConfigValue{secret}, std::nullopt}},
+      {}};
+  const std::array layers{environment};
+  const auto resolved = config::resolve_config(registry, layers);
+  REQUIRE(resolved);
+  REQUIRE(std::get<std::string>(*resolved->find("credential")->value) == secret);
+
+  const auto provenance = adapters::process_run_provenance(
+      *resolved, make_id<domain::ModelId>("venice-model"), "venice",
+      domain::CredentialSourceReference{
+          domain::CredentialSourceKind::environment, "VENICE_API_KEY"});
+  REQUIRE(domain::validate_run_provenance(provenance));
+  REQUIRE(provenance.backend_id == "venice");
+  REQUIRE_FALSE(provenance.aiforge_version.empty());
+  // Tool identity stays empty here; the run kernel owns it.
+  REQUIRE(provenance.tools.empty());
+  REQUIRE(std::ranges::any_of(provenance.components, [](const auto& component) {
+    return component.component == "aiforge";
+  }));
+  const auto credential = std::ranges::find(
+      provenance.configuration, "credential",
+      &domain::ConfigurationProvenanceEntry::key);
+  REQUIRE(credential != provenance.configuration.end());
+  REQUIRE(credential->sensitive);
+  REQUIRE(credential->value_present);
+  REQUIRE_FALSE(credential->value.has_value());
+
+  // Through the real store: the secret is absent from the database bytes.
+  auto pattern =
+      (std::filesystem::temp_directory_path() / "aiforge-provenance-XXXXXX")
+          .string();
+  pattern.push_back('\0');
+  const auto* created = ::mkdtemp(pattern.data());
+  REQUIRE(created != nullptr);
+  const std::filesystem::path directory{created};
+  const auto path = directory / "aiforge" / "sessions.sqlite3";
+  {
+    auto store = adapters::SqliteSessionStore::open(path);
+    REQUIRE(store);
+    const auto session = make_id<domain::SessionId>("session");
+    REQUIRE((*store)->create_session(
+        {session, domain::EventTimestamp{std::chrono::milliseconds{100}}}));
+    const std::array events{
+        domain::RunEvent{
+            {make_id<domain::EventId>("e1"), make_id<domain::RunId>("run"), 1, 1,
+             domain::EventTimestamp{std::chrono::milliseconds{101}},
+             std::nullopt, std::nullopt, std::nullopt},
+            domain::RunStarted{make_id<domain::SurfaceId>("one-shot"),
+                               make_id<domain::WorkspaceId>("chat"),
+                               make_id<domain::PermissionProfileId>("observe"),
+                               std::nullopt}},
+        domain::RunEvent{
+            {make_id<domain::EventId>("e2"), make_id<domain::RunId>("run"), 2, 1,
+             domain::EventTimestamp{std::chrono::milliseconds{102}},
+             std::nullopt, std::nullopt, std::nullopt},
+            domain::RunProvenanceRecorded{provenance}}};
+    REQUIRE((*store)->append_events(session, events));
+    const auto replayed = (*store)->replay_events(session);
+    REQUIRE(replayed);
+    REQUIRE(*replayed == std::vector<domain::RunEvent>{events[0], events[1]});
+  }
+  std::ifstream database{path, std::ios::binary};
+  REQUIRE(database);
+  const std::string bytes{std::istreambuf_iterator<char>{database},
+                          std::istreambuf_iterator<char>{}};
+  REQUIRE(bytes.find(secret) == std::string::npos);
+  REQUIRE(bytes.find("VENICE_API_KEY") != std::string::npos);
+  std::error_code ignored;
+  std::filesystem::remove_all(directory, ignored);
 }

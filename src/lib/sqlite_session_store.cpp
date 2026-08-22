@@ -1086,11 +1086,249 @@ template <typename Enum>
   return result;
 }
 
+[[nodiscard]] auto provenance_source_name(const domain::ProvenanceSource value)
+    -> std::string_view {
+  switch (value) {
+    case domain::ProvenanceSource::command_line: return "command_line";
+    case domain::ProvenanceSource::environment: return "environment";
+    case domain::ProvenanceSource::file: return "file";
+    case domain::ProvenanceSource::compiled_default: return "compiled_default";
+  }
+  throw CodecFailure{"invalid provenance source"};
+}
+
+[[nodiscard]] auto parse_provenance_source(const Json& value)
+    -> domain::ProvenanceSource {
+  const auto name = value.get<std::string>();
+  return enum_value<domain::ProvenanceSource>(
+      name, {{"command_line", domain::ProvenanceSource::command_line},
+             {"environment", domain::ProvenanceSource::environment},
+             {"file", domain::ProvenanceSource::file},
+             {"compiled_default", domain::ProvenanceSource::compiled_default}});
+}
+
+[[nodiscard]] auto provenance_disposition_name(
+    const domain::ProvenanceDisposition value) -> std::string_view {
+  switch (value) {
+    case domain::ProvenanceDisposition::selected: return "selected";
+    case domain::ProvenanceDisposition::shadowed: return "shadowed";
+    case domain::ProvenanceDisposition::rejected: return "rejected";
+  }
+  throw CodecFailure{"invalid provenance disposition"};
+}
+
+[[nodiscard]] auto parse_provenance_disposition(const Json& value)
+    -> domain::ProvenanceDisposition {
+  const auto name = value.get<std::string>();
+  return enum_value<domain::ProvenanceDisposition>(
+      name, {{"selected", domain::ProvenanceDisposition::selected},
+             {"shadowed", domain::ProvenanceDisposition::shadowed},
+             {"rejected", domain::ProvenanceDisposition::rejected}});
+}
+
+[[nodiscard]] auto provenance_diagnostic_name(
+    const domain::ProvenanceDiagnosticCode value) -> std::string_view {
+  switch (value) {
+    case domain::ProvenanceDiagnosticCode::invalid_registry:
+      return "invalid_registry";
+    case domain::ProvenanceDiagnosticCode::duplicate_key: return "duplicate_key";
+    case domain::ProvenanceDiagnosticCode::duplicate_environment_binding:
+      return "duplicate_environment_binding";
+    case domain::ProvenanceDiagnosticCode::unknown_key: return "unknown_key";
+    case domain::ProvenanceDiagnosticCode::invalid_value: return "invalid_value";
+    case domain::ProvenanceDiagnosticCode::value_too_large:
+      return "value_too_large";
+    case domain::ProvenanceDiagnosticCode::too_many_values:
+      return "too_many_values";
+    case domain::ProvenanceDiagnosticCode::sensitive_value:
+      return "sensitive_value";
+    case domain::ProvenanceDiagnosticCode::duplicate_source_value:
+      return "duplicate_source_value";
+    case domain::ProvenanceDiagnosticCode::source_warning:
+      return "source_warning";
+  }
+  throw CodecFailure{"invalid provenance diagnostic code"};
+}
+
+[[nodiscard]] auto parse_provenance_diagnostic(const Json& value)
+    -> domain::ProvenanceDiagnosticCode {
+  using Code = domain::ProvenanceDiagnosticCode;
+  const auto name = value.get<std::string>();
+  return enum_value<Code>(
+      name, {{"invalid_registry", Code::invalid_registry},
+             {"duplicate_key", Code::duplicate_key},
+             {"duplicate_environment_binding",
+              Code::duplicate_environment_binding},
+             {"unknown_key", Code::unknown_key},
+             {"invalid_value", Code::invalid_value},
+             {"value_too_large", Code::value_too_large},
+             {"too_many_values", Code::too_many_values},
+             {"sensitive_value", Code::sensitive_value},
+             {"duplicate_source_value", Code::duplicate_source_value},
+             {"source_warning", Code::source_warning}});
+}
+
+[[nodiscard]] auto credential_kind_name(const domain::CredentialSourceKind value)
+    -> std::string_view {
+  switch (value) {
+    case domain::CredentialSourceKind::environment: return "environment";
+    case domain::CredentialSourceKind::configuration_file:
+      return "configuration_file";
+    case domain::CredentialSourceKind::unrecognized: return "unrecognized";
+  }
+  throw CodecFailure{"invalid credential source kind"};
+}
+
+[[nodiscard]] auto parse_credential_kind(const Json& value)
+    -> domain::CredentialSourceKind {
+  using Kind = domain::CredentialSourceKind;
+  const auto name = value.get<std::string>();
+  return enum_value<Kind>(name,
+                          {{"environment", Kind::environment},
+                           {"configuration_file", Kind::configuration_file},
+                           {"unrecognized", Kind::unrecognized}});
+}
+
+[[nodiscard]] auto configuration_entry_json(
+    const domain::ConfigurationProvenanceEntry& entry) -> Json {
+  auto decisions = Json::array();
+  for (const auto& decision : entry.decisions) {
+    decisions.push_back(
+        {{"source", provenance_source_name(decision.source)},
+         {"disposition", provenance_disposition_name(decision.disposition)},
+         {"diagnostic_code",
+          decision.diagnostic_code
+              ? Json(provenance_diagnostic_name(*decision.diagnostic_code))
+              : Json(nullptr)}});
+  }
+  return {{"key", entry.key},
+          {"value", entry.value ? Json(*entry.value) : Json(nullptr)},
+          {"value_present", entry.value_present},
+          {"source", entry.source ? Json(provenance_source_name(*entry.source))
+                                  : Json(nullptr)},
+          {"sensitive", entry.sensitive},
+          {"decisions", std::move(decisions)}};
+}
+
+[[nodiscard]] auto parse_configuration_entry(const Json& value)
+    -> domain::ConfigurationProvenanceEntry {
+  const auto& decisions = value.at("decisions");
+  if (!decisions.is_array()) {
+    throw CodecFailure{"configuration decision list is invalid"};
+  }
+  domain::ConfigurationProvenanceEntry entry{};
+  entry.key = value.at("key").get<std::string>();
+  entry.value = parse_optional_string(value.at("value"));
+  entry.value_present = value.at("value_present").get<bool>();
+  if (!value.at("source").is_null()) {
+    entry.source = parse_provenance_source(value.at("source"));
+  }
+  entry.sensitive = value.at("sensitive").get<bool>();
+  entry.decisions.reserve(decisions.size());
+  for (const auto& decision : decisions) {
+    domain::ProvenanceDecision parsed{};
+    parsed.source = parse_provenance_source(decision.at("source"));
+    parsed.disposition =
+        parse_provenance_disposition(decision.at("disposition"));
+    if (!decision.at("diagnostic_code").is_null()) {
+      parsed.diagnostic_code =
+          parse_provenance_diagnostic(decision.at("diagnostic_code"));
+    }
+    entry.decisions.push_back(parsed);
+  }
+  return entry;
+}
+
+[[nodiscard]] auto run_provenance_json(const domain::RunProvenance& provenance)
+    -> Json {
+  if (!domain::validate_run_provenance(provenance)) {
+    throw CodecFailure{"run provenance is invalid"};
+  }
+  auto configuration = Json::array();
+  for (const auto& entry : provenance.configuration) {
+    configuration.push_back(configuration_entry_json(entry));
+  }
+  auto components = Json::array();
+  for (const auto& component : provenance.components) {
+    components.push_back({{"component", component.component},
+                          {"version", component.version}});
+  }
+  auto tools = Json::array();
+  for (const auto& tool : provenance.tools) {
+    tools.push_back({{"tool_name", tool.tool_name},
+                     {"declared_effects", effects_json(tool.declared_effects)},
+                     {"capability_scopes", scopes_json(tool.capability_scopes)}});
+  }
+  return {{"aiforge_version", provenance.aiforge_version},
+          {"backend_id", provenance.backend_id},
+          {"backend_version", provenance.backend_version
+                                  ? Json(*provenance.backend_version)
+                                  : Json(nullptr)},
+          {"model_id", id_text(provenance.model_id)},
+          {"credential_source",
+           provenance.credential_source
+               ? Json{{"kind",
+                       credential_kind_name(provenance.credential_source->kind)},
+                      {"identity", provenance.credential_source->identity}}
+               : Json(nullptr)},
+          {"configuration", std::move(configuration)},
+          {"components", std::move(components)},
+          {"tools", std::move(tools)}};
+}
+
+[[nodiscard]] auto parse_run_provenance(const Json& value)
+    -> domain::RunProvenance {
+  const auto& configuration = value.at("configuration");
+  const auto& components = value.at("components");
+  const auto& tools = value.at("tools");
+  if (!configuration.is_array() || !components.is_array() ||
+      !tools.is_array()) {
+    throw CodecFailure{"run provenance list is invalid"};
+  }
+  domain::RunProvenance provenance{
+      value.at("aiforge_version").get<std::string>(),
+      value.at("backend_id").get<std::string>(),
+      std::nullopt,
+      parse_id<domain::ModelId>(value.at("model_id")),
+      std::nullopt,
+      {},
+      {},
+      {}};
+  provenance.backend_version = parse_optional_string(value.at("backend_version"));
+  if (!value.at("credential_source").is_null()) {
+    const auto& source = value.at("credential_source");
+    provenance.credential_source =
+        domain::CredentialSourceReference{parse_credential_kind(source.at("kind")),
+                                          source.at("identity").get<std::string>()};
+  }
+  provenance.configuration.reserve(configuration.size());
+  for (const auto& entry : configuration) {
+    provenance.configuration.push_back(parse_configuration_entry(entry));
+  }
+  provenance.components.reserve(components.size());
+  for (const auto& component : components) {
+    provenance.components.push_back(
+        {component.at("component").get<std::string>(),
+         component.at("version").get<std::string>()});
+  }
+  provenance.tools.reserve(tools.size());
+  for (const auto& tool : tools) {
+    provenance.tools.push_back({tool.at("tool_name").get<std::string>(),
+                                parse_effects(tool.at("declared_effects")),
+                                parse_scopes(tool.at("capability_scopes"))});
+  }
+  if (!domain::validate_run_provenance(provenance)) {
+    throw CodecFailure{"run provenance is invalid"};
+  }
+  return provenance;
+}
+
 [[nodiscard]] auto payload_type(const domain::RunEventPayload& payload)
     -> std::string {
   return std::visit(
       Overloaded{
           [](const domain::RunStarted&) { return std::string{"run.started"}; },
+          [](const domain::RunProvenanceRecorded&) { return std::string{"run.provenance_recorded"}; },
           [](const domain::RunAwaitingInput&) { return std::string{"run.awaiting_input"}; },
           [](const domain::RunResumed&) { return std::string{"run.resumed"}; },
           [](const domain::RunCompletionRequested&) { return std::string{"run.completion_requested"}; },
@@ -1158,8 +1396,12 @@ template <typename Enum>
 }
 
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
+  // A payload added to the variant must also gain a name here and encode and
+  // parse paths below. Bump this only alongside those edits.
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 47,
+                "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
-      "run.started", "run.awaiting_input", "run.resumed",
+      "run.started", "run.provenance_recorded", "run.awaiting_input", "run.resumed",
       "run.completion_requested", "run.completed", "run.failed",
       "run.cancel_requested", "run.cancelled", "content.user_added",
       "content.assistant_started", "content.assistant_delta_added",
@@ -1189,6 +1431,9 @@ template <typename Enum>
                     {"workspace_id", id_text(value.workspace_id)},
                     {"permission_profile_id", id_text(value.permission_profile_id)},
                     {"persona_id", optional_id_json(value.persona_id)}};
+          },
+          [](const domain::RunProvenanceRecorded& value) -> Json {
+            return {{"provenance", run_provenance_json(value.provenance)}};
           },
           [](const domain::RunAwaitingInput& value) -> Json {
             return {{"question_id", id_text(value.question_id)}};
@@ -1414,6 +1659,10 @@ template <typename Enum>
         parse_id<domain::WorkspaceId>(value.at("workspace_id")),
         parse_id<domain::PermissionProfileId>(value.at("permission_profile_id")),
         parse_optional_id<domain::PersonaId>(value.at("persona_id"))};
+  }
+  if (type == "run.provenance_recorded") {
+    return domain::RunProvenanceRecorded{
+        parse_run_provenance(value.at("provenance"))};
   }
   if (type == "run.awaiting_input") {
     return domain::RunAwaitingInput{
@@ -2182,6 +2431,11 @@ auto process_session_store_path()
     environment.home = std::filesystem::path{value};
   }
   return resolve_session_store_path(environment);
+}
+
+auto sqlite_library_version() -> std::string {
+  const auto* version = sqlite3_libversion();
+  return version == nullptr ? std::string{} : std::string{version};
 }
 
 SqliteSessionStore::SqliteSessionStore(std::unique_ptr<Impl> impl)

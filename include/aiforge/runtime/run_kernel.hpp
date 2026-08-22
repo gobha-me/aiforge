@@ -70,6 +70,10 @@ struct RunStart {
   domain::RunStarted attributes;
   domain::Message user_message;
   backend::BackendRequest request;
+  // Recorded after `run.started` when present. Submit it with `tools` empty:
+  // the kernel fills that section from its own registry snapshot so recorded
+  // tool identity is the run's actual tool set.
+  std::optional<domain::RunProvenance> provenance{};
   auto operator==(const RunStart&) const -> bool = default;
 };
 

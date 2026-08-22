@@ -419,7 +419,8 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
         {*run_id,
          {*surface_id, *workspace_id, *permission_id, std::nullopt},
          std::move(user_message),
-         std::move(backend_request)});
+         std::move(backend_request),
+         std::move(request.provenance)});
     if (!started) {
       return one_shot_error(OneShotErrorCode::run_failed,
                             "one-shot run could not start");

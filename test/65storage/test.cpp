@@ -119,6 +119,32 @@ auto review_draft() -> domain::ReviewReceiptDraft {
         {{artifact, {"sha256", "cccccccccccccccc", 128}}}}}};
 }
 
+auto run_provenance() -> domain::RunProvenance {
+  return {"0.10.0",
+          "venice",
+          std::string{"1.2.3"},
+          make_id<domain::ModelId>("model"),
+          domain::CredentialSourceReference{
+              domain::CredentialSourceKind::environment, "VENICE_API_KEY"},
+          {{"model",
+            std::string{"venice-model"},
+            true,
+            domain::ProvenanceSource::environment,
+            false,
+            {{domain::ProvenanceSource::environment,
+              domain::ProvenanceDisposition::selected, std::nullopt},
+             {domain::ProvenanceSource::file,
+              domain::ProvenanceDisposition::shadowed,
+              domain::ProvenanceDiagnosticCode::duplicate_source_value}}},
+           {"secret", std::nullopt, true, domain::ProvenanceSource::file, true,
+            {{domain::ProvenanceSource::file,
+              domain::ProvenanceDisposition::selected, std::nullopt}}}},
+          {{"aiforge", "0.10.0"}, {"sqlite3", "3.45.1"}},
+          {{"read",
+            {domain::Effect::read},
+            {{domain::Effect::read, "root", "/workspace"}}}}};
+}
+
 auto open_store(const std::filesystem::path& path,
                 storage::SessionStoreLimits limits = {})
     -> std::unique_ptr<adapters::SqliteSessionStore> {
@@ -155,6 +181,7 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
       artifact, "text/plain", 3, "sha256:abc", invocation, 1, 2};
   return {
       started(),
+      domain::RunProvenanceRecorded{run_provenance()},
       domain::RunAwaitingInput{question},
       domain::RunResumed{question},
       domain::RunCompletionRequested{},
@@ -466,6 +493,83 @@ TEST_CASE("missing sessions malformed JSON and newer stores fail explicitly",
   REQUIRE_FALSE(newer);
   REQUIRE(newer.error().code ==
           storage::SessionStoreErrorCode::unsupported_version);
+}
+
+TEST_CASE("run provenance never persists a secret and rejects stored damage",
+          "[storage][sqlite][codec][provenance][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "session", 100);
+  REQUIRE(store->append_events(session, std::array{event(1, started(), "one")}));
+
+  auto sensitive = run_provenance();
+  sensitive.configuration.front().sensitive = true;
+  auto appended = store->append_events(
+      session,
+      std::array{event(2, domain::RunProvenanceRecorded{sensitive}, "secret")});
+  REQUIRE_FALSE(appended);
+  REQUIRE(appended.error().code ==
+          storage::SessionStoreErrorCode::invalid_argument);
+
+  auto duplicated = run_provenance();
+  duplicated.configuration.push_back(duplicated.configuration.front());
+  appended = store->append_events(
+      session, std::array{event(2, domain::RunProvenanceRecorded{duplicated},
+                                "duplicate")});
+  REQUIRE_FALSE(appended);
+  REQUIRE(appended.error().code ==
+          storage::SessionStoreErrorCode::invalid_argument);
+
+  auto secret_shaped = run_provenance();
+  secret_shaped.credential_source->identity = "sk-live-abcdef==";
+  appended = store->append_events(
+      session, std::array{event(2, domain::RunProvenanceRecorded{secret_shaped},
+                                "credential")});
+  REQUIRE_FALSE(appended);
+  REQUIRE(appended.error().code ==
+          storage::SessionStoreErrorCode::invalid_argument);
+
+  storage::SessionStoreLimits small;
+  small.maximum_payload_bytes = 64;
+  auto tight_store = open_store(path, small);
+  appended = tight_store->append_events(
+      session,
+      std::array{event(2, domain::RunProvenanceRecorded{run_provenance()},
+                       "oversized")});
+  REQUIRE_FALSE(appended);
+  REQUIRE(appended.error().code ==
+          storage::SessionStoreErrorCode::resource_exhausted);
+  tight_store.reset();
+
+  // Nothing above reached storage.
+  REQUIRE(store->replay_events(session)->size() == 1);
+  REQUIRE(store->append_events(
+      session, std::array{event(2, domain::RunProvenanceRecorded{
+                                       run_provenance()},
+                                "provenance")}));
+  store.reset();
+
+  execute_sql(path,
+              "UPDATE events SET payload_json="
+              "json_remove(payload_json,'$.provenance.backend_id') "
+              "WHERE event_id='provenance'");
+  store = open_store(path);
+  auto damaged = store->replay_events(session);
+  REQUIRE_FALSE(damaged);
+  REQUIRE(damaged.error().code == storage::SessionStoreErrorCode::corrupt);
+  store.reset();
+
+  // Restore the removed field so this case fails only on the unknown enum name.
+  execute_sql(path,
+              "UPDATE events SET payload_json="
+              "json_set(json_set(payload_json,'$.provenance.backend_id',"
+              "'venice'),'$.provenance.configuration[0].source',"
+              "'future_source') WHERE event_id='provenance'");
+  store = open_store(path);
+  damaged = store->replay_events(session);
+  REQUIRE_FALSE(damaged);
+  REQUIRE(damaged.error().code == storage::SessionStoreErrorCode::corrupt);
 }
 
 TEST_CASE("bounded SQLite writer contention is retryable",

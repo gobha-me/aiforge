@@ -43,6 +43,24 @@ auto started() -> RunStarted {
                     make_id<PermissionProfileId>("observe"), std::nullopt};
 }
 
+auto provenance() -> RunProvenance {
+  return RunProvenance{"0.10.0",
+                       "venice",
+                       std::nullopt,
+                       make_id<ModelId>("model"),
+                       CredentialSourceReference{
+                           CredentialSourceKind::environment, "VENICE_API_KEY"},
+                       {{"model",
+                         "venice-model",
+                         true,
+                         ProvenanceSource::environment,
+                         false,
+                         {{ProvenanceSource::environment,
+                           ProvenanceDisposition::selected, std::nullopt}}}},
+                       {{"aiforge", "0.10.0"}},
+                       {}};
+}
+
 }  // namespace
 
 TEST_CASE("opaque IDs reject invalid input before it reaches an event", "[domain][failure]") {
@@ -110,6 +128,146 @@ TEST_CASE("run projection rejects illegal inference and terminal ordering",
   REQUIRE(projection.apply(event(8, UnknownEvent{"future.after-terminal"}, "e8")));
 }
 
+TEST_CASE("run provenance is recorded once, after a start, on a live run",
+          "[domain][failure][provenance]") {
+  RunProjection projection;
+
+  REQUIRE_FALSE(projection.apply(event(1, RunProvenanceRecorded{provenance()},
+                                       "orphan")));
+  REQUIRE(projection.last_sequence() == 0);
+  REQUIRE_FALSE(projection.provenance());
+
+  REQUIRE(projection.apply(event(1, started(), "e1")));
+  REQUIRE(projection.apply(event(2, RunProvenanceRecorded{provenance()}, "e2")));
+  REQUIRE(projection.provenance() == provenance());
+
+  auto second = provenance();
+  second.backend_id = "other";
+  REQUIRE_FALSE(projection.apply(event(3, RunProvenanceRecorded{second}, "e3")));
+  REQUIRE(projection.provenance() == provenance());
+  REQUIRE(projection.last_sequence() == 2);
+
+  REQUIRE(projection.apply(event(3, RunCompleted{}, "e3")));
+  REQUIRE_FALSE(projection.apply(event(4, RunProvenanceRecorded{provenance()},
+                                       "e4")));
+}
+
+TEST_CASE("run provenance validation refuses secrets and malformed identity",
+          "[domain][failure][provenance]") {
+  REQUIRE(validate_run_provenance(provenance()));
+
+  RunProvenanceLimits zero_limits;
+  zero_limits.maximum_key_bytes = 0;
+  REQUIRE(validate_run_provenance(provenance(), zero_limits).error().code ==
+          RunProvenanceErrorCode::invalid_limits);
+
+  auto sensitive = provenance();
+  sensitive.configuration.front().sensitive = true;
+  REQUIRE(validate_run_provenance(sensitive).error().code ==
+          RunProvenanceErrorCode::sensitive_value_recorded);
+  // A sensitive key may still record that a value resolved, and from where.
+  sensitive.configuration.front().value.reset();
+  REQUIRE(validate_run_provenance(sensitive));
+  REQUIRE(sensitive.configuration.front().value_present);
+
+  auto duplicated = provenance();
+  duplicated.configuration.push_back(duplicated.configuration.front());
+  REQUIRE(validate_run_provenance(duplicated).error().code ==
+          RunProvenanceErrorCode::duplicate_key);
+
+  auto bad_key = provenance();
+  bad_key.configuration.front().key = "model key";
+  REQUIRE(validate_run_provenance(bad_key).error().code ==
+          RunProvenanceErrorCode::invalid_key);
+  bad_key.configuration.front().key.clear();
+  REQUIRE(validate_run_provenance(bad_key).error().code ==
+          RunProvenanceErrorCode::invalid_key);
+
+  auto inconsistent = provenance();
+  inconsistent.configuration.front().value_present = false;
+  REQUIRE(validate_run_provenance(inconsistent).error().code ==
+          RunProvenanceErrorCode::invalid_key);
+
+  auto oversized = provenance();
+  oversized.configuration.front().value = std::string(4097, 'x');
+  REQUIRE(validate_run_provenance(oversized).error().code ==
+          RunProvenanceErrorCode::value_too_large);
+
+  auto many_decisions = provenance();
+  many_decisions.configuration.front().decisions.assign(
+      17, {ProvenanceSource::file, ProvenanceDisposition::shadowed,
+           ProvenanceDiagnosticCode::duplicate_source_value});
+  REQUIRE(validate_run_provenance(many_decisions).error().code ==
+          RunProvenanceErrorCode::too_many_entries);
+
+  auto many_entries = provenance();
+  many_entries.configuration.clear();
+  for (std::size_t index = 0; index <= 256; ++index) {
+    many_entries.configuration.push_back(
+        {"key-" + std::to_string(index), std::nullopt, false, std::nullopt,
+         false, {}});
+  }
+  REQUIRE(validate_run_provenance(many_entries).error().code ==
+          RunProvenanceErrorCode::too_many_entries);
+}
+
+TEST_CASE("run provenance validation bounds identity, credentials, and tools",
+          "[domain][failure][provenance]") {
+  auto empty_version = provenance();
+  empty_version.aiforge_version.clear();
+  REQUIRE(validate_run_provenance(empty_version).error().code ==
+          RunProvenanceErrorCode::invalid_identity);
+
+  auto control_backend = provenance();
+  control_backend.backend_id = "ven\nice";
+  REQUIRE(validate_run_provenance(control_backend).error().code ==
+          RunProvenanceErrorCode::invalid_identity);
+
+  // A leaked credential is far likelier than a variable name to carry padding
+  // or whitespace, so the locator charset excludes both.
+  auto secret_shaped = provenance();
+  secret_shaped.credential_source->identity = "sk-abc123==";
+  REQUIRE(validate_run_provenance(secret_shaped).error().code ==
+          RunProvenanceErrorCode::invalid_credential_source);
+  secret_shaped.credential_source->identity = "VENICE API KEY";
+  REQUIRE(validate_run_provenance(secret_shaped).error().code ==
+          RunProvenanceErrorCode::invalid_credential_source);
+  secret_shaped.credential_source->identity.clear();
+  REQUIRE(validate_run_provenance(secret_shaped).error().code ==
+          RunProvenanceErrorCode::invalid_credential_source);
+
+  auto bad_component = provenance();
+  bad_component.components.front().version = "1.0 (dev)";
+  REQUIRE(validate_run_provenance(bad_component).error().code ==
+          RunProvenanceErrorCode::invalid_component);
+
+  auto duplicate_tool = provenance();
+  duplicate_tool.tools = {{"read", {Effect::read}, {}},
+                          {"read", {Effect::read}, {}}};
+  REQUIRE(validate_run_provenance(duplicate_tool).error().code ==
+          RunProvenanceErrorCode::duplicate_tool);
+
+  auto empty_tool = provenance();
+  empty_tool.tools = {{"", {}, {}}};
+  REQUIRE(validate_run_provenance(empty_tool).error().code ==
+          RunProvenanceErrorCode::invalid_tool);
+
+  auto wide_tool = provenance();
+  wide_tool.tools = {{"read", std::vector<Effect>(17, Effect::read), {}}};
+  REQUIRE(validate_run_provenance(wide_tool).error().code ==
+          RunProvenanceErrorCode::invalid_tool);
+
+  auto exhausted = provenance();
+  exhausted.configuration.clear();
+  for (std::size_t index = 0; index < 32; ++index) {
+    exhausted.configuration.push_back({"key-" + std::to_string(index),
+                                       std::string(4000, 'x'), true,
+                                       std::nullopt, false, {}});
+  }
+  REQUIRE(validate_run_provenance(exhausted).error().code ==
+          RunProvenanceErrorCode::resource_exhausted);
+}
+
 TEST_CASE("usage aggregation detects overflow without partially applying the event",
           "[domain][failure]") {
   RunProjection projection;
@@ -171,6 +329,7 @@ TEST_CASE("all north-star event families have typed payloads", "[domain]") {
 
   const std::vector<RunEventPayload> payloads{
       started(),
+      RunProvenanceRecorded{provenance()},
       RunAwaitingInput{question},
       RunResumed{question},
       RunCompletionRequested{},
@@ -208,7 +367,7 @@ TEST_CASE("all north-star event families have typed payloads", "[domain]") {
       UnknownEvent{"future.event"},
   };
 
-  REQUIRE(payloads.size() == 36);
+  REQUIRE(payloads.size() == 37);
   REQUIRE(std::holds_alternative<RunStarted>(payloads.front()));
   REQUIRE(std::holds_alternative<UnknownEvent>(payloads.back()));
 }

@@ -75,6 +75,14 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
             m_status = RunStatus::running;
             return {};
           },
+          [&](const RunProvenanceRecorded& recorded) -> std::expected<void, ProjectionError> {
+            if (auto live = require_running(); !live) return live;
+            if (m_provenance) {
+              return transition_error("run provenance may be recorded only once");
+            }
+            m_provenance = recorded.provenance;
+            return {};
+          },
           [&](const RunAwaitingInput&) -> std::expected<void, ProjectionError> {
             if (m_status != RunStatus::running || m_active_inference_id) {
               return transition_error("a run may await input only between inferences");

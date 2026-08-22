@@ -170,6 +170,9 @@ class CommandDispatcher final {
 
 [[nodiscard]] auto builtin_command_registry() -> const CommandRegistry&;
 
+// The build's version, formatted as `major.minor.patch[.tweak]`.
+[[nodiscard]] auto project_version() -> std::string;
+
 [[nodiscard]] auto run_cli(std::span<const std::string_view> arguments,
                            std::ostream& output, std::ostream& error) noexcept
     -> int;
