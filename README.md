@@ -262,9 +262,31 @@ failed partial assistant output remains inspectable in durable history but is
 not presented to the next model call as a completed answer.
 
 Interactive startup supports new, exact resume, continue-latest, and ephemeral
-sessions through command-line selection. In-surface session listing/switching
-and richer configuration, credential-source, and runtime-version provenance
-remain follow-up work under AF-11 and their owning feature issues.
+sessions through command-line selection. In-surface session listing and
+switching remain follow-up work under AF-11.
+
+## Run provenance
+
+Every run may record a `run.provenance_recorded` event immediately after
+`run.started`, so a replayed run explains what produced it: resolved
+configuration with its precedence decisions, backend and model identity, the
+credential source, the tool declarations the run actually offered, and runtime
+component versions. Each run carries its own record, including each interactive
+turn.
+
+A sensitive configuration key contributes presence, source, and its decision
+trail; its resolved value never enters an event. Credential sources are named by
+a non-secret locator such as an environment variable name, never by any part of
+the credential. `aiforge::domain::validate_run_provenance` enforces both rules
+before the run kernel records anything, so an ephemeral run cannot carry a
+secret into the in-memory event log either, and the storage adapter enforces
+them again on encode and parse. Tool identity is kernel-owned: a caller submits
+the record with no tools and the kernel fills them from its own registry
+snapshot.
+
+`RunProjection::provenance` exposes the restored record after replay. A record
+is refused before `run.started`, after a terminal event, and a second time
+within one run. An older reader retains the event opaquely and replays past it.
 
 ## Repository snapshot identity
 
