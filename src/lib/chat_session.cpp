@@ -96,6 +96,7 @@ struct ChatSession::Impl {
   ChatSessionLimits limits;
   bool is_durable{};
   ChatIdentitySuffixSource identity_suffix_source;
+  std::optional<domain::RunProvenance> provenance;
   std::unique_ptr<runtime::RunKernel> kernel;
 };
 
@@ -208,7 +209,8 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
 
     auto impl = std::make_unique<Impl>(Impl{
         request.model_id, *model, output_tokens, limits, durable,
-        std::move(dependencies.identity_suffix_source), std::move(kernel)});
+        std::move(dependencies.identity_suffix_source),
+        std::move(request.provenance), std::move(kernel)});
     return std::unique_ptr<ChatSession>{new ChatSession{std::move(impl)}};
   } catch (...) {
     return error(ChatSessionErrorCode::internal_failure,
@@ -310,7 +312,8 @@ auto ChatSession::submit(std::string prompt)
         {*run_id,
          {*surface_id, *workspace_id, *permission_id, std::nullopt},
          std::move(user_message),
-         std::move(backend_request)});
+         std::move(backend_request),
+         m_impl->provenance});
     if (!started) return std::unexpected(kernel_error(started.error()));
 
     const auto events = m_impl->kernel->event_log().events();

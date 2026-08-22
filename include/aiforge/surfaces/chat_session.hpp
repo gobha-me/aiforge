@@ -50,6 +50,9 @@ struct ChatSessionOpen {
   domain::ModelId model_id;
   Mode mode{Mode::create};
   std::optional<domain::SessionId> session_id;
+  // Recorded on every run this session starts, so each turn is independently
+  // answerable. Its tool section is filled by the run kernel.
+  std::optional<domain::RunProvenance> provenance{};
 };
 
 struct ChatSubmission {

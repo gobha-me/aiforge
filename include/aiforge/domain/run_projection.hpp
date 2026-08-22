@@ -57,6 +57,9 @@ class RunProjection final {
   [[nodiscard]] auto active_inference_id() const noexcept -> const std::optional<InferenceId>& {
     return m_active_inference_id;
   }
+  [[nodiscard]] auto provenance() const noexcept -> const std::optional<RunProvenance>& {
+    return m_provenance;
+  }
   [[nodiscard]] auto last_sequence() const noexcept -> std::uint64_t { return m_last_sequence; }
 
  private:
@@ -68,6 +71,7 @@ class RunProjection final {
   std::vector<ProjectedMessage> m_messages;
   Usage m_usage;
   std::optional<InferenceId> m_active_inference_id;
+  std::optional<RunProvenance> m_provenance;
   std::uint64_t m_last_sequence{};
 };
 

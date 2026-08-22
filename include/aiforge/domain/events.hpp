@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <aiforge/domain/content.hpp>
+#include <aiforge/domain/provenance.hpp>
 #include <aiforge/domain/review_receipt.hpp>
 #include <aiforge/domain/verification_evidence.hpp>
 
@@ -23,6 +24,14 @@ struct RunStarted {
   PermissionProfileId permission_profile_id;
   std::optional<PersonaId> persona_id;
   auto operator==(const RunStarted&) const -> bool = default;
+};
+
+// Recorded once per run, immediately after `RunStarted`, so a replayed run can
+// explain the configuration, backend, credential source, and tool and runtime
+// versions that produced it.
+struct RunProvenanceRecorded {
+  RunProvenance provenance;
+  auto operator==(const RunProvenanceRecorded&) const -> bool = default;
 };
 
 struct RunAwaitingInput {
@@ -345,7 +354,8 @@ struct UnknownEvent {
 };
 
 using RunEventPayload = std::variant<
-    RunStarted, RunAwaitingInput, RunResumed, RunCompletionRequested, RunCompleted,
+    RunStarted, RunProvenanceRecorded, RunAwaitingInput, RunResumed,
+    RunCompletionRequested, RunCompleted,
     RunFailed, RunCancelRequested, RunCancelled, UserContentAdded,
     AssistantContentStarted, AssistantContentDeltaAdded, AssistantContentFinished,
     InferenceStarted, ReasoningMetadataAdded, UsageRecorded, InferenceFinished,

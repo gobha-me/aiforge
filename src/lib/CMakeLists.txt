@@ -6,6 +6,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   command_registry.cpp
   conversation_context.cpp
   config.cpp
+  config_provenance.cpp
   context_builder.cpp
   context_parcel.cpp
   context_selection.cpp
@@ -16,6 +17,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   one_shot.cpp
   presentation_text.cpp
   project_instructions.cpp
+  provenance.cpp
   repository_knowledge.cpp
   repository_snapshot.cpp
   review_gate.cpp

@@ -48,18 +48,23 @@ struct OneShotRequest {
                  std::optional<std::string> stdin_evidence,
                  domain::ModelId model_id,
                  SessionMode session_mode = SessionMode::create,
-                 std::optional<domain::SessionId> session_id = std::nullopt)
+                 std::optional<domain::SessionId> session_id = std::nullopt,
+                 std::optional<domain::RunProvenance> provenance = std::nullopt)
       : prompt(std::move(prompt)),
         stdin_evidence(std::move(stdin_evidence)),
         model_id(std::move(model_id)),
         session_mode(session_mode),
-        session_id(std::move(session_id)) {}
+        session_id(std::move(session_id)),
+        provenance(std::move(provenance)) {}
 
   std::string prompt;
   std::optional<std::string> stdin_evidence;
   domain::ModelId model_id;
   SessionMode session_mode{SessionMode::create};
   std::optional<domain::SessionId> session_id;
+  // Recorded on the run this request creates. Its tool section is filled by the
+  // run kernel.
+  std::optional<domain::RunProvenance> provenance;
 };
 
 struct OneShotResult {

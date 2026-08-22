@@ -1899,6 +1899,26 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
           kernel_error(RunKernelErrorCode::invalid_start,
                        "run ID is already present in the session"));
     }
+    if (start.provenance) {
+      if (!start.provenance->tools.empty()) {
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::invalid_start,
+                         "run provenance tool identity is kernel-owned"));
+      }
+      for (const auto& declaration : m_impl->tools.declarations()) {
+        start.provenance->tools.push_back({declaration.name,
+                                           declaration.effects,
+                                           declaration.capability_scopes});
+      }
+      // Validated before anything is recorded so an ephemeral run cannot carry
+      // a sensitive value into the in-memory log either.
+      if (auto valid = domain::validate_run_provenance(*start.provenance);
+          !valid) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::invalid_start,
+            "run provenance is invalid: " + valid.error().message));
+      }
+    }
 
     Impl::ActiveRun active{start.run_id,
                            start.attributes.permission_profile_id,
@@ -1921,6 +1941,15 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
                                      transaction);
         !result) {
       return result;
+    }
+    if (start.provenance) {
+      if (auto result = m_impl->record(
+              start.run_id,
+              domain::RunProvenanceRecorded{std::move(*start.provenance)},
+              transaction);
+          !result) {
+        return result;
+      }
     }
     if (auto result = m_impl->record(
             start.run_id,

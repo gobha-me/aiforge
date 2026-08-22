@@ -237,6 +237,49 @@ TEST_CASE("interactive turns stream and reuse completed conversation context",
           std::vector<std::string>{"first\nline", "second"});
 }
 
+TEST_CASE("every interactive run records its own provenance once",
+          "[chat][provenance]") {
+  Backend backend;
+  domain::RunProvenance provenance{
+      "0.10.0",
+      "venice",
+      std::nullopt,
+      make_id<domain::ModelId>("model"),
+      domain::CredentialSourceReference{
+          domain::CredentialSourceKind::environment, "VENICE_API_KEY"},
+      {{"model", std::string{"venice-model"}, true,
+        domain::ProvenanceSource::environment, false,
+        {{domain::ProvenanceSource::environment,
+          domain::ProvenanceDisposition::selected, std::nullopt}}}},
+      {{"aiforge", "0.10.0"}},
+      {}};
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt, provenance},
+      backend, backend);
+  REQUIRE(session);
+
+  const auto recorded_in = [](const std::vector<domain::RunEvent>& events) {
+    return std::ranges::count_if(events, [](const auto& event) {
+      return std::holds_alternative<domain::RunProvenanceRecorded>(
+          event.payload);
+    });
+  };
+
+  auto first = (*session)->submit("first");
+  REQUIRE(first);
+  REQUIRE(recorded_in(first->committed_events) == 1);
+  drain_to_end(**session);
+
+  auto second = (*session)->submit("second");
+  REQUIRE(second);
+  REQUIRE(recorded_in(second->committed_events) == 1);
+  REQUIRE(second->run_id != first->run_id);
+  drain_to_end(**session);
+
+  REQUIRE(recorded_in((*session)->event_log().events()) == 2);
+}
+
 TEST_CASE("interactive sessions accept deterministic identity and time sources",
           "[chat][scenario]") {
   Backend backend;

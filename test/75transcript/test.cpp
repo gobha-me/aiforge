@@ -140,6 +140,50 @@ TEST_CASE("transcript rebuild equals deterministic incremental application",
   REQUIRE(answer.usage == domain::Usage{4, 2, 1, 0});
 }
 
+TEST_CASE("a provenance record replays without adding a transcript item",
+          "[transcript][provenance]") {
+  const domain::RunProvenance provenance{
+      "0.10.0",
+      "venice",
+      std::nullopt,
+      make_id<domain::ModelId>("model"),
+      domain::CredentialSourceReference{
+          domain::CredentialSourceKind::environment, "VENICE_API_KEY"},
+      {{"model", std::string{"venice-model"}, true,
+        domain::ProvenanceSource::environment, false,
+        {{domain::ProvenanceSource::environment,
+          domain::ProvenanceDisposition::selected, std::nullopt}}}},
+      {{"aiforge", "0.10.0"}},
+      {}};
+  const std::vector events{
+      event(1, started()),
+      event(2, domain::RunProvenanceRecorded{provenance}),
+      event(3, domain::UserContentAdded{
+                   message("user", domain::Role::user, "hello")}),
+      event(4, domain::RunCompleted{}),
+  };
+
+  domain::TranscriptProjection incremental;
+  for (const auto& value : events) REQUIRE(incremental.apply(value));
+  const auto rebuilt = domain::TranscriptProjection::rebuild(events);
+  REQUIRE(rebuilt);
+  REQUIRE(rebuilt->items() == incremental.items());
+  // Provenance is run state, not a rendered turn.
+  REQUIRE(incremental.items().size() == 1);
+  REQUIRE(rebuilt->last_sequence() == 4);
+
+  const auto session = domain::SessionTranscriptProjection::rebuild(events);
+  REQUIRE(session);
+
+  // The once-per-run rule is inherited from the run projection.
+  auto duplicated = events;
+  duplicated.insert(duplicated.begin() + 2,
+                    event(3, domain::RunProvenanceRecorded{provenance},
+                          "event-3b"));
+  duplicated.back().metadata.sequence = 5;
+  REQUIRE_FALSE(domain::TranscriptProjection::rebuild(duplicated));
+}
+
 TEST_CASE("session transcript composes sequential and interleaved runs",
           "[transcript][session]") {
   const std::vector events{

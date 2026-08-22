@@ -4,10 +4,15 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <string>
 
 #include <aiforge/storage/session_store.hpp>
 
 namespace aiforge::adapters {
+
+// The SQLite runtime this build is linked against, for run provenance. The
+// SQLite headers stay inside this adapter.
+[[nodiscard]] auto sqlite_library_version() -> std::string;
 
 struct SessionStorePathEnvironment {
   std::optional<std::filesystem::path> xdg_state_home;

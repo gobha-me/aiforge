@@ -1,6 +1,7 @@
 #include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/process_draft_editor.hpp>
 #include <aiforge/adapters/process_interactive.hpp>
+#include <aiforge/adapters/process_provenance.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/termforge_run_bridge.hpp>
 #include <aiforge/adapters/transcript_view.hpp>
@@ -638,8 +639,14 @@ auto ProcessInteractiveCommand::execute(Request request,
       }
       return surfaces::ChatSessionOpen::Mode::create;
     }();
+    // The variable name only. The key itself never leaves `api_key`.
+    auto credential_source = domain::CredentialSourceReference{
+        domain::CredentialSourceKind::environment, "VENICE_API_KEY"};
+    auto provenance = process_run_provenance(*resolved, *model, "venice",
+                                             std::move(credential_source));
     surfaces::ChatSessionOpen open{std::move(*model), mode,
-                                   std::move(request.session_id)};
+                                   std::move(request.session_id),
+                                   std::move(provenance)};
 
     std::unique_ptr<SqliteSessionStore> store;
     if (mode != surfaces::ChatSessionOpen::Mode::ephemeral) {

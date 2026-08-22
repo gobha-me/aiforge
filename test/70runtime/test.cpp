@@ -19,6 +19,7 @@
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
+#include <aiforge/testing/scripted_session_store.hpp>
 
 namespace {
 
@@ -74,6 +75,36 @@ auto run_start(backend::BackendRequest backend_request = request())
                       {domain::TextBlock{"hello"}},
                       std::nullopt},
       std::move(backend_request)};
+}
+
+auto provenance() -> domain::RunProvenance {
+  return {"0.10.0",
+          "venice",
+          std::nullopt,
+          make_id<domain::ModelId>("model"),
+          domain::CredentialSourceReference{
+              domain::CredentialSourceKind::environment, "VENICE_API_KEY"},
+          {{"model", std::string{"venice-model"}, true,
+            domain::ProvenanceSource::environment, false,
+            {{domain::ProvenanceSource::environment,
+              domain::ProvenanceDisposition::selected, std::nullopt}}}},
+          {{"aiforge", "0.10.0"}},
+          {}};
+}
+
+template <typename Payload>
+auto durable_event(const domain::RunId& run, const std::uint64_t sequence,
+                   std::string event_id, Payload payload) -> domain::RunEvent {
+  return {domain::EventMetadata{make_id<domain::EventId>(std::move(event_id)),
+                                run,
+                                sequence,
+                                1,
+                                domain::EventTimestamp{
+                                    std::chrono::milliseconds{100 + sequence}},
+                                std::nullopt,
+                                std::nullopt,
+                                std::nullopt},
+          std::move(payload)};
 }
 
 auto step(backend::BackendEvent event) -> testing::ScriptedStep {
@@ -624,4 +655,150 @@ TEST_CASE("duplicate terminal backend events are rejected once",
   REQUIRE_FALSE(kernel.active_run_id());
   REQUIRE(kernel.projection(make_id<domain::RunId>("run"))->status() ==
           domain::RunStatus::completed);
+}
+
+TEST_CASE("run provenance is validated and completed before it is recorded",
+          "[runtime][provenance][failure]") {
+  const backend::ToolDeclaration declaration{
+      "lookup",
+      "Lookup",
+      {"application/schema+json", R"({"type":"object"})"},
+      {domain::Effect::network},
+      {{domain::Effect::network, "network.host", "example.test"}}};
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(declaration,
+                                 std::make_shared<PassiveToolExecutor>()));
+  auto snapshot = registry.snapshot();
+  REQUIRE(snapshot);
+  auto backend_request = request({declaration});
+  testing::ScriptedBackend fake{{testing::ScriptedExchange{
+      backend_request,
+      testing::StreamScript{{
+          step(backend::ResponseStarted{"response"}),
+          step(backend::ResponseFinished{domain::FinishReason::stop}),
+          testing::EndOfStream{},
+      }}}}};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake, &wake,
+                            {}, {}, std::move(*snapshot)};
+
+  // The tool section is kernel-owned, so a caller may not assert it.
+  auto claimed_tools = run_start(backend_request);
+  claimed_tools.provenance = provenance();
+  claimed_tools.provenance->tools = {{"lookup", {}, {}}};
+  auto started = kernel.start(std::move(claimed_tools));
+  REQUIRE_FALSE(started);
+  REQUIRE(started.error().code == runtime::RunKernelErrorCode::invalid_start);
+  REQUIRE(kernel.event_log().events().empty());
+
+  // A sensitive value is refused before anything is recorded, even with no
+  // durable store attached.
+  auto secret = run_start(backend_request);
+  secret.provenance = provenance();
+  secret.provenance->configuration.front().sensitive = true;
+  started = kernel.start(std::move(secret));
+  REQUIRE_FALSE(started);
+  REQUIRE(started.error().code == runtime::RunKernelErrorCode::invalid_start);
+  REQUIRE(kernel.event_log().events().empty());
+  REQUIRE_FALSE(kernel.active_run_id());
+
+  // The kernel remains usable, and fills tool identity from its own registry.
+  auto valid = run_start(backend_request);
+  valid.provenance = provenance();
+  REQUIRE(kernel.start(std::move(valid)));
+
+  const auto& events = kernel.event_log().events();
+  REQUIRE(events.size() >= 2);
+  REQUIRE(std::holds_alternative<domain::RunStarted>(events[0].payload));
+  const auto* recorded =
+      std::get_if<domain::RunProvenanceRecorded>(&events[1].payload);
+  REQUIRE(recorded != nullptr);
+  REQUIRE(recorded->provenance.tools.size() == 1);
+  REQUIRE(recorded->provenance.tools.front().tool_name == declaration.name);
+  REQUIRE(recorded->provenance.tools.front().declared_effects ==
+          declaration.effects);
+  REQUIRE(recorded->provenance.tools.front().capability_scopes ==
+          declaration.capability_scopes);
+  REQUIRE(events[1].metadata.run_id == events[0].metadata.run_id);
+  REQUIRE(events[1].metadata.sequence > events[0].metadata.sequence);
+
+  // Copied before draining: the event log may reallocate underneath a pointer.
+  const auto completed = recorded->provenance;
+  static_cast<void>(drain_to_end(kernel, wake));
+  REQUIRE(kernel.projection(make_id<domain::RunId>("run"))->provenance() ==
+          completed);
+}
+
+TEST_CASE("a run without provenance records none", "[runtime][provenance]") {
+  auto backend_request = request();
+  testing::ScriptedBackend fake{{testing::ScriptedExchange{
+      backend_request,
+      testing::StreamScript{{
+          step(backend::ResponseStarted{"response"}),
+          step(backend::ResponseFinished{domain::FinishReason::stop}),
+          testing::EndOfStream{},
+      }}}}};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake, &wake};
+
+  REQUIRE(kernel.start(run_start(backend_request)));
+  static_cast<void>(drain_to_end(kernel, wake));
+  const auto& events = kernel.event_log().events();
+  REQUIRE(std::ranges::none_of(events, [](const auto& event) {
+    return std::holds_alternative<domain::RunProvenanceRecorded>(event.payload);
+  }));
+  REQUIRE_FALSE(kernel.projection(make_id<domain::RunId>("run"))->provenance());
+}
+
+TEST_CASE("resume restores recorded provenance and rejects a duplicate record",
+          "[runtime][provenance][failure]") {
+  const auto session = make_id<domain::SessionId>("session");
+  const auto run = make_id<domain::RunId>("run");
+  const auto history = [&](const bool duplicate) {
+    std::vector<domain::RunEvent> events{
+        durable_event(run, 1, "e1",
+                      domain::RunStarted{
+                          make_id<domain::SurfaceId>("test"),
+                          make_id<domain::WorkspaceId>("chat"),
+                          make_id<domain::PermissionProfileId>("observe"),
+                          std::nullopt}),
+        durable_event(run, 2, "e2",
+                      domain::RunProvenanceRecorded{provenance()}),
+        durable_event(run, 3, "e3", domain::RunCompleted{})};
+    if (duplicate) {
+      events.insert(events.begin() + 2,
+                    durable_event(run, 3, "e2b",
+                                  domain::RunProvenanceRecorded{provenance()}));
+      events.back().metadata.sequence = 4;
+    }
+    return events;
+  };
+
+  testing::ScriptedBackend fake{{}};
+  const storage::SessionInfo info{
+      session, domain::EventTimestamp{std::chrono::milliseconds{100}},
+      domain::EventTimestamp{std::chrono::milliseconds{103}}, 3};
+  testing::ScriptedSessionStore store{
+      {{testing::OpenSessionCall{session}, info},
+       {testing::ReplayEventsCall{session}, history(false)}}};
+  auto resumed = runtime::RunKernel::open_durable(
+      {session, runtime::DurableSessionMode::resume,
+       domain::EventTimestamp{std::chrono::milliseconds{100}}},
+      store, fake);
+  REQUIRE(resumed);
+  REQUIRE((*resumed)->projection(run)->provenance() == provenance());
+
+  const storage::SessionInfo duplicate_info{
+      session, domain::EventTimestamp{std::chrono::milliseconds{100}},
+      domain::EventTimestamp{std::chrono::milliseconds{104}}, 4};
+  testing::ScriptedSessionStore duplicate_store{
+      {{testing::OpenSessionCall{session}, duplicate_info},
+       {testing::ReplayEventsCall{session}, history(true)}}};
+  const auto rejected = runtime::RunKernel::open_durable(
+      {session, runtime::DurableSessionMode::resume,
+       domain::EventTimestamp{std::chrono::milliseconds{100}}},
+      duplicate_store, fake);
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code ==
+          runtime::RunKernelErrorCode::replay_rejected);
 }
