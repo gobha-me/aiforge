@@ -173,11 +173,12 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   const auto& registry = builtin_slash_command_registry();
   const auto listed = registry.describe();
   REQUIRE(listed);
-  REQUIRE(listed->size() == 4);
+  REQUIRE(listed->size() == 5);
   REQUIRE((*listed)[0].name == "help");
   REQUIRE((*listed)[1].name == "quit");
   REQUIRE((*listed)[2].name == "clear");
   REQUIRE((*listed)[3].name == "edit");
+  REQUIRE((*listed)[4].name == "session");
 
   const auto help = registry.dispatch("/help /clear");
   REQUIRE(help);
@@ -197,6 +198,37 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
       "/help", {.run_active = true, .stop_token = {}});
   REQUIRE_FALSE(active);
   REQUIRE(active.error().code == SlashCommandErrorCode::unavailable_command);
+
+  const auto sessions = registry.dispatch("/session");
+  REQUIRE(sessions);
+  REQUIRE((*sessions)->action == SlashCommandAction::list_sessions);
+  REQUIRE_FALSE((*sessions)->subject);
+
+  const auto listed_sessions = registry.dispatch("/session list\t");
+  REQUIRE(listed_sessions);
+  REQUIRE((*listed_sessions)->action == SlashCommandAction::list_sessions);
+
+  const auto resumed = registry.dispatch("/session resume session-42");
+  REQUIRE(resumed);
+  REQUIRE((*resumed)->action == SlashCommandAction::resume_session);
+  REQUIRE((*resumed)->subject == "session-42");
+
+  const auto created = registry.dispatch("/session new");
+  REQUIRE(created);
+  REQUIRE((*created)->action == SlashCommandAction::new_session);
+
+  for (const auto invalid : {"/session resume", "/session list extra",
+                             "/session unknown"}) {
+    const auto rejected = registry.dispatch(invalid);
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error().code == SlashCommandErrorCode::invalid_arguments);
+  }
+
+  const auto active_session = registry.dispatch(
+      "/session list", {.run_active = true, .stop_token = {}});
+  REQUIRE_FALSE(active_session);
+  REQUIRE(active_session.error().code ==
+          SlashCommandErrorCode::unavailable_command);
 
   std::stop_source cancelled;
   cancelled.request_stop();

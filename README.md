@@ -262,8 +262,16 @@ failed partial assistant output remains inspectable in durable history but is
 not presented to the next model call as a completed answer.
 
 Interactive startup supports new, exact resume, continue-latest, and ephemeral
-sessions through command-line selection. In-surface session listing and
-switching remain follow-up work under AF-11.
+sessions through command-line selection. Inside the TUI, `/session` and
+`/session list` show the 100 most recently active durable sessions with their
+IDs, creation and activity times, and run counts; the current session is marked.
+`/session resume <session-id>` replays and switches to an exact durable session,
+while `/session new` starts a fresh session without leaving the terminal. A
+switch opens and validates the candidate before replacing the current kernel or
+transcript, so failure leaves the current session usable. Session actions are
+refused while a run or question is active rather than implicitly cancelling it.
+In ephemeral mode listing explains that durable history is unavailable, resume
+is rejected, and `/session new` starts another ephemeral session.
 
 ## Run provenance
 

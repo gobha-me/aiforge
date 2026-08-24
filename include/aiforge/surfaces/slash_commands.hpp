@@ -24,6 +24,9 @@ enum class SlashCommandAction {
   quit,
   clear_view,
   edit_draft,
+  list_sessions,
+  resume_session,
+  new_session,
 };
 
 struct SlashCommandResult {
