@@ -352,6 +352,7 @@ TEST_CASE("all typed payloads and opaque future payloads round trip",
   REQUIRE(info);
   REQUIRE(info->last_sequence == events.size());
   REQUIRE(info->last_activity_at == events.back().metadata.timestamp);
+  REQUIRE(info->run_count == 1);
   const auto listed = store->list_sessions(10);
   REQUIRE(listed);
   REQUIRE(*listed == std::vector<storage::SessionInfo>{*info});
@@ -377,6 +378,36 @@ TEST_CASE("all typed payloads and opaque future payloads round trip",
   REQUIRE_FALSE(rejected);
   REQUIRE(rejected.error().code ==
           storage::SessionStoreErrorCode::invalid_argument);
+}
+
+TEST_CASE("session discovery derives distinct run counts without schema state",
+          "[storage][sqlite][catalog]") {
+  TemporaryDirectory temporary;
+  auto store = open_store(temporary.path() / "aiforge" / "sessions.sqlite3");
+  const auto session = create(*store, "session", 100);
+
+  const auto empty = store->open_session(session);
+  REQUIRE(empty);
+  REQUIRE(empty->run_count == 0);
+
+  auto first = event(1, domain::UnknownEvent{
+                            "future.first", {"application/json", "{}"}});
+  auto second = event(2, domain::UnknownEvent{
+                             "future.second", {"application/json", "{}"}});
+  second.metadata.run_id = make_id<domain::RunId>("second-run");
+  auto repeated = event(3, domain::UnknownEvent{
+                               "future.third", {"application/json", "{}"}});
+  repeated.metadata.run_id = second.metadata.run_id;
+  REQUIRE(store->append_events(session, std::array{first, second, repeated}));
+
+  const auto info = store->open_session(session);
+  REQUIRE(info);
+  REQUIRE(info->last_sequence == 3);
+  REQUIRE(info->run_count == 2);
+  const auto listed = store->list_sessions(1);
+  REQUIRE(listed);
+  REQUIRE(listed->size() == 1);
+  REQUIRE(listed->front() == *info);
 }
 
 TEST_CASE("append validation and constraints leave prior history readable",

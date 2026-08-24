@@ -138,6 +138,38 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
   return no_arguments(arguments, SlashCommandAction::edit_draft);
 }
 
+[[nodiscard]] auto trim_arguments(std::string_view value) -> std::string_view {
+  const auto first = value.find_first_not_of(" \t");
+  if (first == std::string_view::npos) return {};
+  const auto last = value.find_last_not_of(" \t");
+  return value.substr(first, last - first + 1);
+}
+
+[[nodiscard]] auto session_handler(std::string_view arguments,
+                                   const SlashCommandContext&)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  arguments = trim_arguments(arguments);
+  if (arguments.empty() || arguments == "list") {
+    return SlashCommandResult{SlashCommandAction::list_sessions, std::nullopt};
+  }
+  if (arguments == "new") {
+    return SlashCommandResult{SlashCommandAction::new_session, std::nullopt};
+  }
+
+  constexpr std::string_view resume{"resume"};
+  if (arguments.starts_with(resume) && arguments.size() > resume.size() &&
+      (arguments[resume.size()] == ' ' || arguments[resume.size()] == '\t')) {
+    const auto session_id = trim_arguments(arguments.substr(resume.size()));
+    if (!session_id.empty()) {
+      return SlashCommandResult{SlashCommandAction::resume_session,
+                                std::string{session_id}};
+    }
+  }
+  return command_error(
+      SlashCommandErrorCode::invalid_arguments,
+      "session accepts list, resume <session-id>, or new");
+}
+
 [[nodiscard]] auto builtin_specs() -> std::vector<SlashCommandSpec> {
   return {
       {"help", "help", "[command]", "Show available slash commands.",
@@ -148,6 +180,9 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
        idle_available, clear_handler},
       {"edit", "edit", "", "Open an empty draft in the configured editor.",
        editor_available, edit_handler},
+      {"session", "session", "[list | resume <session-id> | new]",
+       "List, resume, or start interactive sessions.", idle_available,
+       session_handler},
   };
 }
 

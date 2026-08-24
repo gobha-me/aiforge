@@ -5,10 +5,15 @@
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <condition_variable>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
+#include <span>
 #include <sstream>
 #include <string>
 #include <termforge/widgets/choice_wizard_dialog.hpp>
@@ -149,6 +154,133 @@ class NoEditor final : public surfaces::DraftEditor {
         surfaces::DraftEditorErrorCode::not_configured,
         "editor is unavailable in a scenario"});
   }
+};
+
+class SessionScenarioStore final : public storage::SessionStore {
+ public:
+  explicit SessionScenarioStore(const bool fail_listing = false)
+      : m_fail_listing(fail_listing) {
+    const auto target = make_id<domain::SessionId>("target-session");
+    m_sessions.emplace(
+        target,
+        storage::SessionInfo{target, domain::EventTimestamp{500ms},
+                             domain::EventTimestamp{3000ms}, 0, 7});
+    const auto corrupt = make_id<domain::SessionId>("corrupt-session");
+    m_sessions.emplace(
+        corrupt,
+        storage::SessionInfo{corrupt, domain::EventTimestamp{400ms},
+                             domain::EventTimestamp{2500ms}, 1, 1});
+    m_histories[corrupt] = {domain::RunEvent{
+        {make_id<domain::EventId>("corrupt-event"),
+         make_id<domain::RunId>("corrupt-run"), 1, 1,
+         domain::EventTimestamp{2500ms}, std::nullopt, std::nullopt,
+         std::nullopt},
+        domain::RunCompleted{}}};
+  }
+
+  auto create_session(storage::SessionCreate session, std::stop_token token)
+      -> std::expected<void, storage::SessionStoreError> override {
+    if (token.stop_requested()) return std::unexpected(cancelled());
+    if (m_sessions.contains(session.session_id)) {
+      return std::unexpected(storage::SessionStoreError{
+          storage::SessionStoreErrorCode::already_exists, "session exists",
+          false});
+    }
+    const auto timestamp = domain::EventTimestamp{
+        std::chrono::milliseconds{1000 *
+                                  static_cast<std::int64_t>(m_sessions.size() +
+                                                            1)}};
+    m_sessions.emplace(session.session_id,
+                       storage::SessionInfo{session.session_id, timestamp,
+                                            timestamp, 0, 0});
+    return {};
+  }
+
+  auto open_session(const domain::SessionId& session_id, std::stop_token token)
+      -> std::expected<storage::SessionInfo,
+                       storage::SessionStoreError> override {
+    if (token.stop_requested()) return std::unexpected(cancelled());
+    const auto found = m_sessions.find(session_id);
+    if (found == m_sessions.end()) {
+      return std::unexpected(storage::SessionStoreError{
+          storage::SessionStoreErrorCode::not_found, "session disappeared",
+          false});
+    }
+    return found->second;
+  }
+
+  auto list_sessions(const std::size_t limit, std::stop_token token)
+      -> std::expected<std::vector<storage::SessionInfo>,
+                       storage::SessionStoreError> override {
+    if (token.stop_requested()) return std::unexpected(cancelled());
+    if (m_fail_listing) {
+      return std::unexpected(storage::SessionStoreError{
+          storage::SessionStoreErrorCode::contention,
+          "session catalog is contended", true});
+    }
+    std::vector<storage::SessionInfo> result;
+    for (const auto& [id, info] : m_sessions) {
+      static_cast<void>(id);
+      result.push_back(info);
+    }
+    std::ranges::sort(result, [](const auto& left, const auto& right) {
+      if (left.last_activity_at != right.last_activity_at) {
+        return left.last_activity_at > right.last_activity_at;
+      }
+      return left.session_id < right.session_id;
+    });
+    if (result.size() > limit) {
+      result.erase(result.begin() + static_cast<std::ptrdiff_t>(limit),
+                   result.end());
+    }
+    return result;
+  }
+
+  auto append_events(const domain::SessionId& session_id,
+                     const std::span<const domain::RunEvent> events,
+                     std::stop_token token)
+      -> std::expected<void, storage::SessionStoreError> override {
+    if (token.stop_requested()) return std::unexpected(cancelled());
+    const auto found = m_sessions.find(session_id);
+    if (found == m_sessions.end()) {
+      return std::unexpected(storage::SessionStoreError{
+          storage::SessionStoreErrorCode::not_found, "session disappeared",
+          false});
+    }
+    auto& history = m_histories[session_id];
+    history.insert(history.end(), events.begin(), events.end());
+    if (!history.empty()) {
+      found->second.last_sequence = history.back().metadata.sequence;
+      found->second.last_activity_at = history.back().metadata.timestamp;
+      std::set<domain::RunId> runs;
+      for (const auto& event : history) runs.insert(event.metadata.run_id);
+      found->second.run_count = runs.size();
+    }
+    return {};
+  }
+
+  auto replay_events(const domain::SessionId& session_id,
+                     std::stop_token token)
+      -> std::expected<std::vector<domain::RunEvent>,
+                       storage::SessionStoreError> override {
+    if (token.stop_requested()) return std::unexpected(cancelled());
+    if (!m_sessions.contains(session_id)) {
+      return std::unexpected(storage::SessionStoreError{
+          storage::SessionStoreErrorCode::not_found, "session disappeared",
+          false});
+    }
+    return m_histories[session_id];
+  }
+
+ private:
+  [[nodiscard]] static auto cancelled() -> storage::SessionStoreError {
+    return {storage::SessionStoreErrorCode::cancelled,
+            "session operation cancelled", false};
+  }
+
+  bool m_fail_listing{};
+  std::map<domain::SessionId, storage::SessionInfo> m_sessions;
+  std::map<domain::SessionId, std::vector<domain::RunEvent>> m_histories;
 };
 
 class GatedBackendState final {
@@ -627,6 +759,154 @@ auto chat_factory() -> testing::TuiScenarioTargetFactory {
   };
 }
 
+auto session_success_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-session-list-resume-new";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 12, 1000, 240};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  const auto escape = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Escape, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/session list"}}},
+      {0, enter},
+      {1, escape},
+      {2, testing::TuiScenarioPost{
+              termforge::PasteEvent{"/session resume session-1"}}},
+      {2, enter},
+      {3, testing::TuiScenarioPost{
+              termforge::PasteEvent{"/session resume target-session"}}},
+      {3, enter},
+      {4, testing::TuiScenarioPost{termforge::PasteEvent{"/session new"}}},
+      {4, enter},
+      {5, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
+      {5, enter},
+  };
+  value.limits.maximum_frames = 24;
+  return value;
+}
+
+auto session_failure_scenario(std::string scenario_id, std::string command)
+    -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = std::move(scenario_id);
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 8, 1000, 160};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{std::move(command)}}},
+      {0, enter},
+      {2, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Char, U'c', true, false, false,
+              termforge::KeyAction::Press}}},
+  };
+  value.limits.maximum_frames = 16;
+  return value;
+}
+
+auto ephemeral_session_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-ephemeral-session-actions";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 9, 1000, 180};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  const auto escape = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Escape, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/session"}}},
+      {0, enter},
+      {1, escape},
+      {2, testing::TuiScenarioPost{termforge::PasteEvent{"/session new"}}},
+      {2, enter},
+      {3, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
+      {3, enter},
+  };
+  value.limits.maximum_frames = 20;
+  return value;
+}
+
+auto session_factory(const bool durable, const bool fail_listing = false)
+    -> testing::TuiScenarioTargetFactory {
+  return [=](testing::TuiScenarioPass, termforge::ByteSink* output)
+             -> std::expected<testing::TuiScenarioTarget,
+                              testing::TuiScenarioError> {
+    auto pipe = std::make_shared<Pipe>();
+    if (!pipe->ok()) {
+      return std::unexpected(testing::TuiScenarioError{
+          testing::TuiScenarioErrorCode::target_failure,
+          "session scenario pipe setup failed"});
+    }
+    auto backend_state = std::make_shared<GatedBackendState>();
+    auto backend = std::make_shared<GatedBackend>(backend_state);
+    auto editor = std::make_shared<NoEditor>();
+    auto store = std::make_shared<SessionScenarioStore>(fail_listing);
+    auto frame = std::make_shared<std::string>();
+    auto suffix = std::make_shared<std::uint64_t>();
+    adapters::InteractiveChatAppOptions options;
+    options.live_wake_enabled = false;
+    options.poll_worker_updates = false;
+    options.rendered_output = output;
+    options.rendered_frame = [frame](const termforge::Screen& screen) {
+      *frame = normalized_screen(screen);
+    };
+    options.session_dependencies.identity_suffix_source = [suffix] {
+      return ++*suffix;
+    };
+    options.session_dependencies.timestamp_source = [] {
+      return domain::EventTimestamp{123ms};
+    };
+    auto app = adapters::make_interactive_chat_app(
+        *backend, *backend, durable ? store.get() : nullptr,
+        {make_id<domain::ModelId>("model"),
+         durable ? surfaces::ChatSessionOpen::Mode::create
+                 : surfaces::ChatSessionOpen::Mode::ephemeral,
+         std::nullopt},
+        *editor, {}, std::move(options));
+    if (!app->ready()) {
+      return std::unexpected(testing::TuiScenarioError{
+          testing::TuiScenarioErrorCode::target_failure,
+          app->setup_error().message});
+    }
+    auto* raw = app.get();
+    return testing::TuiScenarioTarget{
+        std::move(app),
+        [raw, pipe](const termforge::Capabilities& capabilities) {
+          return raw->configure_terminal_for_scenario(
+              termforge::TerminalIo{pipe->read_fd(), -1}, capabilities);
+        },
+        [raw, backend, editor, store] {
+          static_cast<void>(backend);
+          static_cast<void>(editor);
+          static_cast<void>(store);
+          return raw->run();
+        },
+        [](std::string_view) -> std::expected<void, std::string> {
+          return std::unexpected("session scenario has no backend script");
+        },
+        [](std::string_view) -> std::expected<void, std::string> {
+          return std::unexpected("session scenario has no tool script");
+        },
+        [frame] { return *frame; },
+        [raw, backend, editor, store] {
+          static_cast<void>(backend);
+          static_cast<void>(editor);
+          static_cast<void>(store);
+          return std::string{raw->status_text()};
+        }};
+  };
+}
+
 auto modal_scenario() -> testing::TuiScenario {
   testing::TuiScenario value;
   value.scenario_id = "ask-user-modal-resize";
@@ -772,6 +1052,86 @@ TEST_CASE("interactive chat cancellation replay preserves cross-thread order",
   REQUIRE(std::ranges::any_of(
       result->recorded.normalized_frames, [](const std::string& frame) {
         return frame.find("cancelled") != std::string::npos;
+      }));
+}
+
+TEST_CASE("interactive session actions list resume and create atomically",
+          "[scenario][session]") {
+  const auto result = testing::run_tui_scenario(session_success_scenario(),
+                                                session_factory(true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state == "Started session session-3");
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("target-session") != std::string::npos &&
+               frame.find("runs 7") != std::string::npos;
+      }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("Session is already current") != std::string::npos;
+      }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("AIForge  session target-session") !=
+               std::string::npos;
+      }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("AIForge  session session-3") != std::string::npos;
+      }));
+}
+
+TEST_CASE("failed session operations preserve the current interactive app",
+          "[scenario][session][failure]") {
+  struct FailureCase {
+    std::string scenario_id;
+    std::string command;
+    bool fail_listing{};
+    std::string status;
+  };
+  const std::vector<FailureCase> cases{
+      {"interactive-session-missing-failure", "/session resume missing", false,
+       "durable session could not be opened"},
+      {"interactive-session-replay-failure",
+       "/session resume corrupt-session", false,
+       "durable session could not be opened"},
+      {"interactive-session-list-failure", "/session list", true,
+       "Sessions could not be listed: session catalog is contended"},
+  };
+  for (const auto& failure : cases) {
+    const auto result = testing::run_tui_scenario(
+        session_failure_scenario(failure.scenario_id, failure.command),
+        session_factory(true, failure.fail_listing));
+    INFO((result ? std::string{} : result.error().message));
+    REQUIRE(result);
+    REQUIRE(result->recorded == result->replayed);
+    REQUIRE(result->recorded.semantic_state == failure.status);
+    REQUIRE(std::ranges::any_of(
+        result->recorded.normalized_frames, [](const std::string& frame) {
+          return frame.find("AIForge  session session-1") != std::string::npos;
+        }));
+  }
+}
+
+TEST_CASE("ephemeral session actions explain and preserve ephemerality",
+          "[scenario][session][ephemeral]") {
+  const auto result = testing::run_tui_scenario(
+      ephemeral_session_scenario(), session_factory(false));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state == "Started session session-2");
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("Current session is ephemeral") !=
+               std::string::npos;
+      }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("AIForge  session session-2 (ephemeral)") !=
+               std::string::npos;
       }));
 }
 

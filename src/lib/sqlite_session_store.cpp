@@ -2376,13 +2376,15 @@ class Transaction final {
   const auto created = sqlite3_column_int64(statement, 1);
   const auto activity = sqlite3_column_int64(statement, 2);
   const auto sequence = sqlite3_column_int64(statement, 3);
-  if (sequence < 0) {
+  const auto run_count = sqlite3_column_int64(statement, 4);
+  if (sequence < 0 || run_count < 0) {
     return std::unexpected(store_error(SessionStoreErrorCode::corrupt,
-                                       "session sequence is invalid"));
+                                       "session summary is invalid"));
   }
   return storage::SessionInfo{std::move(*session_id), timestamp_from_count(created),
                               timestamp_from_count(activity),
-                              static_cast<std::uint64_t>(sequence)};
+                              static_cast<std::uint64_t>(sequence),
+                              static_cast<std::uint64_t>(run_count)};
 }
 
 constexpr std::string_view session_info_select{
@@ -2390,7 +2392,9 @@ constexpr std::string_view session_info_select{
     "COALESCE((SELECT e.timestamp_ms FROM events e WHERE e.session_id=s.session_id "
     "ORDER BY e.sequence DESC LIMIT 1),s.created_at_ms),"
     "COALESCE((SELECT e.sequence FROM events e WHERE e.session_id=s.session_id "
-    "ORDER BY e.sequence DESC LIMIT 1),0) FROM sessions s"};
+    "ORDER BY e.sequence DESC LIMIT 1),0),"
+    "(SELECT COUNT(DISTINCT e.run_id) FROM events e "
+    "WHERE e.session_id=s.session_id) FROM sessions s"};
 
 }  // namespace
 

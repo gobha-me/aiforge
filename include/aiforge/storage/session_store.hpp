@@ -46,6 +46,7 @@ struct SessionInfo {
   domain::EventTimestamp created_at;
   domain::EventTimestamp last_activity_at;
   std::uint64_t last_sequence{};
+  std::uint64_t run_count{};
   auto operator==(const SessionInfo&) const -> bool = default;
 };
 

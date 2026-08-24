@@ -11,7 +11,9 @@
 #include <aiforge/surfaces/chat_session.hpp>
 #include <aiforge/surfaces/slash_commands.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
+#include <format>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -25,6 +27,8 @@
 
 namespace aiforge::adapters {
 namespace {
+
+constexpr std::size_t interactive_session_list_limit = 100U;
 
 [[nodiscard]] auto failure(const cli::CommandFailureKind kind,
                            std::string message)
@@ -63,6 +67,23 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
     result += value;
   }
   return result;
+}
+
+[[nodiscard]] auto format_timestamp(const domain::EventTimestamp timestamp)
+    -> std::string {
+  const auto day = std::chrono::floor<std::chrono::days>(timestamp);
+  const std::chrono::year_month_day date{day};
+  if (!date.ok()) {
+    return std::to_string(timestamp.time_since_epoch().count()) +
+           "ms since epoch";
+  }
+  const std::chrono::hh_mm_ss time{timestamp - day};
+  return std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+                     static_cast<int>(date.year()),
+                     static_cast<unsigned>(date.month()),
+                     static_cast<unsigned>(date.day()), time.hours().count(),
+                     time.minutes().count(), time.seconds().count(),
+                     time.subseconds().count());
 }
 
 [[nodiscard]] auto load_config(std::ostream& diagnostics)
@@ -146,7 +167,12 @@ class ChatAppImpl final : public InteractiveChatApp {
               surfaces::ChatSessionOpen open, surfaces::DraftEditor& editor,
               const std::stop_token stop_token,
               InteractiveChatAppOptions options)
-      : m_bridge(*this, options.live_wake_enabled,
+      : m_backend(backend),
+        m_model_context(model_context),
+        m_session_store(session_store),
+        m_open_template(std::move(open)),
+        m_session_dependencies(std::move(options.session_dependencies)),
+        m_bridge(*this, options.live_wake_enabled,
                  std::move(options.wake_observer)),
         m_editor(editor),
         m_stop_token(stop_token), m_rendered_output(options.rendered_output),
@@ -155,9 +181,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     set_frame_ms(33);
     m_composer.set_max_height(8);
     m_focus.add(&m_composer);
-    auto session = surfaces::ChatSession::open(
-        std::move(open), backend, model_context, session_store, &m_bridge,
-        stop_token, {}, std::move(options.session_dependencies));
+    auto session = open_chat_session(m_open_template);
     if (!session) {
       m_setup_error = session_error(session.error());
       return;
@@ -383,8 +407,26 @@ class ChatAppImpl final : public InteractiveChatApp {
     quit();
   }
 
+  [[nodiscard]] auto open_chat_session(surfaces::ChatSessionOpen request)
+      -> std::expected<std::unique_ptr<surfaces::ChatSession>,
+                       surfaces::ChatSessionError> {
+    return surfaces::ChatSession::open(
+        std::move(request), m_backend, m_model_context, m_session_store,
+        &m_bridge, m_stop_token, {}, m_session_dependencies);
+  }
+
   [[nodiscard]] auto active_text_box() -> termforge::TextBox& {
     return m_help_visible ? m_help : m_transcript.widget();
+  }
+
+  auto show_panel(std::string title, std::vector<std::string> lines,
+                  std::string status) -> void {
+    m_help.clear();
+    m_help.append(std::move(title));
+    for (auto& line : lines) m_help.append(std::move(line));
+    m_help_visible = true;
+    m_help.scroll(-1000000);
+    m_status = std::move(status);
   }
 
   auto show_help(const std::optional<std::string>& subject) -> bool {
@@ -397,8 +439,8 @@ class ChatAppImpl final : public InteractiveChatApp {
       m_status = descriptions.error().message;
       return false;
     }
-    m_help.clear();
-    m_help.append(subject ? "Slash command" : "Slash commands");
+    std::vector<std::string> lines;
+    lines.reserve(descriptions->size());
     for (const auto& command : *descriptions) {
       std::string line{"/"};
       line += command.name;
@@ -409,11 +451,104 @@ class ChatAppImpl final : public InteractiveChatApp {
       line += " — ";
       line += command.help;
       if (!command.available) line += " (unavailable)";
-      m_help.append(std::move(line));
+      lines.push_back(std::move(line));
     }
-    m_help_visible = true;
-    m_help.scroll(-1000000);
-    m_status = "Help is not added to session history";
+    show_panel(subject ? "Slash command" : "Slash commands", std::move(lines),
+               "Help is not added to session history");
+    return true;
+  }
+
+  auto show_sessions() -> bool {
+    if (m_session_store == nullptr) {
+      show_panel("Sessions",
+                 {"Current session is ephemeral.",
+                  "There are no durable sessions to list or resume."},
+                 "Ephemeral session; /session new starts another ephemeral session");
+      return true;
+    }
+
+    auto sessions = m_session_store->list_sessions(
+        interactive_session_list_limit, m_stop_token);
+    if (!sessions) {
+      m_status = "Sessions could not be listed: " + sessions.error().message;
+      return false;
+    }
+
+    std::vector<std::string> lines;
+    lines.reserve(sessions->size() + 1);
+    if (sessions->empty()) {
+      lines.push_back("No durable sessions were found.");
+    } else {
+      lines.push_back("* marks the current session; most recent activity first.");
+      for (const auto& info : *sessions) {
+        const bool current = info.session_id == m_session->session_id();
+        lines.push_back(
+            std::format("{}{} | created {} | active {} | runs {}",
+                        current ? "* " : "  ", info.session_id.value(),
+                        format_timestamp(info.created_at),
+                        format_timestamp(info.last_activity_at),
+                        info.run_count));
+      }
+    }
+    show_panel("Durable sessions", std::move(lines),
+               sessions->size() == interactive_session_list_limit
+                   ? "Showing the 100 most recently active sessions"
+                   : "Session list is not added to durable history");
+    return true;
+  }
+
+  auto switch_session(const surfaces::ChatSessionOpen::Mode mode,
+                      std::optional<domain::SessionId> session_id) -> bool {
+    if (m_session->active()) {
+      m_status = "Finish or cancel the active run before switching sessions";
+      return false;
+    }
+    if (mode == surfaces::ChatSessionOpen::Mode::resume) {
+      if (!session_id || m_session_store == nullptr) {
+        m_status = m_session_store == nullptr
+                       ? "Ephemeral sessions cannot resume durable history"
+                       : "A session ID is required";
+        return false;
+      }
+      if (*session_id == m_session->session_id()) {
+        m_help_visible = false;
+        m_status = "Session is already current";
+        return true;
+      }
+    }
+
+    auto request = m_open_template;
+    request.mode = mode;
+    request.session_id = std::move(session_id);
+    auto candidate = open_chat_session(std::move(request));
+    if (!candidate) {
+      m_status = candidate.error().message;
+      return false;
+    }
+
+    TranscriptView candidate_view;
+    auto candidate_projection =
+        candidate_view.rebuild((*candidate)->event_log().events());
+    if (!candidate_projection) {
+      m_status = "Interactive transcript replay failed";
+      return false;
+    }
+    auto rebuilt = m_transcript.rebuild((*candidate)->event_log().events());
+    if (!rebuilt) {
+      m_status = "Interactive transcript replay failed";
+      return false;
+    }
+
+    m_session = std::move(*candidate);
+    m_help_visible = false;
+    m_history_cutoff = 0;
+    sync_history();
+    m_transcript.widget().scroll_to_bottom();
+    m_status = mode == surfaces::ChatSessionOpen::Mode::resume
+                   ? "Resumed session " +
+                         std::string{m_session->session_id().value()}
+                   : "Started session " +
+                         std::string{m_session->session_id().value()};
     return true;
   }
 
@@ -485,6 +620,36 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_help_visible = false;
         m_composer.clear();
         request_edit();
+        return true;
+      case surfaces::SlashCommandAction::list_sessions:
+        if (!show_sessions()) return false;
+        m_composer.clear();
+        return true;
+      case surfaces::SlashCommandAction::resume_session: {
+        if (!command.subject) {
+          m_status = "A session ID is required";
+          return false;
+        }
+        auto session_id = domain::SessionId::from(*command.subject);
+        if (!session_id) {
+          m_status = "Session ID is invalid";
+          return false;
+        }
+        if (!switch_session(surfaces::ChatSessionOpen::Mode::resume,
+                            std::move(*session_id))) {
+          return false;
+        }
+        m_composer.clear();
+        return true;
+      }
+      case surfaces::SlashCommandAction::new_session:
+        if (!switch_session(m_session_store == nullptr
+                                ? surfaces::ChatSessionOpen::Mode::ephemeral
+                                : surfaces::ChatSessionOpen::Mode::create,
+                            std::nullopt)) {
+          return false;
+        }
+        m_composer.clear();
         return true;
     }
     m_status = "Slash command result is unsupported";
@@ -561,6 +726,11 @@ class ChatAppImpl final : public InteractiveChatApp {
     quit();
   }
 
+  backend::Backend& m_backend;
+  backend::ModelContextProvider& m_model_context;
+  storage::SessionStore* m_session_store{};
+  surfaces::ChatSessionOpen m_open_template;
+  surfaces::ChatSessionDependencies m_session_dependencies;
   TermForgeRunBridge m_bridge;
   surfaces::DraftEditor& m_editor;
   std::stop_token m_stop_token;
