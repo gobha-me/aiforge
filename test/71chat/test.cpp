@@ -429,6 +429,41 @@ TEST_CASE("every interactive run records its own provenance once",
   REQUIRE(recorded_in((*session)->event_log().events()) == 2);
 }
 
+TEST_CASE("idle model selection updates context and next-run provenance",
+          "[chat][models]") {
+  Backend backend;
+  domain::RunProvenance provenance{
+      "0.30.0", "venice", std::nullopt, make_id<domain::ModelId>("old-model"),
+      std::nullopt, {}, {{"aiforge", "0.30.0"}}, {}};
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("old-model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt, provenance},
+      backend, backend);
+  REQUIRE(session);
+
+  REQUIRE((*session)->select_model(make_id<domain::ModelId>("new-model")));
+  REQUIRE((*session)->model_id() == make_id<domain::ModelId>("new-model"));
+  auto submitted = (*session)->submit("use the new model");
+  REQUIRE(submitted);
+  const auto recorded = std::ranges::find_if(
+      submitted->committed_events, [](const auto& event) {
+        return std::holds_alternative<domain::RunProvenanceRecorded>(
+            event.payload);
+      });
+  REQUIRE(recorded != submitted->committed_events.end());
+  REQUIRE(std::get<domain::RunProvenanceRecorded>(recorded->payload)
+              .provenance.model_id == make_id<domain::ModelId>("new-model"));
+
+  const auto active_change =
+      (*session)->select_model(make_id<domain::ModelId>("third-model"));
+  REQUIRE_FALSE(active_change);
+  REQUIRE(active_change.error().code == surfaces::ChatSessionErrorCode::run_failed);
+  drain_to_end(**session);
+  REQUIRE_FALSE(backend.requests.empty());
+  REQUIRE(backend.requests.back().model_id ==
+          make_id<domain::ModelId>("new-model"));
+}
+
 TEST_CASE("interactive sessions accept deterministic identity and time sources",
           "[chat][scenario]") {
   Backend backend;

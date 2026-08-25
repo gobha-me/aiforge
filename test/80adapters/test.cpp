@@ -24,9 +24,12 @@
 #include <aiforge/adapters/termforge_run_bridge.hpp>
 #include <aiforge/adapters/ask_user_dialog.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
+#include <aiforge/adapters/json_model_catalog_cache.hpp>
+#include <aiforge/adapters/model_picker_dialog.hpp>
 #include <aiforge/adapters/process_provenance.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
+#include <aiforge/adapters/venice_model_catalog_source.hpp>
 #include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
 
@@ -76,7 +79,12 @@ class LocalServer final {
   LocalServer() {
     m_server.Get(
         "/api/v1/models",
-        [](const httplib::Request&, httplib::Response& response) {
+        [this](const httplib::Request& request, httplib::Response& response) {
+          {
+            std::lock_guard lock(m_mutex);
+            m_model_authorization =
+                request.get_header_value("Authorization");
+          }
           response.set_content(
               R"({"data":[{"id":"test-model","type":"text","context_length":8192,"model_spec":{"availableContextTokens":8192,"maxCompletionTokens":1024,"offline":false}}]})",
               "application/json");
@@ -127,6 +135,11 @@ class LocalServer final {
     return m_authorization;
   }
 
+  auto model_authorization() -> std::string {
+    std::lock_guard lock(m_mutex);
+    return m_model_authorization;
+  }
+
  private:
   httplib::Server m_server;
   int m_port{};
@@ -134,6 +147,7 @@ class LocalServer final {
   std::mutex m_mutex;
   std::string m_body;
   std::string m_authorization;
+  std::string m_model_authorization;
 };
 
 class TestApp final : public termforge::App {
@@ -175,6 +189,135 @@ auto write_file(const std::filesystem::path& path, const std::string& bytes)
 }
 
 }  // namespace
+
+TEST_CASE("Venice model discovery is public and maps neutral context metadata",
+          "[adapter][models]") {
+  LocalServer server;
+  adapters::VeniceModelCatalogOptions options;
+  options.base_url = server.base_url();
+  adapters::VeniceModelCatalogSource source{std::move(options)};
+  const auto catalog = source.fetch({});
+  REQUIRE(catalog);
+  REQUIRE(catalog->entries.size() == 1);
+  REQUIRE(catalog->entries.front().id == make_id<domain::ModelId>("test-model"));
+  REQUIRE(catalog->entries.front().type == "text");
+  REQUIRE(catalog->entries.front().context_window_tokens == 8192);
+  REQUIRE(catalog->entries.front().maximum_output_tokens == 1024);
+  REQUIRE(server.model_authorization().empty());
+}
+
+TEST_CASE("model catalog cache round trips atomically with restrictive permissions",
+          "[adapter][models][cache]") {
+  TempDirectory temporary{"aiforge-model-cache"};
+  const auto path = temporary.path() / "cache" / "model-catalog.json";
+  adapters::JsonModelCatalogCache cache{path};
+  model::CatalogEntry entry{make_id<domain::ModelId>("text-model"), "text"};
+  entry.name = "Text Model";
+  entry.context_window_tokens = 8192;
+  entry.capabilities = {
+      {model::Capability::tool_calling, true},
+      {model::Capability::vision, std::nullopt}};
+  entry.pricing = model::Pricing{};
+  entry.pricing->base.input = model::Price{0.5, 1.0};
+  model::CatalogSnapshot snapshot{
+      std::chrono::sys_time<std::chrono::milliseconds>{1234ms},
+      {std::move(entry)}};
+
+  REQUIRE(cache.store(snapshot, {}));
+  auto loaded = cache.load({});
+  REQUIRE(loaded);
+  REQUIRE(loaded->has_value());
+  REQUIRE((*loaded)->entries == snapshot.entries);
+  REQUIRE((*loaded)->fetched_at == snapshot.fetched_at);
+
+  const auto permissions = std::filesystem::status(path).permissions();
+  REQUIRE((permissions & (std::filesystem::perms::group_all |
+                          std::filesystem::perms::others_all)) ==
+          std::filesystem::perms::none);
+}
+
+TEST_CASE("model cache rejects duplicate JSON, loose modes, symlinks and cancellation",
+          "[adapter][models][cache][failure]") {
+  TempDirectory temporary{"aiforge-model-cache-hostile"};
+  const auto path = temporary.path() / "model-catalog.json";
+  adapters::JsonModelCatalogCache cache{path, 4096};
+  write_file(path,
+             R"({"schema_version":1,"schema_version":1,"fetched_at_ms":0,"entries":[]})");
+  std::filesystem::permissions(path, std::filesystem::perms::owner_read |
+                                         std::filesystem::perms::owner_write,
+                               std::filesystem::perm_options::replace);
+  REQUIRE_FALSE(cache.load({}));
+
+  write_file(path,
+             R"({"schema_version":1,"fetched_at_ms":0,"entries":[]})");
+  std::filesystem::permissions(path, std::filesystem::perms::owner_read |
+                                         std::filesystem::perms::owner_write |
+                                         std::filesystem::perms::group_read,
+                               std::filesystem::perm_options::replace);
+  REQUIRE_FALSE(cache.load({}));
+
+  std::filesystem::remove(path);
+  const auto target = temporary.path() / "target";
+  write_file(target, "{}");
+  std::filesystem::create_symlink(target, path);
+  REQUIRE_FALSE(cache.load({}));
+
+  std::stop_source stop;
+  stop.request_stop();
+  auto cancelled = cache.load(stop.get_token());
+  REQUIRE_FALSE(cancelled);
+  REQUIRE(cancelled.error().code == model::CatalogErrorCode::cancelled);
+}
+
+TEST_CASE("model picker filters, selects, cancels and survives tiny geometry",
+          "[adapter][models][picker]") {
+  model::CatalogEntry alpha{make_id<domain::ModelId>("alpha-chat"), "text"};
+  alpha.name = "Alpha";
+  alpha.context_window_tokens = 8192;
+  model::CatalogEntry beta{make_id<domain::ModelId>("beta-chat"), "text"};
+  beta.name = "Beta";
+  beta.context_window_tokens = 8192;
+  model::CatalogSnapshot snapshot{
+      std::chrono::sys_time<std::chrono::milliseconds>{1ms},
+      {std::move(alpha), std::move(beta)}};
+
+  adapters::ModelPickerDialog dialog;
+  std::optional<domain::ModelId> selected;
+  bool reported{};
+  dialog.on_result([&](std::optional<domain::ModelId> result) {
+    reported = true;
+    selected = std::move(result);
+  });
+  dialog.set_models(snapshot, make_id<domain::ModelId>("alpha-chat"));
+  termforge::Screen screen{60, 16};
+  dialog.draw(screen);
+  for (const char character : std::string{"beta"}) {
+    REQUIRE(dialog.on_event(termforge::KeyEvent{
+        termforge::Key::Char, static_cast<char32_t>(character), false, false,
+        false, termforge::KeyAction::Press}));
+  }
+  REQUIRE(dialog.on_event(termforge::KeyEvent{
+      termforge::Key::Tab, 0, false, false, false,
+      termforge::KeyAction::Press}));
+  REQUIRE(dialog.on_event(termforge::KeyEvent{
+      termforge::Key::Enter, 0, false, false, false,
+      termforge::KeyAction::Press}));
+  REQUIRE(reported);
+  REQUIRE(selected == make_id<domain::ModelId>("beta-chat"));
+
+  adapters::ModelPickerDialog cancelled_dialog;
+  bool cancelled_result{};
+  cancelled_dialog.on_result([&](std::optional<domain::ModelId> result) {
+    cancelled_result = !result.has_value();
+  });
+  cancelled_dialog.set_models(snapshot, make_id<domain::ModelId>("alpha-chat"));
+  termforge::Screen tiny{1, 1};
+  cancelled_dialog.draw(tiny);
+  REQUIRE(cancelled_dialog.on_event(termforge::KeyEvent{
+      termforge::Key::Escape, 0, false, false, false,
+      termforge::KeyAction::Press}));
+  REQUIRE(cancelled_result);
+}
 
 TEST_CASE("persona roots follow XDG configuration semantics",
           "[adapter][persona]") {

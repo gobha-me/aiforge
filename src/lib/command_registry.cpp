@@ -236,6 +236,8 @@ auto one_shot_handler(CommandContext& context,
                       std::string{session_prefix} + "ephemeral") != nullptr;
   const auto persona_name = parsed_text_values(
       context.invocation, std::string{option_prefix} + "persona");
+  const auto requested_model = parsed_text_values(
+      context.invocation, std::string{option_prefix} + "model");
   const bool no_persona =
       parsed_argument(context.invocation,
                       std::string{option_prefix} + "no-persona") != nullptr;
@@ -249,6 +251,11 @@ auto one_shot_handler(CommandContext& context,
   }
   if (persona_name && no_persona) {
     context.error << "aiforge: --persona and --no-persona are mutually exclusive\n";
+    return usage_exit_code;
+  }
+  if (requested_model &&
+      (requested_model->size() != 1 || requested_model->front().empty())) {
+    context.error << "aiforge: model ID is invalid\n";
     return usage_exit_code;
   }
   persona::PersonaDirective persona_directive;
@@ -289,7 +296,10 @@ auto one_shot_handler(CommandContext& context,
         session_mode = InteractiveCommand::SessionMode::ephemeral;
       }
       auto result = context.environment.interactive->execute(
-          {session_mode, std::move(resume_id), std::move(persona_directive)},
+          {session_mode, std::move(resume_id), std::move(persona_directive),
+           requested_model
+               ? std::optional<std::string>{requested_model->front()}
+               : std::nullopt},
           context.environment,
           context.output, context.error);
       if (result) return success_exit_code;
@@ -325,7 +335,10 @@ auto one_shot_handler(CommandContext& context,
   }
   auto result = context.environment.one_shot->execute(
       {prompt->front(), session_mode, std::move(resume_id),
-       std::move(persona_directive)},
+       std::move(persona_directive),
+       requested_model
+           ? std::optional<std::string>{requested_model->front()}
+           : std::nullopt},
       context.environment, context.output, context.error);
   if (result) return success_exit_code;
   if (!result.error().message.empty()) {
@@ -348,6 +361,21 @@ auto root_handler(CommandContext& context) -> int {
 
 auto chat_handler(CommandContext& context) -> int {
   return one_shot_handler(context, "chat.prompt", false);
+}
+
+auto models_handler(CommandContext& context) -> int {
+  if (context.environment.models == nullptr) return unavailable_handler(context);
+  auto result = context.environment.models->execute(
+      context.environment, context.output, context.error);
+  if (result) return success_exit_code;
+  if (!result.error().message.empty())
+    context.error << "aiforge: " << result.error().message << '\n';
+  switch (result.error().kind) {
+    case CommandFailureKind::usage: return usage_exit_code;
+    case CommandFailureKind::cancelled: return 130;
+    case CommandFailureKind::runtime: return failure_exit_code;
+  }
+  return failure_exit_code;
 }
 
 auto write_config_warning(std::ostream& error, const std::string_view message)
@@ -680,6 +708,13 @@ auto builtin_command_registry() -> const CommandRegistry& {
           1},
          "name",
          "Select a file-backed persona."},
+        {{std::string{prefix} + ".model",
+          {"--model"},
+          ArgumentValueKind::text,
+          0,
+          1},
+         "model-id",
+         "Select and validate a text model."},
         {{std::string{prefix} + ".no-persona",
           {"--no-persona"},
           ArgumentValueKind::flag,
@@ -714,7 +749,7 @@ auto builtin_command_registry() -> const CommandRegistry& {
          {},
          {},
          {},
-         unavailable_handler},
+         models_handler},
         {"config",
          "config",
          "Inspect or update configuration.",

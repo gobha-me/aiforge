@@ -4,7 +4,8 @@ AIForge is a C++23 terminal AI client built from a provider-neutral run kernel
 outward. It currently provides a streaming Venice-backed one-shot/pipe surface,
 durable and resumable sessions, provider-neutral run events, deterministic
 backends, replayable run and transcript projections, Markdown-lite
-presentation, typed configuration, file-backed personas, and a resumable
+presentation, typed configuration, file-backed personas, model discovery and
+selection, and a resumable
 structured `ask_user` tool
 boundary plus a policy-gated bounded argv process executor. Exact-candidate
 review receipts now materialize merge authorization only from current required
@@ -15,8 +16,8 @@ it. Its slash-command registry keeps dispatch, help, completion, and command
 availability on one provider- and terminal-neutral definition.
 
 The command registry provides generated help and version output. Commands that
-depend on later model-picker or interactive milestones fail explicitly instead
-of reporting false success. The architectural guardrails live in
+depend on later milestones fail explicitly instead of reporting false success.
+The architectural guardrails live in
 [`docs/ARCHITECTURE-NORTH-STAR.md`](docs/ARCHITECTURE-NORTH-STAR.md).
 
 Architecture documents have explicit authority levels. The north star and
@@ -39,8 +40,8 @@ TermForge and venice-cpp; consumed core-only builds may set
 baselines: TermForge v0.55.0 for cross-thread posting, styled word wrapping,
 bounded mutable transcript streaming, multiline composition, history recall,
 and multi-page choice dialogs; and
-venice-cpp v0.9.0 for transport
-cancellation, structured deltas, and tool declarations.
+venice-cpp v0.23.0 for transport cancellation, structured deltas, tool
+declarations, explicit public authentication, and typed model metadata.
 
 Durable session storage uses SQLite 3 behind a neutral storage port. CMake
 prefers an installed SQLite 3.45.1 or newer and otherwise builds the pinned
@@ -74,6 +75,8 @@ export VENICE_API_KEY=your-key
 ./build/src/bin/aiforge --continue "Build on the prior answer"
 ./build/src/bin/aiforge --resume session-id "Reopen this session"
 ./build/src/bin/aiforge --ephemeral "Do not retain this request"
+./build/src/bin/aiforge --model model-id "Use this model"
+./build/src/bin/aiforge models
 ./build/src/bin/aiforge                 # interactive Chat
 ./build/src/bin/aiforge --continue      # interactive latest session
 git diff | ./build/src/bin/aiforge "Review this diff"
@@ -90,8 +93,7 @@ usage, configuration warnings, and failures use stderr, so stdout remains safe
 to pipe. Unsafe terminal control sequences are removed from provider text.
 Ctrl-C requests transport cancellation, preserves already-written partial
 output, and returns 130; command-line/input mistakes return 2 and runtime
-failures return 1. The `models` command remains unavailable until its owning
-model-picker milestone.
+failures return 1.
 
 ## Run kernel
 
@@ -164,6 +166,28 @@ entries. Case and extension aliases are rejected. Each run records the selected
 persona's portable source path, byte size, and SHA-256 digest in the append-only
 event stream; persona text enters model context as an attributed persona-layer
 system instruction, not as conversation history.
+
+## Model catalog and picker
+
+`aiforge models` reads Venice's public catalog without sending an API key and
+prints a tab-separated table containing model ID, modality, context capacity,
+capabilities, base input/output USD pricing, and availability. Catalog warnings
+use stderr, leaving stdout safe to pipe.
+
+`--model <id>` overrides `AIFORGE_MODEL` and the configuration file. Unknown
+command-line text models exit 2 with deterministic suggestions before a paid
+request starts. In interactive Chat, `/model` opens a filter-as-you-type picker
+and `/model <id>` selects directly; changes are allowed only while idle and
+take effect on the next run, whose ordinary provenance records the chosen
+model.
+
+The bounded catalog cache is
+`$XDG_CACHE_HOME/aiforge/model-catalog.json`, or
+`$HOME/.cache/aiforge/model-catalog.json` when the XDG location is unset. A
+fresh snapshot is reused for 24 hours. If refresh fails, a valid stale cache is
+shown with a warning; malformed, insecure, symlinked, or oversized cache data
+is never trusted. The cache contains neutral catalog metadata, never
+credentials or provider request payloads.
 
 Ctrl+E restores the terminal and opens the current draft in `$VISUAL` or
 `$EDITOR`. The editor setting names one executable only; arguments and shell

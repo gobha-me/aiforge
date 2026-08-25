@@ -197,6 +197,7 @@ struct PersonaSetup {
 struct ChatSession::Impl {
   domain::ModelId model_id;
   backend::ModelContextInfo model;
+  backend::ModelContextProvider* model_context{};
   std::uint64_t output_tokens{};
   ChatSessionLimits limits;
   bool is_durable{};
@@ -331,6 +332,7 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
     auto impl = std::make_unique<Impl>(Impl{
         request.model_id,
         *model,
+        &model_context,
         output_tokens,
         limits,
         durable,
@@ -581,6 +583,41 @@ auto ChatSession::disable_persona() -> std::expected<void, ChatSessionError> {
       domain::PersonaSelectionSource::interactive, std::nullopt,
       std::move(previous)};
   m_impl->persona_attention.clear();
+  return {};
+}
+
+auto ChatSession::select_model(domain::ModelId model_id)
+    -> std::expected<void, ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before selecting a model");
+  }
+  if (m_impl->model_context == nullptr) {
+    return error(ChatSessionErrorCode::model_lookup_failed,
+                 "model catalog is unavailable");
+  }
+  auto selected = m_impl->model_context->lookup(model_id, m_impl->stop_token);
+  if (!selected) {
+    return error(selected.error().kind == backend::BackendErrorKind::cancelled
+                     ? ChatSessionErrorCode::cancelled
+                     : ChatSessionErrorCode::model_lookup_failed,
+                 selected.error().redacted_message, selected.error().retryable);
+  }
+  if (selected->model_id != model_id || selected->context_window_tokens == 0) {
+    return error(ChatSessionErrorCode::model_lookup_failed,
+                 "selected model context metadata is invalid");
+  }
+  auto output_tokens = m_impl->limits.preferred_output_tokens;
+  if (selected->maximum_output_tokens)
+    output_tokens = std::min(output_tokens, *selected->maximum_output_tokens);
+  if (output_tokens == 0 || output_tokens >= selected->context_window_tokens) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "selected model context capacity is too small");
+  }
+  m_impl->model_id = std::move(model_id);
+  m_impl->model = std::move(*selected);
+  m_impl->output_tokens = output_tokens;
+  if (m_impl->provenance) m_impl->provenance->model_id = m_impl->model_id;
   return {};
 }
 

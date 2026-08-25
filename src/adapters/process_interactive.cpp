@@ -2,6 +2,8 @@
 #include <aiforge/adapters/filesystem_persona_source.hpp>
 #include <aiforge/adapters/process_draft_editor.hpp>
 #include <aiforge/adapters/process_interactive.hpp>
+#include <aiforge/adapters/process_model_catalog.hpp>
+#include <aiforge/adapters/model_picker_dialog.hpp>
 #include <aiforge/adapters/process_provenance.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/termforge_run_bridge.hpp>
@@ -87,10 +89,17 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
                      time.subseconds().count());
 }
 
-[[nodiscard]] auto load_config(std::ostream& diagnostics)
+[[nodiscard]] auto load_config(
+    std::ostream& diagnostics,
+    const std::optional<std::string>& requested_model)
     -> std::expected<config::ResolvedConfig, cli::CommandFailure> {
   const auto& registry = config::builtin_config_registry();
   std::vector<config::ConfigLayer> layers;
+  if (requested_model) {
+    layers.push_back(config::ConfigLayer{
+        config::ConfigSource::command_line,
+        {{"model", config::ConfigValue{*requested_model}, std::nullopt}}, {}});
+  }
   auto environment = config::environment_config_layer(registry);
   if (!environment) {
     return failure(cli::CommandFailureKind::runtime,
@@ -171,6 +180,7 @@ class ChatAppImpl final : public InteractiveChatApp {
       : m_backend(backend),
         m_model_context(model_context),
         m_session_store(session_store),
+        m_model_catalog(options.model_catalog),
         m_open_template(std::move(open)),
         m_session_dependencies(std::move(options.session_dependencies)),
         m_bridge(*this, options.live_wake_enabled,
@@ -391,6 +401,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     std::string header =
         "AIForge  session " + std::string{m_session->session_id().value()};
     if (!m_session->durable()) header += " (ephemeral)";
+    header += " | model " + std::string{m_session->model_id().value()};
     const auto persona = m_session->persona_state();
     if (persona.requires_attention) {
       header += " | persona attention";
@@ -757,6 +768,27 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_status = "Persona disabled";
         return true;
       }
+      case surfaces::SlashCommandAction::choose_model: {
+        if (command.subject) {
+          auto model_id = domain::ModelId::from(*command.subject);
+          if (!model_id) {
+            m_status = "Model ID is invalid";
+            return false;
+          }
+          auto selected = m_session->select_model(std::move(*model_id));
+          if (!selected) {
+            m_status = selected.error().message;
+            return false;
+          }
+          m_help_visible = false;
+          m_composer.clear();
+          m_status = "Selected model " + *command.subject;
+          return true;
+        }
+        if (!show_models()) return false;
+        m_composer.clear();
+        return true;
+      }
     }
     m_status = "Slash command result is unsupported";
     return false;
@@ -806,6 +838,45 @@ class ChatAppImpl final : public InteractiveChatApp {
     }
   }
 
+  auto show_models() -> bool {
+    if (m_model_catalog == nullptr) {
+      m_status = "Model catalog is unavailable";
+      return false;
+    }
+    auto snapshot = m_model_catalog->snapshot(m_stop_token);
+    if (!snapshot) {
+      m_status = snapshot.error().message;
+      return false;
+    }
+    if (!m_model_picker) {
+      m_model_picker = std::make_unique<ModelPickerDialog>();
+      m_model_picker->on_close([this] { pop_overlay(); });
+      m_model_picker->on_result(
+          [this](std::optional<domain::ModelId> selected) {
+            if (!selected) {
+              m_status = "Model selection cancelled";
+              return;
+            }
+            auto changed = m_session->select_model(std::move(*selected));
+            if (!changed) {
+              m_status = changed.error().message;
+              return;
+            }
+            m_status = "Selected model " +
+                       std::string{m_session->model_id().value()};
+          });
+    }
+    m_model_picker->set_models(snapshot->get(), m_session->model_id());
+    push_overlay(*m_model_picker,
+                 {.backdrop = termforge::Backdrop::Dim,
+                  .dismiss_on_click_outside = false});
+    if (!snapshot->get().warnings.empty())
+      m_status = snapshot->get().warnings.back();
+    else
+      m_status = "Choose a model";
+    return true;
+  }
+
   [[nodiscard]] auto apply_events(const std::vector<domain::RunEvent>& events)
       -> bool {
     for (const auto& event : events) {
@@ -835,6 +906,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   backend::Backend& m_backend;
   backend::ModelContextProvider& m_model_context;
   storage::SessionStore* m_session_store{};
+  model::CatalogService* m_model_catalog{};
   surfaces::ChatSessionOpen m_open_template;
   surfaces::ChatSessionDependencies m_session_dependencies;
   TermForgeRunBridge m_bridge;
@@ -857,6 +929,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   bool m_help_visible{};
   bool m_history_enabled{true};
   std::size_t m_history_cutoff{};
+  std::unique_ptr<ModelPickerDialog> m_model_picker;
 };
 
 }  // namespace
@@ -882,10 +955,31 @@ auto ProcessInteractiveCommand::execute(Request request,
       return failure(cli::CommandFailureKind::usage,
                      "interactive chat requires terminal input and output");
     }
-    auto resolved = load_config(diagnostics);
+    auto resolved = load_config(diagnostics, request.model);
     if (!resolved) return std::unexpected(std::move(resolved.error()));
     auto model = configured_model(*resolved);
     if (!model) return std::unexpected(std::move(model.error()));
+    auto catalog = ProcessModelCatalog::create();
+    if (!catalog)
+      return failure(cli::CommandFailureKind::runtime, catalog.error().message);
+    if (request.model) {
+      auto snapshot = (*catalog)->service().snapshot(environment.stop_token);
+      if (!snapshot) {
+        return failure(
+            snapshot.error().code == model::CatalogErrorCode::cancelled
+                ? cli::CommandFailureKind::cancelled
+                : cli::CommandFailureKind::runtime,
+            snapshot.error().message);
+      }
+      if (model::find_model(snapshot->get(), *model, "text") == nullptr) {
+        auto suggestions = model::suggest_models(snapshot->get(), model->value());
+        std::string message =
+            "unknown text model '" + std::string{model->value()} + "'";
+        if (!suggestions.empty())
+          message += "; did you mean '" + suggestions.front() + "'?";
+        return failure(cli::CommandFailureKind::usage, std::move(message));
+      }
+    }
 
     const char* raw_key = std::getenv("VENICE_API_KEY");
     if (raw_key == nullptr || *raw_key == '\0') {
@@ -944,10 +1038,11 @@ auto ProcessInteractiveCommand::execute(Request request,
     }
 
     InteractiveChatAppOptions app_options;
+    app_options.model_catalog = &(*catalog)->service();
     app_options.session_dependencies.persona_source =
         personas ? &*personas : nullptr;
     auto app = make_interactive_chat_app(
-        backend, backend, store.get(), std::move(open), editor,
+        backend, (*catalog)->service(), store.get(), std::move(open), editor,
         environment.stop_token, std::move(app_options));
     if (!app->ready()) return std::unexpected(app->setup_error());
     for (;;) {

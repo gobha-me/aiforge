@@ -14,6 +14,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   exact_source_edit.cpp
   json_config_file_store.cpp
   language_analysis.cpp
+  model_catalog.cpp
   one_shot.cpp
   persona.cpp
   persona_context.cpp

@@ -194,6 +194,20 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
       "persona accepts list, set <name>, or off");
 }
 
+[[nodiscard]] auto model_handler(std::string_view arguments,
+                                 const SlashCommandContext&)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  arguments = trim_arguments(arguments);
+  if (arguments.empty())
+    return SlashCommandResult{SlashCommandAction::choose_model, std::nullopt};
+  if (arguments.find_first_of(" \t") == std::string_view::npos) {
+    return SlashCommandResult{SlashCommandAction::choose_model,
+                              std::string{arguments}};
+  }
+  return command_error(SlashCommandErrorCode::invalid_arguments,
+                       "model accepts at most one model ID");
+}
+
 [[nodiscard]] auto builtin_specs() -> std::vector<SlashCommandSpec> {
   return {
       {"help", "help", "[command]", "Show available slash commands.",
@@ -210,6 +224,8 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
       {"persona", "persona", "[list | set <name> | off]",
        "List, select, or disable file-backed personas.", idle_available,
        persona_handler},
+      {"model", "model", "[model-id]",
+       "Choose a text model for future runs.", idle_available, model_handler},
   };
 }
 
