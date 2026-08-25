@@ -58,10 +58,62 @@ enum class ChildMode {
 };
 
 auto close_child(Child& child) -> void {
+  if (child.pid > 0) {
+    int status{};
+    if (::waitpid(child.pid, &status, WNOHANG) == 0) {
+      static_cast<void>(::kill(child.pid, SIGKILL));
+      static_cast<void>(::waitpid(child.pid, &status, 0));
+    }
+  }
   if (child.master >= 0) static_cast<void>(::close(child.master));
   if (child.terminal >= 0) static_cast<void>(::close(child.terminal));
+  child.pid = -1;
   child.master = -1;
   child.terminal = -1;
+}
+
+[[nodiscard]] auto visible_terminal_text(const std::string_view output)
+    -> std::string {
+  enum class State { text, escape, control_sequence, string, string_escape };
+  auto state = State::text;
+  std::string visible;
+  visible.reserve(output.size());
+  for (const auto byte : output) {
+    const auto character = static_cast<unsigned char>(byte);
+    switch (state) {
+      case State::text:
+        if (character == 0x1b) {
+          state = State::escape;
+        } else if (character >= 0x20 && character != 0x7f) {
+          visible.push_back(byte);
+        }
+        break;
+      case State::escape:
+        if (byte == '[') {
+          state = State::control_sequence;
+        } else if (byte == ']' || byte == 'P' || byte == '^' || byte == '_' ||
+                   byte == 'X') {
+          state = State::string;
+        } else {
+          state = State::text;
+        }
+        break;
+      case State::control_sequence:
+        if (character >= 0x40 && character <= 0x7e) state = State::text;
+        break;
+      case State::string:
+        if (character == 0x07) {
+          state = State::text;
+        } else if (character == 0x1b) {
+          state = State::string_escape;
+        }
+        break;
+      case State::string_escape:
+        state = byte == '\\' ? State::text : State::string;
+        break;
+    }
+  }
+  return visible;
 }
 
 [[nodiscard]] auto spawn(const std::string& executable,
@@ -111,7 +163,9 @@ auto close_child(Child& child) -> void {
       const auto count = ::read(child.master, buffer, sizeof(buffer));
       if (count > 0) child.output.append(buffer, static_cast<std::size_t>(count));
     }
-    if (child.output.find(marker) != std::string::npos) return true;
+    if (visible_terminal_text(child.output).find(marker) != std::string::npos) {
+      return true;
+    }
   }
   return false;
 }
