@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
-#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <ranges>
@@ -114,15 +113,58 @@ namespace {
 }
 
 [[nodiscard]] auto valid_price(const std::optional<Price>& value) -> bool {
-  const auto valid = [](const std::optional<double> amount) {
-    return !amount || (std::isfinite(*amount) && *amount >= 0.0);
-  };
-  return !value || (valid(value->usd) && valid(value->diem));
+  return !value || value->usd.has_value() || value->diem.has_value();
 }
 
 [[nodiscard]] auto valid_tier(const PriceTier& tier) -> bool {
   return valid_price(tier.input) && valid_price(tier.output) &&
          valid_price(tier.cache_input) && valid_price(tier.cache_write);
+}
+
+[[nodiscard]] auto has_text_rate(const Pricing& pricing) -> bool {
+  const auto tier_has_rate = [](const PriceTier& tier) {
+    return tier.input.has_value() || tier.output.has_value() ||
+           tier.cache_input.has_value() || tier.cache_write.has_value();
+  };
+  return tier_has_rate(pricing.base) ||
+         (pricing.extended && tier_has_rate(*pricing.extended));
+}
+
+[[nodiscard]] auto pricing_origin(const CatalogOrigin origin)
+    -> domain::PricingCatalogOrigin {
+  switch (origin) {
+  case CatalogOrigin::live:
+    return domain::PricingCatalogOrigin::live;
+  case CatalogOrigin::fresh_cache:
+    return domain::PricingCatalogOrigin::fresh_cache;
+  case CatalogOrigin::stale_cache:
+    return domain::PricingCatalogOrigin::stale_cache;
+  }
+  return domain::PricingCatalogOrigin::live;
+}
+
+[[nodiscard]] auto observed_rate(const Price& rate) -> domain::PriceRate {
+  return {rate.usd, rate.diem};
+}
+
+[[nodiscard]] auto observed_tier(const PriceTier& tier)
+    -> domain::TextPriceTier {
+  const auto rate = [](const std::optional<Price>& value)
+      -> std::optional<domain::PriceRate> {
+    return value ? std::optional<domain::PriceRate>{observed_rate(*value)}
+                 : std::nullopt;
+  };
+  return {rate(tier.input), rate(tier.output), rate(tier.cache_input),
+          rate(tier.cache_write)};
+}
+
+[[nodiscard]] auto observed_pricing(const Pricing& pricing)
+    -> domain::TextPricing {
+  domain::TextPricing result{observed_tier(pricing.base)};
+  result.extended_threshold_tokens = pricing.extended_threshold_tokens;
+  if (pricing.extended)
+    result.extended = observed_tier(*pricing.extended);
+  return result;
 }
 
 }  // namespace
@@ -245,8 +287,23 @@ auto CatalogService::lookup(const domain::ModelId& model_id,
         backend::BackendErrorKind::protocol,
         "configured model has no context capacity", false, std::nullopt});
   }
+  std::optional<domain::PricingObservation> observation;
+  if (entry->pricing && has_text_rate(*entry->pricing)) {
+    auto created = domain::make_pricing_observation(
+        entry->id, resolved->get().source_id, resolved->get().source_revision,
+        resolved->get().fetched_at, pricing_origin(resolved->get().origin),
+        observed_pricing(*entry->pricing));
+    if (!created) {
+      return std::unexpected(
+          backend::BackendError{backend::BackendErrorKind::protocol,
+                                "configured model has invalid pricing metadata",
+                                false, std::nullopt});
+    }
+    observation = std::move(*created);
+  }
   return backend::ModelContextInfo{entry->id, *entry->context_window_tokens,
-                                   entry->maximum_output_tokens};
+                                   entry->maximum_output_tokens,
+                                   std::move(observation)};
 }
 
 auto CatalogService::clear_memory_cache() noexcept -> void { m_snapshot.reset(); }
@@ -276,8 +333,11 @@ auto validate_catalog(const CatalogSnapshot& snapshot, const CatalogLimits limit
         entry.maximum_output_tokens == 0 ||
         (entry.pricing &&
          (!valid_tier(entry.pricing->base) ||
-          (entry.pricing->extended &&
-           !valid_tier(*entry.pricing->extended)) ||
+          (entry.pricing->extended && !valid_tier(*entry.pricing->extended)) ||
+          (entry.pricing->extended.has_value() !=
+           entry.pricing->extended_threshold_tokens.has_value()) ||
+          (entry.pricing->extended_threshold_tokens &&
+           *entry.pricing->extended_threshold_tokens == 0) ||
           !valid_price(entry.pricing->generation)))) {
       return catalog_error(CatalogErrorCode::invalid_data,
                            "model catalog contains invalid numeric metadata");

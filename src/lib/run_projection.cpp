@@ -132,7 +132,9 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
           [&](const RunFailed&) -> std::expected<void, ProjectionError> {
             if (auto live = require_running(); !live) return live;
             m_active_inference_id.reset();
+            m_active_model_id.reset();
             m_active_inference_cost_recorded = false;
+            m_active_inference_pricing_recorded = false;
             m_status = RunStatus::failed;
             return {};
           },
@@ -145,7 +147,9 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
               if (message.inference_id == m_active_inference_id) message.complete = true;
             }
             m_active_inference_id.reset();
+            m_active_model_id.reset();
             m_active_inference_cost_recorded = false;
+            m_active_inference_pricing_recorded = false;
             m_status = RunStatus::cancelled;
             return {};
           },
@@ -173,7 +177,32 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
               return transition_error("only one inference may be active in this projection");
             }
             m_active_inference_id = started.inference_id;
+            m_active_model_id = started.model_id;
             m_active_inference_cost_recorded = false;
+            m_active_inference_pricing_recorded = false;
+            return {};
+          },
+          [&](const InferencePricingObserved &observed)
+              -> std::expected<void, ProjectionError> {
+            if (!m_active_inference_id ||
+                *m_active_inference_id != observed.inference_id ||
+                !m_active_model_id ||
+                *m_active_model_id != observed.observation.model_id) {
+              return std::unexpected(ProjectionError{
+                  ProjectionErrorCode::wrong_inference,
+                  "pricing observation has no matching inference"});
+            }
+            if (m_active_inference_pricing_recorded) {
+              return transition_error(
+                  "pricing may be observed only once per inference");
+            }
+            if (!validate_pricing_observation(observed.observation)) {
+              return std::unexpected(
+                  ProjectionError{ProjectionErrorCode::invalid_pricing,
+                                  "pricing observation is malformed"});
+            }
+            m_pricing_observations.push_back(observed.observation);
+            m_active_inference_pricing_recorded = true;
             return {};
           },
           [&](const AssistantContentStarted& started) -> std::expected<void, ProjectionError> {
@@ -286,7 +315,9 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
               return transition_error("inference finished before its assistant content");
             }
             m_active_inference_id.reset();
+            m_active_model_id.reset();
             m_active_inference_cost_recorded = false;
+            m_active_inference_pricing_recorded = false;
             return {};
           },
           [&](const InferenceFailed& failed) -> std::expected<void, ProjectionError> {
@@ -298,7 +329,9 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
               if (message.inference_id == failed.inference_id) message.complete = true;
             }
             m_active_inference_id.reset();
+            m_active_model_id.reset();
             m_active_inference_cost_recorded = false;
+            m_active_inference_pricing_recorded = false;
             return {};
           },
           [&](const InferenceCancelled& cancelled) -> std::expected<void, ProjectionError> {
@@ -310,7 +343,9 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
               if (message.inference_id == cancelled.inference_id) message.complete = true;
             }
             m_active_inference_id.reset();
+            m_active_model_id.reset();
             m_active_inference_cost_recorded = false;
+            m_active_inference_pricing_recorded = false;
             return {};
           },
           [&](const UnknownEvent&) -> std::expected<void, ProjectionError> { return {}; },

@@ -194,6 +194,36 @@ TEST_CASE("lookup rejects missing offline and capacity-less text models",
   REQUIRE_FALSE(service.lookup(model_id("image"), {}));
 }
 
+TEST_CASE("lookup returns provenance-rich decimal pricing observations",
+          "[models][pricing]") {
+  FakeSource source;
+  auto priced = entry("priced");
+  model::Pricing rates;
+  rates.base.input = model::Price{domain::DecimalAmount::from("1.42").value(),
+                                  domain::DecimalAmount::from("2.5").value()};
+  rates.base.output =
+      model::Price{domain::DecimalAmount::from("2.83").value(), std::nullopt};
+  priced.pricing = std::move(rates);
+  source.value = snapshot(123ms, {std::move(priced)});
+  source.value.source_id = "test.models";
+  source.value.source_revision = "revision-7";
+  model::CatalogService service{source};
+
+  const auto found = service.lookup(model_id("priced"), {});
+  REQUIRE(found);
+  REQUIRE(found->pricing_observation);
+  REQUIRE(found->pricing_observation->model_id == model_id("priced"));
+  REQUIRE(found->pricing_observation->source_id == "test.models");
+  REQUIRE(found->pricing_observation->source_revision == "revision-7");
+  REQUIRE(found->pricing_observation->fetched_at ==
+          std::chrono::sys_time<std::chrono::milliseconds>{123ms});
+  REQUIRE(found->pricing_observation->origin ==
+          domain::PricingCatalogOrigin::live);
+  REQUIRE(found->pricing_observation->pricing.base.input->usd->to_string() ==
+          "1.42");
+  REQUIRE(domain::validate_pricing_observation(*found->pricing_observation));
+}
+
 TEST_CASE("model suggestions are text-only deterministic and bounded",
           "[models][suggestions]") {
   auto image = entry("alpha-image", "image");

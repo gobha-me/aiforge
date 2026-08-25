@@ -145,6 +145,21 @@ auto run_provenance() -> domain::RunProvenance {
             {{domain::Effect::read, "root", "/workspace"}}}}};
 }
 
+auto pricing_observation() -> domain::PricingObservation {
+  domain::TextPricing pricing;
+  pricing.base.input =
+      domain::PriceRate{domain::DecimalAmount::from("1.42").value(),
+                        domain::DecimalAmount::from("2.5").value()};
+  pricing.base.output = domain::PriceRate{
+      domain::DecimalAmount::from("2.83").value(), std::nullopt};
+  return domain::make_pricing_observation(
+             make_id<domain::ModelId>("model"), "venice.models", std::nullopt,
+             std::chrono::sys_time<std::chrono::milliseconds>{
+                 std::chrono::milliseconds{900}},
+             domain::PricingCatalogOrigin::fresh_cache, std::move(pricing))
+      .value();
+}
+
 auto open_store(const std::filesystem::path& path,
                 storage::SessionStoreLimits limits = {})
     -> std::unique_ptr<adapters::SqliteSessionStore> {
@@ -217,6 +232,7 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
                                          domain::TextBlock{"delta"}},
       domain::AssistantContentFinished{message, inference},
       domain::InferenceStarted{inference, make_id<domain::ModelId>("model")},
+      domain::InferencePricingObserved{inference, pricing_observation()},
       domain::ReasoningMetadataAdded{
           inference, std::string{"summary"}, {{"visibility", "summary"}}},
       domain::UsageRecorded{inference, domain::Usage{1, 2, 3, 4}},
@@ -420,6 +436,29 @@ TEST_CASE("malformed persisted reported cost fails replay explicitly",
       "\"inference_id\":\"inference\","
       "\"cost\":{\"amounts\":[{\"unit\":\"USD\",\"amount\":\"-1\"}]}}' "
       "WHERE event_id='cost-event'");
+  store = open_store(path);
+  const auto replayed = store->replay_events(session);
+  REQUIRE_FALSE(replayed);
+  REQUIRE(replayed.error().code == storage::SessionStoreErrorCode::corrupt);
+}
+
+TEST_CASE("forged persisted pricing observation fails replay explicitly",
+          "[storage][sqlite][pricing][corrupt][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "pricing-session", 100);
+  REQUIRE(store->append_events(
+      session, std::array{event(1,
+                                domain::InferencePricingObserved{
+                                    make_id<domain::InferenceId>("inference"),
+                                    pricing_observation()},
+                                "pricing-event")}));
+  store.reset();
+
+  execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json, "
+                    "'$.observation.rate_card_digest.value','forged') "
+                    "WHERE event_id='pricing-event'");
   store = open_store(path);
   const auto replayed = store->replay_events(session);
   REQUIRE_FALSE(replayed);

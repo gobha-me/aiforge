@@ -529,7 +529,8 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
          std::move(user_message),
          std::move(backend_request),
          std::move(request.provenance),
-         std::move(resolved_persona->selection)});
+         std::move(resolved_persona->selection),
+         model->pricing_observation});
     if (!started) {
       return one_shot_error(OneShotErrorCode::run_failed,
                             "one-shot run could not start");

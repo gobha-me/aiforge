@@ -3,7 +3,6 @@
 #include <aiforge/adapters/process_model_catalog.hpp>
 
 #include <algorithm>
-#include <format>
 #include <iomanip>
 #include <ostream>
 #include <ranges>
@@ -33,7 +32,7 @@ namespace {
 
 [[nodiscard]] auto usd(const std::optional<model::Price>& value) -> std::string {
   if (!value || !value->usd) return "-";
-  return std::format("${:.6g}", *value->usd);
+  return "$" + value->usd->to_string();
 }
 
 }  // namespace

@@ -11,6 +11,7 @@
 #include <aiforge/domain/content.hpp>
 #include <aiforge/domain/money.hpp>
 #include <aiforge/domain/persona.hpp>
+#include <aiforge/domain/pricing.hpp>
 #include <aiforge/domain/provenance.hpp>
 #include <aiforge/domain/review_receipt.hpp>
 #include <aiforge/domain/verification_evidence.hpp>
@@ -102,6 +103,12 @@ struct InferenceStarted {
   InferenceId inference_id;
   ModelId model_id;
   auto operator==(const InferenceStarted&) const -> bool = default;
+};
+
+struct InferencePricingObserved {
+  InferenceId inference_id;
+  PricingObservation observation;
+  auto operator==(const InferencePricingObserved &) const -> bool = default;
 };
 
 struct ReasoningMetadataAdded {
@@ -372,18 +379,18 @@ using RunEventPayload = std::variant<
     RunAwaitingInput, RunResumed,
     RunCompletionRequested, RunCompleted,
     RunFailed, RunCancelRequested, RunCancelled, UserContentAdded,
-    AssistantContentStarted, AssistantContentDeltaAdded, AssistantContentFinished,
-    InferenceStarted, ReasoningMetadataAdded, UsageRecorded,
-    InferenceCostRecorded, InferenceFinished, InferenceFailed,
-    InferenceCancelled, ToolProposed, ToolPolicyDecided,
-    ToolApprovalRequested, ToolApprovalDecided, ToolPolicyFailed, ToolStarted,
-    ToolProgressed, ToolResultRecorded, ToolErrored, QuestionRequested,
-    QuestionAnswered, QuestionCancelled, ArtifactCreated, ArtifactReferenced,
-    ArtifactDisplayed, ArtifactRemovedFromView, VerificationEvidenceRecorded,
-    ReviewReceiptDrafted, ReviewRequested, ReviewFindingOpened,
-    ReviewFindingResolved, ReviewVerdictRecorded, ReviewVerdictRevoked,
-    ReviewOverrideRecorded, ReviewOverrideRevoked, ChildRunCreated,
-    InterRunMessageSent, UnknownEvent>;
+    AssistantContentStarted, AssistantContentDeltaAdded,
+    AssistantContentFinished, InferenceStarted, InferencePricingObserved,
+    ReasoningMetadataAdded, UsageRecorded, InferenceCostRecorded,
+    InferenceFinished, InferenceFailed, InferenceCancelled, ToolProposed,
+    ToolPolicyDecided, ToolApprovalRequested, ToolApprovalDecided,
+    ToolPolicyFailed, ToolStarted, ToolProgressed, ToolResultRecorded,
+    ToolErrored, QuestionRequested, QuestionAnswered, QuestionCancelled,
+    ArtifactCreated, ArtifactReferenced, ArtifactDisplayed,
+    ArtifactRemovedFromView, VerificationEvidenceRecorded, ReviewReceiptDrafted,
+    ReviewRequested, ReviewFindingOpened, ReviewFindingResolved,
+    ReviewVerdictRecorded, ReviewVerdictRevoked, ReviewOverrideRecorded,
+    ReviewOverrideRevoked, ChildRunCreated, InterRunMessageSent, UnknownEvent>;
 
 struct EventMetadata {
   EventId event_id;

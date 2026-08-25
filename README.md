@@ -226,6 +226,23 @@ particular, a reported zero in one unit is preserved as data and is not treated
 as proof that the call was free. Cost diagnostics never enter completion
 stdout, and replay performs no provider or billing request.
 
+## Durable catalog pricing observations
+
+When the selected text model has catalog pricing, AIForge records one
+provider-neutral `InferencePricingObserved` event before starting each backend
+request. The observation retains model and catalog identity, retrieval time,
+live/fresh-cache/stale-cache origin, optional source revision, exact normalized
+decimal rates, and a deterministic rate-card digest. Input, output, cache-read,
+and cache-write buckets remain distinct, as do base and extended tiers.
+
+These observations are provenance for later estimates; they are not quotes or
+actual charges. AIForge does not yet multiply usage by catalog rates, guess
+whether an extended threshold counts prompt or total tokens, or reinterpret a
+reported cache-read count as a cache write. The replaceable model-catalog cache
+stores decimal rates as strings in schema version 2; older cache schemas are
+refreshed through the existing catalog fallback policy. Session replay rebuilds
+the same pricing context without consulting the cache or provider.
+
 Ctrl+E restores the terminal and opens the current draft in `$VISUAL` or
 `$EDITOR`. The editor setting names one executable only; arguments and shell
 syntax are rejected, and users who need flags may select a wrapper executable.

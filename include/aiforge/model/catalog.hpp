@@ -2,6 +2,7 @@
 
 #include <aiforge/backend/backend.hpp>
 #include <aiforge/domain/ids.hpp>
+#include <aiforge/domain/pricing.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -42,8 +43,8 @@ struct CapabilitySupport {
 };
 
 struct Price {
-  std::optional<double> usd;
-  std::optional<double> diem;
+  std::optional<domain::DecimalAmount> usd;
+  std::optional<domain::DecimalAmount> diem;
   auto operator==(const Price&) const -> bool = default;
 };
 
@@ -89,6 +90,8 @@ struct CatalogSnapshot {
   std::vector<CatalogEntry> entries;
   CatalogOrigin origin{CatalogOrigin::live};
   std::vector<std::string> warnings;
+  std::string source_id{"model-catalog"};
+  std::optional<std::string> source_revision;
   auto operator==(const CatalogSnapshot&) const -> bool = default;
 };
 

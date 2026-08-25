@@ -96,6 +96,17 @@ auto run_start(backend::BackendRequest backend_request) -> runtime::RunStart {
       std::move(backend_request)};
 }
 
+auto pricing_observation() -> domain::PricingObservation {
+  domain::TextPricing pricing;
+  pricing.base.input = domain::PriceRate{
+      domain::DecimalAmount::from("1.42").value(), std::nullopt};
+  return domain::make_pricing_observation(
+             make_id<domain::ModelId>("model"), "test.models", std::nullopt,
+             domain::EventTimestamp{1ms}, domain::PricingCatalogOrigin::live,
+             std::move(pricing))
+      .value();
+}
+
 auto step(backend::BackendEvent event) -> testing::ScriptedStep {
   return testing::ScriptedStep{std::move(event)};
 }
@@ -436,7 +447,7 @@ TEST_CASE("allowed tool results continue the same run in registry order",
 
   auto initial = request("inference-1", "assistant-1", snapshot.declarations());
   const auto tool_message =
-      domain::Message{make_id<domain::MessageId>("tool-message-6"),
+      domain::Message{make_id<domain::MessageId>("tool-message-7"),
                       domain::Role::tool,
                       {domain::TextBlock{"done"}},
                       invocation};
@@ -458,13 +469,15 @@ TEST_CASE("allowed tool results continue the same run in registry order",
       make_id<domain::SessionId>("session"), backend, &wake, {}, {}, snapshot,
       allow_policy()};
 
-  REQUIRE(kernel.start(run_start(initial)));
+  auto start = run_start(initial);
+  start.pricing_observation = pricing_observation();
+  REQUIRE(kernel.start(std::move(start)));
   drain_to_inference_boundary(kernel, wake);
   bool continued{};
   std::size_t observed{};
   for (int attempt = 0; attempt < 100 && !continued; ++attempt) {
-    auto next =
-        kernel.continue_run(make_id<domain::RunId>("run"), continuation);
+    auto next = kernel.continue_run(make_id<domain::RunId>("run"), continuation,
+                                    pricing_observation());
     if (next) {
       continued = true;
       break;
@@ -494,6 +507,10 @@ TEST_CASE("allowed tool results continue the same run in registry order",
   const auto result = std::ranges::find_if(events, [](const auto& event) {
     return std::holds_alternative<domain::ToolResultRecorded>(event.payload);
   });
+  REQUIRE(std::ranges::count_if(events, [](const auto &event) {
+            return std::holds_alternative<domain::InferencePricingObserved>(
+                event.payload);
+          }) == 2);
   REQUIRE(policy < started);
   REQUIRE(started < result);
   REQUIRE(kernel.projection(make_id<domain::RunId>("run"))->status() ==

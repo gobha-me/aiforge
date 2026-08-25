@@ -1898,7 +1898,10 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
     }
     if (start.user_message.role != domain::Role::user ||
         start.request.assistant_message_id == start.user_message.message_id ||
-        start.request.tools != m_impl->tools.declarations()) {
+        start.request.tools != m_impl->tools.declarations() ||
+        (start.pricing_observation &&
+         (start.pricing_observation->model_id != start.request.model_id ||
+          !domain::validate_pricing_observation(*start.pricing_observation)))) {
       return std::unexpected(kernel_error(
           RunKernelErrorCode::invalid_start,
           "run start contains invalid identity or tool declarations"));
@@ -2034,6 +2037,17 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
                            transaction);
         !result) {
       return result;
+    }
+    if (start.pricing_observation) {
+      if (auto result =
+              m_impl->record(start.run_id,
+                             domain::InferencePricingObserved{
+                                 start.request.inference_id,
+                                 std::move(*start.pricing_observation)},
+                             transaction);
+          !result) {
+        return result;
+      }
     }
     transaction.active = std::move(active);
     if (auto committed = m_impl->commit(std::move(transaction)); !committed) {
@@ -2411,8 +2425,9 @@ auto RunKernel::cancel_questions(
   }
 }
 
-auto RunKernel::continue_run(const domain::RunId& run_id,
-                             backend::BackendRequest request)
+auto RunKernel::continue_run(
+    const domain::RunId &run_id, backend::BackendRequest request,
+    std::optional<domain::PricingObservation> pricing_observation)
     -> std::expected<void, RunKernelError> {
   try {
     if (!m_impl->active || m_impl->active->run_id != run_id) {
@@ -2430,7 +2445,10 @@ auto RunKernel::continue_run(const domain::RunId& run_id,
               return active.invocations.at(invocation_id).state !=
                      Impl::InvocationState::terminal;
             }) ||
-        request.tools != m_impl->tools.declarations()) {
+        request.tools != m_impl->tools.declarations() ||
+        (pricing_observation &&
+         (pricing_observation->model_id != request.model_id ||
+          !domain::validate_pricing_observation(*pricing_observation)))) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::continuation_not_ready,
                        "run is not ready for another inference"));
@@ -2464,6 +2482,16 @@ auto RunKernel::continue_run(const domain::RunId& run_id,
             transaction);
         !result) {
       return result;
+    }
+    if (pricing_observation) {
+      if (auto result = m_impl->record(
+              run_id,
+              domain::InferencePricingObserved{request.inference_id,
+                                               std::move(*pricing_observation)},
+              transaction);
+          !result) {
+        return result;
+      }
     }
     if (auto committed = m_impl->commit(std::move(transaction)); !committed) {
       return committed;

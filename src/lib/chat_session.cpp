@@ -488,8 +488,10 @@ auto ChatSession::submit(std::string prompt)
          std::move(user_message),
          std::move(backend_request),
          m_impl->provenance,
-         m_impl->next_persona_selection});
-    if (!started) return std::unexpected(kernel_error(started.error()));
+         m_impl->next_persona_selection,
+         m_impl->model.pricing_observation});
+    if (!started)
+      return std::unexpected(kernel_error(started.error()));
 
     if (m_impl->persona_document) {
       m_impl->next_persona_selection = domain::PersonaSelection{
