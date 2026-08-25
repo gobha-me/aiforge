@@ -3,6 +3,7 @@
 #include <aiforge/adapters/process_draft_editor.hpp>
 #include <aiforge/adapters/process_interactive.hpp>
 #include <aiforge/adapters/process_model_catalog.hpp>
+#include <aiforge/adapters/process_credentials.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
 #include <aiforge/adapters/process_provenance.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
@@ -30,6 +31,24 @@
 
 namespace aiforge::adapters {
 namespace {
+
+class CredentialUnavailableBackend final : public backend::Backend {
+ public:
+  [[nodiscard]] auto start(backend::BackendRequest,
+                           std::stop_token stop_token)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    if (stop_token.stop_requested()) {
+      return std::unexpected(backend::BackendError{
+          backend::BackendErrorKind::cancelled, "Venice request cancelled",
+          false, std::nullopt});
+    }
+    return std::unexpected(backend::BackendError{
+        backend::BackendErrorKind::credential_unavailable,
+        "Venice credential is not configured; run 'aiforge login' or set VENICE_API_KEY",
+        false, std::nullopt});
+  }
+};
 
 constexpr std::size_t interactive_session_list_limit = 100U;
 
@@ -981,20 +1000,18 @@ auto ProcessInteractiveCommand::execute(Request request,
       }
     }
 
-    const char* raw_key = std::getenv("VENICE_API_KEY");
-    if (raw_key == nullptr || *raw_key == '\0') {
-      return failure(cli::CommandFailureKind::runtime,
-                     "VENICE_API_KEY is not configured");
+    auto credential = resolve_process_credential(diagnostics);
+    if (!credential) return std::unexpected(std::move(credential.error()));
+    std::optional<domain::CredentialSourceReference> credential_source;
+    std::unique_ptr<backend::Backend> backend;
+    if (credential->credential) {
+      auto resolved_credential = std::move(*credential->credential);
+      credential_source = resolved_credential.source;
+      backend = std::make_unique<VeniceBackend>(
+          std::move(resolved_credential.secret));
+    } else {
+      backend = std::make_unique<CredentialUnavailableBackend>();
     }
-    const std::string api_key{raw_key};
-    if (api_key.size() > 64U * 1024U) {
-      return failure(cli::CommandFailureKind::runtime,
-                     "VENICE_API_KEY is invalid");
-    }
-
-    VeniceBackendOptions options;
-    options.api_key = api_key;
-    VeniceBackend backend{std::move(options)};
     ProcessDraftEditor editor;
     const auto mode = [&] {
       switch (request.session_mode) {
@@ -1009,9 +1026,6 @@ auto ProcessInteractiveCommand::execute(Request request,
       }
       return surfaces::ChatSessionOpen::Mode::create;
     }();
-    // The variable name only. The key itself never leaves `api_key`.
-    auto credential_source = domain::CredentialSourceReference{
-        domain::CredentialSourceKind::environment, "VENICE_API_KEY"};
     auto provenance = process_run_provenance(*resolved, *model, "venice",
                                              std::move(credential_source));
     auto persona_root = process_persona_root();
@@ -1042,7 +1056,7 @@ auto ProcessInteractiveCommand::execute(Request request,
     app_options.session_dependencies.persona_source =
         personas ? &*personas : nullptr;
     auto app = make_interactive_chat_app(
-        backend, (*catalog)->service(), store.get(), std::move(open), editor,
+        *backend, (*catalog)->service(), store.get(), std::move(open), editor,
         environment.stop_token, std::move(app_options));
     if (!app->ready()) return std::unexpected(app->setup_error());
     for (;;) {

@@ -417,16 +417,19 @@ class VeniceStream final : public backend::BackendStream {
 }  // namespace
 
 struct VeniceBackend::Impl {
-  explicit Impl(VeniceBackendOptions backend_options)
+  explicit Impl(credentials::Secret credential,
+                VeniceBackendOptions backend_options)
       : options(std::move(backend_options)),
-        client(options.api_key, options.base_url) {}
+        client(std::move(credential).release(), options.base_url) {}
 
   VeniceBackendOptions options;
   venice::Client client;
 };
 
-VeniceBackend::VeniceBackend(VeniceBackendOptions options)
-    : m_impl(std::make_unique<Impl>(std::move(options))) {}
+VeniceBackend::VeniceBackend(credentials::Secret credential,
+                             VeniceBackendOptions options)
+    : m_impl(std::make_unique<Impl>(std::move(credential),
+                                    std::move(options))) {}
 
 VeniceBackend::~VeniceBackend() = default;
 VeniceBackend::VeniceBackend(VeniceBackend&&) noexcept = default;

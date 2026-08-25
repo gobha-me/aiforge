@@ -55,5 +55,26 @@ if [[ -n $production ]]; then
   set -e
   [[ $status -eq 1 ]]
   [[ ! -s "$test_dir/out" ]]
-  grep -q 'VENICE_API_KEY is not configured' "$test_dir/err"
+  grep -q 'Venice credential is not configured' "$test_dir/err"
+
+  set +e
+  printf 'must-not-be-read\n' | env -u VENICE_API_KEY \
+    XDG_CONFIG_HOME="$test_dir/config" "$production" login \
+    >"$test_dir/out" 2>"$test_dir/err"
+  status=$?
+  set -e
+  [[ $status -eq 2 ]]
+  [[ ! -e "$test_dir/config/aiforge/credentials" ]]
+  grep -q 'credentials cannot be piped' "$test_dir/err"
+  ! grep -q 'must-not-be-read' "$test_dir/out" "$test_dir/err"
+
+  set +e
+  printf 'stdin evidence' | VENICE_API_KEY='invalid value' \
+    XDG_CONFIG_HOME="$test_dir/config" AIFORGE_MODEL=fixture-model \
+    "$production" explain >"$test_dir/out" 2>"$test_dir/err"
+  status=$?
+  set -e
+  [[ $status -eq 1 ]]
+  grep -q 'VENICE_API_KEY is invalid' "$test_dir/err"
+  ! grep -q 'invalid value' "$test_dir/out" "$test_dir/err"
 fi

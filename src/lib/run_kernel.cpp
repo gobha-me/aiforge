@@ -95,6 +95,9 @@ using WorkerUpdate =
     case backend::BackendErrorKind::authentication:
       return {domain::ErrorCode::backend, "backend authentication failed",
               false};
+    case backend::BackendErrorKind::credential_unavailable:
+      return {domain::ErrorCode::backend,
+              "backend credential is not configured", false};
     case backend::BackendErrorKind::request_rejected:
       return {domain::ErrorCode::backend, "backend rejected the request",
               false};
