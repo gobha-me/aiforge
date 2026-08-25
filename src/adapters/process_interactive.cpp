@@ -284,16 +284,29 @@ class ChatAppImpl final : public InteractiveChatApp {
 
     if (const auto* key = std::get_if<termforge::KeyEvent>(&event)) {
       if (key->action != termforge::KeyAction::Press) return;
-      if (key->key == termforge::Key::Escape && m_session->active()) return;
-      if (key->key == termforge::Key::Escape && m_help_visible) {
-        m_help_visible = false;
-        m_status = "Ready";
+      if (key->key == termforge::Key::Escape) {
+        if (m_session->active()) return;
+        if (m_help_visible) {
+          m_help_visible = false;
+          m_status = "Ready";
+        }
         return;
       }
       if (key->ctrl && key->key == termforge::Key::Char && key->ch == U'c') {
         if (m_session->active()) {
           auto cancelled = m_session->cancel_active("interrupt");
           if (!cancelled) fail(session_error(cancelled.error()));
+        } else if (m_composer.text().empty()) {
+          m_status = "Draft is already empty";
+        } else {
+          m_composer.clear();
+          m_status = "Draft cleared";
+        }
+        return;
+      }
+      if (key->ctrl && key->key == termforge::Key::Char && key->ch == U'd') {
+        if (m_session->active()) {
+          m_status = "Ctrl+D is unavailable while a run is active";
         } else {
           quit();
         }
@@ -391,10 +404,11 @@ class ChatAppImpl final : public InteractiveChatApp {
 
     std::string footer =
         m_session->active()
-            ? "Running — Esc cancels"
+            ? "Running — Esc/Ctrl+C cancel | Ctrl+D unavailable"
             : m_help_visible
-                  ? "Slash command help — Esc closes"
-                  : "Enter submit | Tab complete | /help commands | Ctrl+E editor";
+                  ? "Slash command help — Esc closes | Ctrl+D exits"
+                  : "Enter submit | Tab | Ctrl+C clear | Ctrl+D exit | "
+                    "^E editor | /help";
     if (!m_status.empty()) footer += " | " + m_status;
     screen.write_text(0, rows - 1, footer, termforge::theme::kDim,
                       termforge::theme::kBg);

@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <condition_variable>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,7 @@
 #include <string>
 #include <termforge/widgets/choice_wizard_dialog.hpp>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace aiforge;
@@ -641,9 +643,11 @@ auto chat_scenario() -> testing::TuiScenario {
   return value;
 }
 
-auto chat_cancellation_scenario() -> testing::TuiScenario {
+auto chat_cancellation_scenario(std::string scenario_id,
+                                termforge::KeyEvent cancellation)
+    -> testing::TuiScenario {
   auto value = chat_scenario();
-  value.scenario_id = "interactive-chat-cancellation";
+  value.scenario_id = std::move(scenario_id);
   value.backend_script = {"response-started", "delta:hello", "cancelled",
                           "cancel-end"};
   const auto enter = testing::TuiScenarioPost{
@@ -654,14 +658,90 @@ auto chat_cancellation_scenario() -> testing::TuiScenario {
       {0, enter},
       {1, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
       {2, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
-      {3, testing::TuiScenarioPost{termforge::KeyEvent{
-              termforge::Key::Escape, 0, false, false, false,
-              termforge::KeyAction::Press}}},
+      {3, testing::TuiScenarioPost{cancellation}},
       {4, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
       {5, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
       {6, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
       {6, enter},
   };
+  return value;
+}
+
+auto idle_control_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-idle-control-keys";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {120, 8, 1200, 160};
+  const auto control = [](const char32_t ch) {
+    return testing::TuiScenarioPost{termforge::KeyEvent{
+        termforge::Key::Char, ch, true, false, false,
+        termforge::KeyAction::Press}};
+  };
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"single-line draft"}}},
+      {1, control(U'c')},
+      {2, testing::TuiScenarioResize{{48, 5, 480, 100}}},
+      {3, testing::TuiScenarioPost{
+              termforge::PasteEvent{"alpha\nbeta\ngamma\ndelta\nepsilon"}}},
+      {4, control(U'c')},
+      {5, testing::TuiScenarioResize{{120, 8, 1200, 160}}},
+      {6, control(U'c')},
+      {7, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Escape, 0, false, false, false,
+              termforge::KeyAction::Press}}},
+      {8, testing::TuiScenarioPost{termforge::PasteEvent{"after escape"}}},
+      {9, control(U'c')},
+      {10, control(U'd')},
+  };
+  value.limits.maximum_frames = 32;
+  return value;
+}
+
+auto help_control_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-help-control-keys";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 8, 1000, 160};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/help"}}},
+      {0, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Enter, 0, false, false, false,
+              termforge::KeyAction::Press}}},
+      {1, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Escape, 0, false, false, false,
+              termforge::KeyAction::Press}}},
+      {2, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Char, U'd', true, false, false,
+              termforge::KeyAction::Press}}},
+  };
+  value.limits.maximum_frames = 16;
+  return value;
+}
+
+auto active_control_d_scenario() -> testing::TuiScenario {
+  auto value = chat_scenario();
+  value.scenario_id = "interactive-active-control-d";
+  value.initial_size = {120, 8, 1200, 160};
+  const auto enter = testing::TuiScenarioPost{termforge::KeyEvent{
+      termforge::Key::Enter, 0, false, false, false,
+      termforge::KeyAction::Press}};
+  const auto control_d = testing::TuiScenarioPost{termforge::KeyEvent{
+      termforge::Key::Char, U'd', true, false, false,
+      termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"question"}}},
+      {0, enter},
+      {1, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {2, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {3, control_d},
+      {4, testing::TuiScenarioResize{{48, 5, 480, 100}}},
+      {5, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {6, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {8, control_d},
+  };
+  value.limits.maximum_frames = 32;
   return value;
 }
 
@@ -804,7 +884,7 @@ auto session_failure_scenario(std::string scenario_id, std::string command)
       {0, testing::TuiScenarioPost{termforge::PasteEvent{std::move(command)}}},
       {0, enter},
       {2, testing::TuiScenarioPost{termforge::KeyEvent{
-              termforge::Key::Char, U'c', true, false, false,
+              termforge::Key::Char, U'd', true, false, false,
               termforge::KeyAction::Press}}},
   };
   value.limits.maximum_frames = 16;
@@ -1042,16 +1122,99 @@ TEST_CASE("interactive chat records and replays a gated backend stream",
 
 TEST_CASE("interactive chat cancellation replay preserves cross-thread order",
           "[scenario][chat][cancellation]") {
+  const std::vector<std::pair<std::string, termforge::KeyEvent>> cases{
+      {"interactive-chat-escape-cancellation",
+       {termforge::Key::Escape, 0, false, false, false,
+        termforge::KeyAction::Press}},
+      {"interactive-chat-control-c-cancellation",
+       {termforge::Key::Char, U'c', true, false, false,
+        termforge::KeyAction::Press}},
+  };
+  for (const auto& [scenario_id, cancellation] : cases) {
+    const auto result = testing::run_tui_scenario(
+        chat_cancellation_scenario(scenario_id, cancellation), chat_factory());
+    INFO((result ? std::string{} : result.error().message));
+    REQUIRE(result);
+    REQUIRE(result->recorded == result->replayed);
+    REQUIRE(result->recorded.semantic_state.find(":cancelled") !=
+            std::string::npos);
+    REQUIRE(std::ranges::any_of(
+        result->recorded.normalized_frames, [](const std::string& frame) {
+          return frame.find("cancelled") != std::string::npos;
+        }));
+  }
+}
+
+TEST_CASE("idle control keys clear drafts without durable history and exit",
+          "[scenario][chat][controls]") {
   const auto result =
-      testing::run_tui_scenario(chat_cancellation_scenario(), chat_factory());
+      testing::run_tui_scenario(idle_control_scenario(), chat_factory());
   INFO((result ? std::string{} : result.error().message));
   REQUIRE(result);
   REQUIRE(result->recorded == result->replayed);
-  REQUIRE(result->recorded.semantic_state.find(":cancelled") !=
+  REQUIRE(result->recorded.semantic_state == "Draft cleared");
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("Draft cleared") != std::string::npos;
+      }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("Draft is already empty") != std::string::npos;
+      }));
+  const auto multiline = std::ranges::find_if(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.starts_with("48x5:") &&
+               frame.find("epsilon") != std::string::npos;
+      });
+  REQUIRE(multiline != result->recorded.normalized_frames.end());
+  REQUIRE(std::ranges::any_of(
+      std::next(multiline), result->recorded.normalized_frames.end(),
+      [](const std::string& frame) {
+        return frame.starts_with("48x5:") &&
+               frame.find("Ctrl+C clear") != std::string::npos &&
+               frame.find("alpha") == std::string::npos &&
+               frame.find("epsilon") == std::string::npos;
+      }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("after escape") != std::string::npos;
+      }));
+}
+
+TEST_CASE("help Escape closes the panel and idle Ctrl+D exits cleanly",
+          "[scenario][chat][controls][help]") {
+  const auto result =
+      testing::run_tui_scenario(help_control_scenario(), chat_factory());
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state == "Ready");
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("Slash command help") != std::string::npos &&
+               frame.find("Esc closes") != std::string::npos;
+      }));
+}
+
+TEST_CASE("active Ctrl+D neither exits nor cancels the run",
+          "[scenario][chat][controls][cancellation]") {
+  const auto result =
+      testing::run_tui_scenario(active_control_d_scenario(), chat_factory());
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state.starts_with("Ready"));
+  REQUIRE(result->recorded.semantic_state.find(":cancelled") ==
           std::string::npos);
   REQUIRE(std::ranges::any_of(
       result->recorded.normalized_frames, [](const std::string& frame) {
-        return frame.find("cancelled") != std::string::npos;
+        return frame.find("Ctrl+D is unavailable while a run is active") !=
+               std::string::npos;
+      }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.starts_with("48x5:") &&
+               frame.find("Esc/Ctrl+C cancel | Ctrl+D") != std::string::npos;
       }));
 }
 

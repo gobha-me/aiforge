@@ -119,9 +119,10 @@ terminal remains an error rather than attempting to start a TUI.
 The composer owns multiline UTF-8 editing, bracketed paste, display-width
 wrapping, and draft-local cursor state. Enter submits; Shift+Enter or Alt+Enter
 adds a newline when the terminal can distinguish the modifier. Page Up/Down
-scroll the transcript, and Escape or Ctrl-C cancels an active run. Ctrl-C exits
-when idle. Submission is disabled during inference because steering semantics
-remain a separate runtime milestone.
+scroll the transcript, and Escape or Ctrl-C cancels an active run. When idle,
+Ctrl-C clears the complete draft, Ctrl-D exits, and Escape has no exit behavior.
+Ctrl-D is unavailable during an active run. Submission is disabled during
+inference because steering semantics remain a separate runtime milestone.
 
 Prompt recall is rebuilt from ordered `UserContentAdded` events in the selected
 session. Failed validation or persistence leaves the draft intact and creates
