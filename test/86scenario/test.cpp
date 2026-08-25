@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <condition_variable>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -30,6 +31,28 @@ using namespace std::chrono_literals;
 
 template <typename IdType> auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
+}
+
+template <typename Payload>
+auto run_event(const std::uint64_t sequence, std::string event_id,
+               std::string run_id, Payload payload) -> domain::RunEvent {
+  return {{make_id<domain::EventId>(event_id), make_id<domain::RunId>(run_id),
+           sequence, 1,
+           domain::EventTimestamp{std::chrono::milliseconds{sequence}},
+           std::nullopt, std::nullopt, std::nullopt},
+          std::move(payload)};
+}
+
+auto reported_cost() -> domain::ReportedCost {
+  return domain::ReportedCost::create(
+             {domain::MonetaryAmount::create(
+                  "USD", domain::DecimalAmount::from("0").value())
+                  .value(),
+              domain::MonetaryAmount::create(
+                  "venice.diem",
+                  domain::DecimalAmount::from("0.0645375").value())
+                  .value()})
+      .value();
 }
 
 auto normalized_screen(const termforge::Screen& screen) -> std::string {
@@ -166,7 +189,76 @@ class SessionScenarioStore final : public storage::SessionStore {
     m_sessions.emplace(
         target,
         storage::SessionInfo{target, domain::EventTimestamp{500ms},
-                             domain::EventTimestamp{3000ms}, 0, 7});
+                             domain::EventTimestamp{3000ms}, 11, 7});
+    const auto surface = make_id<domain::SurfaceId>("interactive");
+    const auto workspace = make_id<domain::WorkspaceId>("chat");
+    const auto profile = make_id<domain::PermissionProfileId>("observe");
+    const auto first_inference =
+        make_id<domain::InferenceId>("failed-inference");
+    const auto second_inference =
+        make_id<domain::InferenceId>("cancelled-inference");
+    const auto model = make_id<domain::ModelId>("model");
+    m_histories[target] = {
+        run_event(1, "target-start-1", "target-run-1",
+                  domain::RunStarted{surface, workspace, profile, std::nullopt}),
+        run_event(2, "target-inference-1", "target-run-1",
+                  domain::InferenceStarted{first_inference, model}),
+        run_event(3, "target-usage-1", "target-run-1",
+                  domain::UsageRecorded{first_inference, {5, 3, 2, 1}}),
+        run_event(4, "target-cost-1", "target-run-1",
+                  domain::InferenceCostRecorded{first_inference,
+                                                reported_cost()}),
+        run_event(5, "target-inference-failed", "target-run-1",
+                  domain::InferenceFailed{
+                      first_inference,
+                      {domain::ErrorCode::backend, "failed", false}}),
+        run_event(6, "target-run-failed", "target-run-1",
+                  domain::RunFailed{
+                      {domain::ErrorCode::backend, "failed", false}}),
+        run_event(7, "target-start-2", "target-run-2",
+                  domain::RunStarted{surface, workspace, profile, std::nullopt}),
+        run_event(8, "target-inference-2", "target-run-2",
+                  domain::InferenceStarted{second_inference, model}),
+        run_event(9, "target-usage-2", "target-run-2",
+                  domain::UsageRecorded{second_inference, {7, 4, 0, 0}}),
+        run_event(10, "target-inference-cancelled", "target-run-2",
+                  domain::InferenceCancelled{second_inference, "cancelled"}),
+        run_event(11, "target-run-cancelled", "target-run-2",
+                  domain::RunCancelled{"cancelled"}),
+    };
+    const auto overflow = make_id<domain::SessionId>("usage-overflow-session");
+    m_sessions.emplace(
+        overflow,
+        storage::SessionInfo{overflow, domain::EventTimestamp{450ms},
+                             domain::EventTimestamp{2750ms}, 10, 2});
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    const auto overflow_first = make_id<domain::InferenceId>("overflow-first");
+    const auto overflow_second =
+        make_id<domain::InferenceId>("overflow-second");
+    m_histories[overflow] = {
+        run_event(1, "overflow-start-1", "overflow-run-1",
+                  domain::RunStarted{surface, workspace, profile, std::nullopt}),
+        run_event(2, "overflow-inference-1", "overflow-run-1",
+                  domain::InferenceStarted{overflow_first, model}),
+        run_event(3, "overflow-usage-1", "overflow-run-1",
+                  domain::UsageRecorded{overflow_first, {maximum, 0, 0, 0}}),
+        run_event(4, "overflow-finish-1", "overflow-run-1",
+                  domain::InferenceFinished{overflow_first,
+                                            domain::FinishReason::stop}),
+        run_event(5, "overflow-complete-1", "overflow-run-1",
+                  domain::RunCompleted{}),
+        run_event(6, "overflow-start-2", "overflow-run-2",
+                  domain::RunStarted{surface, workspace, profile, std::nullopt}),
+        run_event(7, "overflow-inference-2", "overflow-run-2",
+                  domain::InferenceStarted{overflow_second, model}),
+        run_event(8, "overflow-usage-2", "overflow-run-2",
+                  domain::UsageRecorded{overflow_second, {1, 0, 0, 0}}),
+        run_event(9, "overflow-finish-2", "overflow-run-2",
+                  domain::InferenceFinished{overflow_second,
+                                            domain::FinishReason::stop}),
+        run_event(10, "overflow-complete-2", "overflow-run-2",
+                  domain::RunCompleted{}),
+    };
     const auto corrupt = make_id<domain::SessionId>("corrupt-session");
     m_sessions.emplace(
         corrupt,
@@ -294,6 +386,8 @@ class GatedBackendState final {
         backend::BackendEvent{backend::ResponseStarted{"response"}},
         backend::BackendEvent{backend::ContentDelta{
             request.assistant_message_id, domain::TextBlock{"hello"}}},
+        backend::BackendEvent{backend::UsageObserved{{3, 2, 1, 4}}},
+        backend::BackendEvent{backend::CostObserved{reported_cost()}},
         backend::BackendEvent{
             backend::ResponseFinished{domain::FinishReason::stop}},
         std::nullopt,
@@ -333,7 +427,8 @@ class GatedBackendState final {
   auto release(const std::string_view description)
       -> std::expected<void, std::string> {
     static const std::vector<std::string_view> expected{
-        "response-started", "delta:hello", "response-finished", "end"};
+        "response-started", "delta:hello", "usage", "cost",
+        "response-finished", "end"};
     std::unique_lock lock{m_mutex};
     if (!m_condition.wait_for(lock, 1s, [&] {
           return m_initialized && m_waiting_calls >= m_released + 1;
@@ -622,8 +717,8 @@ auto chat_scenario() -> testing::TuiScenario {
   value.scenario_id = "interactive-chat-stream";
   value.corpus_version = "1";
   value.application_revision = "test-revision";
-  value.initial_size = {60, 10, 600, 200};
-  value.backend_script = {"response-started", "delta:hello",
+  value.initial_size = {180, 10, 1800, 200};
+  value.backend_script = {"response-started", "delta:hello", "usage", "cost",
                           "response-finished", "end"};
   const auto enter = testing::TuiScenarioPost{
       termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
@@ -633,11 +728,16 @@ auto chat_scenario() -> testing::TuiScenario {
       {0, enter},
       {1, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
       {2, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
-      {3, testing::TuiScenarioResize{{32, 6, 320, 120}}},
       {3, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
       {4, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
-      {6, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
-      {6, enter},
+      {5, testing::TuiScenarioResize{{32, 6, 320, 120}}},
+      {5, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {6, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {7, testing::TuiScenarioResize{{120, 12, 1200, 240}}},
+      {8, testing::TuiScenarioPost{termforge::PasteEvent{"/usage"}}},
+      {8, enter},
+      {9, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
+      {9, enter},
   };
   value.limits.maximum_frames = 32;
   return value;
@@ -720,6 +820,25 @@ auto help_control_scenario() -> testing::TuiScenario {
   return value;
 }
 
+auto empty_usage_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-empty-usage";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 14, 1000, 280};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/usage"}}},
+      {0, enter},
+      {1, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
+      {1, enter},
+  };
+  value.limits.maximum_frames = 12;
+  return value;
+}
+
 auto active_control_d_scenario() -> testing::TuiScenario {
   auto value = chat_scenario();
   value.scenario_id = "interactive-active-control-d";
@@ -739,7 +858,9 @@ auto active_control_d_scenario() -> testing::TuiScenario {
       {4, testing::TuiScenarioResize{{48, 5, 480, 100}}},
       {5, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
       {6, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
-      {8, control_d},
+      {7, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {8, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {10, control_d},
   };
   value.limits.maximum_frames = 32;
   return value;
@@ -808,7 +929,8 @@ auto chat_factory() -> testing::TuiScenarioTargetFactory {
           auto released = backend_state->release(step);
           if (!released) return released;
           static const std::vector<std::string_view> expected{
-              "response-started", "delta:hello", "response-finished", "end"};
+              "response-started", "delta:hello", "usage", "cost",
+              "response-finished", "end"};
           const auto found = std::ranges::find(expected, step);
           if (found == expected.end()) {
             return std::expected<void, std::string>{
@@ -844,7 +966,7 @@ auto session_success_scenario() -> testing::TuiScenario {
   value.scenario_id = "interactive-session-list-resume-new";
   value.corpus_version = "1";
   value.application_revision = "test-revision";
-  value.initial_size = {100, 12, 1000, 240};
+  value.initial_size = {180, 12, 1800, 240};
   const auto enter = testing::TuiScenarioPost{
       termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
                           termforge::KeyAction::Press}};
@@ -1113,11 +1235,36 @@ TEST_CASE("interactive chat records and replays a gated backend stream",
   INFO((result ? std::string{} : result.error().message));
   REQUIRE(result);
   REQUIRE(result->recorded == result->replayed);
-  REQUIRE(result->recorded.semantic_state.starts_with("Ready"));
+  REQUIRE(result->recorded.semantic_state.starts_with(
+      "Usage summary is derived from session events"));
   REQUIRE(std::ranges::any_of(result->recorded.normalized_frames,
                               [](const std::string& frame) {
                                 return frame.find("hello") != std::string::npos;
                               }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("usage 3 in/2 out/1 cached/4 reasoning") !=
+                   std::string::npos &&
+               frame.find("reported 0 USD + 0.0645375 venice.diem") !=
+                   std::string::npos;
+      }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("Session usage and reported cost") !=
+                   std::string::npos &&
+               frame.find("Input tokens: 3") != std::string::npos &&
+               frame.find("Cached input tokens: 1") != std::string::npos &&
+               frame.find("Reasoning tokens: 4") != std::string::npos &&
+               frame.find("1 completed") != std::string::npos &&
+               frame.find(
+                   "Reported cost: 0 USD + 0.0645375 venice.diem (1 of 1") !=
+                   std::string::npos;
+      }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.starts_with("32x6:") &&
+               frame.find("usage 3 in/2 out") == std::string::npos;
+      }));
 }
 
 TEST_CASE("interactive chat cancellation replay preserves cross-thread order",
@@ -1196,6 +1343,21 @@ TEST_CASE("help Escape closes the panel and idle Ctrl+D exits cleanly",
       }));
 }
 
+TEST_CASE("interactive usage keeps absent cost explicit", "[scenario][usage]") {
+  const auto result =
+      testing::run_tui_scenario(empty_usage_scenario(), chat_factory());
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("Input tokens: 0") != std::string::npos &&
+               frame.find("Inferences: 0 total") != std::string::npos &&
+               frame.find("Reported cost: unavailable (no inferences)") !=
+                   std::string::npos;
+      }));
+}
+
 TEST_CASE("active Ctrl+D neither exits nor cancels the run",
           "[scenario][chat][controls][cancellation]") {
   const auto result =
@@ -1238,7 +1400,11 @@ TEST_CASE("interactive session actions list resume and create atomically",
   REQUIRE(std::ranges::any_of(
       result->recorded.normalized_frames, [](const std::string& frame) {
         return frame.find("AIForge  session target-session") !=
-               std::string::npos;
+                   std::string::npos &&
+               frame.find("usage 12 in/7 out/2 cached/1 reasoning") !=
+                   std::string::npos &&
+               frame.find("reported 0 USD + 0.0645375 venice.diem (partial)") !=
+                   std::string::npos;
       }));
   REQUIRE(std::ranges::any_of(
       result->recorded.normalized_frames, [](const std::string& frame) {
@@ -1260,6 +1426,9 @@ TEST_CASE("failed session operations preserve the current interactive app",
       {"interactive-session-replay-failure",
        "/session resume corrupt-session", false,
        "durable session could not be opened"},
+      {"interactive-session-usage-overflow",
+       "/session resume usage-overflow-session", false,
+       "Interactive usage replay failed: usage ledger total overflow"},
       {"interactive-session-list-failure", "/session list", true,
        "Sessions could not be listed: session catalog is contended"},
   };

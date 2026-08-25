@@ -208,6 +208,12 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
                        "model accepts at most one model ID");
 }
 
+[[nodiscard]] auto usage_handler(std::string_view arguments,
+                                 const SlashCommandContext&)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  return no_arguments(arguments, SlashCommandAction::show_usage);
+}
+
 [[nodiscard]] auto builtin_specs() -> std::vector<SlashCommandSpec> {
   return {
       {"help", "help", "[command]", "Show available slash commands.",
@@ -226,6 +232,8 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
        persona_handler},
       {"model", "model", "[model-id]",
        "Choose a text model for future runs.", idle_available, model_handler},
+      {"usage", "usage", "", "Show session usage and reported cost.",
+       idle_available, usage_handler},
   };
 }
 
