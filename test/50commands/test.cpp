@@ -39,6 +39,7 @@ class FakeOneShot final : public OneShotCommand {
     seen_session_mode = request.session_mode;
     seen_session_id = std::move(request.session_id);
     seen_persona = std::move(request.persona);
+    seen_model = std::move(request.model);
     saw_terminal_input = environment.input_is_terminal;
     output << "answer";
     error << "usage\n";
@@ -50,6 +51,7 @@ class FakeOneShot final : public OneShotCommand {
   SessionMode seen_session_mode{SessionMode::create};
   std::optional<aiforge::domain::SessionId> seen_session_id;
   aiforge::persona::PersonaDirective seen_persona;
+  std::optional<std::string> seen_model;
   bool saw_terminal_input{};
   std::optional<CommandFailure> failure;
 };
@@ -61,6 +63,7 @@ class FakeInteractive final : public InteractiveCommand {
     seen_session_mode = request.session_mode;
     seen_session_id = std::move(request.session_id);
     seen_persona = std::move(request.persona);
+    seen_model = std::move(request.model);
     output << "interactive";
     if (failure) return std::unexpected(*failure);
     return {};
@@ -69,6 +72,22 @@ class FakeInteractive final : public InteractiveCommand {
   SessionMode seen_session_mode{SessionMode::create};
   std::optional<aiforge::domain::SessionId> seen_session_id;
   aiforge::persona::PersonaDirective seen_persona;
+  std::optional<std::string> seen_model;
+  std::optional<CommandFailure> failure;
+};
+
+class FakeModels final : public ModelsCommand {
+ public:
+  auto execute(CommandEnvironment&, std::ostream& output, std::ostream& error)
+      -> std::expected<void, CommandFailure> override {
+    ++calls;
+    output << "models\n";
+    error << "warning\n";
+    if (failure) return std::unexpected(*failure);
+    return {};
+  }
+
+  int calls{};
   std::optional<CommandFailure> failure;
 };
 
@@ -258,6 +277,10 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
   REQUIRE(output.empty());
   REQUIRE(error.find("not available in this build") != std::string::npos);
 
+  REQUIRE(dispatch(registry, {"models"}, output, error) == 1);
+  REQUIRE(output.empty());
+  REQUIRE(error.find("not available in this build") != std::string::npos);
+
   REQUIRE(dispatch(registry, {"config"}, output, error) == 2);
   REQUIRE(output.empty());
   REQUIRE(error.find("requires a subcommand") != std::string::npos);
@@ -344,6 +367,15 @@ TEST_CASE("one-shot session options are explicit and mutually exclusive",
   error.str({});
   REQUIRE(CommandDispatcher{}.dispatch(
               registry,
+              std::vector<std::string_view>{"chat", "--model", "text-model",
+                                            "with model"},
+              environment, output, error) == 0);
+  REQUIRE(one_shot.seen_model == "text-model");
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
               std::vector<std::string_view>{"--no-persona", "without"},
               environment, output, error) == 0);
   REQUIRE(one_shot.seen_persona.kind ==
@@ -388,6 +420,39 @@ TEST_CASE("one-shot session options are explicit and mutually exclusive",
   REQUIRE(interactive.seen_persona.kind ==
           aiforge::persona::PersonaDirectiveKind::select);
   REQUIRE(interactive.seen_persona.name == "reviewer");
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"--model", "interactive-model"},
+              environment, output, error) == 0);
+  REQUIRE(interactive.seen_model == "interactive-model");
+}
+
+TEST_CASE("models command uses its dedicated service and preserves streams",
+          "[commands][models]") {
+  const auto& registry = builtin_command_registry();
+  FakeModels models;
+  std::istringstream input;
+  CommandEnvironment environment{input, false, false, false, {}, nullptr,
+                                 nullptr, &models};
+  std::ostringstream output;
+  std::ostringstream error;
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry, std::vector<std::string_view>{"models"}, environment,
+              output, error) == 0);
+  REQUIRE(models.calls == 1);
+  REQUIRE(output.str() == "models\n");
+  REQUIRE(error.str() == "warning\n");
+
+  output.str({});
+  error.str({});
+  models.failure = CommandFailure{CommandFailureKind::runtime, "offline"};
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry, std::vector<std::string_view>{"models"}, environment,
+              output, error) == 1);
+  REQUIRE(error.str().find("offline") != std::string::npos);
 }
 
 TEST_CASE("empty terminal root input routes to the interactive service",

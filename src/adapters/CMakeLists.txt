@@ -2,6 +2,10 @@ add_library(${PROJECT_NAME}_adapters STATIC
   ask_user_dialog.cpp
   filesystem_persona_source.cpp
   git_repository_snapshot_source.cpp
+  json_model_catalog_cache.cpp
+  model_picker_dialog.cpp
+  process_model_catalog.cpp
+  process_models.cpp
   process_tool.cpp
   process_one_shot.cpp
   process_provenance.cpp
@@ -11,6 +15,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   transcript_view.cpp
   tui_scenario.cpp
   venice_backend.cpp
+  venice_model_catalog_source.cpp
 )
 add_library(${PROJECT_NAME}::adapters ALIAS ${PROJECT_NAME}_adapters)
 

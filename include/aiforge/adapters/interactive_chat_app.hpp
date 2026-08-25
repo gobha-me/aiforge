@@ -3,6 +3,7 @@
 #include <aiforge/backend/backend.hpp>
 #include <aiforge/cli/command_registry.hpp>
 #include <aiforge/domain/events.hpp>
+#include <aiforge/model/catalog.hpp>
 #include <aiforge/storage/session_store.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
 #include <aiforge/surfaces/draft_editor.hpp>
@@ -28,6 +29,7 @@ struct InteractiveChatAppOptions {
   std::function<void()> wake_observer;
   bool live_wake_enabled{true};
   bool poll_worker_updates{true};
+  model::CatalogService* model_catalog{};
 };
 
 class InteractiveChatApp : public termforge::App {

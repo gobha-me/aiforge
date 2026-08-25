@@ -45,6 +45,7 @@ class OneShotCommand {
     SessionMode session_mode{SessionMode::create};
     std::optional<domain::SessionId> session_id;
     persona::PersonaDirective persona;
+    std::optional<std::string> model;
   };
 
   [[nodiscard]] virtual auto execute(Request request,
@@ -68,11 +69,21 @@ class InteractiveCommand {
     SessionMode session_mode{SessionMode::create};
     std::optional<domain::SessionId> session_id;
     persona::PersonaDirective persona;
+    std::optional<std::string> model;
   };
 
   [[nodiscard]] virtual auto execute(Request request,
                                      CommandEnvironment& environment,
                                      std::ostream& output, std::ostream& error)
+      -> std::expected<void, CommandFailure> = 0;
+};
+
+class ModelsCommand {
+ public:
+  virtual ~ModelsCommand() = default;
+  [[nodiscard]] virtual auto execute(CommandEnvironment& environment,
+                                     std::ostream& output,
+                                     std::ostream& error)
       -> std::expected<void, CommandFailure> = 0;
 };
 
@@ -84,6 +95,7 @@ struct CommandEnvironment {
   std::stop_token stop_token;
   OneShotCommand* one_shot{};
   InteractiveCommand* interactive{};
+  ModelsCommand* models{};
 };
 
 struct CommandContext {

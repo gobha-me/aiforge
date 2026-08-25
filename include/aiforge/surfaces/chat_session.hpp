@@ -112,6 +112,8 @@ class ChatSession final {
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto disable_persona()
       -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto select_model(domain::ModelId model_id)
+      -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto persona_state() const -> ChatPersonaState;
 
   [[nodiscard]] auto submitted_prompts() const -> std::vector<std::string>;

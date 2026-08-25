@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <aiforge/adapters/process_provenance.hpp>
+#include <aiforge/adapters/process_model_catalog.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
@@ -36,10 +37,16 @@ auto warning(std::ostream& error, const std::string_view message) -> bool {
   }
 }
 
-[[nodiscard]] auto load_process_config(std::ostream& error)
+[[nodiscard]] auto load_process_config(
+    std::ostream& error, const std::optional<std::string>& requested_model)
     -> std::expected<config::ResolvedConfig, cli::CommandFailure> {
   const auto& registry = config::builtin_config_registry();
   std::vector<config::ConfigLayer> layers;
+  if (requested_model) {
+    layers.push_back(config::ConfigLayer{
+        config::ConfigSource::command_line,
+        {{"model", config::ConfigValue{*requested_model}, std::nullopt}}, {}});
+  }
   auto environment = config::environment_config_layer(registry);
   if (!environment) {
     return failure(cli::CommandFailureKind::runtime,
@@ -95,6 +102,31 @@ auto warning(std::ostream& error, const std::string_view message) -> bool {
                    "configured model is invalid");
   }
   return std::move(*model);
+}
+
+[[nodiscard]] auto validate_requested_model(
+    model::CatalogService& catalog, const domain::ModelId& requested,
+    const std::stop_token stop_token)
+    -> std::expected<void, cli::CommandFailure> {
+  auto snapshot = catalog.snapshot(stop_token);
+  if (!snapshot) {
+    return failure(snapshot.error().code == model::CatalogErrorCode::cancelled
+                       ? cli::CommandFailureKind::cancelled
+                       : cli::CommandFailureKind::runtime,
+                   snapshot.error().message);
+  }
+  if (model::find_model(snapshot->get(), requested, "text") != nullptr) return {};
+  auto suggestions = model::suggest_models(snapshot->get(), requested.value());
+  std::string message = "unknown text model '" + std::string{requested.value()} + "'";
+  if (!suggestions.empty()) {
+    message += "; did you mean ";
+    for (std::size_t index{}; index < suggestions.size(); ++index) {
+      if (index != 0) message += index + 1 == suggestions.size() ? " or " : ", ";
+      message += "'" + suggestions[index] + "'";
+    }
+    message.push_back('?');
+  }
+  return failure(cli::CommandFailureKind::usage, std::move(message));
 }
 
 [[nodiscard]] auto read_stdin(cli::CommandEnvironment& environment,
@@ -168,10 +200,18 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
                      "one-shot input exceeds 1 MiB");
     }
 
-    auto resolved = load_process_config(error);
+    auto resolved = load_process_config(error, request.model);
     if (!resolved) return std::unexpected(std::move(resolved.error()));
     auto model = configured_model(*resolved);
     if (!model) return std::unexpected(std::move(model.error()));
+    auto catalog = ProcessModelCatalog::create();
+    if (!catalog)
+      return failure(cli::CommandFailureKind::runtime, catalog.error().message);
+    if (request.model) {
+      auto validated = validate_requested_model(
+          (*catalog)->service(), *model, environment.stop_token);
+      if (!validated) return std::unexpected(std::move(validated.error()));
+    }
 
     const char* raw_key = std::getenv("VENICE_API_KEY");
     if (raw_key == nullptr || *raw_key == '\0') {
@@ -220,7 +260,8 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
             "one-shot session setup failed"});
     if (session_mode == surfaces::OneShotRequest::SessionMode::ephemeral) {
       surfaces::OneShotSurface surface{
-          backend, backend, {m_maximum_input_bytes, 4096}, persona_source};
+          backend, (*catalog)->service(), {m_maximum_input_bytes, 4096},
+          persona_source};
       result = surface.run(std::move(one_shot_request), output, error,
                            environment.stop_token);
     } else {
@@ -235,7 +276,8 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
                        "session storage could not be opened");
       }
       surfaces::OneShotSurface surface{
-          backend, backend, **store, {m_maximum_input_bytes, 4096},
+          backend, (*catalog)->service(), **store,
+          {m_maximum_input_bytes, 4096},
           persona_source};
       result = surface.run(std::move(one_shot_request), output, error,
                            environment.stop_token);
