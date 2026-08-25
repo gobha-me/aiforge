@@ -74,6 +74,9 @@ struct RunStart {
   // the kernel fills that section from its own registry snapshot so recorded
   // tool identity is the run's actual tool set.
   std::optional<domain::RunProvenance> provenance{};
+  // Recorded atomically with run start when a persona is selected or explicitly
+  // disabled. The kernel verifies it against attributes and constructed context.
+  std::optional<domain::PersonaSelection> persona_selection{};
   auto operator==(const RunStart&) const -> bool = default;
 };
 

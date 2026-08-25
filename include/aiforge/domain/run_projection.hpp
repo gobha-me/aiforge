@@ -60,6 +60,10 @@ class RunProjection final {
   [[nodiscard]] auto provenance() const noexcept -> const std::optional<RunProvenance>& {
     return m_provenance;
   }
+  [[nodiscard]] auto persona_selection() const noexcept
+      -> const std::optional<PersonaSelection>& {
+    return m_persona_selection;
+  }
   [[nodiscard]] auto last_sequence() const noexcept -> std::uint64_t { return m_last_sequence; }
 
  private:
@@ -72,6 +76,8 @@ class RunProjection final {
   Usage m_usage;
   std::optional<InferenceId> m_active_inference_id;
   std::optional<RunProvenance> m_provenance;
+  std::optional<PersonaId> m_persona_id;
+  std::optional<PersonaSelection> m_persona_selection;
   std::uint64_t m_last_sequence{};
 };
 

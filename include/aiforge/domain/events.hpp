@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <aiforge/domain/content.hpp>
+#include <aiforge/domain/persona.hpp>
 #include <aiforge/domain/provenance.hpp>
 #include <aiforge/domain/review_receipt.hpp>
 #include <aiforge/domain/verification_evidence.hpp>
@@ -32,6 +33,11 @@ struct RunStarted {
 struct RunProvenanceRecorded {
   RunProvenance provenance;
   auto operator==(const RunProvenanceRecorded&) const -> bool = default;
+};
+
+struct PersonaSelectionRecorded {
+  PersonaSelection selection;
+  auto operator==(const PersonaSelectionRecorded&) const -> bool = default;
 };
 
 struct RunAwaitingInput {
@@ -354,7 +360,8 @@ struct UnknownEvent {
 };
 
 using RunEventPayload = std::variant<
-    RunStarted, RunProvenanceRecorded, RunAwaitingInput, RunResumed,
+    RunStarted, RunProvenanceRecorded, PersonaSelectionRecorded,
+    RunAwaitingInput, RunResumed,
     RunCompletionRequested, RunCompleted,
     RunFailed, RunCancelRequested, RunCancelled, UserContentAdded,
     AssistantContentStarted, AssistantContentDeltaAdded, AssistantContentFinished,

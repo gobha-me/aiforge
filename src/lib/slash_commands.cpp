@@ -170,6 +170,30 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
       "session accepts list, resume <session-id>, or new");
 }
 
+[[nodiscard]] auto persona_handler(std::string_view arguments,
+                                   const SlashCommandContext&)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  arguments = trim_arguments(arguments);
+  if (arguments.empty() || arguments == "list") {
+    return SlashCommandResult{SlashCommandAction::list_personas, std::nullopt};
+  }
+  if (arguments == "off") {
+    return SlashCommandResult{SlashCommandAction::disable_persona, std::nullopt};
+  }
+  constexpr std::string_view set{"set"};
+  if (arguments.starts_with(set) && arguments.size() > set.size() &&
+      (arguments[set.size()] == ' ' || arguments[set.size()] == '\t')) {
+    const auto name = trim_arguments(arguments.substr(set.size()));
+    if (!name.empty() && name.find_first_of(" \t") == std::string_view::npos) {
+      return SlashCommandResult{SlashCommandAction::select_persona,
+                                std::string{name}};
+    }
+  }
+  return command_error(
+      SlashCommandErrorCode::invalid_arguments,
+      "persona accepts list, set <name>, or off");
+}
+
 [[nodiscard]] auto builtin_specs() -> std::vector<SlashCommandSpec> {
   return {
       {"help", "help", "[command]", "Show available slash commands.",
@@ -183,6 +207,9 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
       {"session", "session", "[list | resume <session-id> | new]",
        "List, resume, or start interactive sessions.", idle_available,
        session_handler},
+      {"persona", "persona", "[list | set <name> | off]",
+       "List, select, or disable file-backed personas.", idle_available,
+       persona_handler},
   };
 }
 

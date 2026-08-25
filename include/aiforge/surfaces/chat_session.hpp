@@ -1,6 +1,7 @@
 #pragma once
 
 #include <aiforge/backend/backend.hpp>
+#include <aiforge/persona/source.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/storage/session_store.hpp>
 #include <cstddef>
@@ -53,6 +54,14 @@ struct ChatSessionOpen {
   // Recorded on every run this session starts, so each turn is independently
   // answerable. Its tool section is filled by the run kernel.
   std::optional<domain::RunProvenance> provenance{};
+  persona::PersonaDirective persona{};
+};
+
+struct ChatPersonaState {
+  std::optional<domain::PersonaReference> selected;
+  bool requires_attention{};
+  std::string message;
+  auto operator==(const ChatPersonaState&) const -> bool = default;
 };
 
 struct ChatSubmission {
@@ -68,6 +77,8 @@ struct ChatSessionDependencies {
   runtime::RunKernelLimits run_limits{};
   runtime::ToolRegistrySnapshot tools{};
   std::shared_ptr<runtime::ToolPolicy> tool_policy;
+  persona::PersonaSource* persona_source{};
+  persona::PersonaLimits persona_limits{};
 };
 
 class ChatSession final {
@@ -95,6 +106,13 @@ class ChatSession final {
   [[nodiscard]] auto cancel_active(
       std::optional<std::string> reason = std::nullopt)
       -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto list_personas()
+      -> std::expected<std::vector<domain::PersonaSummary>, ChatSessionError>;
+  [[nodiscard]] auto select_persona(std::string name)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto disable_persona()
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto persona_state() const -> ChatPersonaState;
 
   [[nodiscard]] auto submitted_prompts() const -> std::vector<std::string>;
   [[nodiscard]] auto event_log() const noexcept

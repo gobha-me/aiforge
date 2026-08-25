@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <aiforge/adapters/process_provenance.hpp>
+#include <aiforge/adapters/filesystem_persona_source.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
 #include <aiforge/config/config.hpp>
@@ -204,9 +205,14 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
         domain::CredentialSourceKind::environment, "VENICE_API_KEY"};
     auto provenance = process_run_provenance(*resolved, *model, "venice",
                                              std::move(credential_source));
+    auto persona_root = process_persona_root();
+    std::optional<FilesystemPersonaSource> personas;
+    if (persona_root) personas.emplace(std::move(*persona_root));
+    auto* persona_source = personas ? &*personas : nullptr;
     surfaces::OneShotRequest one_shot_request{
         std::string{request.prompt}, std::move(*input), std::move(*model),
-        session_mode, std::move(request.session_id), std::move(provenance)};
+        session_mode, std::move(request.session_id), std::move(provenance),
+        std::move(request.persona)};
 
     std::expected<surfaces::OneShotResult, surfaces::OneShotError> result =
         std::unexpected(surfaces::OneShotError{
@@ -214,7 +220,7 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
             "one-shot session setup failed"});
     if (session_mode == surfaces::OneShotRequest::SessionMode::ephemeral) {
       surfaces::OneShotSurface surface{
-          backend, backend, {m_maximum_input_bytes, 4096}};
+          backend, backend, {m_maximum_input_bytes, 4096}, persona_source};
       result = surface.run(std::move(one_shot_request), output, error,
                            environment.stop_token);
     } else {
@@ -229,7 +235,8 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
                        "session storage could not be opened");
       }
       surfaces::OneShotSurface surface{
-          backend, backend, **store, {m_maximum_input_bytes, 4096}};
+          backend, backend, **store, {m_maximum_input_bytes, 4096},
+          persona_source};
       result = surface.run(std::move(one_shot_request), output, error,
                            environment.stop_token);
     }

@@ -23,6 +23,7 @@
 
 #include <aiforge/adapters/termforge_run_bridge.hpp>
 #include <aiforge/adapters/ask_user_dialog.hpp>
+#include <aiforge/adapters/filesystem_persona_source.hpp>
 #include <aiforge/adapters/process_provenance.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
@@ -140,7 +141,169 @@ class TestApp final : public termforge::App {
   auto on_render(termforge::Screen&) -> void override {}
 };
 
+class TempDirectory final {
+ public:
+  explicit TempDirectory(std::string prefix) {
+    auto pattern =
+        (std::filesystem::temp_directory_path() / (prefix + "-XXXXXX"))
+            .string();
+    pattern.push_back('\0');
+    const auto* created = ::mkdtemp(pattern.data());
+    REQUIRE(created != nullptr);
+    m_path = created;
+  }
+
+  ~TempDirectory() {
+    std::error_code ignored;
+    std::filesystem::remove_all(m_path, ignored);
+  }
+
+  [[nodiscard]] auto path() const -> const std::filesystem::path& {
+    return m_path;
+  }
+
+ private:
+  std::filesystem::path m_path;
+};
+
+auto write_file(const std::filesystem::path& path, const std::string& bytes)
+    -> void {
+  std::ofstream output{path, std::ios::binary};
+  REQUIRE(output);
+  output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  REQUIRE(output);
+}
+
 }  // namespace
+
+TEST_CASE("persona roots follow XDG configuration semantics",
+          "[adapter][persona]") {
+  const auto xdg = adapters::resolve_persona_root(
+      {.xdg_config_home = std::filesystem::path{"/tmp/xdg"},
+       .home = std::filesystem::path{"/tmp/home"}});
+  REQUIRE(xdg == std::filesystem::path{"/tmp/xdg/aiforge/personas"});
+
+  const auto home = adapters::resolve_persona_root(
+      {.xdg_config_home = std::filesystem::path{"relative"},
+       .home = std::filesystem::path{"/tmp/home"}});
+  REQUIRE(home == std::filesystem::path{"/tmp/home/.config/aiforge/personas"});
+
+  const auto missing = adapters::resolve_persona_root({});
+  REQUIRE_FALSE(missing);
+  REQUIRE(missing.error().code == persona::PersonaErrorCode::missing_home);
+}
+
+TEST_CASE("filesystem personas are deterministic bounded attributed text",
+          "[adapter][persona]") {
+  TempDirectory temporary{"aiforge-personas"};
+  const auto root = temporary.path() / "personas";
+  adapters::FilesystemPersonaSource source{root};
+
+  const auto empty = source.list();
+  REQUIRE(empty);
+  REQUIRE(empty->empty());
+  const auto absent = source.load("Reviewer");
+  REQUIRE_FALSE(absent);
+  REQUIRE(absent.error().code == persona::PersonaErrorCode::not_found);
+
+  REQUIRE(std::filesystem::create_directory(root));
+  write_file(root / "Reviewer.md", "abc");
+  write_file(root / "writer.txt", "Write concisely.\nSecond line.");
+
+  const auto listed = source.list();
+  REQUIRE(listed);
+  REQUIRE(listed->size() == 2);
+  REQUIRE((*listed)[0].reference.name == "Reviewer");
+  REQUIRE((*listed)[0].description == "abc");
+  REQUIRE((*listed)[1].reference.name == "writer");
+
+  const auto loaded = source.load("reviewer");
+  REQUIRE(loaded);
+  REQUIRE(loaded->reference.persona_id.value() == "persona:reviewer");
+  REQUIRE(loaded->reference.source_location == "personas/Reviewer.md");
+  REQUIRE(loaded->reference.content_digest.algorithm == "sha256");
+  REQUIRE(loaded->reference.content_digest.value ==
+          "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  REQUIRE(loaded->reference.content_digest.byte_size == 3);
+  REQUIRE(loaded->text == "abc");
+
+  const auto traversed = source.load("../Reviewer");
+  REQUIRE_FALSE(traversed);
+  REQUIRE(traversed.error().code == persona::PersonaErrorCode::invalid_name);
+
+  const auto bounded = source.load(
+      "Reviewer", {.maximum_personas = 256,
+                   .maximum_name_bytes = 96,
+                   .maximum_file_bytes = 2,
+                   .maximum_description_bytes = 160});
+  REQUIRE_FALSE(bounded);
+  REQUIRE(bounded.error().code == persona::PersonaErrorCode::resource_exhausted);
+}
+
+TEST_CASE("filesystem personas fail closed on aliases symlinks and bad text",
+          "[adapter][persona][failure]") {
+  TempDirectory temporary{"aiforge-persona-hostile"};
+  const auto root = temporary.path() / "personas";
+  REQUIRE(std::filesystem::create_directory(root));
+  adapters::FilesystemPersonaSource source{root};
+
+  write_file(root / "reviewer.md", "safe");
+  write_file(root / "Reviewer.txt", "alias");
+  const auto ambiguous = source.list();
+  REQUIRE_FALSE(ambiguous);
+  REQUIRE(ambiguous.error().code == persona::PersonaErrorCode::ambiguous_name);
+
+  REQUIRE(std::filesystem::remove(root / "Reviewer.txt"));
+  write_file(temporary.path() / "outside.md", "outside");
+  std::error_code symlink_error;
+  std::filesystem::create_symlink(temporary.path() / "outside.md",
+                                  root / "escape.md", symlink_error);
+  REQUIRE_FALSE(symlink_error);
+  const auto escaped = source.load("escape");
+  REQUIRE_FALSE(escaped);
+  REQUIRE(escaped.error().code == persona::PersonaErrorCode::path_escape);
+
+  std::error_code root_symlink_error;
+  std::filesystem::create_directory_symlink(root, temporary.path() / "alias",
+                                            root_symlink_error);
+  REQUIRE_FALSE(root_symlink_error);
+  adapters::FilesystemPersonaSource aliased_root{temporary.path() / "alias"};
+  const auto rejected_root = aliased_root.list();
+  REQUIRE_FALSE(rejected_root);
+  REQUIRE(rejected_root.error().code == persona::PersonaErrorCode::path_escape);
+
+  REQUIRE(std::filesystem::remove(root / "escape.md"));
+  write_file(root / "unsafe.md", std::string{"bad\x01text", 8});
+  const auto malformed = source.load("unsafe");
+  REQUIRE_FALSE(malformed);
+  REQUIRE(malformed.error().code == persona::PersonaErrorCode::malformed_text);
+
+  write_file(root / "empty.md", "");
+  const auto empty = source.load("empty");
+  REQUIRE_FALSE(empty);
+  REQUIRE(empty.error().code == persona::PersonaErrorCode::malformed_text);
+
+  const auto too_many = source.list(
+      {.maximum_personas = 1,
+       .maximum_name_bytes = 96,
+       .maximum_file_bytes = 1024U * 1024U,
+       .maximum_description_bytes = 160});
+  REQUIRE_FALSE(too_many);
+  REQUIRE(too_many.error().code ==
+          persona::PersonaErrorCode::resource_exhausted);
+
+  std::stop_source cancelled;
+  cancelled.request_stop();
+  const auto stopped = source.load("reviewer", {}, cancelled.get_token());
+  REQUIRE_FALSE(stopped);
+  REQUIRE(stopped.error().code == persona::PersonaErrorCode::cancelled);
+
+  REQUIRE(std::filesystem::create_directory(root / "directory.md"));
+  const auto nonregular = source.load("directory");
+  REQUIRE_FALSE(nonregular);
+  REQUIRE(nonregular.error().code ==
+          persona::PersonaErrorCode::unsupported_entry);
+}
 
 TEST_CASE("Venice adapter rejects unsupported content without a request",
           "[adapter][venice][failure]") {

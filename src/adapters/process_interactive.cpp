@@ -1,4 +1,5 @@
 #include <aiforge/adapters/interactive_chat_app.hpp>
+#include <aiforge/adapters/filesystem_persona_source.hpp>
 #include <aiforge/adapters/process_draft_editor.hpp>
 #include <aiforge/adapters/process_interactive.hpp>
 #include <aiforge/adapters/process_provenance.hpp>
@@ -196,7 +197,12 @@ class ChatAppImpl final : public InteractiveChatApp {
       return;
     }
     sync_history();
-    m_status = "Ready";
+    const auto persona = m_session->persona_state();
+    m_status = persona.requires_attention
+                   ? persona.message
+                   : persona.selected
+                         ? "Ready with persona " + persona.selected->name
+                         : "Ready";
   }
 
   [[nodiscard]] auto ready() const noexcept -> bool override {
@@ -385,6 +391,12 @@ class ChatAppImpl final : public InteractiveChatApp {
     std::string header =
         "AIForge  session " + std::string{m_session->session_id().value()};
     if (!m_session->durable()) header += " (ephemeral)";
+    const auto persona = m_session->persona_state();
+    if (persona.requires_attention) {
+      header += " | persona attention";
+    } else if (persona.selected) {
+      header += " | persona " + persona.selected->name;
+    }
     screen.write_text(0, 0, header, termforge::theme::kFg,
                       termforge::Rgb{0x20, 0x20, 0x40});
 
@@ -511,6 +523,36 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
+  auto show_personas() -> bool {
+    auto personas = m_session->list_personas();
+    if (!personas) {
+      m_status = "Personas could not be listed: " + personas.error().message;
+      return false;
+    }
+
+    const auto state = m_session->persona_state();
+    std::vector<std::string> lines;
+    lines.reserve(personas->size() + 1);
+    if (personas->empty()) {
+      lines.push_back("No personas were found in the personas directory.");
+    } else {
+      lines.push_back("* marks the selected persona.");
+      for (const auto& summary : *personas) {
+        const bool selected =
+            state.selected &&
+            state.selected->persona_id == summary.reference.persona_id;
+        auto line = std::format("{}{} | {}", selected ? "* " : "  ",
+                                summary.reference.name,
+                                summary.reference.source_location);
+        if (!summary.description.empty()) line += " | " + summary.description;
+        lines.push_back(std::move(line));
+      }
+    }
+    show_panel("File-backed personas", std::move(lines),
+               "Persona list is not added to durable history");
+    return true;
+  }
+
   auto switch_session(const surfaces::ChatSessionOpen::Mode mode,
                       std::optional<domain::SessionId> session_id) -> bool {
     if (m_session->active()) {
@@ -534,6 +576,21 @@ class ChatAppImpl final : public InteractiveChatApp {
     auto request = m_open_template;
     request.mode = mode;
     request.session_id = std::move(session_id);
+    if (mode == surfaces::ChatSessionOpen::Mode::resume) {
+      request.persona = {persona::PersonaDirectiveKind::inherit, std::nullopt,
+                         domain::PersonaSelectionSource::resumed};
+    } else {
+      const auto state = m_session->persona_state();
+      request.persona = state.selected
+                            ? persona::PersonaDirective{
+                                  persona::PersonaDirectiveKind::select,
+                                  state.selected->name,
+                                  domain::PersonaSelectionSource::interactive}
+                            : persona::PersonaDirective{
+                                  persona::PersonaDirectiveKind::disable,
+                                  std::nullopt,
+                                  domain::PersonaSelectionSource::interactive};
+    }
     auto candidate = open_chat_session(std::move(request));
     if (!candidate) {
       m_status = candidate.error().message;
@@ -558,11 +615,16 @@ class ChatAppImpl final : public InteractiveChatApp {
     m_history_cutoff = 0;
     sync_history();
     m_transcript.widget().scroll_to_bottom();
-    m_status = mode == surfaces::ChatSessionOpen::Mode::resume
-                   ? "Resumed session " +
-                         std::string{m_session->session_id().value()}
-                   : "Started session " +
-                         std::string{m_session->session_id().value()};
+    const auto persona = m_session->persona_state();
+    if (persona.requires_attention) {
+      m_status = persona.message;
+    } else {
+      m_status = mode == surfaces::ChatSessionOpen::Mode::resume
+                     ? "Resumed session " +
+                           std::string{m_session->session_id().value()}
+                     : "Started session " +
+                           std::string{m_session->session_id().value()};
+    }
     return true;
   }
 
@@ -665,6 +727,36 @@ class ChatAppImpl final : public InteractiveChatApp {
         }
         m_composer.clear();
         return true;
+      case surfaces::SlashCommandAction::list_personas:
+        if (!show_personas()) return false;
+        m_composer.clear();
+        return true;
+      case surfaces::SlashCommandAction::select_persona: {
+        if (!command.subject) {
+          m_status = "A persona name is required";
+          return false;
+        }
+        auto selected = m_session->select_persona(*command.subject);
+        if (!selected) {
+          m_status = selected.error().message;
+          return false;
+        }
+        m_help_visible = false;
+        m_composer.clear();
+        m_status = "Selected persona " + *command.subject;
+        return true;
+      }
+      case surfaces::SlashCommandAction::disable_persona: {
+        auto disabled = m_session->disable_persona();
+        if (!disabled) {
+          m_status = disabled.error().message;
+          return false;
+        }
+        m_help_visible = false;
+        m_composer.clear();
+        m_status = "Persona disabled";
+        return true;
+      }
     }
     m_status = "Slash command result is unsupported";
     return false;
@@ -828,9 +920,13 @@ auto ProcessInteractiveCommand::execute(Request request,
         domain::CredentialSourceKind::environment, "VENICE_API_KEY"};
     auto provenance = process_run_provenance(*resolved, *model, "venice",
                                              std::move(credential_source));
+    auto persona_root = process_persona_root();
+    std::optional<FilesystemPersonaSource> personas;
+    if (persona_root) personas.emplace(std::move(*persona_root));
     surfaces::ChatSessionOpen open{std::move(*model), mode,
                                    std::move(request.session_id),
-                                   std::move(provenance)};
+                                   std::move(provenance),
+                                   std::move(request.persona)};
 
     std::unique_ptr<SqliteSessionStore> store;
     if (mode != surfaces::ChatSessionOpen::Mode::ephemeral) {
@@ -847,9 +943,12 @@ auto ProcessInteractiveCommand::execute(Request request,
       store = std::move(*opened);
     }
 
-    auto app = make_interactive_chat_app(backend, backend, store.get(),
-                                         std::move(open), editor,
-                                         environment.stop_token);
+    InteractiveChatAppOptions app_options;
+    app_options.session_dependencies.persona_source =
+        personas ? &*personas : nullptr;
+    auto app = make_interactive_chat_app(
+        backend, backend, store.get(), std::move(open), editor,
+        environment.stop_token, std::move(app_options));
     if (!app->ready()) return std::unexpected(app->setup_error());
     for (;;) {
       const int result = app->run();

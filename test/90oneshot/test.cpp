@@ -17,6 +17,7 @@
 #include <vector>
 
 #include <aiforge/surfaces/one_shot.hpp>
+#include <aiforge/testing/scripted_persona_source.hpp>
 
 namespace {
 
@@ -116,6 +117,15 @@ class FakeModels final : public backend::ModelContextProvider {
 };
 
 auto success_items(const domain::MessageId& message_id) -> std::vector<Item>;
+
+auto persona_document(std::string text = "Review carefully.")
+    -> domain::PersonaDocument {
+  return {{make_id<domain::PersonaId>("persona:reviewer"),
+           "reviewer",
+           "personas/reviewer.md",
+           {"sha256", std::string(64, 'a'), text.size()}},
+          std::move(text)};
+}
 
 class MemoryStore final : public storage::SessionStore {
  public:
@@ -540,6 +550,68 @@ TEST_CASE("durable one-shot sessions resume completed conversation in order",
       output, error);
   REQUIRE(continued);
   REQUIRE(continued->session_id == first->session_id);
+}
+
+TEST_CASE("one-shot personas are injected recorded and identity-checked",
+          "[one-shot][persona][session][failure]") {
+  FakeModels models;
+  ConversationBackend backend;
+  MemoryStore store;
+  const auto original = persona_document();
+  const auto changed = persona_document("Changed instructions.");
+  testing::ScriptedPersonaSource personas{
+      {}, {{"reviewer", original}, {"reviewer", original},
+           {"reviewer", changed}}};
+  surfaces::OneShotSurface surface{backend, models, store, {}, &personas};
+  std::ostringstream output;
+  std::ostringstream error;
+  const auto model = make_id<domain::ModelId>("model");
+
+  const auto first = surface.run(
+      {"first", std::nullopt, model,
+       surfaces::OneShotRequest::SessionMode::create, std::nullopt,
+       std::nullopt,
+       {persona::PersonaDirectiveKind::select, "reviewer",
+        domain::PersonaSelectionSource::command_line}},
+      output, error);
+  REQUIRE(first);
+  REQUIRE(backend.captured.size() == 1);
+  const auto persona_entry = std::ranges::find_if(
+      backend.captured.front().context.entries, [](const auto& entry) {
+        return entry.instruction_layer == domain::InstructionLayer::persona;
+      });
+  REQUIRE(persona_entry != backend.captured.front().context.entries.end());
+  REQUIRE(persona_entry->provenance.source_location ==
+          original.reference.source_location);
+  REQUIRE(persona_entry->provenance.digest ==
+          "sha256:" + original.reference.content_digest.value);
+  const auto recorded = std::ranges::find_if(
+      store.histories[first->session_id], [](const auto& event) {
+        return std::holds_alternative<domain::PersonaSelectionRecorded>(
+            event.payload);
+      });
+  REQUIRE(recorded != store.histories[first->session_id].end());
+  REQUIRE(std::get<domain::PersonaSelectionRecorded>(recorded->payload)
+              .selection.persona == original.reference);
+
+  output.str({});
+  error.str({});
+  const auto resumed = surface.run(
+      {"second", std::nullopt, model,
+       surfaces::OneShotRequest::SessionMode::resume, first->session_id},
+      output, error);
+  REQUIRE(resumed);
+  REQUIRE(backend.captured.size() == 2);
+
+  output.str({});
+  error.str({});
+  const auto rejected = surface.run(
+      {"third", std::nullopt, model,
+       surfaces::OneShotRequest::SessionMode::resume, first->session_id},
+      output, error);
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code == surfaces::OneShotErrorCode::context_failed);
+  REQUIRE(backend.captured.size() == 2);
 }
 
 TEST_CASE("one-shot runs persist provenance and refuse a sensitive value",

@@ -606,6 +606,100 @@ template <typename Enum>
           value.at("byte_size").get<std::uint64_t>()};
 }
 
+[[nodiscard]] auto persona_reference_json(
+    const domain::PersonaReference& reference) -> Json {
+  return {{"persona_id", id_text(reference.persona_id)},
+          {"name", reference.name},
+          {"source_location", reference.source_location},
+          {"content_digest", digest_json(reference.content_digest)}};
+}
+
+[[nodiscard]] auto parse_persona_reference(const Json& value)
+    -> domain::PersonaReference {
+  domain::PersonaReference reference{
+      parse_id<domain::PersonaId>(value.at("persona_id")),
+      value.at("name").get<std::string>(),
+      value.at("source_location").get<std::string>(),
+      parse_digest(value.at("content_digest"))};
+  if (!domain::validate_persona_reference(reference)) {
+    throw CodecFailure{"persona reference is invalid"};
+  }
+  return reference;
+}
+
+[[nodiscard]] auto optional_persona_reference_json(
+    const std::optional<domain::PersonaReference>& reference) -> Json {
+  return reference ? persona_reference_json(*reference) : Json(nullptr);
+}
+
+[[nodiscard]] auto parse_optional_persona_reference(const Json& value)
+    -> std::optional<domain::PersonaReference> {
+  if (value.is_null()) return std::nullopt;
+  return parse_persona_reference(value);
+}
+
+[[nodiscard]] auto persona_action_name(
+    const domain::PersonaSelectionAction value) -> std::string_view {
+  switch (value) {
+    case domain::PersonaSelectionAction::selected: return "selected";
+    case domain::PersonaSelectionAction::disabled: return "disabled";
+    case domain::PersonaSelectionAction::unknown: break;
+  }
+  throw CodecFailure{"invalid persona selection action"};
+}
+
+[[nodiscard]] auto parse_persona_action(const Json& value)
+    -> domain::PersonaSelectionAction {
+  return enum_value<domain::PersonaSelectionAction>(
+      value.get<std::string>(),
+      {{"selected", domain::PersonaSelectionAction::selected},
+       {"disabled", domain::PersonaSelectionAction::disabled}});
+}
+
+[[nodiscard]] auto persona_source_name(
+    const domain::PersonaSelectionSource value) -> std::string_view {
+  switch (value) {
+    case domain::PersonaSelectionSource::command_line: return "command_line";
+    case domain::PersonaSelectionSource::interactive: return "interactive";
+    case domain::PersonaSelectionSource::resumed: return "resumed";
+    case domain::PersonaSelectionSource::retained: return "retained";
+    case domain::PersonaSelectionSource::unknown: break;
+  }
+  throw CodecFailure{"invalid persona selection source"};
+}
+
+[[nodiscard]] auto parse_persona_source(const Json& value)
+    -> domain::PersonaSelectionSource {
+  return enum_value<domain::PersonaSelectionSource>(
+      value.get<std::string>(),
+      {{"command_line", domain::PersonaSelectionSource::command_line},
+       {"interactive", domain::PersonaSelectionSource::interactive},
+       {"resumed", domain::PersonaSelectionSource::resumed},
+       {"retained", domain::PersonaSelectionSource::retained}});
+}
+
+[[nodiscard]] auto persona_selection_json(
+    const domain::PersonaSelection& selection) -> Json {
+  return {{"action", persona_action_name(selection.action)},
+          {"source", persona_source_name(selection.source)},
+          {"persona", optional_persona_reference_json(selection.persona)},
+          {"previous_persona",
+           optional_persona_reference_json(selection.previous_persona)}};
+}
+
+[[nodiscard]] auto parse_persona_selection(const Json& value)
+    -> domain::PersonaSelection {
+  domain::PersonaSelection selection{
+      parse_persona_action(value.at("action")),
+      parse_persona_source(value.at("source")),
+      parse_optional_persona_reference(value.at("persona")),
+      parse_optional_persona_reference(value.at("previous_persona"))};
+  if (!domain::validate_persona_selection(selection)) {
+    throw CodecFailure{"persona selection is invalid"};
+  }
+  return selection;
+}
+
 [[nodiscard]] auto snapshot_json(
     const domain::RepositorySnapshotIdentity& snapshot) -> Json {
   return {{"repository_id", id_text(snapshot.repository_id)},
@@ -1329,6 +1423,7 @@ template <typename Enum>
       Overloaded{
           [](const domain::RunStarted&) { return std::string{"run.started"}; },
           [](const domain::RunProvenanceRecorded&) { return std::string{"run.provenance_recorded"}; },
+          [](const domain::PersonaSelectionRecorded&) { return std::string{"persona.selection_recorded"}; },
           [](const domain::RunAwaitingInput&) { return std::string{"run.awaiting_input"}; },
           [](const domain::RunResumed&) { return std::string{"run.resumed"}; },
           [](const domain::RunCompletionRequested&) { return std::string{"run.completion_requested"}; },
@@ -1398,10 +1493,11 @@ template <typename Enum>
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 47,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 48,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
-      "run.started", "run.provenance_recorded", "run.awaiting_input", "run.resumed",
+      "run.started", "run.provenance_recorded", "persona.selection_recorded",
+      "run.awaiting_input", "run.resumed",
       "run.completion_requested", "run.completed", "run.failed",
       "run.cancel_requested", "run.cancelled", "content.user_added",
       "content.assistant_started", "content.assistant_delta_added",
@@ -1434,6 +1530,9 @@ template <typename Enum>
           },
           [](const domain::RunProvenanceRecorded& value) -> Json {
             return {{"provenance", run_provenance_json(value.provenance)}};
+          },
+          [](const domain::PersonaSelectionRecorded& value) -> Json {
+            return {{"selection", persona_selection_json(value.selection)}};
           },
           [](const domain::RunAwaitingInput& value) -> Json {
             return {{"question_id", id_text(value.question_id)}};
@@ -1663,6 +1762,10 @@ template <typename Enum>
   if (type == "run.provenance_recorded") {
     return domain::RunProvenanceRecorded{
         parse_run_provenance(value.at("provenance"))};
+  }
+  if (type == "persona.selection_recorded") {
+    return domain::PersonaSelectionRecorded{
+        parse_persona_selection(value.at("selection"))};
   }
   if (type == "run.awaiting_input") {
     return domain::RunAwaitingInput{

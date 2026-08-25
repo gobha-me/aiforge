@@ -1899,6 +1899,51 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
           kernel_error(RunKernelErrorCode::invalid_start,
                        "run ID is already present in the session"));
     }
+    const auto persona_entries = std::ranges::count_if(
+        start.request.context.entries, [](const domain::ContextEntry& entry) {
+          return entry.kind == domain::ContextEntryKind::instruction &&
+                 entry.instruction_layer == domain::InstructionLayer::persona;
+        });
+    if (!start.persona_selection) {
+      if (start.attributes.persona_id || persona_entries != 0) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::invalid_start,
+            "run persona metadata is incomplete"));
+      }
+    } else {
+      if (!domain::validate_persona_selection(*start.persona_selection)) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::invalid_start,
+            "run persona selection is invalid"));
+      }
+      if (start.persona_selection->action ==
+          domain::PersonaSelectionAction::disabled) {
+        if (start.attributes.persona_id || persona_entries != 0) {
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::invalid_start,
+              "disabled persona selection entered the backend context"));
+        }
+      } else {
+        const auto& persona = *start.persona_selection->persona;
+        const auto found = std::ranges::find_if(
+            start.request.context.entries,
+            [](const domain::ContextEntry& entry) {
+              return entry.kind == domain::ContextEntryKind::instruction &&
+                     entry.instruction_layer == domain::InstructionLayer::persona;
+            });
+        const auto expected_digest = persona.content_digest.algorithm + ":" +
+                                     persona.content_digest.value;
+        if (start.attributes.persona_id != persona.persona_id ||
+            persona_entries != 1 ||
+            found == start.request.context.entries.end() ||
+            found->provenance.source_location != persona.source_location ||
+            found->provenance.digest != expected_digest) {
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::invalid_start,
+              "run persona selection does not match constructed context"));
+        }
+      }
+    }
     if (start.provenance) {
       if (!start.provenance->tools.empty()) {
         return std::unexpected(
@@ -1946,6 +1991,16 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
       if (auto result = m_impl->record(
               start.run_id,
               domain::RunProvenanceRecorded{std::move(*start.provenance)},
+              transaction);
+          !result) {
+        return result;
+      }
+    }
+    if (start.persona_selection) {
+      if (auto result = m_impl->record(
+              start.run_id,
+              domain::PersonaSelectionRecorded{
+                  std::move(*start.persona_selection)},
               transaction);
           !result) {
         return result;
