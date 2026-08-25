@@ -173,12 +173,13 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   const auto& registry = builtin_slash_command_registry();
   const auto listed = registry.describe();
   REQUIRE(listed);
-  REQUIRE(listed->size() == 5);
+  REQUIRE(listed->size() == 6);
   REQUIRE((*listed)[0].name == "help");
   REQUIRE((*listed)[1].name == "quit");
   REQUIRE((*listed)[2].name == "clear");
   REQUIRE((*listed)[3].name == "edit");
   REQUIRE((*listed)[4].name == "session");
+  REQUIRE((*listed)[5].name == "persona");
 
   const auto help = registry.dispatch("/help /clear");
   REQUIRE(help);
@@ -216,6 +217,26 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   const auto created = registry.dispatch("/session new");
   REQUIRE(created);
   REQUIRE((*created)->action == SlashCommandAction::new_session);
+
+  const auto personas = registry.dispatch("/persona");
+  REQUIRE(personas);
+  REQUIRE((*personas)->action == SlashCommandAction::list_personas);
+
+  const auto selected = registry.dispatch("/persona set reviewer");
+  REQUIRE(selected);
+  REQUIRE((*selected)->action == SlashCommandAction::select_persona);
+  REQUIRE((*selected)->subject == "reviewer");
+
+  const auto disabled = registry.dispatch("/persona off");
+  REQUIRE(disabled);
+  REQUIRE((*disabled)->action == SlashCommandAction::disable_persona);
+
+  for (const auto invalid : {"/persona set", "/persona off now",
+                             "/persona set two names", "/persona unknown"}) {
+    const auto rejected = registry.dispatch(invalid);
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error().code == SlashCommandErrorCode::invalid_arguments);
+  }
 
   for (const auto invalid : {"/session resume", "/session list extra",
                              "/session unknown"}) {

@@ -105,6 +105,39 @@ TEST_CASE("run projection rejects events without a start and from another run",
   REQUIRE(projection.status() == RunStatus::running);
 }
 
+TEST_CASE("run projection requires persona provenance before run content",
+          "[domain][persona][failure]") {
+  const PersonaReference persona{
+      make_id<PersonaId>("persona:reviewer"), "reviewer",
+      "personas/reviewer.md", {"sha256", std::string(64, 'a'), 7}};
+  const auto user = UserContentAdded{Message{
+      make_id<MessageId>("user"), Role::user, {TextBlock{"prompt"}},
+      std::nullopt}};
+
+  RunProjection missing;
+  REQUIRE(missing.apply(event(
+      1, RunStarted{make_id<SurfaceId>("surface"),
+                    make_id<WorkspaceId>("chat"),
+                    make_id<PermissionProfileId>("observe"),
+                    persona.persona_id},
+      "start")));
+  REQUIRE_FALSE(missing.apply(event(2, user, "user")));
+
+  RunProjection ordered;
+  REQUIRE(ordered.apply(event(
+      1, RunStarted{make_id<SurfaceId>("surface"),
+                    make_id<WorkspaceId>("chat"),
+                    make_id<PermissionProfileId>("observe"),
+                    persona.persona_id},
+      "ordered-start")));
+  REQUIRE(ordered.apply(event(
+      2, PersonaSelectionRecorded{{PersonaSelectionAction::selected,
+                                   PersonaSelectionSource::command_line,
+                                   persona, std::nullopt}},
+      "persona")));
+  REQUIRE(ordered.apply(event(3, user, "ordered-user")));
+}
+
 TEST_CASE("run projection rejects illegal inference and terminal ordering",
           "[domain][failure]") {
   RunProjection projection;

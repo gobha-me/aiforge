@@ -38,6 +38,7 @@ class FakeOneShot final : public OneShotCommand {
     seen_prompt = std::string{request.prompt};
     seen_session_mode = request.session_mode;
     seen_session_id = std::move(request.session_id);
+    seen_persona = std::move(request.persona);
     saw_terminal_input = environment.input_is_terminal;
     output << "answer";
     error << "usage\n";
@@ -48,6 +49,7 @@ class FakeOneShot final : public OneShotCommand {
   std::string seen_prompt;
   SessionMode seen_session_mode{SessionMode::create};
   std::optional<aiforge::domain::SessionId> seen_session_id;
+  aiforge::persona::PersonaDirective seen_persona;
   bool saw_terminal_input{};
   std::optional<CommandFailure> failure;
 };
@@ -58,6 +60,7 @@ class FakeInteractive final : public InteractiveCommand {
                std::ostream&) -> std::expected<void, CommandFailure> override {
     seen_session_mode = request.session_mode;
     seen_session_id = std::move(request.session_id);
+    seen_persona = std::move(request.persona);
     output << "interactive";
     if (failure) return std::unexpected(*failure);
     return {};
@@ -65,6 +68,7 @@ class FakeInteractive final : public InteractiveCommand {
 
   SessionMode seen_session_mode{SessionMode::create};
   std::optional<aiforge::domain::SessionId> seen_session_id;
+  aiforge::persona::PersonaDirective seen_persona;
   std::optional<CommandFailure> failure;
 };
 
@@ -327,6 +331,36 @@ TEST_CASE("one-shot session options are explicit and mutually exclusive",
 
   output.str({});
   error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"chat", "--persona", "reviewer",
+                                            "with persona"},
+              environment, output, error) == 0);
+  REQUIRE(one_shot.seen_persona.kind ==
+          aiforge::persona::PersonaDirectiveKind::select);
+  REQUIRE(one_shot.seen_persona.name == "reviewer");
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"--no-persona", "without"},
+              environment, output, error) == 0);
+  REQUIRE(one_shot.seen_persona.kind ==
+          aiforge::persona::PersonaDirectiveKind::disable);
+  REQUIRE_FALSE(one_shot.seen_persona.name);
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"--persona", "reviewer",
+                                            "--no-persona", "conflict"},
+              environment, output, error) == 2);
+  REQUIRE(error.str().find("mutually exclusive") != std::string::npos);
+
+  output.str({});
+  error.str({});
   REQUIRE(
       CommandDispatcher{}.dispatch(registry,
                                    std::vector<std::string_view>{
@@ -344,6 +378,16 @@ TEST_CASE("one-shot session options are explicit and mutually exclusive",
           InteractiveCommand::SessionMode::resume);
   REQUIRE(interactive.seen_session_id ==
           aiforge::domain::SessionId::from("saved").value());
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"--persona", "reviewer"},
+              environment, output, error) == 0);
+  REQUIRE(interactive.seen_persona.kind ==
+          aiforge::persona::PersonaDirectiveKind::select);
+  REQUIRE(interactive.seen_persona.name == "reviewer");
 }
 
 TEST_CASE("empty terminal root input routes to the interactive service",

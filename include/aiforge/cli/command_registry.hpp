@@ -2,6 +2,7 @@
 
 #include <aiforge/cli/parser.hpp>
 #include <aiforge/domain/ids.hpp>
+#include <aiforge/persona/source.hpp>
 #include <cstddef>
 #include <expected>
 #include <iosfwd>
@@ -43,6 +44,7 @@ class OneShotCommand {
     std::string_view prompt;
     SessionMode session_mode{SessionMode::create};
     std::optional<domain::SessionId> session_id;
+    persona::PersonaDirective persona;
   };
 
   [[nodiscard]] virtual auto execute(Request request,
@@ -65,6 +67,7 @@ class InteractiveCommand {
   struct Request {
     SessionMode session_mode{SessionMode::create};
     std::optional<domain::SessionId> session_id;
+    persona::PersonaDirective persona;
   };
 
   [[nodiscard]] virtual auto execute(Request request,

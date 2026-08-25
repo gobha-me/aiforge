@@ -4,7 +4,8 @@ AIForge is a C++23 terminal AI client built from a provider-neutral run kernel
 outward. It currently provides a streaming Venice-backed one-shot/pipe surface,
 durable and resumable sessions, provider-neutral run events, deterministic
 backends, replayable run and transcript projections, Markdown-lite
-presentation, typed configuration, and a resumable structured `ask_user` tool
+presentation, typed configuration, file-backed personas, and a resumable
+structured `ask_user` tool
 boundary plus a policy-gated bounded argv process executor. Exact-candidate
 review receipts now materialize merge authorization only from current required
 evidence or an explicit trusted override. The interactive
@@ -136,6 +137,33 @@ help. `/help [command]` opens transient help that never enters session history;
 retaining durable events and prompt recall; and `/edit` opens an empty external
 draft. Unknown, unavailable, malformed, and oversized slash commands are
 rejected locally and never become model content.
+
+## File-backed personas
+
+Personas are bounded system instructions stored as `.md` or `.txt` files in
+`$XDG_CONFIG_HOME/aiforge/personas`, or
+`$HOME/.config/aiforge/personas` when the XDG location is unset or relative.
+A persona is selected by its bare filename without the extension:
+
+```bash
+./build/src/bin/aiforge --persona reviewer "Review this design"
+./build/src/bin/aiforge chat --persona reviewer "Review this design"
+./build/src/bin/aiforge --no-persona "Ignore the session persona"
+```
+
+In interactive Chat, `/persona list` shows available personas,
+`/persona set <name>` selects one for the next turn, and `/persona off`
+disables it. New sessions carry the current selection. Resumed sessions reload
+the recorded file and require an explicit `set` or `off` decision when its
+content has changed or disappeared.
+
+Names are ASCII letters or digits followed by letters, digits, `_`, or `-`.
+AIForge accepts at most 256 personas, reads at most 1 MiB per file, rejects
+empty or malformed UTF-8 and unsafe controls, and refuses symlinked roots or
+entries. Case and extension aliases are rejected. Each run records the selected
+persona's portable source path, byte size, and SHA-256 digest in the append-only
+event stream; persona text enters model context as an attributed persona-layer
+system instruction, not as conversation history.
 
 Ctrl+E restores the terminal and opens the current draft in `$VISUAL` or
 `$EDITOR`. The editor setting names one executable only; arguments and shell

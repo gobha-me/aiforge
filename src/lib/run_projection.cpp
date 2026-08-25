@@ -67,12 +67,13 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
 
   const auto result = std::visit(
       Overloaded{
-          [&](const RunStarted&) -> std::expected<void, ProjectionError> {
+          [&](const RunStarted& started) -> std::expected<void, ProjectionError> {
             if (m_status != RunStatus::not_started || m_run_id) {
               return transition_error("run.started may occur only once");
             }
             m_run_id = event.metadata.run_id;
             m_status = RunStatus::running;
+            m_persona_id = started.persona_id;
             return {};
           },
           [&](const RunProvenanceRecorded& recorded) -> std::expected<void, ProjectionError> {
@@ -81,6 +82,26 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
               return transition_error("run provenance may be recorded only once");
             }
             m_provenance = recorded.provenance;
+            return {};
+          },
+          [&](const PersonaSelectionRecorded& recorded)
+              -> std::expected<void, ProjectionError> {
+            if (auto live = require_running(); !live) return live;
+            if (m_persona_selection ||
+                !m_messages.empty() ||
+                !validate_persona_selection(recorded.selection)) {
+              return transition_error(
+                  "persona selection must be recorded once before run content");
+            }
+            const auto selected_id = recorded.selection.persona
+                                         ? std::optional<PersonaId>{
+                                               recorded.selection.persona->persona_id}
+                                         : std::nullopt;
+            if (selected_id != m_persona_id) {
+              return transition_error(
+                  "persona selection does not match run start metadata");
+            }
+            m_persona_selection = recorded.selection;
             return {};
           },
           [&](const RunAwaitingInput&) -> std::expected<void, ProjectionError> {
@@ -128,6 +149,10 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
           },
           [&](const UserContentAdded& added) -> std::expected<void, ProjectionError> {
             if (auto live = require_running(); !live) return live;
+            if (m_persona_id && !m_persona_selection) {
+              return transition_error(
+                  "selected persona provenance must precede run content");
+            }
             if (added.message.role != Role::user) {
               return transition_error("user content must carry the user role");
             }

@@ -1,5 +1,6 @@
 add_library(${PROJECT_NAME}_adapters STATIC
   ask_user_dialog.cpp
+  filesystem_persona_source.cpp
   git_repository_snapshot_source.cpp
   process_tool.cpp
   process_one_shot.cpp

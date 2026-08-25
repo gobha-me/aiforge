@@ -261,6 +261,50 @@ TEST_CASE("run kernel rejects invalid limits before starting a worker",
   REQUIRE(kernel.event_log().events().empty());
 }
 
+TEST_CASE("run kernel rejects persona provenance that does not match context",
+          "[runtime][persona][failure]") {
+  testing::ScriptedBackend fake{{}};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake};
+  auto start = run_start();
+  const domain::PersonaReference reference{
+      make_id<domain::PersonaId>("persona:reviewer"), "reviewer",
+      "personas/reviewer.md", {"sha256", std::string(64, 'a'), 7}};
+  start.attributes.persona_id = reference.persona_id;
+  start.persona_selection = domain::PersonaSelection{
+      domain::PersonaSelectionAction::selected,
+      domain::PersonaSelectionSource::command_line, reference, std::nullopt};
+
+  const auto missing_context = kernel.start(start);
+  REQUIRE_FALSE(missing_context);
+  REQUIRE(missing_context.error().code ==
+          runtime::RunKernelErrorCode::invalid_start);
+  REQUIRE(kernel.event_log().events().empty());
+
+  start.request.context.entries.push_back(domain::ContextEntry{
+      make_id<domain::ContextEntryId>("persona-entry"),
+      domain::ContextEntryKind::instruction,
+      domain::InstructionLayer::persona,
+      domain::Message{make_id<domain::MessageId>("persona-message"),
+                      domain::Role::system, {domain::TextBlock{"review"}},
+                      std::nullopt},
+      {make_id<domain::ContextSourceId>("persona-source"),
+       reference.source_location,
+       reference.content_digest.algorithm + ":" +
+           reference.content_digest.value},
+      0,
+      2,
+      2});
+  start.request.context.entries.push_back(start.request.context.entries.back());
+  start.request.context.decisions.push_back(
+      {make_id<domain::ContextEntryId>("persona-entry"),
+       domain::ContextDecision::admitted, std::nullopt});
+  const auto duplicate_context = kernel.start(std::move(start));
+  REQUIRE_FALSE(duplicate_context);
+  REQUIRE(duplicate_context.error().code ==
+          runtime::RunKernelErrorCode::invalid_start);
+  REQUIRE(kernel.event_log().events().empty());
+}
+
 TEST_CASE("premature backend EOF becomes a redacted failed run",
           "[runtime][failure]") {
   auto backend_request = request();

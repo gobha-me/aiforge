@@ -1,4 +1,5 @@
 #include <aiforge/runtime/context_builder.hpp>
+#include <aiforge/runtime/persona.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
 #include <algorithm>
 #include <atomic>
@@ -87,6 +88,110 @@ template <typename IdType>
   return {ChatSessionErrorCode::run_failed, value.message, value.retryable};
 }
 
+struct PersonaSetup {
+  std::optional<domain::PersonaDocument> document;
+  std::optional<domain::PersonaSelection> next_selection;
+  std::string attention;
+};
+
+[[nodiscard]] auto persona_error(const persona::PersonaError& value)
+    -> ChatSessionError {
+  return {value.code == persona::PersonaErrorCode::cancelled
+              ? ChatSessionErrorCode::cancelled
+              : value.code == persona::PersonaErrorCode::invalid_name
+                    ? ChatSessionErrorCode::invalid_input
+                    : ChatSessionErrorCode::context_failed,
+          value.message, value.retryable};
+}
+
+[[nodiscard]] auto resolve_persona(
+    persona::PersonaSource* source, const persona::PersonaLimits limits,
+    const persona::PersonaDirective& directive,
+    const domain::SessionEventLog& event_log,
+    const std::stop_token stop_token, const bool allow_attention)
+    -> std::expected<PersonaSetup, ChatSessionError> {
+  if ((directive.kind == persona::PersonaDirectiveKind::select) !=
+          directive.name.has_value() ||
+      directive.source == domain::PersonaSelectionSource::unknown) {
+    return error(ChatSessionErrorCode::invalid_input,
+                 "persona selection is invalid");
+  }
+  auto latest = runtime::latest_persona_selection(event_log);
+  if (!latest) {
+    return error(ChatSessionErrorCode::session_failed,
+                 "persona history is invalid");
+  }
+  std::optional<domain::PersonaReference> previous;
+  if (*latest && (*latest)->action == domain::PersonaSelectionAction::selected) {
+    previous = (*latest)->persona;
+  }
+  if (directive.kind == persona::PersonaDirectiveKind::disable) {
+    return PersonaSetup{
+        std::nullopt,
+        domain::PersonaSelection{domain::PersonaSelectionAction::disabled,
+                                 directive.source, std::nullopt, previous},
+        {}};
+  }
+  if (directive.kind == persona::PersonaDirectiveKind::inherit) {
+    if (!*latest) return PersonaSetup{};
+    if ((*latest)->action == domain::PersonaSelectionAction::disabled) {
+      return PersonaSetup{
+          std::nullopt,
+          domain::PersonaSelection{domain::PersonaSelectionAction::disabled,
+                                   domain::PersonaSelectionSource::resumed,
+                                   std::nullopt, std::nullopt},
+          {}};
+    }
+  }
+  if (source == nullptr) {
+    if (allow_attention) {
+      return PersonaSetup{
+          std::nullopt, std::nullopt,
+          "Persona source is unavailable; select a persona or turn it off"};
+    }
+    return error(ChatSessionErrorCode::context_failed,
+                 "persona source is unavailable");
+  }
+  const auto name = directive.kind == persona::PersonaDirectiveKind::select
+                        ? *directive.name
+                        : previous->name;
+  auto loaded = source->load(name, limits, stop_token);
+  if (!loaded) {
+    if (allow_attention &&
+        directive.kind == persona::PersonaDirectiveKind::inherit) {
+      return PersonaSetup{
+          std::nullopt, std::nullopt,
+          "Persona needs attention: " + loaded.error().message};
+    }
+    return std::unexpected(persona_error(loaded.error()));
+  }
+  if (!domain::validate_persona_document(*loaded)) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "persona document is invalid");
+  }
+  if (directive.kind == persona::PersonaDirectiveKind::inherit &&
+      loaded->reference != *previous) {
+    if (allow_attention) {
+      return PersonaSetup{
+          std::nullopt, std::nullopt,
+          "Persona changed since this session was recorded; select it again or turn it off"};
+    }
+    return error(ChatSessionErrorCode::context_failed,
+                 "persona changed since this session was recorded");
+  }
+  const auto selection_source =
+      directive.kind == persona::PersonaDirectiveKind::inherit
+          ? domain::PersonaSelectionSource::resumed
+          : directive.source;
+  auto reference = loaded->reference;
+  return PersonaSetup{
+      std::move(*loaded),
+      domain::PersonaSelection{domain::PersonaSelectionAction::selected,
+                               selection_source, std::move(reference),
+                               std::move(previous)},
+      {}};
+}
+
 }  // namespace
 
 struct ChatSession::Impl {
@@ -97,6 +202,12 @@ struct ChatSession::Impl {
   bool is_durable{};
   ChatIdentitySuffixSource identity_suffix_source;
   std::optional<domain::RunProvenance> provenance;
+  persona::PersonaSource* persona_source{};
+  persona::PersonaLimits persona_limits{};
+  std::stop_token stop_token;
+  std::optional<domain::PersonaDocument> persona_document;
+  std::optional<domain::PersonaSelection> next_persona_selection;
+  std::string persona_attention;
   std::unique_ptr<runtime::RunKernel> kernel;
 };
 
@@ -207,10 +318,31 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
           std::move(dependencies.tools), std::move(dependencies.tool_policy));
     }
 
+    const bool allow_persona_attention =
+        request.mode == ChatSessionOpen::Mode::resume ||
+        request.mode == ChatSessionOpen::Mode::continue_latest;
+    auto persona_setup = resolve_persona(
+        dependencies.persona_source, dependencies.persona_limits,
+        request.persona, kernel->event_log(), stop_token,
+        allow_persona_attention);
+    if (!persona_setup) {
+      return std::unexpected(std::move(persona_setup.error()));
+    }
     auto impl = std::make_unique<Impl>(Impl{
-        request.model_id, *model, output_tokens, limits, durable,
+        request.model_id,
+        *model,
+        output_tokens,
+        limits,
+        durable,
         std::move(dependencies.identity_suffix_source),
-        std::move(request.provenance), std::move(kernel)});
+        std::move(request.provenance),
+        dependencies.persona_source,
+        dependencies.persona_limits,
+        stop_token,
+        std::move(persona_setup->document),
+        std::move(persona_setup->next_selection),
+        std::move(persona_setup->attention),
+        std::move(kernel)});
     return std::unique_ptr<ChatSession>{new ChatSession{std::move(impl)}};
   } catch (...) {
     return error(ChatSessionErrorCode::internal_failure,
@@ -232,6 +364,33 @@ auto ChatSession::submit(std::string prompt)
     if (m_impl->kernel->active_run_id()) {
       return error(ChatSessionErrorCode::run_failed,
                    "another interactive run is active");
+    }
+    if (!m_impl->persona_attention.empty()) {
+      return error(ChatSessionErrorCode::context_failed,
+                   m_impl->persona_attention);
+    }
+    if (m_impl->persona_document) {
+      if (m_impl->persona_source == nullptr) {
+        m_impl->persona_attention = "Persona source is unavailable";
+        return error(ChatSessionErrorCode::context_failed,
+                     m_impl->persona_attention);
+      }
+      auto current = m_impl->persona_source->load(
+          m_impl->persona_document->reference.name,
+          m_impl->persona_limits, m_impl->stop_token);
+      if (!current) {
+        m_impl->persona_attention =
+            "Persona needs attention: " + current.error().message;
+        return std::unexpected(persona_error(current.error()));
+      }
+      if (!domain::validate_persona_document(*current) ||
+          current->reference != m_impl->persona_document->reference) {
+        m_impl->persona_attention =
+            "Persona changed; select it again or turn it off";
+        return error(ChatSessionErrorCode::context_failed,
+                     m_impl->persona_attention);
+      }
+      m_impl->persona_document = std::move(*current);
     }
 
     const auto suffix = m_impl->identity_suffix_source();
@@ -294,6 +453,15 @@ auto ChatSession::submit(std::string prompt)
           1,
           detail::runtime_contract.size()}},
         std::move(content)};
+    if (m_impl->persona_document) {
+      auto persona_instruction = runtime::persona_instruction_input(
+          *m_impl->persona_document, m_impl->persona_document->text.size());
+      if (!persona_instruction) {
+        return error(ChatSessionErrorCode::context_failed,
+                     persona_instruction.error().message);
+      }
+      input.instructions.push_back(std::move(*persona_instruction));
+    }
     auto context = runtime::ContextBuilder{}.build(std::move(input));
     if (!context) {
       return error(ChatSessionErrorCode::context_failed,
@@ -310,11 +478,25 @@ auto ChatSession::submit(std::string prompt)
         {std::nullopt, m_impl->output_tokens, std::nullopt, {}}};
     auto started = m_impl->kernel->start(
         {*run_id,
-         {*surface_id, *workspace_id, *permission_id, std::nullopt},
+         {*surface_id, *workspace_id, *permission_id,
+          m_impl->persona_document
+              ? std::optional<domain::PersonaId>{
+                    m_impl->persona_document->reference.persona_id}
+              : std::nullopt},
          std::move(user_message),
          std::move(backend_request),
-         m_impl->provenance});
+         m_impl->provenance,
+         m_impl->next_persona_selection});
     if (!started) return std::unexpected(kernel_error(started.error()));
+
+    if (m_impl->persona_document) {
+      m_impl->next_persona_selection = domain::PersonaSelection{
+          domain::PersonaSelectionAction::selected,
+          domain::PersonaSelectionSource::retained,
+          m_impl->persona_document->reference, std::nullopt};
+    } else {
+      m_impl->next_persona_selection.reset();
+    }
 
     const auto events = m_impl->kernel->event_log().events();
     std::vector<domain::RunEvent> committed;
@@ -343,6 +525,71 @@ auto ChatSession::cancel_active(std::optional<std::string> reason)
   auto cancelled = m_impl->kernel->cancel_run(*run, std::move(reason));
   if (!cancelled) return std::unexpected(kernel_error(cancelled.error()));
   return {};
+}
+
+auto ChatSession::list_personas()
+    -> std::expected<std::vector<domain::PersonaSummary>, ChatSessionError> {
+  if (m_impl->persona_source == nullptr) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "persona source is unavailable");
+  }
+  auto listed = m_impl->persona_source->list(m_impl->persona_limits,
+                                             m_impl->stop_token);
+  if (!listed) return std::unexpected(persona_error(listed.error()));
+  return std::move(*listed);
+}
+
+auto ChatSession::select_persona(std::string name)
+    -> std::expected<void, ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before selecting a persona");
+  }
+  if (m_impl->persona_source == nullptr) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "persona source is unavailable");
+  }
+  auto loaded = m_impl->persona_source->load(
+      std::move(name), m_impl->persona_limits, m_impl->stop_token);
+  if (!loaded) return std::unexpected(persona_error(loaded.error()));
+  if (!domain::validate_persona_document(*loaded)) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "persona document is invalid");
+  }
+  std::optional<domain::PersonaReference> previous;
+  if (m_impl->persona_document) previous = m_impl->persona_document->reference;
+  auto reference = loaded->reference;
+  m_impl->persona_document = std::move(*loaded);
+  m_impl->next_persona_selection = domain::PersonaSelection{
+      domain::PersonaSelectionAction::selected,
+      domain::PersonaSelectionSource::interactive, std::move(reference),
+      std::move(previous)};
+  m_impl->persona_attention.clear();
+  return {};
+}
+
+auto ChatSession::disable_persona() -> std::expected<void, ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before disabling a persona");
+  }
+  std::optional<domain::PersonaReference> previous;
+  if (m_impl->persona_document) previous = m_impl->persona_document->reference;
+  m_impl->persona_document.reset();
+  m_impl->next_persona_selection = domain::PersonaSelection{
+      domain::PersonaSelectionAction::disabled,
+      domain::PersonaSelectionSource::interactive, std::nullopt,
+      std::move(previous)};
+  m_impl->persona_attention.clear();
+  return {};
+}
+
+auto ChatSession::persona_state() const -> ChatPersonaState {
+  return {m_impl->persona_document
+              ? std::optional<domain::PersonaReference>{
+                    m_impl->persona_document->reference}
+              : std::nullopt,
+          !m_impl->persona_attention.empty(), m_impl->persona_attention};
 }
 
 auto ChatSession::submitted_prompts() const -> std::vector<std::string> {

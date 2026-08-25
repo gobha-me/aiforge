@@ -9,6 +9,7 @@
 #include <utility>
 
 #include <aiforge/backend/backend.hpp>
+#include <aiforge/persona/source.hpp>
 #include <aiforge/storage/session_store.hpp>
 
 namespace aiforge::surfaces {
@@ -49,13 +50,15 @@ struct OneShotRequest {
                  domain::ModelId model_id,
                  SessionMode session_mode = SessionMode::create,
                  std::optional<domain::SessionId> session_id = std::nullopt,
-                 std::optional<domain::RunProvenance> provenance = std::nullopt)
+                 std::optional<domain::RunProvenance> provenance = std::nullopt,
+                 persona::PersonaDirective persona = {})
       : prompt(std::move(prompt)),
         stdin_evidence(std::move(stdin_evidence)),
         model_id(std::move(model_id)),
         session_mode(session_mode),
         session_id(std::move(session_id)),
-        provenance(std::move(provenance)) {}
+        provenance(std::move(provenance)),
+        persona(std::move(persona)) {}
 
   std::string prompt;
   std::optional<std::string> stdin_evidence;
@@ -65,6 +68,7 @@ struct OneShotRequest {
   // Recorded on the run this request creates. Its tool section is filled by the
   // run kernel.
   std::optional<domain::RunProvenance> provenance;
+  persona::PersonaDirective persona;
 };
 
 struct OneShotResult {
@@ -78,11 +82,13 @@ class OneShotSurface final {
  public:
   OneShotSurface(backend::Backend& backend,
                  backend::ModelContextProvider& model_context,
-                 OneShotLimits limits = {});
+                 OneShotLimits limits = {},
+                 persona::PersonaSource* persona_source = nullptr);
   OneShotSurface(backend::Backend& backend,
                  backend::ModelContextProvider& model_context,
                  storage::SessionStore& session_store,
-                 OneShotLimits limits = {});
+                 OneShotLimits limits = {},
+                 persona::PersonaSource* persona_source = nullptr);
 
   [[nodiscard]] auto run(OneShotRequest request, std::ostream& output,
                          std::ostream& error,
@@ -93,6 +99,7 @@ class OneShotSurface final {
   backend::Backend& m_backend;
   backend::ModelContextProvider& m_model_context;
   storage::SessionStore* m_session_store{};
+  persona::PersonaSource* m_persona_source{};
   OneShotLimits m_limits;
 };
 

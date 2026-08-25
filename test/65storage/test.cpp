@@ -182,6 +182,14 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
   return {
       started(),
       domain::RunProvenanceRecorded{run_provenance()},
+      domain::PersonaSelectionRecorded{{
+          domain::PersonaSelectionAction::selected,
+          domain::PersonaSelectionSource::command_line,
+          domain::PersonaReference{
+              make_id<domain::PersonaId>("persona:reviewer"), "reviewer",
+              "personas/reviewer.md",
+              {"sha256", std::string(64, 'a'), 7}},
+          std::nullopt}},
       domain::RunAwaitingInput{question},
       domain::RunResumed{question},
       domain::RunCompletionRequested{},

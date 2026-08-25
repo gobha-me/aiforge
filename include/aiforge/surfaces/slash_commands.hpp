@@ -27,6 +27,9 @@ enum class SlashCommandAction {
   list_sessions,
   resume_session,
   new_session,
+  list_personas,
+  select_persona,
+  disable_persona,
 };
 
 struct SlashCommandResult {

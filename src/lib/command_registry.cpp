@@ -224,6 +224,8 @@ auto one_shot_handler(CommandContext& context,
                       const bool allow_empty_for_interactive) -> int {
   const auto session_prefix =
       argument_id.starts_with("root.") ? "root.session." : "chat.session.";
+  const auto option_prefix =
+      argument_id.starts_with("root.") ? "root." : "chat.";
   const auto resume = parsed_text_values(
       context.invocation, std::string{session_prefix} + "resume");
   const bool continue_latest =
@@ -232,6 +234,11 @@ auto one_shot_handler(CommandContext& context,
   const bool ephemeral =
       parsed_argument(context.invocation,
                       std::string{session_prefix} + "ephemeral") != nullptr;
+  const auto persona_name = parsed_text_values(
+      context.invocation, std::string{option_prefix} + "persona");
+  const bool no_persona =
+      parsed_argument(context.invocation,
+                      std::string{option_prefix} + "no-persona") != nullptr;
   const auto selections = static_cast<int>(resume.has_value()) +
                           static_cast<int>(continue_latest) +
                           static_cast<int>(ephemeral);
@@ -239,6 +246,21 @@ auto one_shot_handler(CommandContext& context,
     context.error << "aiforge: --resume, --continue, and --ephemeral are "
                      "mutually exclusive\n";
     return usage_exit_code;
+  }
+  if (persona_name && no_persona) {
+    context.error << "aiforge: --persona and --no-persona are mutually exclusive\n";
+    return usage_exit_code;
+  }
+  persona::PersonaDirective persona_directive;
+  if (persona_name) {
+    if (persona_name->size() != 1 || persona_name->front().empty()) {
+      context.error << "aiforge: persona name is invalid\n";
+      return usage_exit_code;
+    }
+    persona_directive.kind = persona::PersonaDirectiveKind::select;
+    persona_directive.name = std::string{persona_name->front()};
+  } else if (no_persona) {
+    persona_directive.kind = persona::PersonaDirectiveKind::disable;
   }
   std::optional<domain::SessionId> resume_id;
   if (resume) {
@@ -267,7 +289,8 @@ auto one_shot_handler(CommandContext& context,
         session_mode = InteractiveCommand::SessionMode::ephemeral;
       }
       auto result = context.environment.interactive->execute(
-          {session_mode, std::move(resume_id)}, context.environment,
+          {session_mode, std::move(resume_id), std::move(persona_directive)},
+          context.environment,
           context.output, context.error);
       if (result) return success_exit_code;
       if (!result.error().message.empty()) {
@@ -301,7 +324,8 @@ auto one_shot_handler(CommandContext& context,
     session_mode = OneShotCommand::SessionMode::ephemeral;
   }
   auto result = context.environment.one_shot->execute(
-      {prompt->front(), session_mode, std::move(resume_id)},
+      {prompt->front(), session_mode, std::move(resume_id),
+       std::move(persona_directive)},
       context.environment, context.output, context.error);
   if (result) return success_exit_code;
   if (!result.error().message.empty()) {
@@ -648,7 +672,21 @@ auto builtin_command_registry() -> const CommandRegistry& {
           0,
           1},
          {},
-         "Run without creating or opening durable session storage."}};
+         "Run without creating or opening durable session storage."},
+        {{std::string{prefix} + ".persona",
+          {"--persona"},
+          ArgumentValueKind::text,
+          0,
+          1},
+         "name",
+         "Select a file-backed persona."},
+        {{std::string{prefix} + ".no-persona",
+          {"--no-persona"},
+          ArgumentValueKind::flag,
+          0,
+          1},
+         {},
+         "Disable any inherited persona."}};
   };
   static const CommandRegistry registry{
       std::string{PROGRAM_NAME},

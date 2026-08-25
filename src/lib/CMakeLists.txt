@@ -15,6 +15,8 @@ add_library(${PROJECT_NAME}_lib STATIC
   json_config_file_store.cpp
   language_analysis.cpp
   one_shot.cpp
+  persona.cpp
+  persona_context.cpp
   presentation_text.cpp
   project_instructions.cpp
   provenance.cpp
@@ -30,6 +32,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   scripted_hosted_review_check.cpp
   scripted_language_analysis_source.cpp
   scripted_policy_grant_store.cpp
+  scripted_persona_source.cpp
   scripted_project_instruction_source.cpp
   scripted_repository_snapshot_source.cpp
   scripted_session_store.cpp

@@ -1,5 +1,6 @@
 #include <aiforge/presentation/text.hpp>
 #include <aiforge/runtime/context_builder.hpp>
+#include <aiforge/runtime/persona.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/surfaces/one_shot.hpp>
 #include <algorithm>
@@ -142,6 +143,86 @@ class Wake final : public runtime::RunWakeSink {
   std::size_t m_generation{};
 };
 
+struct ResolvedPersona {
+  std::optional<domain::PersonaDocument> document;
+  std::optional<domain::PersonaSelection> selection;
+};
+
+[[nodiscard]] auto resolve_persona(
+    persona::PersonaSource* source, const persona::PersonaDirective& directive,
+    const domain::SessionEventLog& event_log,
+    const std::stop_token stop_token)
+    -> std::expected<ResolvedPersona, OneShotError> {
+  if ((directive.kind == persona::PersonaDirectiveKind::select) !=
+          directive.name.has_value() ||
+      directive.source == domain::PersonaSelectionSource::unknown) {
+    return one_shot_error(OneShotErrorCode::invalid_input,
+                          "persona selection is invalid");
+  }
+  auto latest = runtime::latest_persona_selection(event_log);
+  if (!latest) {
+    return one_shot_error(OneShotErrorCode::run_failed,
+                          "persona history is invalid");
+  }
+  std::optional<domain::PersonaReference> previous;
+  if (*latest && (*latest)->action == domain::PersonaSelectionAction::selected) {
+    previous = (*latest)->persona;
+  }
+  if (directive.kind == persona::PersonaDirectiveKind::disable) {
+    return ResolvedPersona{
+        std::nullopt,
+        domain::PersonaSelection{domain::PersonaSelectionAction::disabled,
+                                 directive.source, std::nullopt, previous}};
+  }
+  if (directive.kind == persona::PersonaDirectiveKind::inherit) {
+    if (!*latest) return ResolvedPersona{};
+    if ((*latest)->action == domain::PersonaSelectionAction::disabled) {
+      return ResolvedPersona{
+          std::nullopt,
+          domain::PersonaSelection{domain::PersonaSelectionAction::disabled,
+                                   domain::PersonaSelectionSource::resumed,
+                                   std::nullopt, std::nullopt}};
+    }
+  }
+  const auto name = directive.kind == persona::PersonaDirectiveKind::select
+                        ? *directive.name
+                        : previous->name;
+  if (source == nullptr) {
+    return one_shot_error(OneShotErrorCode::context_failed,
+                          "persona source is unavailable");
+  }
+  auto loaded = source->load(name, {}, stop_token);
+  if (!loaded) {
+    return one_shot_error(
+        loaded.error().code == persona::PersonaErrorCode::cancelled
+            ? OneShotErrorCode::cancelled
+            : loaded.error().code == persona::PersonaErrorCode::invalid_name
+                  ? OneShotErrorCode::invalid_input
+                  : OneShotErrorCode::context_failed,
+        loaded.error().message);
+  }
+  if (!domain::validate_persona_document(*loaded)) {
+    return one_shot_error(OneShotErrorCode::context_failed,
+                          "persona document is invalid");
+  }
+  if (directive.kind == persona::PersonaDirectiveKind::inherit &&
+      loaded->reference != *previous) {
+    return one_shot_error(
+        OneShotErrorCode::context_failed,
+        "persona changed since the session was recorded; explicitly select it or disable it");
+  }
+  const auto selection_source =
+      directive.kind == persona::PersonaDirectiveKind::inherit
+          ? domain::PersonaSelectionSource::resumed
+          : directive.source;
+  auto reference = loaded->reference;
+  return ResolvedPersona{
+      std::move(*loaded),
+      domain::PersonaSelection{domain::PersonaSelectionAction::selected,
+                               selection_source, std::move(reference),
+                               std::move(previous)}};
+}
+
 [[nodiscard]] auto render_events(const std::vector<domain::RunEvent>& events,
                                  std::ostream& output, std::ostream& error,
                                  std::optional<domain::DomainError>& run_error)
@@ -187,16 +268,22 @@ class Wake final : public runtime::RunWakeSink {
 
 OneShotSurface::OneShotSurface(backend::Backend& backend,
                                backend::ModelContextProvider& model_context,
-                               OneShotLimits limits)
-    : m_backend(backend), m_model_context(model_context), m_limits(limits) {}
+                               OneShotLimits limits,
+                               persona::PersonaSource* persona_source)
+    : m_backend(backend),
+      m_model_context(model_context),
+      m_persona_source(persona_source),
+      m_limits(limits) {}
 
 OneShotSurface::OneShotSurface(backend::Backend& backend,
                                backend::ModelContextProvider& model_context,
                                storage::SessionStore& session_store,
-                               OneShotLimits limits)
+                               OneShotLimits limits,
+                               persona::PersonaSource* persona_source)
     : m_backend(backend),
       m_model_context(model_context),
       m_session_store(&session_store),
+      m_persona_source(persona_source),
       m_limits(limits) {}
 
 auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
@@ -319,6 +406,12 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
           std::make_unique<runtime::RunKernel>(session_id, m_backend, &wake);
     }
 
+    auto resolved_persona = resolve_persona(
+        m_persona_source, request.persona, kernel->event_log(), stop_token);
+    if (!resolved_persona) {
+      return std::unexpected(std::move(resolved_persona.error()));
+    }
+
     auto run_id = make_id<domain::RunId>("run", suffix);
     auto inference_id = make_id<domain::InferenceId>("inference", suffix);
     auto user_message_id = make_id<domain::MessageId>("user", suffix);
@@ -379,6 +472,17 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
           detail::runtime_contract.size()}},
         std::move(content)};
 
+    if (resolved_persona->document) {
+      auto persona_instruction = runtime::persona_instruction_input(
+          *resolved_persona->document,
+          resolved_persona->document->text.size());
+      if (!persona_instruction) {
+        return one_shot_error(OneShotErrorCode::context_failed,
+                              persona_instruction.error().message);
+      }
+      build_input.instructions.push_back(std::move(*persona_instruction));
+    }
+
     if (request.stdin_evidence && !request.stdin_evidence->empty()) {
       auto evidence_message_id =
           make_id<domain::MessageId>("stdin-message", suffix);
@@ -417,10 +521,15 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
         {std::nullopt, output_tokens, std::nullopt, {}}};
     auto started = kernel->start(
         {*run_id,
-         {*surface_id, *workspace_id, *permission_id, std::nullopt},
+         {*surface_id, *workspace_id, *permission_id,
+          resolved_persona->document
+              ? std::optional<domain::PersonaId>{
+                    resolved_persona->document->reference.persona_id}
+              : std::nullopt},
          std::move(user_message),
          std::move(backend_request),
-         std::move(request.provenance)});
+         std::move(request.provenance),
+         std::move(resolved_persona->selection)});
     if (!started) {
       return one_shot_error(OneShotErrorCode::run_failed,
                             "one-shot run could not start");
