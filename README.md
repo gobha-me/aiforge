@@ -192,6 +192,16 @@ shown with a warning; malformed, insecure, symlinked, or oversized cache data
 is never trusted. The cache contains neutral catalog metadata, never
 credentials or provider request payloads.
 
+## Replayable usage ledger
+
+`aiforge::domain::UsageLedgerProjection` rebuilds session usage from durable
+inference events instead of maintaining a mutable session counter. Each
+inference record retains its run, model, timestamps, terminal status, and
+separate input, output, cached-input, and reasoning-token totals. Interleaved
+runs, retries, failures, cancellation, and partial live streams remain
+inspectable, while checked aggregation refuses overflow without partially
+changing the projection. Replay performs no provider call or other side effect.
+
 Ctrl+E restores the terminal and opens the current draft in `$VISUAL` or
 `$EDITOR`. The editor setting names one executable only; arguments and shell
 syntax are rejected, and users who need flags may select a wrapper executable.

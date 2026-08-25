@@ -44,6 +44,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   transcript_projection.cpp
   tool_policy.cpp
   tool_registry.cpp
+  usage_ledger.cpp
   verification_evidence.cpp
 )
 add_library(${PROJECT_NAME}::lib ALIAS ${PROJECT_NAME}_lib)
