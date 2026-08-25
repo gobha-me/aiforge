@@ -3,12 +3,14 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -27,6 +29,7 @@
 #include <aiforge/adapters/json_model_catalog_cache.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
 #include <aiforge/adapters/process_provenance.hpp>
+#include <aiforge/adapters/process_credentials.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
 #include <aiforge/adapters/venice_model_catalog_source.hpp>
@@ -41,6 +44,10 @@ using namespace aiforge;
 template <typename IdType>
 auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
+}
+
+auto secret(std::string value) -> credentials::Secret {
+  return credentials::make_secret(std::move(value)).value();
 }
 
 auto context(domain::ContentBlock content = domain::TextBlock{"hello"})
@@ -76,7 +83,8 @@ auto request(domain::ConstructedContext built = context())
 
 class LocalServer final {
  public:
-  LocalServer() {
+  explicit LocalServer(std::optional<std::string> echoed_error = std::nullopt)
+      : m_echoed_error(std::move(echoed_error)) {
     m_server.Get(
         "/api/v1/models",
         [this](const httplib::Request& request, httplib::Response& response) {
@@ -96,6 +104,12 @@ class LocalServer final {
             std::lock_guard lock(m_mutex);
             m_body = request.body;
             m_authorization = request.get_header_value("Authorization");
+          }
+          if (m_echoed_error) {
+            response.status = 401;
+            response.set_content("provider echoed " + *m_echoed_error,
+                                 "text/plain");
+            return;
           }
           response.set_content(
               "data: "
@@ -148,6 +162,7 @@ class LocalServer final {
   std::string m_body;
   std::string m_authorization;
   std::string m_model_authorization;
+  std::optional<std::string> m_echoed_error;
 };
 
 class TestApp final : public termforge::App {
@@ -178,6 +193,25 @@ class TempDirectory final {
 
  private:
   std::filesystem::path m_path;
+};
+
+class EnvironmentGuard final {
+ public:
+  explicit EnvironmentGuard(std::string name) : m_name(std::move(name)) {
+    if (const auto* value = std::getenv(m_name.c_str())) m_value = value;
+  }
+
+  ~EnvironmentGuard() {
+    if (m_value) {
+      static_cast<void>(::setenv(m_name.c_str(), m_value->c_str(), 1));
+    } else {
+      static_cast<void>(::unsetenv(m_name.c_str()));
+    }
+  }
+
+ private:
+  std::string m_name;
+  std::optional<std::string> m_value;
 };
 
 auto write_file(const std::filesystem::path& path, const std::string& bytes)
@@ -451,7 +485,7 @@ TEST_CASE("filesystem personas fail closed on aliases symlinks and bad text",
 TEST_CASE("Venice adapter rejects unsupported content without a request",
           "[adapter][venice][failure]") {
   adapters::VeniceBackend backend{
-      {"secret", "http://127.0.0.1:1", 10ms, 10ms, 10ms, 4}};
+      secret("secret"), {"http://127.0.0.1:1", 10ms, 10ms, 10ms, 4}};
   auto unsupported = context(domain::ArtifactReferenceBlock{
       make_id<domain::ArtifactId>("artifact"), std::nullopt});
   const auto started = backend.start(request(std::move(unsupported)), {});
@@ -464,7 +498,7 @@ TEST_CASE("Venice adapter maps structured SSE into neutral events",
           "[adapter][venice]") {
   LocalServer server;
   adapters::VeniceBackend backend{
-      {"test-secret", server.base_url(), 1s, 1s, 1s, 8}};
+      secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
   auto started = backend.start(request(), {});
   REQUIRE(started);
 
@@ -497,7 +531,7 @@ TEST_CASE("Venice adapter sends structured tool results as tool messages",
           "[adapter][venice][tools]") {
   LocalServer server;
   adapters::VeniceBackend backend{
-      {"test-secret", server.base_url(), 1s, 1s, 1s, 8}};
+      secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
   auto built = context();
   built.entries.front().kind = domain::ContextEntryKind::tool_result;
   built.entries.front().message = {
@@ -523,7 +557,7 @@ TEST_CASE("Venice adapter exposes neutral model context metadata",
           "[adapter][venice][models]") {
   LocalServer server;
   adapters::VeniceBackend backend{
-      {"test-secret", server.base_url(), 1s, 1s, 1s, 8}};
+      secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
   const auto model_id = make_id<domain::ModelId>("test-model");
   const auto context = backend.lookup(model_id, {});
   REQUIRE(context);
@@ -538,6 +572,24 @@ TEST_CASE("Venice adapter exposes neutral model context metadata",
           backend::BackendErrorKind::request_rejected);
   REQUIRE(missing.error().redacted_message.find("test-secret") ==
           std::string::npos);
+}
+
+TEST_CASE("Venice adapter redacts provider bodies containing credentials",
+          "[adapter][venice][failure][redaction]") {
+  const std::string credential{"provider-echoed-secret"};
+  LocalServer server{credential};
+  adapters::VeniceBackend backend{
+      secret(credential), {server.base_url(), 1s, 1s, 1s, 8}};
+  auto started = backend.start(request(), {});
+  REQUIRE(started);
+
+  auto next = (*started)->next({});
+  REQUIRE_FALSE(next);
+  REQUIRE(next.error().kind == backend::BackendErrorKind::authentication);
+  REQUIRE(next.error().redacted_message == "Venice authentication failed");
+  REQUIRE(next.error().redacted_message.find(credential) == std::string::npos);
+  REQUIRE(request().context.entries.front().message.content ==
+          std::vector<domain::ContentBlock>{domain::TextBlock{"hello"}});
 }
 
 TEST_CASE("TermForge bridge converts its marker to an owner-thread drain",
@@ -739,4 +791,50 @@ TEST_CASE("process provenance names a credential source without its secret",
   REQUIRE(bytes.find("VENICE_API_KEY") != std::string::npos);
   std::error_code ignored;
   std::filesystem::remove_all(directory, ignored);
+}
+
+TEST_CASE("process credential resolution uses environment then XDG storage",
+          "[adapters][credentials][failure]") {
+  EnvironmentGuard key_guard{"VENICE_API_KEY"};
+  EnvironmentGuard xdg_guard{"XDG_CONFIG_HOME"};
+  EnvironmentGuard home_guard{"HOME"};
+  TempDirectory temporary{"aiforge-process-credential"};
+  REQUIRE(::setenv("XDG_CONFIG_HOME", temporary.path().c_str(), 1) == 0);
+  REQUIRE(::unsetenv("VENICE_API_KEY") == 0);
+
+  const auto path = temporary.path() / "aiforge" / "credentials";
+  credentials::FileCredentialStore store{path};
+  auto stored = secret("stored-process-secret");
+  REQUIRE(store.store(stored));
+  std::ostringstream diagnostics;
+  auto resolved = adapters::resolve_process_credential(diagnostics);
+  REQUIRE(resolved);
+  REQUIRE(resolved->credential);
+  REQUIRE(resolved->credential->secret.view() == "stored-process-secret");
+  REQUIRE(resolved->credential->source.kind ==
+          domain::CredentialSourceKind::configuration_file);
+  REQUIRE(diagnostics.str().empty());
+
+  REQUIRE(::setenv("VENICE_API_KEY", "environment-process-secret", 1) == 0);
+  resolved = adapters::resolve_process_credential(diagnostics);
+  REQUIRE(resolved);
+  REQUIRE(resolved->credential);
+  REQUIRE(resolved->credential->secret.view() == "environment-process-secret");
+  REQUIRE(resolved->credential->source.kind ==
+          domain::CredentialSourceKind::environment);
+
+  REQUIRE(::setenv("VENICE_API_KEY", "invalid value", 1) == 0);
+  resolved = adapters::resolve_process_credential(diagnostics);
+  REQUIRE_FALSE(resolved);
+  REQUIRE(resolved.error().message == "VENICE_API_KEY is invalid");
+  REQUIRE(resolved.error().message.find("invalid value") == std::string::npos);
+
+  REQUIRE(::unsetenv("VENICE_API_KEY") == 0);
+  REQUIRE(::chmod(path.c_str(), 0644) == 0);
+  diagnostics.str({});
+  resolved = adapters::resolve_process_credential(diagnostics);
+  REQUIRE(resolved);
+  REQUIRE_FALSE(resolved->credential);
+  REQUIRE(diagnostics.str().find("mode 0600") != std::string::npos);
+  REQUIRE(diagnostics.str().find("stored-process-secret") == std::string::npos);
 }

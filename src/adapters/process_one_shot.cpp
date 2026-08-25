@@ -12,6 +12,7 @@
 
 #include <aiforge/adapters/process_provenance.hpp>
 #include <aiforge/adapters/process_model_catalog.hpp>
+#include <aiforge/adapters/process_credentials.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
@@ -213,20 +214,15 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
       if (!validated) return std::unexpected(std::move(validated.error()));
     }
 
-    const char* raw_key = std::getenv("VENICE_API_KEY");
-    if (raw_key == nullptr || *raw_key == '\0') {
+    auto credential = resolve_process_credential(error);
+    if (!credential) return std::unexpected(std::move(credential.error()));
+    if (!credential->credential) {
       return failure(cli::CommandFailureKind::runtime,
-                     "VENICE_API_KEY is not configured");
+                     "Venice credential is not configured; run 'aiforge login' or set VENICE_API_KEY");
     }
-    const std::string api_key{raw_key};
-    if (api_key.size() > 64U * 1024U) {
-      return failure(cli::CommandFailureKind::runtime,
-                     "VENICE_API_KEY is invalid");
-    }
-
-    VeniceBackendOptions backend_options;
-    backend_options.api_key = api_key;
-    VeniceBackend backend{std::move(backend_options)};
+    auto resolved_credential = std::move(*credential->credential);
+    auto credential_source = resolved_credential.source;
+    VeniceBackend backend{std::move(resolved_credential.secret)};
     const auto session_mode = [&] {
       switch (request.session_mode) {
         case cli::OneShotCommand::SessionMode::create:
@@ -240,9 +236,6 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
       }
       return surfaces::OneShotRequest::SessionMode::create;
     }();
-    // The variable name only. The key itself never leaves `api_key`.
-    auto credential_source = domain::CredentialSourceReference{
-        domain::CredentialSourceKind::environment, "VENICE_API_KEY"};
     auto provenance = process_run_provenance(*resolved, *model, "venice",
                                              std::move(credential_source));
     auto persona_root = process_persona_root();

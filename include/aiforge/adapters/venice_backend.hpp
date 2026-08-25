@@ -7,11 +7,11 @@
 #include <string>
 
 #include <aiforge/backend/backend.hpp>
+#include <aiforge/credentials/credential.hpp>
 
 namespace aiforge::adapters {
 
 struct VeniceBackendOptions {
-  std::string api_key;
   std::string base_url{"https://api.venice.ai/api/v1"};
   std::optional<std::chrono::milliseconds> connect_timeout;
   std::optional<std::chrono::milliseconds> read_timeout;
@@ -22,7 +22,8 @@ struct VeniceBackendOptions {
 class VeniceBackend final : public backend::Backend,
                             public backend::ModelContextProvider {
  public:
-  explicit VeniceBackend(VeniceBackendOptions options);
+  explicit VeniceBackend(credentials::Secret credential,
+                         VeniceBackendOptions options = {});
   ~VeniceBackend() override;
 
   VeniceBackend(const VeniceBackend&) = delete;

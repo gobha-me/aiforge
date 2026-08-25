@@ -87,6 +87,15 @@ class ModelsCommand {
       -> std::expected<void, CommandFailure> = 0;
 };
 
+class LoginCommand {
+ public:
+  virtual ~LoginCommand() = default;
+  [[nodiscard]] virtual auto execute(CommandEnvironment& environment,
+                                     std::ostream& output,
+                                     std::ostream& error)
+      -> std::expected<void, CommandFailure> = 0;
+};
+
 struct CommandEnvironment {
   std::istream& input;
   bool input_is_terminal{true};
@@ -96,6 +105,8 @@ struct CommandEnvironment {
   OneShotCommand* one_shot{};
   InteractiveCommand* interactive{};
   ModelsCommand* models{};
+  LoginCommand* login{};
+  int input_descriptor{-1};
 };
 
 struct CommandContext {

@@ -10,6 +10,7 @@
 
 #ifdef AIFORGE_HAS_ADAPTERS
 #include <aiforge/adapters/process_interactive.hpp>
+#include <aiforge/adapters/process_login.hpp>
 #include <aiforge/adapters/process_models.hpp>
 #include <aiforge/adapters/process_one_shot.hpp>
 #endif
@@ -65,14 +66,17 @@ auto main(const int argc, char* argv[]) -> int {
 #ifdef AIFORGE_HAS_ADAPTERS
   aiforge::adapters::ProcessOneShotCommand one_shot;
   aiforge::adapters::ProcessInteractiveCommand interactive;
+  aiforge::adapters::ProcessLoginCommand login;
   aiforge::adapters::ProcessModelsCommand models;
   aiforge::cli::OneShotCommand* one_shot_service = &one_shot;
   aiforge::cli::InteractiveCommand* interactive_service = &interactive;
   aiforge::cli::ModelsCommand* models_service = &models;
+  aiforge::cli::LoginCommand* login_service = &login;
 #else
   aiforge::cli::OneShotCommand* one_shot_service = nullptr;
   aiforge::cli::InteractiveCommand* interactive_service = nullptr;
   aiforge::cli::ModelsCommand* models_service = nullptr;
+  aiforge::cli::LoginCommand* login_service = nullptr;
 #endif
   aiforge::cli::CommandEnvironment environment{std::cin,
 #ifdef _WIN32
@@ -87,7 +91,13 @@ auto main(const int argc, char* argv[]) -> int {
                                                cancellation.get_token(),
                                                one_shot_service,
                                                interactive_service,
-                                               models_service};
+                                               models_service,
+                                               login_service,
+#ifdef _WIN32
+                                               -1};
+#else
+                                               STDIN_FILENO};
+#endif
   const auto result =
       aiforge::cli::run_cli(arguments, environment, std::cout, std::cerr);
   signal_watcher.request_stop();

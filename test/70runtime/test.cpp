@@ -367,6 +367,29 @@ TEST_CASE("backend failure text is structurally excluded from run events",
   REQUIRE(failures == 1);
 }
 
+TEST_CASE("missing backend credentials use a fixed replayable failure",
+          "[runtime][failure][credentials]") {
+  auto backend_request = request();
+  testing::ScriptedBackend fake{{testing::ScriptedExchange{
+      backend_request,
+      backend::BackendError{backend::BackendErrorKind::credential_unavailable,
+                            "provider-secret-must-not-cross", false,
+                            std::nullopt}}}};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake, &wake};
+
+  REQUIRE(kernel.start(run_start(backend_request)));
+  static_cast<void>(drain_to_end(kernel, wake));
+  const auto failed = std::ranges::find_if(
+      kernel.event_log().events(), [](const domain::RunEvent& event) {
+        return std::holds_alternative<domain::RunFailed>(event.payload);
+      });
+  REQUIRE(failed != kernel.event_log().events().end());
+  const auto& error = std::get<domain::RunFailed>(failed->payload).error;
+  REQUIRE(error.message == "backend credential is not configured");
+  REQUIRE(error.message.find("provider-secret") == std::string::npos);
+}
+
 TEST_CASE("streaming lifecycle preserves content citations reasoning and usage",
           "[runtime]") {
   auto backend_request = request();

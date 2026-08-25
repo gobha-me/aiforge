@@ -101,6 +101,7 @@ enum class BackendErrorKind {
   request_rejected,
   unavailable,
   authentication,
+  credential_unavailable,
   rate_limited,
   network,
   protocol,

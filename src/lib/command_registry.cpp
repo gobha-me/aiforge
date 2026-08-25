@@ -378,6 +378,22 @@ auto models_handler(CommandContext& context) -> int {
   return failure_exit_code;
 }
 
+auto login_handler(CommandContext& context) -> int {
+  if (context.environment.login == nullptr) return unavailable_handler(context);
+  auto result = context.environment.login->execute(
+      context.environment, context.output, context.error);
+  if (result) return success_exit_code;
+  if (!result.error().message.empty()) {
+    context.error << "aiforge: " << result.error().message << '\n';
+  }
+  switch (result.error().kind) {
+    case CommandFailureKind::usage: return usage_exit_code;
+    case CommandFailureKind::cancelled: return 130;
+    case CommandFailureKind::runtime: return failure_exit_code;
+  }
+  return failure_exit_code;
+}
+
 auto write_config_warning(std::ostream& error, const std::string_view message)
     -> void {
   error << "aiforge: warning: " << message << '\n';
@@ -750,6 +766,14 @@ auto builtin_command_registry() -> const CommandRegistry& {
          {},
          {},
          models_handler},
+        {"login",
+         "login",
+         "Store a Venice API credential from terminal input.",
+         false,
+         {},
+         {},
+         {},
+         login_handler},
         {"config",
          "config",
          "Inspect or update configuration.",

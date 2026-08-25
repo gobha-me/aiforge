@@ -91,6 +91,26 @@ class FakeModels final : public ModelsCommand {
   std::optional<CommandFailure> failure;
 };
 
+class FakeLogin final : public LoginCommand {
+ public:
+  auto execute(CommandEnvironment& environment, std::ostream& output,
+               std::ostream& error)
+      -> std::expected<void, CommandFailure> override {
+    ++calls;
+    saw_terminal_input = environment.input_is_terminal;
+    input_descriptor = environment.input_descriptor;
+    output << "stored\n";
+    error << "prompt\n";
+    if (failure) return std::unexpected(*failure);
+    return {};
+  }
+
+  int calls{};
+  bool saw_terminal_input{};
+  int input_descriptor{-1};
+  std::optional<CommandFailure> failure;
+};
+
 [[nodiscard]] auto root_command(CommandHandler handler = success_handler)
     -> CommandSpec {
   return {"root", "", "Test command registry.", false, {}, {}, {}, handler};
@@ -260,7 +280,7 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
   const auto& registry = builtin_command_registry();
   const auto schema = make_parser_schema(registry);
   REQUIRE(schema);
-  REQUIRE(schema->root.subcommands.size() == 4);
+  REQUIRE(schema->root.subcommands.size() == 5);
   const auto config =
       std::ranges::find(schema->root.subcommands, "config", &CommandSchema::id);
   REQUIRE(config != schema->root.subcommands.end());
@@ -453,6 +473,34 @@ TEST_CASE("models command uses its dedicated service and preserves streams",
               registry, std::vector<std::string_view>{"models"}, environment,
               output, error) == 1);
   REQUIRE(error.str().find("offline") != std::string::npos);
+}
+
+TEST_CASE("login command uses its dedicated terminal service",
+          "[commands][login]") {
+  const auto& registry = builtin_command_registry();
+  FakeLogin login;
+  std::istringstream input;
+  CommandEnvironment environment{input, true, true, true, {}, nullptr,
+                                 nullptr, nullptr, &login, 42};
+  std::ostringstream output;
+  std::ostringstream error;
+
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry, std::vector<std::string_view>{"login"}, environment,
+              output, error) == 0);
+  REQUIRE(login.calls == 1);
+  REQUIRE(login.saw_terminal_input);
+  REQUIRE(login.input_descriptor == 42);
+  REQUIRE(output.str() == "stored\n");
+  REQUIRE(error.str() == "prompt\n");
+
+  output.str({});
+  error.str({});
+  login.failure = CommandFailure{CommandFailureKind::cancelled, "stopped"};
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry, std::vector<std::string_view>{"login"}, environment,
+              output, error) == 130);
+  REQUIRE(error.str().find("stopped") != std::string::npos);
 }
 
 TEST_CASE("empty terminal root input routes to the interactive service",

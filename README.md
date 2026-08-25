@@ -64,11 +64,14 @@ cmake --build build-clang --parallel
 ctest --test-dir build-clang --output-on-failure
 ```
 
-Configure a model and Venice API key, then run a one-shot request:
+Configure a model and either store or export a Venice API key, then run a
+one-shot request:
 
 ```bash
 export AIFORGE_MODEL=model-id
-export VENICE_API_KEY=your-key
+./build/src/bin/aiforge login       # terminal-only, input echo is disabled
+# Or for the current process:
+export VENICE_API_KEY=your-key      # takes precedence over the stored key
 
 ./build/src/bin/aiforge "Explain append-only event streams"
 ./build/src/bin/aiforge chat "Explain append-only event streams"
@@ -290,9 +293,31 @@ It is strict UTF-8 JSON. AIForge creates its directory and file with restrictive
 permissions, preserves unknown fields during known updates, and refuses to
 overwrite malformed, symlinked, or loosely permissioned files. Configuration
 diagnostics use stderr; requested values use stdout. Credentials are excluded
-from this file. The one-shot surface currently reads `VENICE_API_KEY` directly
-from the environment; stored credentials and `login` remain a separate
-milestone.
+from this file.
+
+## Credentials
+
+`aiforge login` reads one credential from terminal input with echo disabled and
+stores it at `$XDG_CONFIG_HOME/aiforge/credentials`, or
+`$HOME/.config/aiforge/credentials` when the XDG location is unset or relative.
+The AIForge directory is mode 0700 and credential, lock, and temporary files are
+mode 0600. Writes are locked, synced, and atomically renamed. Symlinked,
+non-regular, or loosely permissioned paths are rejected; login never accepts a
+credential from a pipe or from inside the TUI.
+
+An explicitly present `VENICE_API_KEY` overrides the stored source. An empty,
+oversized, whitespace-bearing, or control-bearing explicit value is an error
+and does not fall through to the file. Stored-source failures are reported as
+warnings and the source is ignored. Missing credentials fail one-shot
+inference, while interactive Chat and public/cached model discovery remain
+available; submitting a turn records and renders a fixed
+credential-not-configured failure.
+
+Credential bytes are consumed only by production backend construction. They do
+not enter provider-neutral requests, events, artifacts, session storage,
+diagnostics, or terminal frames. Durable provenance records only the source
+locator `VENICE_API_KEY` or `aiforge/credentials`. Local plaintext storage is a
+restricted bootstrap mechanism, not a replacement for a platform keychain.
 
 ## Durable sessions and replay
 

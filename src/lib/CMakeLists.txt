@@ -7,6 +7,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   conversation_context.cpp
   config.cpp
   config_provenance.cpp
+  credential.cpp
   context_builder.cpp
   context_parcel.cpp
   context_selection.cpp
