@@ -29,6 +29,17 @@ auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
+auto reported_cost() -> domain::ReportedCost {
+  auto usd = domain::MonetaryAmount::create(
+      "USD", domain::DecimalAmount::from("0").value()).value();
+  auto diem = domain::MonetaryAmount::create(
+      "venice.diem", domain::DecimalAmount::from("0.0645375").value())
+                  .value();
+  return domain::ReportedCost::create(
+             {std::move(usd), std::move(diem)})
+      .value();
+}
+
 auto run_provenance() -> domain::RunProvenance {
   return {"0.10.0",
           "venice",
@@ -257,6 +268,7 @@ auto success_items(const domain::MessageId& message_id) -> std::vector<Item> {
       backend::BackendEvent{backend::CitationObserved{
           {"https://example.test/\x1b[2J", "source\nforged\x7f"}}},
       backend::BackendEvent{backend::UsageObserved{{3, 2, 1, 0}}},
+      backend::BackendEvent{backend::CostObserved{reported_cost()}},
       backend::BackendEvent{
           backend::ResponseFinished{domain::FinishReason::stop}},
       End{},
@@ -330,12 +342,16 @@ TEST_CASE("one-shot streams only sanitized text and builds neutral evidence",
 
   REQUIRE(result);
   REQUIRE(result->usage == domain::Usage{3, 2, 1, 0});
+  REQUIRE(result->reported_cost == reported_cost());
   REQUIRE(output.str() == "hellored");
   REQUIRE(error.str().find("citation: https://example.test/") !=
           std::string::npos);
   REQUIRE(error.str().find("\x1b") == std::string::npos);
   REQUIRE(error.str().find("\nforged") == std::string::npos);
   REQUIRE(error.str().find("usage: input=3 output=2 cached=1 reasoning=0") !=
+          std::string::npos);
+  REQUIRE(error.str().find(
+              "cost: USD=0 venice.diem=0.0645375 (provider-reported)") !=
           std::string::npos);
   REQUIRE(rewriting.captured);
   REQUIRE(rewriting.captured->tools.empty());

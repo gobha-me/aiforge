@@ -607,7 +607,23 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       return one_shot_error(OneShotErrorCode::output_failed,
                             "diagnostic output failed");
     }
-    return OneShotResult{usage, session_id, durable};
+    const auto& reported_cost = projection->reported_cost();
+    std::string cost_line{"cost:"};
+    if (reported_cost) {
+      for (const auto& amount : reported_cost->amounts()) {
+        cost_line += " " + std::string{amount.unit()} + "=" +
+                     amount.amount().to_string();
+      }
+      cost_line += " (provider-reported)";
+    } else {
+      cost_line += " unavailable";
+    }
+    cost_line.push_back('\n');
+    if (!write(error, cost_line)) {
+      return one_shot_error(OneShotErrorCode::output_failed,
+                            "diagnostic output failed");
+    }
+    return OneShotResult{usage, reported_cost, session_id, durable};
   } catch (...) {
     return one_shot_error(OneShotErrorCode::internal_failure,
                           "one-shot execution failed internally");

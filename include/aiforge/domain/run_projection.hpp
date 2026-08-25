@@ -36,6 +36,7 @@ enum class ProjectionErrorCode {
   unknown_message,
   wrong_inference,
   usage_overflow,
+  cost_overflow,
 };
 
 struct ProjectionError {
@@ -54,6 +55,10 @@ class RunProjection final {
     return m_messages;
   }
   [[nodiscard]] auto usage() const noexcept -> const Usage& { return m_usage; }
+  [[nodiscard]] auto reported_cost() const noexcept
+      -> const std::optional<ReportedCost>& {
+    return m_reported_cost;
+  }
   [[nodiscard]] auto active_inference_id() const noexcept -> const std::optional<InferenceId>& {
     return m_active_inference_id;
   }
@@ -74,7 +79,9 @@ class RunProjection final {
   RunStatus m_status{RunStatus::not_started};
   std::vector<ProjectedMessage> m_messages;
   Usage m_usage;
+  std::optional<ReportedCost> m_reported_cost;
   std::optional<InferenceId> m_active_inference_id;
+  bool m_active_inference_cost_recorded{};
   std::optional<RunProvenance> m_provenance;
   std::optional<PersonaId> m_persona_id;
   std::optional<PersonaSelection> m_persona_selection;

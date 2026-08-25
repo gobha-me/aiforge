@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <aiforge/domain/content.hpp>
+#include <aiforge/domain/money.hpp>
 #include <aiforge/domain/persona.hpp>
 #include <aiforge/domain/provenance.hpp>
 #include <aiforge/domain/review_receipt.hpp>
@@ -114,6 +115,13 @@ struct UsageRecorded {
   InferenceId inference_id;
   Usage usage;
   auto operator==(const UsageRecorded&) const -> bool = default;
+};
+
+struct InferenceCostRecorded {
+  InferenceId inference_id;
+  // Actual backend-reported amounts. Quotes and estimates are separate facts.
+  ReportedCost cost;
+  auto operator==(const InferenceCostRecorded&) const -> bool = default;
 };
 
 struct InferenceFinished {
@@ -365,8 +373,9 @@ using RunEventPayload = std::variant<
     RunCompletionRequested, RunCompleted,
     RunFailed, RunCancelRequested, RunCancelled, UserContentAdded,
     AssistantContentStarted, AssistantContentDeltaAdded, AssistantContentFinished,
-    InferenceStarted, ReasoningMetadataAdded, UsageRecorded, InferenceFinished,
-    InferenceFailed, InferenceCancelled, ToolProposed, ToolPolicyDecided,
+    InferenceStarted, ReasoningMetadataAdded, UsageRecorded,
+    InferenceCostRecorded, InferenceFinished, InferenceFailed,
+    InferenceCancelled, ToolProposed, ToolPolicyDecided,
     ToolApprovalRequested, ToolApprovalDecided, ToolPolicyFailed, ToolStarted,
     ToolProgressed, ToolResultRecorded, ToolErrored, QuestionRequested,
     QuestionAnswered, QuestionCancelled, ArtifactCreated, ArtifactReferenced,
