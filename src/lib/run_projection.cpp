@@ -132,6 +132,7 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
           [&](const RunFailed&) -> std::expected<void, ProjectionError> {
             if (auto live = require_running(); !live) return live;
             m_active_inference_id.reset();
+            m_active_inference_cost_recorded = false;
             m_status = RunStatus::failed;
             return {};
           },
@@ -144,6 +145,7 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
               if (message.inference_id == m_active_inference_id) message.complete = true;
             }
             m_active_inference_id.reset();
+            m_active_inference_cost_recorded = false;
             m_status = RunStatus::cancelled;
             return {};
           },
@@ -171,6 +173,7 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
               return transition_error("only one inference may be active in this projection");
             }
             m_active_inference_id = started.inference_id;
+            m_active_inference_cost_recorded = false;
             return {};
           },
           [&](const AssistantContentStarted& started) -> std::expected<void, ProjectionError> {
@@ -243,6 +246,34 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
             m_usage = next;
             return {};
           },
+          [&](const InferenceCostRecorded& recorded)
+              -> std::expected<void, ProjectionError> {
+            if (!m_active_inference_id ||
+                *m_active_inference_id != recorded.inference_id) {
+              return std::unexpected(ProjectionError{
+                  ProjectionErrorCode::wrong_inference,
+                  "reported cost has no matching inference"});
+            }
+            if (m_active_inference_cost_recorded) {
+              return transition_error(
+                  "reported cost may be recorded only once per inference");
+            }
+            auto next = m_reported_cost;
+            if (next) {
+              auto combined = add(*next, recorded.cost);
+              if (!combined) {
+                return std::unexpected(ProjectionError{
+                    ProjectionErrorCode::cost_overflow,
+                    "reported cost total overflow"});
+              }
+              next = std::move(*combined);
+            } else {
+              next = recorded.cost;
+            }
+            m_reported_cost = std::move(next);
+            m_active_inference_cost_recorded = true;
+            return {};
+          },
           [&](const InferenceFinished& finished) -> std::expected<void, ProjectionError> {
             if (!m_active_inference_id || *m_active_inference_id != finished.inference_id) {
               return std::unexpected(ProjectionError{ProjectionErrorCode::wrong_inference,
@@ -255,6 +286,7 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
               return transition_error("inference finished before its assistant content");
             }
             m_active_inference_id.reset();
+            m_active_inference_cost_recorded = false;
             return {};
           },
           [&](const InferenceFailed& failed) -> std::expected<void, ProjectionError> {
@@ -266,6 +298,7 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
               if (message.inference_id == failed.inference_id) message.complete = true;
             }
             m_active_inference_id.reset();
+            m_active_inference_cost_recorded = false;
             return {};
           },
           [&](const InferenceCancelled& cancelled) -> std::expected<void, ProjectionError> {
@@ -277,6 +310,7 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
               if (message.inference_id == cancelled.inference_id) message.complete = true;
             }
             m_active_inference_id.reset();
+            m_active_inference_cost_recorded = false;
             return {};
           },
           [&](const UnknownEvent&) -> std::expected<void, ProjectionError> { return {}; },

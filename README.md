@@ -202,6 +202,23 @@ runs, retries, failures, cancellation, and partial live streams remain
 inspectable, while checked aggregation refuses overflow without partially
 changing the projection. Replay performs no provider call or other side effect.
 
+## Provider-reported inference cost
+
+When a backend reports what an inference actually charged, AIForge records the
+amount once as a provider-neutral `InferenceCostRecorded` event. Monetary
+values use checked canonical decimals and bounded unit identifiers rather than
+floating-point durable state. Run and session usage projections retain the
+per-inference report and aggregate each unit independently, including failed or
+cancelled inference attempts; missing cost stays unknown.
+
+One-shot mode prints the report to stderr after usage, for example
+`cost: USD=0 venice.diem=0.0645375 (provider-reported)`, or
+`cost: unavailable` when the backend supplied no amount. These are actual
+provider observations, not estimates reconstructed from catalog rates. In
+particular, a reported zero in one unit is preserved as data and is not treated
+as proof that the call was free. Cost diagnostics never enter completion
+stdout, and replay performs no provider or billing request.
+
 Ctrl+E restores the terminal and opens the current draft in `$VISUAL` or
 `$EDITOR`. The editor setting names one executable only; arguments and shell
 syntax are rejected, and users who need flags may select a wrapper executable.

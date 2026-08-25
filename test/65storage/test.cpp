@@ -179,6 +179,13 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
       domain::QuestionOtherInput{"Other", std::nullopt, 4096}};
   const domain::ArtifactMetadata artifact_metadata{
       artifact, "text/plain", 3, "sha256:abc", invocation, 1, 2};
+  auto usd = domain::MonetaryAmount::create(
+      "USD", domain::DecimalAmount::from("0").value()).value();
+  auto diem = domain::MonetaryAmount::create(
+      "venice.diem", domain::DecimalAmount::from("0.0645375").value())
+                  .value();
+  auto reported_cost = domain::ReportedCost::create(
+      {std::move(usd), std::move(diem)}).value();
   return {
       started(),
       domain::RunProvenanceRecorded{run_provenance()},
@@ -213,6 +220,7 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
       domain::ReasoningMetadataAdded{
           inference, std::string{"summary"}, {{"visibility", "summary"}}},
       domain::UsageRecorded{inference, domain::Usage{1, 2, 3, 4}},
+      domain::InferenceCostRecorded{inference, std::move(reported_cost)},
       domain::InferenceFinished{inference, domain::FinishReason::tool_call},
       domain::InferenceFailed{inference, error},
       domain::InferenceCancelled{inference, std::string{"cancelled"}},
@@ -386,6 +394,36 @@ TEST_CASE("all typed payloads and opaque future payloads round trip",
   REQUIRE_FALSE(rejected);
   REQUIRE(rejected.error().code ==
           storage::SessionStoreErrorCode::invalid_argument);
+}
+
+TEST_CASE("malformed persisted reported cost fails replay explicitly",
+          "[storage][sqlite][cost][corrupt][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "cost-session", 100);
+  auto amount = domain::MonetaryAmount::create(
+      "USD", domain::DecimalAmount::from("1").value()).value();
+  auto cost = domain::ReportedCost::create({std::move(amount)}).value();
+  REQUIRE(store->append_events(
+      session,
+      std::array{event(
+          1,
+          domain::InferenceCostRecorded{
+              make_id<domain::InferenceId>("inference"), std::move(cost)},
+          "cost-event")}));
+  store.reset();
+
+  execute_sql(
+      path,
+      "UPDATE events SET payload_json='{"
+      "\"inference_id\":\"inference\","
+      "\"cost\":{\"amounts\":[{\"unit\":\"USD\",\"amount\":\"-1\"}]}}' "
+      "WHERE event_id='cost-event'");
+  store = open_store(path);
+  const auto replayed = store->replay_events(session);
+  REQUIRE_FALSE(replayed);
+  REQUIRE(replayed.error().code == storage::SessionStoreErrorCode::corrupt);
 }
 
 TEST_CASE("session discovery derives distinct run counts without schema state",

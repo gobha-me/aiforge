@@ -26,6 +26,7 @@ struct InferenceUsageRecord {
   std::optional<EventTimestamp> ended_at;
   InferenceUsageStatus status{InferenceUsageStatus::active};
   Usage usage;
+  std::optional<ReportedCost> reported_cost;
   auto operator==(const InferenceUsageRecord &) const -> bool = default;
 };
 
@@ -38,6 +39,7 @@ enum class UsageLedgerErrorCode {
   wrong_run,
   invalid_transition,
   usage_overflow,
+  cost_overflow,
 };
 
 struct UsageLedgerError {
@@ -59,6 +61,10 @@ public:
   [[nodiscard]] auto total_usage() const noexcept -> const Usage & {
     return m_total_usage;
   }
+  [[nodiscard]] auto total_reported_cost() const noexcept
+      -> const std::optional<ReportedCost> & {
+    return m_total_reported_cost;
+  }
   [[nodiscard]] auto last_sequence() const noexcept -> std::uint64_t {
     return m_last_sequence;
   }
@@ -69,6 +75,7 @@ private:
 
   std::vector<InferenceUsageRecord> m_records;
   Usage m_total_usage;
+  std::optional<ReportedCost> m_total_reported_cost;
   std::set<EventId> m_event_ids;
   std::uint64_t m_last_sequence{};
 };

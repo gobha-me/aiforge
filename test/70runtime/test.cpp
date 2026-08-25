@@ -11,6 +11,7 @@
 #include <ranges>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -29,6 +30,13 @@ using namespace aiforge;
 template <typename IdType>
 auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
+}
+
+auto reported_cost(const std::string_view value = "0.0645375")
+    -> domain::ReportedCost {
+  auto amount = domain::MonetaryAmount::create(
+      "venice.diem", domain::DecimalAmount::from(value).value()).value();
+  return domain::ReportedCost::create({std::move(amount)}).value();
 }
 
 auto context() -> domain::ConstructedContext {
@@ -402,6 +410,7 @@ TEST_CASE("streaming lifecycle preserves content citations reasoning and usage",
           step(backend::ContentDelta{assistant, domain::TextBlock{"hello"}}),
           step(backend::CitationObserved{{"https://example.test", "source"}}),
           step(backend::UsageObserved{{2, 1, 0, 1}}),
+          step(backend::CostObserved{reported_cost()}),
           step(backend::ResponseFinished{domain::FinishReason::stop}),
           testing::EndOfStream{},
       }}}}};
@@ -422,9 +431,50 @@ TEST_CASE("streaming lifecycle preserves content citations reasoning and usage",
   REQUIRE(projection->messages().back().complete);
   REQUIRE(projection->messages().back().content.size() == 2);
   REQUIRE(projection->usage() == domain::Usage{2, 1, 0, 1});
-  REQUIRE(kernel.event_log().events().size() == 12);
+  REQUIRE(projection->reported_cost() == reported_cost());
+  REQUIRE(kernel.event_log().events().size() == 13);
   REQUIRE(kernel.event_log().events().front().metadata.timestamp ==
           domain::EventTimestamp{1ms});
+}
+
+TEST_CASE("cost observations require a started response and occur once",
+          "[runtime][cost][failure]") {
+  SECTION("before response start") {
+    auto backend_request = request();
+    testing::ScriptedBackend fake{{testing::ScriptedExchange{
+        backend_request,
+        testing::StreamScript{{
+            step(backend::CostObserved{reported_cost()}),
+            testing::EndOfStream{},
+        }}}}};
+    WakeCounter wake;
+    runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake,
+                              &wake};
+    REQUIRE(kernel.start(run_start(backend_request)));
+    static_cast<void>(drain_to_end(kernel, wake));
+    REQUIRE(kernel.projection(make_id<domain::RunId>("run"))->status() ==
+            domain::RunStatus::failed);
+  }
+
+  SECTION("duplicate for one inference") {
+    auto backend_request = request();
+    testing::ScriptedBackend fake{{testing::ScriptedExchange{
+        backend_request,
+        testing::StreamScript{{
+            step(backend::ResponseStarted{"response"}),
+            step(backend::CostObserved{reported_cost("0.01")}),
+            step(backend::CostObserved{reported_cost("0.02")}),
+            testing::EndOfStream{},
+        }}}}};
+    WakeCounter wake;
+    runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake,
+                              &wake};
+    REQUIRE(kernel.start(run_start(backend_request)));
+    static_cast<void>(drain_to_end(kernel, wake));
+    const auto* projection = kernel.projection(make_id<domain::RunId>("run"));
+    REQUIRE(projection->status() == domain::RunStatus::failed);
+    REQUIRE(projection->reported_cost() == reported_cost("0.01"));
+  }
 }
 
 TEST_CASE("usage overflow fails without committing the overflowing event",

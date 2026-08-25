@@ -110,6 +110,7 @@ enum class TranscriptProjectionErrorCode {
   unknown_artifact,
   invalid_verification,
   usage_overflow,
+  cost_overflow,
   internal_failure,
 };
 

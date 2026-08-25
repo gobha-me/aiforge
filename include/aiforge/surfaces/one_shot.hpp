@@ -73,6 +73,7 @@ struct OneShotRequest {
 
 struct OneShotResult {
   domain::Usage usage;
+  std::optional<domain::ReportedCost> reported_cost;
   domain::SessionId session_id;
   bool durable{};
   auto operator==(const OneShotResult&) const -> bool = default;

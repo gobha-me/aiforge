@@ -840,6 +840,12 @@ struct RunKernel::Impl {
             }
             return record_or_fail(
                 domain::UsageRecorded{*active->inference_id, value.usage});
+          } else if constexpr (std::same_as<Value, backend::CostObserved>) {
+            if (!active->response_started) {
+              return fail_live_run(transaction, protocol_domain_error());
+            }
+            return record_or_fail(domain::InferenceCostRecorded{
+                *active->inference_id, std::move(value.cost)});
           } else if constexpr (std::same_as<Value, backend::ToolCallDelta>) {
             if (!active->response_started || value.tool_name.size() > 256 ||
                 has_control_character(value.tool_name)) {

@@ -435,6 +435,36 @@ template <typename Enum>
           value.at("reasoning_tokens").get<std::uint64_t>()};
 }
 
+[[nodiscard]] auto reported_cost_json(const domain::ReportedCost& cost)
+    -> Json {
+  auto amounts = Json::array();
+  for (const auto& amount : cost.amounts()) {
+    amounts.push_back({{"unit", std::string{amount.unit()}},
+                       {"amount", amount.amount().to_string()}});
+  }
+  return {{"amounts", std::move(amounts)}};
+}
+
+[[nodiscard]] auto parse_reported_cost(const Json& value)
+    -> domain::ReportedCost {
+  const auto& values = value.at("amounts");
+  if (!values.is_array()) throw CodecFailure{"reported cost is invalid"};
+  std::vector<domain::MonetaryAmount> amounts;
+  amounts.reserve(values.size());
+  for (const auto& item : values) {
+    auto decimal = domain::DecimalAmount::from(
+        item.at("amount").get<std::string>());
+    if (!decimal) throw CodecFailure{"reported cost amount is invalid"};
+    auto amount = domain::MonetaryAmount::create(
+        item.at("unit").get<std::string>(), *decimal);
+    if (!amount) throw CodecFailure{"reported cost unit is invalid"};
+    amounts.push_back(std::move(*amount));
+  }
+  auto cost = domain::ReportedCost::create(std::move(amounts));
+  if (!cost) throw CodecFailure{"reported cost is invalid"};
+  return std::move(*cost);
+}
+
 [[nodiscard]] auto metadata_json(const domain::Metadata& metadata) -> Json {
   auto result = Json::array();
   for (const auto& [key, value] : metadata) {
@@ -1438,6 +1468,9 @@ template <typename Enum>
           [](const domain::InferenceStarted&) { return std::string{"inference.started"}; },
           [](const domain::ReasoningMetadataAdded&) { return std::string{"inference.reasoning_metadata_added"}; },
           [](const domain::UsageRecorded&) { return std::string{"inference.usage_recorded"}; },
+          [](const domain::InferenceCostRecorded&) {
+            return std::string{"inference.cost_recorded"};
+          },
           [](const domain::InferenceFinished&) { return std::string{"inference.finished"}; },
           [](const domain::InferenceFailed&) { return std::string{"inference.failed"}; },
           [](const domain::InferenceCancelled&) { return std::string{"inference.cancelled"}; },
@@ -1493,7 +1526,7 @@ template <typename Enum>
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 48,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 49,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started", "run.provenance_recorded", "persona.selection_recorded",
@@ -1503,6 +1536,7 @@ template <typename Enum>
       "content.assistant_started", "content.assistant_delta_added",
       "content.assistant_finished", "inference.started",
       "inference.reasoning_metadata_added", "inference.usage_recorded",
+      "inference.cost_recorded",
       "inference.finished", "inference.failed", "inference.cancelled",
       "tool.proposed", "tool.policy_decided", "tool.approval_requested",
       "tool.approval_decided", "tool.policy_failed", "tool.started", "tool.progressed",
@@ -1579,6 +1613,10 @@ template <typename Enum>
           [](const domain::UsageRecorded& value) -> Json {
             return {{"inference_id", id_text(value.inference_id)},
                     {"usage", usage_json(value.usage)}};
+          },
+          [](const domain::InferenceCostRecorded& value) -> Json {
+            return {{"inference_id", id_text(value.inference_id)},
+                    {"cost", reported_cost_json(value.cost)}};
           },
           [](const domain::InferenceFinished& value) -> Json {
             return {{"inference_id", id_text(value.inference_id)},
@@ -1820,6 +1858,11 @@ template <typename Enum>
     return domain::UsageRecorded{
         parse_id<domain::InferenceId>(value.at("inference_id")),
         parse_usage(value.at("usage"))};
+  }
+  if (type == "inference.cost_recorded") {
+    return domain::InferenceCostRecorded{
+        parse_id<domain::InferenceId>(value.at("inference_id")),
+        parse_reported_cost(value.at("cost"))};
   }
   if (type == "inference.finished") {
     return domain::InferenceFinished{

@@ -10,6 +10,7 @@ printf 'stdin evidence' | "$fixture" explain >"$test_dir/out" 2>"$test_dir/err"
 [[ $(cat "$test_dir/out") == answer ]]
 grep -q '^citation: https://example.test (fixture)$' "$test_dir/err"
 grep -q '^usage: input=2 output=1 cached=0 reasoning=0$' "$test_dir/err"
+grep -q '^cost: unavailable$' "$test_dir/err"
 ! grep -q 'citation:' "$test_dir/out"
 
 set +e

@@ -83,6 +83,13 @@ struct UsageObserved {
   auto operator==(const UsageObserved&) const -> bool = default;
 };
 
+struct CostObserved {
+  // Actual amounts reported by the backend for this inference, not an estimate
+  // reconstructed from usage and a rate card.
+  domain::ReportedCost cost;
+  auto operator==(const CostObserved&) const -> bool = default;
+};
+
 struct ResponseFinished {
   domain::FinishReason reason;
   auto operator==(const ResponseFinished&) const -> bool = default;
@@ -95,7 +102,8 @@ struct ResponseCancelled {
 
 using BackendEvent = std::variant<ResponseStarted, ContentDelta, ReasoningDelta,
                                   ToolCallDelta, CitationObserved, UsageObserved,
-                                  ResponseFinished, ResponseCancelled>;
+                                  CostObserved, ResponseFinished,
+                                  ResponseCancelled>;
 
 enum class BackendErrorKind {
   request_rejected,

@@ -94,6 +94,7 @@ auto UsageLedgerProjection::apply(const RunEvent &event)
                                  event.metadata.timestamp,
                                  std::nullopt,
                                  InferenceUsageStatus::active,
+                                 {},
                                  {}});
             return {};
           },
@@ -122,6 +123,38 @@ auto UsageLedgerProjection::apply(const RunEvent &event)
             }
             record->usage = next_record_usage;
             m_total_usage = next_total_usage;
+            return {};
+          },
+          [&](const InferenceCostRecorded &recorded)
+              -> std::expected<void, UsageLedgerError> {
+            auto *record = find_record(recorded.inference_id);
+            if (record == nullptr) {
+              return error(UsageLedgerErrorCode::unknown_inference,
+                           "cost event has no matching inference start");
+            }
+            if (record->run_id != event.metadata.run_id) {
+              return error(UsageLedgerErrorCode::wrong_run,
+                           "cost event belongs to another run");
+            }
+            if (record->status != InferenceUsageStatus::active ||
+                record->reported_cost) {
+              return error(UsageLedgerErrorCode::invalid_transition,
+                           "cost cannot follow a terminal or prior cost event");
+            }
+
+            auto next_total = m_total_reported_cost;
+            if (next_total) {
+              auto combined = add(*next_total, recorded.cost);
+              if (!combined) {
+                return error(UsageLedgerErrorCode::cost_overflow,
+                             "reported cost ledger total overflow");
+              }
+              next_total = std::move(*combined);
+            } else {
+              next_total = recorded.cost;
+            }
+            record->reported_cost = recorded.cost;
+            m_total_reported_cost = std::move(next_total);
             return {};
           },
           [&](const InferenceFinished &finished) {

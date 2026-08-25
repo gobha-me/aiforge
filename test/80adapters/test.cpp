@@ -83,8 +83,12 @@ auto request(domain::ConstructedContext built = context())
 
 class LocalServer final {
  public:
-  explicit LocalServer(std::optional<std::string> echoed_error = std::nullopt)
-      : m_echoed_error(std::move(echoed_error)) {
+  explicit LocalServer(std::optional<std::string> echoed_error = std::nullopt,
+                       const bool duplicate_cost = false,
+                       std::string cost_value = "0.0645375")
+      : m_echoed_error(std::move(echoed_error)),
+        m_duplicate_cost(duplicate_cost),
+        m_cost_value(std::move(cost_value)) {
     m_server.Get(
         "/api/v1/models",
         [this](const httplib::Request& request, httplib::Response& response) {
@@ -111,19 +115,31 @@ class LocalServer final {
                                  "text/plain");
             return;
           }
-          response.set_content(
+          std::string stream =
               "data: "
               "{\"id\":\"response\",\"choices\":[{\"delta\":{\"role\":"
               "\"assistant\"}}]}\n\n"
               "data: "
               "{\"id\":\"response\",\"choices\":[{\"delta\":{\"content\":"
-              "\"hello\"}}]}\n\n"
+              "\"hello\"}}]}\n\n";
+          stream +=
+              "data: "
+              "{\"id\":\"response\",\"choices\":[{\"delta\":{}}],"
+              "\"cost\":{\"usd\":0,\"diem\":" +
+              m_cost_value + "}}\n\n";
+          if (m_duplicate_cost) {
+            stream +=
+                "data: "
+                "{\"id\":\"response\",\"choices\":[{\"delta\":{}}],"
+                "\"cost\":{\"diem\":0.01}}\n\n";
+          }
+          stream +=
               "data: "
               "{\"id\":\"response\",\"choices\":[{\"delta\":{},\"finish_"
               "reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_"
               "tokens\":1,\"total_tokens\":3}}\n\n"
-              "data: [DONE]\n\n",
-              "text/event-stream");
+              "data: [DONE]\n\n";
+          response.set_content(std::move(stream), "text/event-stream");
         });
     m_port = m_server.bind_to_any_port("127.0.0.1");
     REQUIRE(m_port > 0);
@@ -163,6 +179,8 @@ class LocalServer final {
   std::string m_authorization;
   std::string m_model_authorization;
   std::optional<std::string> m_echoed_error;
+  bool m_duplicate_cost{};
+  std::string m_cost_value;
 };
 
 class TestApp final : public termforge::App {
@@ -510,21 +528,73 @@ TEST_CASE("Venice adapter maps structured SSE into neutral events",
     events.push_back(std::move(**next));
   }
 
-  REQUIRE(events.size() == 4);
+  REQUIRE(events.size() == 5);
   REQUIRE(std::holds_alternative<backend::ResponseStarted>(events[0]));
   REQUIRE(std::holds_alternative<backend::ContentDelta>(events[1]));
   REQUIRE(std::get<backend::ContentDelta>(events[1]).message_id ==
           make_id<domain::MessageId>("assistant"));
-  REQUIRE(std::holds_alternative<backend::UsageObserved>(events[2]));
-  REQUIRE(std::get<backend::UsageObserved>(events[2]).usage ==
+  REQUIRE(std::holds_alternative<backend::CostObserved>(events[2]));
+  const auto& cost = std::get<backend::CostObserved>(events[2]).cost;
+  REQUIRE(cost.amounts().size() == 2);
+  REQUIRE(cost.amounts()[0].unit() == "USD");
+  REQUIRE(cost.amounts()[0].amount().to_string() == "0");
+  REQUIRE(cost.amounts()[1].unit() == "venice.diem");
+  REQUIRE(cost.amounts()[1].amount().to_string() == "0.0645375");
+  REQUIRE(std::holds_alternative<backend::UsageObserved>(events[3]));
+  REQUIRE(std::get<backend::UsageObserved>(events[3]).usage ==
           domain::Usage{2, 1, 0, 0});
-  REQUIRE(std::holds_alternative<backend::ResponseFinished>(events[3]));
+  REQUIRE(std::holds_alternative<backend::ResponseFinished>(events[4]));
 
   const auto sent = nlohmann::json::parse(server.body());
   REQUIRE(sent.at("model") == "test-model");
   REQUIRE(sent.at("messages").at(0).at("content") == "hello");
   REQUIRE(server.authorization() == "Bearer test-secret");
   REQUIRE(server.body().find("test-secret") == std::string::npos);
+}
+
+TEST_CASE("Venice adapter rejects duplicate provider cost frames",
+          "[adapter][venice][cost][failure]") {
+  LocalServer server{std::nullopt, true};
+  adapters::VeniceBackend backend{
+      secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
+  auto started = backend.start(request(), {});
+  REQUIRE(started);
+
+  std::optional<backend::BackendError> failure;
+  for (;;) {
+    auto next = (*started)->next({});
+    if (!next) {
+      failure = next.error();
+      break;
+    }
+    if (!*next) break;
+  }
+  REQUIRE(failure);
+  REQUIRE(failure->kind == backend::BackendErrorKind::protocol);
+}
+
+TEST_CASE("Venice adapter rejects invalid provider cost values",
+          "[adapter][venice][cost][failure]") {
+  for (const auto* value : {"-1", "\"invalid\""}) {
+    CAPTURE(value);
+    LocalServer server{std::nullopt, false, value};
+    adapters::VeniceBackend backend{
+        secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
+    auto started = backend.start(request(), {});
+    REQUIRE(started);
+
+    std::optional<backend::BackendError> failure;
+    for (;;) {
+      auto next = (*started)->next({});
+      if (!next) {
+        failure = next.error();
+        break;
+      }
+      if (!*next) break;
+    }
+    REQUIRE(failure);
+    REQUIRE(failure->kind == backend::BackendErrorKind::protocol);
+  }
 }
 
 TEST_CASE("Venice adapter sends structured tool results as tool messages",

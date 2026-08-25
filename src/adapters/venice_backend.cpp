@@ -1,6 +1,9 @@
 #include <aiforge/adapters/venice_backend.hpp>
 
 #include <algorithm>
+#include <array>
+#include <charconv>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -211,6 +214,52 @@ using AdapterItem =
       cumulative.reasoning_tokens - previous.reasoning_tokens};
 }
 
+[[nodiscard]] auto decimal_amount(const double value)
+    -> std::expected<domain::DecimalAmount, backend::BackendError> {
+  if (!std::isfinite(value) || value < 0.0) {
+    return std::unexpected(protocol_error());
+  }
+  std::array<char, 128> buffer{};
+  const auto converted =
+      std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+  if (converted.ec != std::errc{}) return std::unexpected(protocol_error());
+  auto amount = domain::DecimalAmount::from(std::string_view{
+      buffer.data(),
+      static_cast<std::size_t>(converted.ptr - buffer.data())});
+  if (!amount) return std::unexpected(protocol_error());
+  return *amount;
+}
+
+[[nodiscard]] auto checked_cost(const nlohmann::json& price)
+    -> std::expected<std::optional<domain::ReportedCost>,
+                     backend::BackendError> {
+  std::vector<domain::MonetaryAmount> amounts;
+  const auto append = [&](const char* field, const std::string_view unit)
+      -> std::expected<void, backend::BackendError> {
+    if (!price.contains(field) || price.at(field).is_null()) return {};
+    if (!price.at(field).is_number()) {
+      return std::unexpected(protocol_error());
+    }
+    const auto value = price.at(field).get<double>();
+    auto decimal = decimal_amount(value);
+    if (!decimal) return std::unexpected(decimal.error());
+    auto amount = domain::MonetaryAmount::create(std::string{unit}, *decimal);
+    if (!amount) return std::unexpected(protocol_error());
+    amounts.push_back(std::move(*amount));
+    return {};
+  };
+  if (auto result = append("usd", "USD"); !result) {
+    return std::unexpected(result.error());
+  }
+  if (auto result = append("diem", "venice.diem"); !result) {
+    return std::unexpected(result.error());
+  }
+  if (amounts.empty()) return std::optional<domain::ReportedCost>{};
+  auto cost = domain::ReportedCost::create(std::move(amounts));
+  if (!cost) return std::unexpected(protocol_error());
+  return std::optional<domain::ReportedCost>{std::move(*cost)};
+}
+
 class VeniceStream final : public backend::BackendStream {
  public:
   VeniceStream(venice::Client& client, venice::ChatRequest request,
@@ -294,6 +343,7 @@ class VeniceStream final : public backend::BackendStream {
     std::optional<backend::BackendError> local_error;
     std::map<int, domain::InvocationId> invocation_by_index;
     domain::Usage cumulative_usage;
+    bool cost_emitted{};
 
     const auto ensure_started = [&] -> bool {
       if (response_started) return true;
@@ -360,6 +410,27 @@ class VeniceStream final : public backend::BackendStream {
               incremental->cached_input_tokens;
           cumulative_usage.reasoning_tokens += incremental->reasoning_tokens;
           if (!emit(backend::UsageObserved{*incremental})) return false;
+        } catch (...) {
+          local_error = protocol_error();
+          return false;
+        }
+      }
+
+      if (delta.cost != nullptr) {
+        try {
+          auto cost = checked_cost(*delta.cost);
+          if (!cost) {
+            local_error = std::move(cost.error());
+            return false;
+          }
+          if (*cost) {
+            if (cost_emitted) {
+              local_error = protocol_error();
+              return false;
+            }
+            cost_emitted = true;
+            if (!emit(backend::CostObserved{std::move(**cost)})) return false;
+          }
         } catch (...) {
           local_error = protocol_error();
           return false;
