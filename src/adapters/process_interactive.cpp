@@ -12,6 +12,7 @@
 #include <aiforge/adapters/venice_backend.hpp>
 #include <aiforge/config/config.hpp>
 #include <aiforge/config/file_store.hpp>
+#include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
 #include <aiforge/surfaces/slash_commands.hpp>
 #include <algorithm>
@@ -21,9 +22,11 @@
 #include <memory>
 #include <optional>
 #include <ostream>
+#include <span>
 #include <string>
 #include <termforge/core/app.hpp>
 #include <termforge/widgets/composer.hpp>
+#include <termforge/widgets/detail/width.hpp>
 #include <termforge/widgets/focus_ring.hpp>
 #include <termforge/widgets/text_box.hpp>
 #include <utility>
@@ -188,6 +191,103 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
   }
 }
 
+[[nodiscard]] auto rebuild_usage_ledger(
+    const std::span<const domain::RunEvent> events)
+    -> std::expected<domain::UsageLedgerProjection, std::string> {
+  domain::UsageLedgerProjection result;
+  for (const auto& event : events) {
+    auto applied = result.apply(event);
+    if (!applied) return std::unexpected(applied.error().message);
+  }
+  return result;
+}
+
+[[nodiscard]] auto reported_cost_text(const domain::ReportedCost& cost)
+    -> std::string {
+  std::string result;
+  for (const auto& amount : cost.amounts()) {
+    if (!result.empty()) result += " + ";
+    result += amount.amount().to_string();
+    result += ' ';
+    result += amount.unit();
+  }
+  return result;
+}
+
+struct InferenceCounts {
+  std::size_t active{};
+  std::size_t completed{};
+  std::size_t failed{};
+  std::size_t cancelled{};
+  std::size_t costs_reported{};
+};
+
+[[nodiscard]] auto inference_counts(
+    const domain::UsageLedgerProjection& ledger) -> InferenceCounts {
+  InferenceCounts result;
+  for (const auto& record : ledger.records()) {
+    if (record.reported_cost) ++result.costs_reported;
+    switch (record.status) {
+      case domain::InferenceUsageStatus::active: ++result.active; break;
+      case domain::InferenceUsageStatus::completed: ++result.completed; break;
+      case domain::InferenceUsageStatus::failed: ++result.failed; break;
+      case domain::InferenceUsageStatus::cancelled: ++result.cancelled; break;
+    }
+  }
+  return result;
+}
+
+[[nodiscard]] auto usage_header_text(
+    const domain::UsageLedgerProjection& ledger) -> std::string {
+  const auto& usage = ledger.total_usage();
+  auto result = std::format("usage {} in/{} out", usage.input_tokens,
+                            usage.output_tokens);
+  if (usage.cached_input_tokens != 0) {
+    result += std::format("/{} cached", usage.cached_input_tokens);
+  }
+  if (usage.reasoning_tokens != 0) {
+    result += std::format("/{} reasoning", usage.reasoning_tokens);
+  }
+  if (ledger.total_reported_cost()) {
+    const auto counts = inference_counts(ledger);
+    result += " | reported ";
+    result += reported_cost_text(*ledger.total_reported_cost());
+    if (counts.costs_reported != ledger.records().size()) result += " (partial)";
+  }
+  return result;
+}
+
+[[nodiscard]] auto usage_panel_lines(
+    const domain::UsageLedgerProjection& ledger) -> std::vector<std::string> {
+  const auto& usage = ledger.total_usage();
+  const auto counts = inference_counts(ledger);
+  const auto total = ledger.records().size();
+  std::vector<std::string> lines{
+      std::format("Input tokens: {}", usage.input_tokens),
+      std::format("Output tokens: {}", usage.output_tokens),
+      std::format("Cached input tokens: {}", usage.cached_input_tokens),
+      std::format("Reasoning tokens: {}", usage.reasoning_tokens),
+      std::format(
+          "Inferences: {} total | {} completed | {} failed | {} cancelled | {} active",
+          total, counts.completed, counts.failed, counts.cancelled,
+          counts.active),
+  };
+  if (ledger.total_reported_cost()) {
+    auto cost = "Reported cost: " +
+                reported_cost_text(*ledger.total_reported_cost());
+    cost += std::format(" ({} of {} inferences reported)",
+                        counts.costs_reported, total);
+    lines.push_back(std::move(cost));
+  } else if (total == 0) {
+    lines.push_back("Reported cost: unavailable (no inferences)");
+  } else {
+    lines.push_back(std::format(
+        "Reported cost: unavailable (0 of {} inferences reported)", total));
+  }
+  lines.push_back("Reported amounts are provider observations, not estimates.");
+  return lines;
+}
+
 class ChatAppImpl final : public InteractiveChatApp {
  public:
   ChatAppImpl(backend::Backend& backend,
@@ -225,6 +325,15 @@ class ChatAppImpl final : public InteractiveChatApp {
       m_session.reset();
       return;
     }
+    auto usage = rebuild_usage_ledger(m_session->event_log().events());
+    if (!usage) {
+      m_setup_error = cli::CommandFailure{
+          cli::CommandFailureKind::runtime,
+          "interactive usage replay failed: " + usage.error()};
+      m_session.reset();
+      return;
+    }
+    m_usage_ledger = std::move(*usage);
     sync_history();
     const auto persona = m_session->persona_state();
     m_status = persona.requires_attention
@@ -427,7 +536,10 @@ class ChatAppImpl final : public InteractiveChatApp {
     } else if (persona.selected) {
       header += " | persona " + persona.selected->name;
     }
-    screen.write_text(0, 0, header, termforge::theme::kFg,
+    header += " | " + usage_header_text(m_usage_ledger);
+    screen.write_text(0, 0,
+                      termforge::detail::truncate_to_width(header, columns),
+                      termforge::theme::kFg,
                       termforge::Rgb{0x20, 0x20, 0x40});
 
     const int usable = std::max(0, rows - 2);
@@ -583,6 +695,13 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
+  auto show_usage() -> bool {
+    show_panel("Session usage and reported cost",
+               usage_panel_lines(m_usage_ledger),
+               "Usage summary is derived from session events");
+    return true;
+  }
+
   auto switch_session(const surfaces::ChatSessionOpen::Mode mode,
                       std::optional<domain::SessionId> session_id) -> bool {
     if (m_session->active()) {
@@ -634,6 +753,12 @@ class ChatAppImpl final : public InteractiveChatApp {
       m_status = "Interactive transcript replay failed";
       return false;
     }
+    auto candidate_usage =
+        rebuild_usage_ledger((*candidate)->event_log().events());
+    if (!candidate_usage) {
+      m_status = "Interactive usage replay failed: " + candidate_usage.error();
+      return false;
+    }
     auto rebuilt = m_transcript.rebuild((*candidate)->event_log().events());
     if (!rebuilt) {
       m_status = "Interactive transcript replay failed";
@@ -641,6 +766,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     }
 
     m_session = std::move(*candidate);
+    m_usage_ledger = std::move(*candidate_usage);
     m_help_visible = false;
     m_history_cutoff = 0;
     sync_history();
@@ -808,6 +934,10 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_composer.clear();
         return true;
       }
+      case surfaces::SlashCommandAction::show_usage:
+        show_usage();
+        m_composer.clear();
+        return true;
     }
     m_status = "Slash command result is unsupported";
     return false;
@@ -899,6 +1029,12 @@ class ChatAppImpl final : public InteractiveChatApp {
   [[nodiscard]] auto apply_events(const std::vector<domain::RunEvent>& events)
       -> bool {
     for (const auto& event : events) {
+      auto usage = m_usage_ledger.apply(event);
+      if (!usage) {
+        fail({cli::CommandFailureKind::runtime,
+              "interactive usage update failed: " + usage.error().message});
+        return false;
+      }
       auto applied = m_transcript.apply(event);
       if (!applied) {
         fail({cli::CommandFailureKind::runtime,
@@ -934,6 +1070,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   termforge::ByteSink* m_rendered_output{};
   std::function<void(const termforge::Screen&)> m_rendered_frame;
   bool m_poll_worker_updates{true};
+  domain::UsageLedgerProjection m_usage_ledger;
   TranscriptView m_transcript;
   termforge::TextBox m_help;
   termforge::Composer m_composer;

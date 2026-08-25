@@ -140,8 +140,9 @@ Tab completes slash-command names from the same registry used by dispatch and
 help. `/help [command]` opens transient help that never enters session history;
 `/quit` exits; `/clear` clears only the visible transcript projection while
 retaining durable events and prompt recall; and `/edit` opens an empty external
-draft. Unknown, unavailable, malformed, and oversized slash commands are
-rejected locally and never become model content.
+draft. `/usage` opens the selected session's event-derived token and
+provider-reported cost summary. Unknown, unavailable, malformed, and oversized
+slash commands are rejected locally and never become model content.
 
 ## File-backed personas
 
@@ -201,6 +202,12 @@ separate input, output, cached-input, and reasoning-token totals. Interleaved
 runs, retries, failures, cancellation, and partial live streams remain
 inspectable, while checked aggregation refuses overflow without partially
 changing the projection. Replay performs no provider call or other side effect.
+
+Interactive Chat rebuilds the ledger when a session opens or switches and
+advances it from the same events as the transcript. Its header shows compact
+input/output usage and any reported amounts; `/usage` shows all four token
+buckets, inference lifecycle counts, and cost-report coverage. Missing and
+partial reports remain explicit, including when another unit reports zero.
 
 ## Provider-reported inference cost
 
