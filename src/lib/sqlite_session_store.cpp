@@ -636,6 +636,141 @@ template <typename Enum>
           value.at("byte_size").get<std::uint64_t>()};
 }
 
+[[nodiscard]] auto
+optional_decimal_json(const std::optional<domain::DecimalAmount> &value)
+    -> Json {
+  return value ? Json(value->to_string()) : Json(nullptr);
+}
+
+[[nodiscard]] auto parse_optional_decimal(const Json &value)
+    -> std::optional<domain::DecimalAmount> {
+  if (value.is_null())
+    return std::nullopt;
+  auto parsed = domain::DecimalAmount::from(value.get<std::string>());
+  if (!parsed)
+    throw CodecFailure{"pricing amount is invalid"};
+  return *parsed;
+}
+
+[[nodiscard]] auto price_rate_json(const domain::PriceRate &rate) -> Json {
+  return {{"usd", optional_decimal_json(rate.usd)},
+          {"diem", optional_decimal_json(rate.diem)}};
+}
+
+[[nodiscard]] auto parse_price_rate(const Json &value) -> domain::PriceRate {
+  return {parse_optional_decimal(value.at("usd")),
+          parse_optional_decimal(value.at("diem"))};
+}
+
+[[nodiscard]] auto
+optional_price_rate_json(const std::optional<domain::PriceRate> &rate) -> Json {
+  return rate ? price_rate_json(*rate) : Json(nullptr);
+}
+
+[[nodiscard]] auto parse_optional_price_rate(const Json &value)
+    -> std::optional<domain::PriceRate> {
+  if (value.is_null())
+    return std::nullopt;
+  return parse_price_rate(value);
+}
+
+[[nodiscard]] auto text_price_tier_json(const domain::TextPriceTier &tier)
+    -> Json {
+  return {{"input", optional_price_rate_json(tier.input)},
+          {"output", optional_price_rate_json(tier.output)},
+          {"cache_input", optional_price_rate_json(tier.cache_input)},
+          {"cache_write", optional_price_rate_json(tier.cache_write)}};
+}
+
+[[nodiscard]] auto parse_text_price_tier(const Json &value)
+    -> domain::TextPriceTier {
+  return {parse_optional_price_rate(value.at("input")),
+          parse_optional_price_rate(value.at("output")),
+          parse_optional_price_rate(value.at("cache_input")),
+          parse_optional_price_rate(value.at("cache_write"))};
+}
+
+[[nodiscard]] auto
+pricing_origin_name(const domain::PricingCatalogOrigin origin)
+    -> std::string_view {
+  switch (origin) {
+  case domain::PricingCatalogOrigin::live:
+    return "live";
+  case domain::PricingCatalogOrigin::fresh_cache:
+    return "fresh_cache";
+  case domain::PricingCatalogOrigin::stale_cache:
+    return "stale_cache";
+  }
+  throw CodecFailure{"pricing catalog origin is invalid"};
+}
+
+[[nodiscard]] auto parse_pricing_origin(const Json &value)
+    -> domain::PricingCatalogOrigin {
+  const auto text = value.get<std::string>();
+  if (text == "live")
+    return domain::PricingCatalogOrigin::live;
+  if (text == "fresh_cache")
+    return domain::PricingCatalogOrigin::fresh_cache;
+  if (text == "stale_cache")
+    return domain::PricingCatalogOrigin::stale_cache;
+  throw CodecFailure{"pricing catalog origin is invalid"};
+}
+
+[[nodiscard]] auto
+pricing_observation_json(const domain::PricingObservation &observation)
+    -> Json {
+  Json extended = nullptr;
+  if (observation.pricing.extended) {
+    extended = text_price_tier_json(*observation.pricing.extended);
+  }
+  return {
+      {"model_id", id_text(observation.model_id)},
+      {"source_id", observation.source_id},
+      {"source_revision", optional_string_json(observation.source_revision)},
+      {"fetched_at_ms", observation.fetched_at.time_since_epoch().count()},
+      {"origin", pricing_origin_name(observation.origin)},
+      {"basis", "per_million_tokens"},
+      {"pricing",
+       {{"base", text_price_tier_json(observation.pricing.base)},
+        {"extended_threshold_tokens",
+         observation.pricing.extended_threshold_tokens
+             ? Json(*observation.pricing.extended_threshold_tokens)
+             : Json(nullptr)},
+        {"extended", std::move(extended)}}},
+      {"rate_card_digest", digest_json(observation.rate_card_digest)}};
+}
+
+[[nodiscard]] auto parse_pricing_observation(const Json &value)
+    -> domain::PricingObservation {
+  const auto &pricing = value.at("pricing");
+  domain::TextPricing parsed{parse_text_price_tier(pricing.at("base"))};
+  if (!pricing.at("extended_threshold_tokens").is_null()) {
+    parsed.extended_threshold_tokens =
+        pricing.at("extended_threshold_tokens").get<std::uint64_t>();
+  }
+  if (!pricing.at("extended").is_null()) {
+    parsed.extended = parse_text_price_tier(pricing.at("extended"));
+  }
+  if (value.at("basis").get<std::string>() != "per_million_tokens") {
+    throw CodecFailure{"pricing rate basis is invalid"};
+  }
+  domain::PricingObservation observation{
+      parse_id<domain::ModelId>(value.at("model_id")),
+      value.at("source_id").get<std::string>(),
+      parse_optional_string(value.at("source_revision")),
+      std::chrono::sys_time<std::chrono::milliseconds>{
+          std::chrono::milliseconds{
+              value.at("fetched_at_ms").get<std::int64_t>()}},
+      parse_pricing_origin(value.at("origin")),
+      domain::PricingRateBasis::per_million_tokens,
+      std::move(parsed),
+      parse_digest(value.at("rate_card_digest"))};
+  if (!domain::validate_pricing_observation(observation)) {
+    throw CodecFailure{"pricing observation is invalid"};
+  }
+  return observation;
+}
+
 [[nodiscard]] auto persona_reference_json(
     const domain::PersonaReference& reference) -> Json {
   return {{"persona_id", id_text(reference.persona_id)},
@@ -1466,6 +1601,9 @@ template <typename Enum>
           [](const domain::AssistantContentDeltaAdded&) { return std::string{"content.assistant_delta_added"}; },
           [](const domain::AssistantContentFinished&) { return std::string{"content.assistant_finished"}; },
           [](const domain::InferenceStarted&) { return std::string{"inference.started"}; },
+          [](const domain::InferencePricingObserved&) {
+            return std::string{"inference.pricing_observed"};
+          },
           [](const domain::ReasoningMetadataAdded&) { return std::string{"inference.reasoning_metadata_added"}; },
           [](const domain::UsageRecorded&) { return std::string{"inference.usage_recorded"}; },
           [](const domain::InferenceCostRecorded&) {
@@ -1526,7 +1664,7 @@ template <typename Enum>
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 49,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 50,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started", "run.provenance_recorded", "persona.selection_recorded",
@@ -1535,6 +1673,7 @@ template <typename Enum>
       "run.cancel_requested", "run.cancelled", "content.user_added",
       "content.assistant_started", "content.assistant_delta_added",
       "content.assistant_finished", "inference.started",
+      "inference.pricing_observed",
       "inference.reasoning_metadata_added", "inference.usage_recorded",
       "inference.cost_recorded",
       "inference.finished", "inference.failed", "inference.cancelled",
@@ -1604,6 +1743,11 @@ template <typename Enum>
           [](const domain::InferenceStarted& value) -> Json {
             return {{"inference_id", id_text(value.inference_id)},
                     {"model_id", id_text(value.model_id)}};
+          },
+          [](const domain::InferencePricingObserved &value) -> Json {
+            return {
+                {"inference_id", id_text(value.inference_id)},
+                {"observation", pricing_observation_json(value.observation)}};
           },
           [](const domain::ReasoningMetadataAdded& value) -> Json {
             return {{"inference_id", id_text(value.inference_id)},
@@ -1847,6 +1991,11 @@ template <typename Enum>
     return domain::InferenceStarted{
         parse_id<domain::InferenceId>(value.at("inference_id")),
         parse_id<domain::ModelId>(value.at("model_id"))};
+  }
+  if (type == "inference.pricing_observed") {
+    return domain::InferencePricingObserved{
+        parse_id<domain::InferenceId>(value.at("inference_id")),
+        parse_pricing_observation(value.at("observation"))};
   }
   if (type == "inference.reasoning_metadata_added") {
     return domain::ReasoningMetadataAdded{

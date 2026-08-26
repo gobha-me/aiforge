@@ -77,6 +77,9 @@ struct RunStart {
   // Recorded atomically with run start when a persona is selected or explicitly
   // disabled. The kernel verifies it against attributes and constructed context.
   std::optional<domain::PersonaSelection> persona_selection{};
+  // Durable rate-card provenance for the inference, when the selected model
+  // catalog supplied pricing. This is runtime metadata, not a backend option.
+  std::optional<domain::PricingObservation> pricing_observation{};
   auto operator==(const RunStart&) const -> bool = default;
 };
 
@@ -152,9 +155,10 @@ class RunKernel final {
       const domain::InvocationId& invocation_id,
       std::optional<std::string> reason = std::nullopt)
       -> std::expected<void, RunKernelError>;
-  [[nodiscard]] auto continue_run(const domain::RunId& run_id,
-                                  backend::BackendRequest request)
-      -> std::expected<void, RunKernelError>;
+  [[nodiscard]] auto
+  continue_run(const domain::RunId &run_id, backend::BackendRequest request,
+               std::optional<domain::PricingObservation> pricing_observation =
+                   std::nullopt) -> std::expected<void, RunKernelError>;
 
   // Drain worker observations and apply their run events on the calling
   // thread. The returned events are exactly those committed by this call.

@@ -98,7 +98,7 @@ class LocalServer final {
                 request.get_header_value("Authorization");
           }
           response.set_content(
-              R"({"data":[{"id":"test-model","type":"text","context_length":8192,"model_spec":{"availableContextTokens":8192,"maxCompletionTokens":1024,"offline":false}}]})",
+              R"({"data":[{"id":"test-model","type":"text","context_length":8192,"model_spec":{"availableContextTokens":8192,"maxCompletionTokens":1024,"offline":false,"pricing":{"input":{"usd":1.42,"diem":2.5},"output":{"usd":2.83},"cache_input":{"usd":0.23}}}}]})",
               "application/json");
         });
     m_server.Post(
@@ -255,6 +255,15 @@ TEST_CASE("Venice model discovery is public and maps neutral context metadata",
   REQUIRE(catalog->entries.front().type == "text");
   REQUIRE(catalog->entries.front().context_window_tokens == 8192);
   REQUIRE(catalog->entries.front().maximum_output_tokens == 1024);
+  REQUIRE(catalog->source_id == "venice.models");
+  REQUIRE(catalog->entries.front().pricing->base.input->usd->to_string() ==
+          "1.42");
+  REQUIRE(catalog->entries.front().pricing->base.input->diem->to_string() ==
+          "2.5");
+  REQUIRE(
+      catalog->entries.front().pricing->base.cache_input->usd->to_string() ==
+      "0.23");
+  REQUIRE_FALSE(catalog->entries.front().pricing->base.cache_write);
   REQUIRE(server.model_authorization().empty());
 }
 
@@ -270,7 +279,9 @@ TEST_CASE("model catalog cache round trips atomically with restrictive permissio
       {model::Capability::tool_calling, true},
       {model::Capability::vision, std::nullopt}};
   entry.pricing = model::Pricing{};
-  entry.pricing->base.input = model::Price{0.5, 1.0};
+  entry.pricing->base.input =
+      model::Price{domain::DecimalAmount::from("0.5").value(),
+                   domain::DecimalAmount::from("1").value()};
   model::CatalogSnapshot snapshot{
       std::chrono::sys_time<std::chrono::milliseconds>{1234ms},
       {std::move(entry)}};
@@ -281,6 +292,7 @@ TEST_CASE("model catalog cache round trips atomically with restrictive permissio
   REQUIRE(loaded->has_value());
   REQUIRE((*loaded)->entries == snapshot.entries);
   REQUIRE((*loaded)->fetched_at == snapshot.fetched_at);
+  REQUIRE((*loaded)->source_id == snapshot.source_id);
 
   const auto permissions = std::filesystem::status(path).permissions();
   REQUIRE((permissions & (std::filesystem::perms::group_all |
@@ -300,9 +312,18 @@ TEST_CASE("model cache rejects duplicate JSON, loose modes, symlinks and cancell
                                std::filesystem::perm_options::replace);
   REQUIRE_FALSE(cache.load({}));
 
-  write_file(path,
-             R"({"schema_version":1,"fetched_at_ms":0,"entries":[]})");
-  std::filesystem::permissions(path, std::filesystem::perms::owner_read |
+  write_file(path, R"({"schema_version":1,"fetched_at_ms":0,"entries":[]})");
+  std::filesystem::permissions(path,
+                               std::filesystem::perms::owner_read |
+                                   std::filesystem::perms::owner_write,
+                               std::filesystem::perm_options::replace);
+  REQUIRE_FALSE(cache.load({}));
+
+  write_file(
+      path,
+      R"({"schema_version":2,"fetched_at_ms":0,"source_id":"test.models","source_revision":null,"entries":[]})");
+  std::filesystem::permissions(path,
+                               std::filesystem::perms::owner_read |
                                          std::filesystem::perms::owner_write |
                                          std::filesystem::perms::group_read,
                                std::filesystem::perm_options::replace);

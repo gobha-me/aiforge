@@ -20,6 +20,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   one_shot.cpp
   persona.cpp
   persona_context.cpp
+  pricing.cpp
   presentation_text.cpp
   project_instructions.cpp
   provenance.cpp

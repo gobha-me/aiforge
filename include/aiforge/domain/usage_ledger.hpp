@@ -27,6 +27,7 @@ struct InferenceUsageRecord {
   InferenceUsageStatus status{InferenceUsageStatus::active};
   Usage usage;
   std::optional<ReportedCost> reported_cost;
+  std::optional<PricingObservation> pricing_observation;
   auto operator==(const InferenceUsageRecord &) const -> bool = default;
 };
 
@@ -40,6 +41,7 @@ enum class UsageLedgerErrorCode {
   invalid_transition,
   usage_overflow,
   cost_overflow,
+  invalid_pricing,
 };
 
 struct UsageLedgerError {

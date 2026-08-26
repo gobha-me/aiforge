@@ -36,6 +36,8 @@ Overloaded(Callables...) -> Overloaded<Callables...>;
       return {TranscriptProjectionErrorCode::usage_overflow, error.message};
     case ProjectionErrorCode::cost_overflow:
       return {TranscriptProjectionErrorCode::cost_overflow, error.message};
+  case ProjectionErrorCode::invalid_pricing:
+    return {TranscriptProjectionErrorCode::invalid_transition, error.message};
     case ProjectionErrorCode::invalid_transition:
       return {TranscriptProjectionErrorCode::invalid_transition, error.message};
   }

@@ -37,6 +37,7 @@ enum class ProjectionErrorCode {
   wrong_inference,
   usage_overflow,
   cost_overflow,
+  invalid_pricing,
 };
 
 struct ProjectionError {
@@ -59,7 +60,12 @@ class RunProjection final {
       -> const std::optional<ReportedCost>& {
     return m_reported_cost;
   }
-  [[nodiscard]] auto active_inference_id() const noexcept -> const std::optional<InferenceId>& {
+  [[nodiscard]] auto pricing_observations() const noexcept
+      -> const std::vector<PricingObservation> & {
+    return m_pricing_observations;
+  }
+  [[nodiscard]] auto active_inference_id() const noexcept
+      -> const std::optional<InferenceId> & {
     return m_active_inference_id;
   }
   [[nodiscard]] auto provenance() const noexcept -> const std::optional<RunProvenance>& {
@@ -81,7 +87,10 @@ class RunProjection final {
   Usage m_usage;
   std::optional<ReportedCost> m_reported_cost;
   std::optional<InferenceId> m_active_inference_id;
+  std::optional<ModelId> m_active_model_id;
   bool m_active_inference_cost_recorded{};
+  bool m_active_inference_pricing_recorded{};
+  std::vector<PricingObservation> m_pricing_observations;
   std::optional<RunProvenance> m_provenance;
   std::optional<PersonaId> m_persona_id;
   std::optional<PersonaSelection> m_persona_selection;

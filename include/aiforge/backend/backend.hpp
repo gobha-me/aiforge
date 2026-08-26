@@ -7,6 +7,7 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -127,9 +128,19 @@ struct BackendError {
 };
 
 struct ModelContextInfo {
+  ModelContextInfo(
+      domain::ModelId selected_model_id, std::uint64_t context_tokens,
+      std::optional<std::uint64_t> output_tokens = std::nullopt,
+      std::optional<domain::PricingObservation> pricing = std::nullopt)
+      : model_id(std::move(selected_model_id)),
+        context_window_tokens(context_tokens),
+        maximum_output_tokens(output_tokens),
+        pricing_observation(std::move(pricing)) {}
+
   domain::ModelId model_id;
   std::uint64_t context_window_tokens{};
   std::optional<std::uint64_t> maximum_output_tokens;
+  std::optional<domain::PricingObservation> pricing_observation;
   auto operator==(const ModelContextInfo&) const -> bool = default;
 };
 

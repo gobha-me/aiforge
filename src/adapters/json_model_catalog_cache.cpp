@@ -23,7 +23,7 @@ namespace aiforge::adapters {
 namespace {
 
 using Json = nlohmann::json;
-constexpr int cache_schema_version = 1;
+constexpr int cache_schema_version = 2;
 
 class DuplicateJsonKey final : public std::exception {};
 
@@ -64,17 +64,28 @@ class DuplicateJsonKey final : public std::exception {};
 }
 
 [[nodiscard]] auto price_json(const model::Price& price) -> Json {
-  return {{"usd", price.usd ? Json(*price.usd) : Json(nullptr)},
-          {"diem", price.diem ? Json(*price.diem) : Json(nullptr)}};
+  return {{"usd", price.usd ? Json(price.usd->to_string()) : Json(nullptr)},
+          {"diem", price.diem ? Json(price.diem->to_string()) : Json(nullptr)}};
 }
 
 [[nodiscard]] auto parse_price(const Json& value) -> model::Price {
   model::Price result;
-  if (!value.is_object()) throw std::runtime_error{"price is not an object"};
-  if (value.contains("usd") && !value.at("usd").is_null())
-    result.usd = value.at("usd").get<double>();
-  if (value.contains("diem") && !value.at("diem").is_null())
-    result.diem = value.at("diem").get<double>();
+  if (!value.is_object())
+    throw std::runtime_error{"price is not an object"};
+  if (value.contains("usd") && !value.at("usd").is_null()) {
+    auto amount =
+        domain::DecimalAmount::from(value.at("usd").get<std::string>());
+    if (!amount)
+      throw std::runtime_error{"USD price is invalid"};
+    result.usd = *amount;
+  }
+  if (value.contains("diem") && !value.at("diem").is_null()) {
+    auto amount =
+        domain::DecimalAmount::from(value.at("diem").get<std::string>());
+    if (!amount)
+      throw std::runtime_error{"diem price is invalid"};
+    result.diem = *amount;
+  }
   return result;
 }
 
@@ -205,6 +216,11 @@ class DuplicateJsonKey final : public std::exception {};
         std::chrono::sys_time<std::chrono::milliseconds>{
             std::chrono::milliseconds{
                 document.at("fetched_at_ms").get<std::int64_t>()}}};
+    result.source_id = document.at("source_id").get<std::string>();
+    if (!document.at("source_revision").is_null()) {
+      result.source_revision =
+          document.at("source_revision").get<std::string>();
+    }
     result.entries.reserve(document.at("entries").size());
     for (const auto& entry : document.at("entries"))
       result.entries.push_back(parse_entry(entry));
@@ -220,6 +236,10 @@ class DuplicateJsonKey final : public std::exception {};
   for (const auto& entry : snapshot.entries) entries.push_back(entry_json(entry));
   return Json{{"schema_version", cache_schema_version},
               {"fetched_at_ms", snapshot.fetched_at.time_since_epoch().count()},
+              {"source_id", snapshot.source_id},
+              {"source_revision", snapshot.source_revision
+                                      ? Json(*snapshot.source_revision)
+                                      : Json(nullptr)},
               {"entries", std::move(entries)}}
              .dump();
 }

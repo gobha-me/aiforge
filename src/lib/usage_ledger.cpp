@@ -95,7 +95,33 @@ auto UsageLedgerProjection::apply(const RunEvent &event)
                                  std::nullopt,
                                  InferenceUsageStatus::active,
                                  {},
+                                 {},
                                  {}});
+            return {};
+          },
+          [&](const InferencePricingObserved &observed)
+              -> std::expected<void, UsageLedgerError> {
+            auto *record = find_record(observed.inference_id);
+            if (record == nullptr) {
+              return error(UsageLedgerErrorCode::unknown_inference,
+                           "pricing has no matching inference start");
+            }
+            if (record->run_id != event.metadata.run_id) {
+              return error(UsageLedgerErrorCode::wrong_run,
+                           "pricing belongs to another run");
+            }
+            if (record->status != InferenceUsageStatus::active ||
+                record->pricing_observation ||
+                record->model_id != observed.observation.model_id) {
+              return error(
+                  UsageLedgerErrorCode::invalid_transition,
+                  "pricing cannot follow a terminal or prior observation");
+            }
+            if (!validate_pricing_observation(observed.observation)) {
+              return error(UsageLedgerErrorCode::invalid_pricing,
+                           "pricing observation is malformed");
+            }
+            record->pricing_observation = observed.observation;
             return {};
           },
           [&](const UsageRecorded &recorded)

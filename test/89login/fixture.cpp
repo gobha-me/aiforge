@@ -229,8 +229,8 @@ auto fail(const std::string_view message, Child* child = nullptr) -> int {
   std::ofstream output{directory / "model-catalog.json", std::ios::binary};
   if (!output) return false;
   output
-      << R"({"schema_version":1,"fetched_at_ms":)" << now
-      << R"(,"entries":[{"id":"offline-model","type":"text","name":null,"context_window_tokens":8192,"maximum_output_tokens":1024,"offline":false,"traits":[],"capabilities":[],"pricing":null}]})";
+      << R"({"schema_version":2,"fetched_at_ms":)" << now
+      << R"(,"source_id":"test.models","source_revision":null,"entries":[{"id":"offline-model","type":"text","name":null,"context_window_tokens":8192,"maximum_output_tokens":1024,"offline":false,"traits":[],"capabilities":[],"pricing":null}]})";
   output.close();
   return output.good() &&
          ::chmod((directory / "model-catalog.json").c_str(), 0600) == 0;
