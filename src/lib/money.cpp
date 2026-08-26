@@ -1,13 +1,16 @@
 #include <aiforge/domain/money.hpp>
 
 #include <algorithm>
+#include <compare>
 #include <limits>
+#include <string_view>
 #include <utility>
 
 namespace aiforge::domain {
 namespace {
 
 constexpr std::uint8_t kMaximumScale = 18;
+constexpr std::uint8_t kMaximumSpendCeilingScale = 6;
 constexpr std::size_t kMaximumUnits = 16;
 
 [[nodiscard]] auto money_error(const MoneyErrorCode code, std::string message)
@@ -48,6 +51,37 @@ constexpr std::size_t kMaximumUnits = 16;
 
 [[nodiscard]] auto ascii_digit(const char character) -> bool {
   return character >= '0' && character <= '9';
+}
+
+[[nodiscard]] auto aligned_digits(const DecimalAmount &amount,
+                                  const std::uint8_t scale) -> std::string {
+  auto result = std::to_string(amount.coefficient());
+  result.append(scale - amount.scale(), '0');
+  return result;
+}
+
+auto left_pad(std::string &value, const std::size_t size) -> void {
+  if (value.size() < size)
+    value.insert(0, size - value.size(), '0');
+}
+
+[[nodiscard]] auto plain_decimal(const std::string_view text) -> bool {
+  if (text.empty())
+    return false;
+  bool saw_dot{};
+  bool saw_digit{};
+  for (const auto character : text) {
+    if (ascii_digit(character)) {
+      saw_digit = true;
+      continue;
+    }
+    if (character == '.' && !saw_dot) {
+      saw_dot = true;
+      continue;
+    }
+    return false;
+  }
+  return saw_digit && text.front() != '.' && text.back() != '.';
 }
 
 } // namespace
@@ -195,6 +229,87 @@ auto add(const DecimalAmount &left, const DecimalAmount &right)
     --normalized_scale;
   }
   return DecimalAmount{coefficient, normalized_scale};
+}
+
+auto compare(const DecimalAmount &left, const DecimalAmount &right)
+    -> std::strong_ordering {
+  const auto scale = std::max(left.scale(), right.scale());
+  auto left_digits = aligned_digits(left, scale);
+  auto right_digits = aligned_digits(right, scale);
+  const auto width = std::max(left_digits.size(), right_digits.size());
+  left_pad(left_digits, width);
+  left_pad(right_digits, width);
+  if (left_digits < right_digits)
+    return std::strong_ordering::less;
+  if (left_digits > right_digits)
+    return std::strong_ordering::greater;
+  return std::strong_ordering::equal;
+}
+
+auto subtract(const DecimalAmount &left, const DecimalAmount &right)
+    -> std::expected<DecimalAmount, MoneyError> {
+  if (compare(left, right) == std::strong_ordering::less) {
+    return std::unexpected(money_error(MoneyErrorCode::negative_result,
+                                       "amount subtraction is negative"));
+  }
+  const auto scale = std::max(left.scale(), right.scale());
+  auto left_digits = aligned_digits(left, scale);
+  auto right_digits = aligned_digits(right, scale);
+  const auto width = std::max(left_digits.size(), right_digits.size());
+  left_pad(left_digits, width);
+  left_pad(right_digits, width);
+
+  int borrow{};
+  for (std::size_t index = width; index > 0; --index) {
+    auto digit = static_cast<int>(left_digits[index - 1] - '0') - borrow -
+                 static_cast<int>(right_digits[index - 1] - '0');
+    if (digit < 0) {
+      digit += 10;
+      borrow = 1;
+    } else {
+      borrow = 0;
+    }
+    left_digits[index - 1] = static_cast<char>('0' + digit);
+  }
+
+  if (scale != 0) {
+    if (left_digits.size() <= scale) {
+      left_digits.insert(0, scale - left_digits.size() + 1, '0');
+    }
+    left_digits.insert(left_digits.size() - scale, 1, '.');
+  }
+  return DecimalAmount::from(left_digits);
+}
+
+auto SessionSpendCeiling::from(const std::string_view text)
+    -> std::expected<SessionSpendCeiling, MoneyError> {
+  const auto decimal = text.find('.');
+  if (!plain_decimal(text) ||
+      (decimal != std::string_view::npos &&
+       text.size() - decimal - 1 > kMaximumSpendCeilingScale)) {
+    return std::unexpected(
+        money_error(MoneyErrorCode::invalid_amount,
+                    "session spend ceiling must be a plain positive decimal"));
+  }
+  auto amount = DecimalAmount::from(text);
+  if (!amount)
+    return std::unexpected(std::move(amount.error()));
+  return create(*amount);
+}
+
+auto SessionSpendCeiling::create(DecimalAmount amount)
+    -> std::expected<SessionSpendCeiling, MoneyError> {
+  if (amount.coefficient() == 0) {
+    return std::unexpected(
+        money_error(MoneyErrorCode::invalid_amount,
+                    "session spend ceiling must be greater than zero"));
+  }
+  if (amount.scale() > kMaximumSpendCeilingScale) {
+    return std::unexpected(money_error(
+        MoneyErrorCode::invalid_amount,
+        "session spend ceiling supports at most six fractional digits"));
+  }
+  return SessionSpendCeiling{amount};
 }
 
 auto MonetaryAmount::create(std::string unit, DecimalAmount amount)

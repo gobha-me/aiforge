@@ -238,6 +238,8 @@ auto one_shot_handler(CommandContext& context,
       context.invocation, std::string{option_prefix} + "persona");
   const auto requested_model = parsed_text_values(
       context.invocation, std::string{option_prefix} + "model");
+  const auto requested_spend_ceiling = parsed_text_values(
+      context.invocation, std::string{option_prefix} + "session-max-spend");
   const bool no_persona =
       parsed_argument(context.invocation,
                       std::string{option_prefix} + "no-persona") != nullptr;
@@ -257,6 +259,21 @@ auto one_shot_handler(CommandContext& context,
       (requested_model->size() != 1 || requested_model->front().empty())) {
     context.error << "aiforge: model ID is invalid\n";
     return usage_exit_code;
+  }
+  std::optional<domain::SessionSpendCeiling> session_spend_ceiling;
+  if (requested_spend_ceiling) {
+    if (requested_spend_ceiling->size() != 1) {
+      context.error << "aiforge: session spend ceiling is invalid\n";
+      return usage_exit_code;
+    }
+    auto parsed =
+        domain::SessionSpendCeiling::from(requested_spend_ceiling->front());
+    if (!parsed) {
+      context.error << "aiforge: --session-max-spend requires a positive USD "
+                       "decimal with at most 6 fractional digits\n";
+      return usage_exit_code;
+    }
+    session_spend_ceiling = std::move(*parsed);
   }
   persona::PersonaDirective persona_directive;
   if (persona_name) {
@@ -299,7 +316,8 @@ auto one_shot_handler(CommandContext& context,
           {session_mode, std::move(resume_id), std::move(persona_directive),
            requested_model
                ? std::optional<std::string>{requested_model->front()}
-               : std::nullopt},
+               : std::nullopt,
+           session_spend_ceiling},
           context.environment,
           context.output, context.error);
       if (result) return success_exit_code;
@@ -338,7 +356,8 @@ auto one_shot_handler(CommandContext& context,
        std::move(persona_directive),
        requested_model
            ? std::optional<std::string>{requested_model->front()}
-           : std::nullopt},
+           : std::nullopt,
+       session_spend_ceiling},
       context.environment, context.output, context.error);
   if (result) return success_exit_code;
   if (!result.error().message.empty()) {
@@ -731,6 +750,13 @@ auto builtin_command_registry() -> const CommandRegistry& {
           1},
          "model-id",
          "Select and validate a text model."},
+        {{std::string{prefix} + ".session-max-spend",
+          {"--session-max-spend"},
+          ArgumentValueKind::text,
+          0,
+          1},
+         "USD",
+         "Set or narrow the durable session inference spend ceiling."},
         {{std::string{prefix} + ".no-persona",
           {"--no-persona"},
           ArgumentValueKind::flag,

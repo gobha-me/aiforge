@@ -129,6 +129,21 @@ auto write(std::ostream& stream, const std::string_view value) -> bool {
   return result;
 }
 
+[[nodiscard]] auto spend_line(const domain::SessionSpendSummary &spend)
+    -> std::string {
+  auto result = std::string{"spend: USD="};
+  if (!spend.accounted) {
+    result += "unavailable cap=" + spend.ceiling.amount().to_string();
+  } else {
+    result += spend.accounted->amount().to_string() +
+              " cap=" + spend.ceiling.amount().to_string() +
+              " remaining=" + spend.remaining->amount().to_string() +
+              (spend.reached ? " reached" : " open");
+  }
+  result += " (provider-reported or catalog-derived)\n";
+  return result;
+}
+
 template <typename IdType>
 [[nodiscard]] auto make_id(const std::string_view prefix,
                            const std::uint64_t suffix)
@@ -147,6 +162,73 @@ template <typename IdType>
   const auto tick = static_cast<std::uint64_t>(
       std::chrono::steady_clock::now().time_since_epoch().count());
   return tick ^ count;
+}
+
+struct SpendState {
+  domain::UsageLedgerProjection ledger;
+  domain::SessionSpendCeilingProjection ceiling;
+};
+
+[[nodiscard]] auto rebuild_spend_ceiling(const domain::SessionEventLog& log)
+    -> std::expected<domain::SessionSpendCeilingProjection, OneShotError> {
+  domain::SessionSpendCeilingProjection ceiling;
+  for (const auto& event : log.events()) {
+    if (!ceiling.apply(event)) {
+      return one_shot_error(OneShotErrorCode::run_failed,
+                            "session spend ceiling history is invalid");
+    }
+  }
+  return ceiling;
+}
+
+[[nodiscard]] auto rebuild_spend_state(const domain::SessionEventLog& log)
+    -> std::expected<SpendState, OneShotError> {
+  SpendState state;
+  for (const auto& event : log.events()) {
+    if (!state.ledger.apply(event) || !state.ceiling.apply(event)) {
+      return one_shot_error(OneShotErrorCode::run_failed,
+                            "session spend history is invalid");
+    }
+  }
+  return state;
+}
+
+[[nodiscard]] auto apply_requested_spend_ceiling(
+    runtime::RunKernel& kernel,
+    const std::optional<domain::SessionSpendCeiling>& requested)
+    -> std::expected<void, OneShotError> {
+  auto ceiling = rebuild_spend_ceiling(kernel.event_log());
+  if (!ceiling) return std::unexpected(std::move(ceiling.error()));
+  if (!requested) return {};
+  if (ceiling->ceiling()) {
+    const auto ordering = domain::compare(
+        requested->amount(), ceiling->ceiling()->amount());
+    if (ordering == std::strong_ordering::greater) {
+      return one_shot_error(OneShotErrorCode::invalid_input,
+                            "session spend ceiling cannot be widened");
+    }
+    if (ordering == std::strong_ordering::equal) return {};
+  }
+  const auto suffix = next_suffix();
+  auto run_id = make_id<domain::RunId>("spend-policy", suffix);
+  auto surface_id = make_id<domain::SurfaceId>("session-policy", suffix);
+  auto workspace_id = make_id<domain::WorkspaceId>("chat", suffix);
+  auto permission_id =
+      make_id<domain::PermissionProfileId>("observe", suffix);
+  if (!run_id || !surface_id || !workspace_id || !permission_id) {
+    return one_shot_error(OneShotErrorCode::internal_failure,
+                          "session spend identity generation failed");
+  }
+  auto recorded = kernel.record_session_spend_ceiling(
+      {*run_id,
+       {*surface_id, *workspace_id, *permission_id, std::nullopt},
+       *requested,
+       domain::SessionSpendCeilingSource::command_line});
+  if (!recorded) {
+    return one_shot_error(OneShotErrorCode::run_failed,
+                          recorded.error().message);
+  }
+  return {};
 }
 
 class Wake final : public runtime::RunWakeSink {
@@ -441,6 +523,37 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
           std::make_unique<runtime::RunKernel>(session_id, m_backend, &wake);
     }
 
+    if (auto applied = apply_requested_spend_ceiling(
+            *kernel, request.session_spend_ceiling);
+        !applied) {
+      return std::unexpected(std::move(applied.error()));
+    }
+    auto opening_ceiling = rebuild_spend_ceiling(kernel->event_log());
+    if (!opening_ceiling) {
+      return std::unexpected(std::move(opening_ceiling.error()));
+    }
+    if (opening_ceiling->ceiling()) {
+      auto opening_spend = rebuild_spend_state(kernel->event_log());
+      if (!opening_spend) {
+        return std::unexpected(std::move(opening_spend.error()));
+      }
+      const auto spend = domain::summarize_session_spend(
+          opening_spend->ledger.records(),
+          *opening_spend->ceiling.ceiling());
+      if (!spend.accounted) {
+        return one_shot_error(
+            OneShotErrorCode::spend_accounting_unavailable,
+            "session spend accounting is unavailable; refusing another inference");
+      }
+      if (spend.reached) {
+        return one_shot_error(
+            OneShotErrorCode::spend_ceiling_reached,
+            "session spend ceiling reached (USD " +
+                spend.accounted->amount().to_string() + " of " +
+                spend.ceiling.amount().to_string() + ")");
+      }
+    }
+
     auto resolved_persona = resolve_persona(
         m_persona_source, request.persona, kernel->event_log(), stop_token);
     if (!resolved_persona) {
@@ -678,8 +791,26 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       return one_shot_error(OneShotErrorCode::output_failed,
                             "diagnostic output failed");
     }
-    return OneShotResult{usage, reported_cost, std::move(estimates), session_id,
-                         durable};
+    std::optional<domain::SessionSpendSummary> spend;
+    auto final_ceiling = rebuild_spend_ceiling(kernel->event_log());
+    if (!final_ceiling) {
+      return std::unexpected(std::move(final_ceiling.error()));
+    }
+    if (final_ceiling->ceiling()) {
+      auto final_spend_state = rebuild_spend_state(kernel->event_log());
+      if (!final_spend_state) {
+        return std::unexpected(std::move(final_spend_state.error()));
+      }
+      spend = domain::summarize_session_spend(
+          final_spend_state->ledger.records(),
+          *final_spend_state->ceiling.ceiling());
+      if (!write(error, spend_line(*spend))) {
+        return one_shot_error(OneShotErrorCode::output_failed,
+                              "diagnostic output failed");
+      }
+    }
+    return OneShotResult{usage,      reported_cost, std::move(estimates),
+                         session_id, durable,       std::move(spend)};
   } catch (...) {
     return one_shot_error(OneShotErrorCode::internal_failure,
                           "one-shot execution failed internally");

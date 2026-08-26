@@ -159,6 +159,24 @@ auto add_failure(SessionCostEstimate &summary,
   }
 }
 
+auto add_failure(SessionSpendSummary &summary,
+                 const CostEstimateUnavailableReason reason) -> void {
+  const auto found = std::ranges::find(summary.unavailable, reason,
+                                       &CostEstimateFailureCount::reason);
+  if (found == summary.unavailable.end()) {
+    summary.unavailable.push_back({reason, 1});
+  } else {
+    ++found->count;
+  }
+}
+
+[[nodiscard]] auto reported_usd(const ReportedCost &cost)
+    -> const MonetaryAmount * {
+  const auto found = std::ranges::find(cost.amounts(), std::string_view{"USD"},
+                                       &MonetaryAmount::unit);
+  return found == cost.amounts().end() ? nullptr : &*found;
+}
+
 } // namespace
 
 auto cost_estimate_unit_name(const CostEstimateUnit unit) noexcept
@@ -292,6 +310,75 @@ auto summarize_cost_estimates(
           CostEstimateUnavailableReason::arithmetic_overflow;
     }
   }
+  return result;
+}
+
+auto summarize_session_spend(
+    const std::span<const InferenceUsageRecord> records,
+    const SessionSpendCeiling &ceiling) -> SessionSpendSummary {
+  SessionSpendSummary result{ceiling, std::nullopt, std::nullopt, 0,    0,
+                             0,       {},           std::nullopt, false};
+  result.total_inferences = records.size();
+  std::optional<DecimalAmount> total{DecimalAmount::from("0").value()};
+  for (const auto &record : records) {
+    std::optional<DecimalAmount> amount;
+    if (record.reported_cost) {
+      if (const auto *reported = reported_usd(*record.reported_cost)) {
+        amount = reported->amount();
+        ++result.reported_inferences;
+      }
+    }
+    if (!amount) {
+      auto estimate = estimate_inference_cost(record, CostEstimateUnit::usd);
+      if (!estimate) {
+        add_failure(result, estimate.error().reason);
+        continue;
+      }
+      amount = estimate->amount.amount();
+      ++result.estimated_inferences;
+    }
+    auto combined = add(*total, *amount);
+    if (!combined) {
+      result.aggregation_failure =
+          CostEstimateUnavailableReason::arithmetic_overflow;
+      total.reset();
+      break;
+    }
+    total = *combined;
+  }
+
+  const auto accounted_count =
+      result.reported_inferences + result.estimated_inferences;
+  if (!total || result.aggregation_failure ||
+      accounted_count != result.total_inferences) {
+    return result;
+  }
+  auto accounted = MonetaryAmount::create("USD", *total);
+  if (!accounted) {
+    result.aggregation_failure =
+        CostEstimateUnavailableReason::arithmetic_overflow;
+    return result;
+  }
+  result.accounted = std::move(*accounted);
+  result.reached =
+      compare(*total, ceiling.amount()) != std::strong_ordering::less;
+  const auto remaining_amount = result.reached
+                                    ? DecimalAmount::from("0")
+                                    : subtract(ceiling.amount(), *total);
+  if (!remaining_amount) {
+    result.accounted.reset();
+    result.aggregation_failure =
+        CostEstimateUnavailableReason::arithmetic_overflow;
+    return result;
+  }
+  auto remaining = MonetaryAmount::create("USD", *remaining_amount);
+  if (!remaining) {
+    result.accounted.reset();
+    result.aggregation_failure =
+        CostEstimateUnavailableReason::arithmetic_overflow;
+    return result;
+  }
+  result.remaining = std::move(*remaining);
   return result;
 }
 
@@ -466,6 +553,40 @@ auto UsageLedgerProjection::apply(const RunEvent &event)
     m_last_sequence = event.metadata.sequence;
   }
   return result;
+}
+
+auto SessionSpendCeilingProjection::apply(const RunEvent &event)
+    -> std::expected<void, UsageLedgerError> {
+  if (event.metadata.sequence == 0 || event.metadata.schema_version == 0) {
+    return error(UsageLedgerErrorCode::invalid_envelope,
+                 "event sequence and schema version must be positive");
+  }
+  if (m_event_ids.contains(event.metadata.event_id)) {
+    return error(UsageLedgerErrorCode::duplicate_event_id,
+                 "event ID is already present in the spend ceiling projection");
+  }
+  if (event.metadata.sequence <= m_last_sequence) {
+    return error(UsageLedgerErrorCode::non_monotonic_sequence,
+                 "event sequence must increase");
+  }
+
+  if (const auto *set = std::get_if<SessionSpendCeilingSet>(&event.payload)) {
+    if (set->source != SessionSpendCeilingSource::command_line ||
+        !SessionSpendCeiling::create(set->ceiling.amount())) {
+      return error(UsageLedgerErrorCode::invalid_ceiling,
+                   "session spend ceiling event is invalid");
+    }
+    if (m_ceiling && compare(set->ceiling.amount(), m_ceiling->amount()) ==
+                         std::strong_ordering::greater) {
+      return error(UsageLedgerErrorCode::ceiling_widening,
+                   "session spend ceiling cannot be widened");
+    }
+    m_ceiling = set->ceiling;
+  }
+
+  m_event_ids.insert(event.metadata.event_id);
+  m_last_sequence = event.metadata.sequence;
+  return {};
 }
 
 } // namespace aiforge::domain

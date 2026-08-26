@@ -867,6 +867,43 @@ TEST_CASE("a run without provenance records none", "[runtime][provenance]") {
   REQUIRE_FALSE(kernel.projection(make_id<domain::RunId>("run"))->provenance());
 }
 
+TEST_CASE("run kernel records spend ceiling changes without backend work",
+          "[runtime][spend][failure]") {
+  testing::ScriptedBackend fake{{}};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake};
+  const auto change = [](const std::string &run, const std::string &value) {
+    return runtime::SessionSpendCeilingChange{
+        make_id<domain::RunId>(run),
+        {make_id<domain::SurfaceId>("session-policy"),
+         make_id<domain::WorkspaceId>("chat"),
+         make_id<domain::PermissionProfileId>("observe"), std::nullopt},
+        domain::SessionSpendCeiling::from(value).value(),
+        domain::SessionSpendCeilingSource::command_line};
+  };
+
+  REQUIRE(kernel.record_session_spend_ceiling(change("policy-10", "10")));
+  REQUIRE(kernel.event_log().events().size() == 3);
+  REQUIRE(std::holds_alternative<domain::RunStarted>(
+      kernel.event_log().events()[0].payload));
+  REQUIRE(std::get<domain::SessionSpendCeilingSet>(
+              kernel.event_log().events()[1].payload)
+              .ceiling.amount()
+              .to_string() == "10");
+  REQUIRE(std::holds_alternative<domain::RunCompleted>(
+      kernel.event_log().events()[2].payload));
+  REQUIRE(kernel.projection(make_id<domain::RunId>("policy-10"))->status() ==
+          domain::RunStatus::completed);
+  REQUIRE(fake.recorded_requests().empty());
+
+  REQUIRE(kernel.record_session_spend_ceiling(change("policy-5", "5")));
+  const auto widened =
+      kernel.record_session_spend_ceiling(change("policy-6", "6"));
+  REQUIRE_FALSE(widened);
+  REQUIRE(widened.error().code == runtime::RunKernelErrorCode::invalid_start);
+  REQUIRE(kernel.event_log().events().size() == 6);
+  REQUIRE_FALSE(kernel.projection(make_id<domain::RunId>("policy-6")));
+}
+
 TEST_CASE("resume restores recorded provenance and rejects a duplicate record",
           "[runtime][provenance][failure]") {
   const auto session = make_id<domain::SessionId>("session");

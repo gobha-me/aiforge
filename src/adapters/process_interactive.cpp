@@ -202,6 +202,17 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
   return result;
 }
 
+[[nodiscard]] auto rebuild_spend_ceiling(
+    const std::span<const domain::RunEvent> events)
+    -> std::expected<domain::SessionSpendCeilingProjection, std::string> {
+  domain::SessionSpendCeilingProjection result;
+  for (const auto& event : events) {
+    auto applied = result.apply(event);
+    if (!applied) return std::unexpected(applied.error().message);
+  }
+  return result;
+}
+
 [[nodiscard]] auto reported_cost_text(const domain::ReportedCost& cost)
     -> std::string {
   std::string result;
@@ -266,7 +277,8 @@ struct InferenceCounts {
 }
 
 [[nodiscard]] auto usage_header_text(
-    const domain::UsageLedgerProjection& ledger) -> std::string {
+    const domain::UsageLedgerProjection& ledger,
+    const domain::SessionSpendCeilingProjection& ceiling) -> std::string {
   const auto& usage = ledger.total_usage();
   auto result = std::format("usage {} in/{} out", usage.input_tokens,
                             usage.output_tokens);
@@ -291,11 +303,25 @@ struct InferenceCounts {
     if (usd.subtotal) result += " " + estimate_summary_text(usd);
     if (diem.subtotal) result += " " + estimate_summary_text(diem);
   }
+  if (ceiling.ceiling()) {
+    const auto spend =
+        domain::summarize_session_spend(ledger.records(), *ceiling.ceiling());
+    result += " | spend ";
+    if (spend.accounted) {
+      result += spend.accounted->amount().to_string() + "/" +
+                spend.ceiling.amount().to_string() + " USD";
+      if (spend.reached) result += " reached";
+    } else {
+      result += "unavailable/" + spend.ceiling.amount().to_string() + " USD";
+    }
+  }
   return result;
 }
 
 [[nodiscard]] auto usage_panel_lines(
-    const domain::UsageLedgerProjection& ledger) -> std::vector<std::string> {
+    const domain::UsageLedgerProjection& ledger,
+    const domain::SessionSpendCeilingProjection& ceiling)
+    -> std::vector<std::string> {
   const auto& usage = ledger.total_usage();
   const auto counts = inference_counts(ledger);
   const auto total = ledger.records().size();
@@ -334,6 +360,40 @@ struct InferenceCounts {
     const auto failures = estimate_failures_text(estimate);
     if (!failures.empty()) line += "; unavailable: " + failures;
     lines.push_back(std::move(line));
+  }
+  if (ceiling.ceiling()) {
+    const auto spend =
+        domain::summarize_session_spend(ledger.records(), *ceiling.ceiling());
+    lines.push_back("Spend ceiling (USD): " +
+                    spend.ceiling.amount().to_string());
+    if (spend.accounted) {
+      lines.push_back("Accounted spend (USD): " +
+                      spend.accounted->amount().to_string());
+      lines.push_back("Remaining spend (USD): " +
+                      spend.remaining->amount().to_string());
+      lines.push_back(std::string{"Spend ceiling state: "} +
+                      (spend.reached ? "reached" : "open"));
+      lines.push_back(std::format(
+          "Spend coverage: {} provider-reported + {} catalog-derived of {} inferences",
+          spend.reported_inferences, spend.estimated_inferences,
+          spend.total_inferences));
+    } else {
+      lines.push_back("Accounted spend (USD): unavailable");
+      for (const auto& failure : spend.unavailable) {
+        lines.push_back(
+            "Spend unavailable: " +
+            std::string{domain::cost_estimate_reason_name(failure.reason)} +
+            "=" + std::to_string(failure.count));
+      }
+      if (spend.aggregation_failure) {
+        lines.push_back(
+            "Spend unavailable: " +
+            std::string{domain::cost_estimate_reason_name(
+                *spend.aggregation_failure)});
+      }
+    }
+  } else {
+    lines.push_back("Spend ceiling: not set");
   }
   lines.push_back(
       "Reported amounts are provider observations; catalog estimates are derived, not quotes.");
@@ -386,6 +446,15 @@ class ChatAppImpl final : public InteractiveChatApp {
       return;
     }
     m_usage_ledger = std::move(*usage);
+    auto ceiling = rebuild_spend_ceiling(m_session->event_log().events());
+    if (!ceiling) {
+      m_setup_error = cli::CommandFailure{
+          cli::CommandFailureKind::runtime,
+          "interactive spend ceiling replay failed: " + ceiling.error()};
+      m_session.reset();
+      return;
+    }
+    m_spend_ceiling = std::move(*ceiling);
     sync_history();
     const auto persona = m_session->persona_state();
     m_status = persona.requires_attention
@@ -588,7 +657,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     } else if (persona.selected) {
       header += " | persona " + persona.selected->name;
     }
-    header += " | " + usage_header_text(m_usage_ledger);
+    header += " | " + usage_header_text(m_usage_ledger, m_spend_ceiling);
     screen.write_text(0, 0,
                       termforge::detail::truncate_to_width(header, columns),
                       termforge::theme::kFg,
@@ -748,8 +817,8 @@ class ChatAppImpl final : public InteractiveChatApp {
   }
 
   auto show_usage() -> bool {
-    show_panel("Session usage and reported cost",
-               usage_panel_lines(m_usage_ledger),
+    show_panel("Session usage, cost, and spend ceiling",
+               usage_panel_lines(m_usage_ledger, m_spend_ceiling),
                "Usage summary is derived from session events");
     return true;
   }
@@ -811,6 +880,13 @@ class ChatAppImpl final : public InteractiveChatApp {
       m_status = "Interactive usage replay failed: " + candidate_usage.error();
       return false;
     }
+    auto candidate_ceiling =
+        rebuild_spend_ceiling((*candidate)->event_log().events());
+    if (!candidate_ceiling) {
+      m_status = "Interactive spend ceiling replay failed: " +
+                 candidate_ceiling.error();
+      return false;
+    }
     auto rebuilt = m_transcript.rebuild((*candidate)->event_log().events());
     if (!rebuilt) {
       m_status = "Interactive transcript replay failed";
@@ -819,6 +895,7 @@ class ChatAppImpl final : public InteractiveChatApp {
 
     m_session = std::move(*candidate);
     m_usage_ledger = std::move(*candidate_usage);
+    m_spend_ceiling = std::move(*candidate_ceiling);
     m_help_visible = false;
     m_history_cutoff = 0;
     sync_history();
@@ -1087,6 +1164,13 @@ class ChatAppImpl final : public InteractiveChatApp {
               "interactive usage update failed: " + usage.error().message});
         return false;
       }
+      auto ceiling = m_spend_ceiling.apply(event);
+      if (!ceiling) {
+        fail({cli::CommandFailureKind::runtime,
+              "interactive spend ceiling update failed: " +
+                  ceiling.error().message});
+        return false;
+      }
       auto applied = m_transcript.apply(event);
       if (!applied) {
         fail({cli::CommandFailureKind::runtime,
@@ -1123,6 +1207,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   std::function<void(const termforge::Screen&)> m_rendered_frame;
   bool m_poll_worker_updates{true};
   domain::UsageLedgerProjection m_usage_ledger;
+  domain::SessionSpendCeilingProjection m_spend_ceiling;
   TranscriptView m_transcript;
   termforge::TextBox m_help;
   termforge::Composer m_composer;
@@ -1223,7 +1308,8 @@ auto ProcessInteractiveCommand::execute(Request request,
     surfaces::ChatSessionOpen open{std::move(*model), mode,
                                    std::move(request.session_id),
                                    std::move(provenance),
-                                   std::move(request.persona)};
+                                   std::move(request.persona),
+                                   std::move(request.session_spend_ceiling)};
 
     std::unique_ptr<SqliteSessionStore> store;
     if (mode != surfaces::ChatSessionOpen::Mode::ephemeral) {

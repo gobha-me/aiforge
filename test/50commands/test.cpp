@@ -40,6 +40,7 @@ class FakeOneShot final : public OneShotCommand {
     seen_session_id = std::move(request.session_id);
     seen_persona = std::move(request.persona);
     seen_model = std::move(request.model);
+    seen_spend_ceiling = std::move(request.session_spend_ceiling);
     saw_terminal_input = environment.input_is_terminal;
     output << "answer";
     error << "usage\n";
@@ -52,6 +53,7 @@ class FakeOneShot final : public OneShotCommand {
   std::optional<aiforge::domain::SessionId> seen_session_id;
   aiforge::persona::PersonaDirective seen_persona;
   std::optional<std::string> seen_model;
+  std::optional<aiforge::domain::SessionSpendCeiling> seen_spend_ceiling;
   bool saw_terminal_input{};
   std::optional<CommandFailure> failure;
 };
@@ -64,6 +66,7 @@ class FakeInteractive final : public InteractiveCommand {
     seen_session_id = std::move(request.session_id);
     seen_persona = std::move(request.persona);
     seen_model = std::move(request.model);
+    seen_spend_ceiling = std::move(request.session_spend_ceiling);
     output << "interactive";
     if (failure) return std::unexpected(*failure);
     return {};
@@ -73,6 +76,7 @@ class FakeInteractive final : public InteractiveCommand {
   std::optional<aiforge::domain::SessionId> seen_session_id;
   aiforge::persona::PersonaDirective seen_persona;
   std::optional<std::string> seen_model;
+  std::optional<aiforge::domain::SessionSpendCeiling> seen_spend_ceiling;
   std::optional<CommandFailure> failure;
 };
 
@@ -396,6 +400,27 @@ TEST_CASE("one-shot session options are explicit and mutually exclusive",
   error.str({});
   REQUIRE(CommandDispatcher{}.dispatch(
               registry,
+              std::vector<std::string_view>{"chat", "--session-max-spend",
+                                            "12.340000", "bounded"},
+              environment, output, error) == 0);
+  REQUIRE(one_shot.seen_spend_ceiling->amount().to_string() == "12.34");
+
+  for (const auto value : {"0", "-1", "1e2", "0.0000001"}) {
+    output.str({});
+    error.str({});
+    CAPTURE(value);
+    REQUIRE(CommandDispatcher{}.dispatch(
+                registry,
+                std::vector<std::string_view>{"chat", "--session-max-spend",
+                                              value, "invalid"},
+                environment, output, error) == 2);
+    REQUIRE(error.str().find("positive USD decimal") != std::string::npos);
+  }
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
               std::vector<std::string_view>{"--no-persona", "without"},
               environment, output, error) == 0);
   REQUIRE(one_shot.seen_persona.kind ==
@@ -448,6 +473,14 @@ TEST_CASE("one-shot session options are explicit and mutually exclusive",
               std::vector<std::string_view>{"--model", "interactive-model"},
               environment, output, error) == 0);
   REQUIRE(interactive.seen_model == "interactive-model");
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"--session-max-spend", "5.5"},
+              environment, output, error) == 0);
+  REQUIRE(interactive.seen_spend_ceiling->amount().to_string() == "5.5");
 }
 
 TEST_CASE("models command uses its dedicated service and preserves streams",

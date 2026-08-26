@@ -2,6 +2,7 @@
 
 #include <aiforge/cli/parser.hpp>
 #include <aiforge/domain/ids.hpp>
+#include <aiforge/domain/money.hpp>
 #include <aiforge/persona/source.hpp>
 #include <cstddef>
 #include <expected>
@@ -46,6 +47,7 @@ class OneShotCommand {
     std::optional<domain::SessionId> session_id;
     persona::PersonaDirective persona;
     std::optional<std::string> model;
+    std::optional<domain::SessionSpendCeiling> session_spend_ceiling;
   };
 
   [[nodiscard]] virtual auto execute(Request request,
@@ -70,6 +72,7 @@ class InteractiveCommand {
     std::optional<domain::SessionId> session_id;
     persona::PersonaDirective persona;
     std::optional<std::string> model;
+    std::optional<domain::SessionSpendCeiling> session_spend_ceiling;
   };
 
   [[nodiscard]] virtual auto execute(Request request,

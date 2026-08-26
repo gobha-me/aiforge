@@ -29,9 +29,10 @@ auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
-auto reported_cost() -> domain::ReportedCost {
+auto reported_cost(const std::string& usd_value = "0")
+    -> domain::ReportedCost {
   auto usd = domain::MonetaryAmount::create(
-      "USD", domain::DecimalAmount::from("0").value()).value();
+      "USD", domain::DecimalAmount::from(usd_value).value()).value();
   auto diem = domain::MonetaryAmount::create(
       "venice.diem", domain::DecimalAmount::from("0.0645375").value())
                   .value();
@@ -145,7 +146,8 @@ class FakeModels final : public backend::ModelContextProvider {
   std::size_t lookups{};
 };
 
-auto success_items(const domain::MessageId& message_id) -> std::vector<Item>;
+auto success_items(const domain::MessageId& message_id,
+                   const std::string& usd_value = "0") -> std::vector<Item>;
 
 auto persona_document(std::string text = "Review carefully.")
     -> domain::PersonaDocument {
@@ -272,13 +274,15 @@ class ConversationBackend final : public backend::Backend {
                        backend::BackendError> override {
     const auto assistant = request.assistant_message_id;
     captured.push_back(std::move(request));
-    return std::make_unique<VectorStream>(success_items(assistant));
+    return std::make_unique<VectorStream>(success_items(assistant, usd_value));
   }
 
   std::vector<backend::BackendRequest> captured;
+  std::string usd_value{"0"};
 };
 
-auto success_items(const domain::MessageId& message_id) -> std::vector<Item> {
+auto success_items(const domain::MessageId& message_id,
+                   const std::string& usd_value) -> std::vector<Item> {
   return {
       backend::BackendEvent{backend::ResponseStarted{"response"}},
       backend::BackendEvent{backend::ContentDelta{
@@ -286,7 +290,7 @@ auto success_items(const domain::MessageId& message_id) -> std::vector<Item> {
       backend::BackendEvent{backend::CitationObserved{
           {"https://example.test/\x1b[2J", "source\nforged\x7f"}}},
       backend::BackendEvent{backend::UsageObserved{{3, 2, 1, 0}}},
-      backend::BackendEvent{backend::CostObserved{reported_cost()}},
+      backend::BackendEvent{backend::CostObserved{reported_cost(usd_value)}},
       backend::BackendEvent{
           backend::ResponseFinished{domain::FinishReason::stop}},
       End{},
@@ -594,6 +598,60 @@ TEST_CASE("durable one-shot sessions resume completed conversation in order",
   REQUIRE(continued->session_id == first->session_id);
 }
 
+TEST_CASE("one-shot spend ceiling allows crossing then blocks durable resume",
+          "[one-shot][spend][session][failure]") {
+  FakeModels models;
+  ConversationBackend backend;
+  backend.usd_value = "1.25";
+  MemoryStore store;
+  surfaces::OneShotSurface surface{backend, models, store};
+  std::ostringstream output;
+  std::ostringstream error;
+  const auto model = make_id<domain::ModelId>("model");
+  const auto cap = domain::SessionSpendCeiling::from("1").value();
+
+  auto first = surface.run({"first",
+                            std::nullopt,
+                            model,
+                            surfaces::OneShotRequest::SessionMode::create,
+                            std::nullopt,
+                            std::nullopt,
+                            {},
+                            cap},
+                           output, error);
+  REQUIRE(first);
+  REQUIRE(first->spend);
+  REQUIRE(first->spend->reached);
+  REQUIRE(first->spend->accounted->amount().to_string() == "1.25");
+  REQUIRE(error.str().find("spend: USD=1.25 cap=1 remaining=0 reached") !=
+          std::string::npos);
+  REQUIRE(backend.captured.size() == 1);
+
+  output.str({});
+  error.str({});
+  auto blocked = surface.run({"second", std::nullopt, model,
+                              surfaces::OneShotRequest::SessionMode::resume,
+                              first->session_id},
+                             output, error);
+  REQUIRE_FALSE(blocked);
+  REQUIRE(blocked.error().code ==
+          surfaces::OneShotErrorCode::spend_ceiling_reached);
+  REQUIRE(backend.captured.size() == 1);
+
+  auto widened = surface.run({"wider",
+                              std::nullopt,
+                              model,
+                              surfaces::OneShotRequest::SessionMode::resume,
+                              first->session_id,
+                              std::nullopt,
+                              {},
+                              domain::SessionSpendCeiling::from("2").value()},
+                             output, error);
+  REQUIRE_FALSE(widened);
+  REQUIRE(widened.error().code == surfaces::OneShotErrorCode::invalid_input);
+  REQUIRE(backend.captured.size() == 1);
+}
+
 TEST_CASE("one-shot personas are injected recorded and identity-checked",
           "[one-shot][persona][session][failure]") {
   FakeModels models;
@@ -782,6 +840,30 @@ TEST_CASE("terminal persistence failure publishes none of its event batch",
            std::holds_alternative<domain::InferenceFinished>(event.payload) ||
            std::holds_alternative<domain::RunCompleted>(event.payload);
   }));
+}
+
+TEST_CASE("spend ceiling persistence fails atomically before provider start",
+          "[one-shot][spend][session][failure]") {
+  FakeModels models;
+  ConversationBackend backend;
+  MemoryStore store;
+  store.append_failure = storage::SessionStoreError{
+      storage::SessionStoreErrorCode::io_failure, "sensitive detail", true};
+  surfaces::OneShotSurface surface{backend, models, store};
+  std::ostringstream output;
+  std::ostringstream error;
+
+  const auto result = surface.run(
+      {"bounded", std::nullopt, make_id<domain::ModelId>("model"),
+       surfaces::OneShotRequest::SessionMode::create, std::nullopt,
+       std::nullopt, {}, domain::SessionSpendCeiling::from("1").value()},
+      output, error);
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == surfaces::OneShotErrorCode::run_failed);
+  REQUIRE(result.error().message.find("sensitive") == std::string::npos);
+  REQUIRE(backend.captured.empty());
+  REQUIRE(store.sessions.size() == 1);
+  REQUIRE(store.histories.empty());
 }
 
 TEST_CASE("semantically corrupt replay is rejected without provider work",

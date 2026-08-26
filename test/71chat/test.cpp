@@ -26,8 +26,10 @@ auto make_id(const std::string& value) -> IdType {
 
 class Stream final : public backend::BackendStream {
  public:
-  Stream(domain::MessageId message_id, std::string answer)
-      : m_message_id(std::move(message_id)), m_answer(std::move(answer)) {}
+  Stream(domain::MessageId message_id, std::string answer,
+         std::optional<domain::ReportedCost> cost)
+      : m_message_id(std::move(message_id)), m_answer(std::move(answer)),
+        m_cost(std::move(cost)) {}
 
   auto next(std::stop_token stop_token)
       -> std::expected<std::optional<backend::BackendEvent>,
@@ -44,6 +46,13 @@ class Stream final : public backend::BackendStream {
       case 2:
         return backend::BackendEvent{backend::UsageObserved{{2, 1, 0, 0}}};
       case 3:
+        if (m_cost) {
+          return backend::BackendEvent{backend::CostObserved{*m_cost}};
+        }
+        return backend::BackendEvent{
+            backend::ResponseFinished{domain::FinishReason::stop}};
+      case 4:
+        if (!m_cost) return std::optional<backend::BackendEvent>{};
         return backend::BackendEvent{
             backend::ResponseFinished{domain::FinishReason::stop}};
       default:
@@ -54,6 +63,7 @@ class Stream final : public backend::BackendStream {
  private:
   domain::MessageId m_message_id;
   std::string m_answer;
+  std::optional<domain::ReportedCost> m_cost;
   int m_step{};
 };
 
@@ -72,11 +82,18 @@ class Backend final : public backend::Backend,
     requests.push_back(request);
     return std::make_unique<Stream>(
         request.assistant_message_id,
-        "answer-" + std::to_string(requests.size()));
+        "answer-" + std::to_string(requests.size()), reported_cost);
   }
 
   std::vector<backend::BackendRequest> requests;
+  std::optional<domain::ReportedCost> reported_cost;
 };
+
+auto usd_cost(const std::string& value) -> domain::ReportedCost {
+  auto amount = domain::MonetaryAmount::create(
+      "USD", domain::DecimalAmount::from(value).value()).value();
+  return domain::ReportedCost::create({std::move(amount)}).value();
+}
 
 class MemoryStore final : public storage::SessionStore {
  public:
@@ -245,6 +262,81 @@ TEST_CASE("interactive turns stream and reuse completed conversation context",
           std::vector<std::string>{"answer-1"});
   REQUIRE((*session)->submitted_prompts() ==
           std::vector<std::string>{"first\nline", "second"});
+}
+
+TEST_CASE("interactive spend ceilings persist and block subsequent inference",
+          "[chat][spend][failure]") {
+  Backend backend;
+  backend.reported_cost = usd_cost("1.25");
+  MemoryStore store;
+  auto created = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::create,
+       std::nullopt,
+       std::nullopt,
+       {},
+       domain::SessionSpendCeiling::from("1").value()},
+      backend, backend, &store);
+  REQUIRE(created);
+  const auto session_id = (*created)->session_id();
+  REQUIRE(std::ranges::count_if(
+              (*created)->event_log().events(), [](const auto &item) {
+                return std::holds_alternative<domain::SessionSpendCeilingSet>(
+                    item.payload);
+              }) == 1);
+
+  REQUIRE((*created)->submit("cross the ceiling"));
+  drain_to_end(**created);
+  REQUIRE(backend.requests.size() == 1);
+  const auto blocked = (*created)->submit("must not start");
+  REQUIRE_FALSE(blocked);
+  REQUIRE(blocked.error().code ==
+          surfaces::ChatSessionErrorCode::spend_ceiling_reached);
+  REQUIRE(backend.requests.size() == 1);
+
+  created->reset();
+  auto inherited = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::resume, session_id},
+      backend, backend, &store);
+  REQUIRE(inherited);
+  const auto still_blocked = (*inherited)->submit("still blocked");
+  REQUIRE_FALSE(still_blocked);
+  REQUIRE(still_blocked.error().code ==
+          surfaces::ChatSessionErrorCode::spend_ceiling_reached);
+
+  auto widened = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::resume,
+       session_id,
+       std::nullopt,
+       {},
+       domain::SessionSpendCeiling::from("2").value()},
+      backend, backend, &store);
+  REQUIRE_FALSE(widened);
+  REQUIRE(widened.error().code ==
+          surfaces::ChatSessionErrorCode::invalid_input);
+}
+
+TEST_CASE("interactive spend ceiling fails closed without USD accounting",
+          "[chat][spend][failure]") {
+  Backend backend;
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral,
+       std::nullopt,
+       std::nullopt,
+       {},
+       domain::SessionSpendCeiling::from("10").value()},
+      backend, backend);
+  REQUIRE(session);
+  REQUIRE((*session)->submit("first"));
+  drain_to_end(**session);
+  const auto blocked = (*session)->submit("second");
+  REQUIRE_FALSE(blocked);
+  REQUIRE(blocked.error().code ==
+          surfaces::ChatSessionErrorCode::spend_accounting_unavailable);
+  REQUIRE(backend.requests.size() == 1);
 }
 
 TEST_CASE("interactive personas are attributed and retained per run",

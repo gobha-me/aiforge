@@ -21,6 +21,8 @@ enum class OneShotErrorCode {
   input_too_large,
   model_lookup_failed,
   context_failed,
+  spend_ceiling_reached,
+  spend_accounting_unavailable,
   run_failed,
   output_failed,
   cancelled,
@@ -53,14 +55,17 @@ struct OneShotRequest {
                  SessionMode session_mode = SessionMode::create,
                  std::optional<domain::SessionId> session_id = std::nullopt,
                  std::optional<domain::RunProvenance> provenance = std::nullopt,
-                 persona::PersonaDirective persona = {})
+                 persona::PersonaDirective persona = {},
+                 std::optional<domain::SessionSpendCeiling>
+                     session_spend_ceiling = std::nullopt)
       : prompt(std::move(prompt)),
         stdin_evidence(std::move(stdin_evidence)),
         model_id(std::move(model_id)),
         session_mode(session_mode),
         session_id(std::move(session_id)),
         provenance(std::move(provenance)),
-        persona(std::move(persona)) {}
+        persona(std::move(persona)),
+        session_spend_ceiling(std::move(session_spend_ceiling)) {}
 
   std::string prompt;
   std::optional<std::string> stdin_evidence;
@@ -71,6 +76,7 @@ struct OneShotRequest {
   // run kernel.
   std::optional<domain::RunProvenance> provenance;
   persona::PersonaDirective persona;
+  std::optional<domain::SessionSpendCeiling> session_spend_ceiling;
 };
 
 struct OneShotResult {
@@ -79,6 +85,7 @@ struct OneShotResult {
   std::vector<domain::SessionCostEstimate> catalog_estimates;
   domain::SessionId session_id;
   bool durable{};
+  std::optional<domain::SessionSpendSummary> spend;
   auto operator==(const OneShotResult&) const -> bool = default;
 };
 

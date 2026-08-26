@@ -1271,7 +1271,7 @@ TEST_CASE("interactive chat records and replays a gated backend stream",
       }));
   REQUIRE(std::ranges::any_of(
       result->recorded.normalized_frames, [](const std::string& frame) {
-        return frame.find("Session usage and reported cost") !=
+        return frame.find("Session usage, cost, and spend ceiling") !=
                    std::string::npos &&
                frame.find("Input tokens: 3") != std::string::npos &&
                frame.find("Cached input tokens: 1") != std::string::npos &&

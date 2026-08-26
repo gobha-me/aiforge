@@ -1,5 +1,6 @@
 #pragma once
 
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -13,6 +14,7 @@ namespace aiforge::domain {
 enum class MoneyErrorCode {
   invalid_amount,
   amount_overflow,
+  negative_result,
   invalid_unit,
   duplicate_unit,
   empty_cost,
@@ -47,10 +49,36 @@ private:
 
   friend auto add(const DecimalAmount &left, const DecimalAmount &right)
       -> std::expected<DecimalAmount, MoneyError>;
+  friend auto subtract(const DecimalAmount &left, const DecimalAmount &right)
+      -> std::expected<DecimalAmount, MoneyError>;
 };
 
 [[nodiscard]] auto add(const DecimalAmount &left, const DecimalAmount &right)
     -> std::expected<DecimalAmount, MoneyError>;
+[[nodiscard]] auto subtract(const DecimalAmount &left,
+                            const DecimalAmount &right)
+    -> std::expected<DecimalAmount, MoneyError>;
+[[nodiscard]] auto compare(const DecimalAmount &left,
+                           const DecimalAmount &right) -> std::strong_ordering;
+
+class SessionSpendCeiling final {
+public:
+  [[nodiscard]] static auto from(std::string_view text)
+      -> std::expected<SessionSpendCeiling, MoneyError>;
+  [[nodiscard]] static auto create(DecimalAmount amount)
+      -> std::expected<SessionSpendCeiling, MoneyError>;
+
+  [[nodiscard]] auto amount() const noexcept -> const DecimalAmount & {
+    return m_amount;
+  }
+
+  auto operator==(const SessionSpendCeiling &) const -> bool = default;
+
+private:
+  explicit SessionSpendCeiling(DecimalAmount amount) : m_amount(amount) {}
+
+  DecimalAmount m_amount;
+};
 
 class MonetaryAmount final {
 public:

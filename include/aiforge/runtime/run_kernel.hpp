@@ -91,6 +91,15 @@ struct ToolApprovalResolution {
   auto operator==(const ToolApprovalResolution&) const -> bool = default;
 };
 
+struct SessionSpendCeilingChange {
+  domain::RunId run_id;
+  domain::RunStarted attributes;
+  domain::SessionSpendCeiling ceiling;
+  domain::SessionSpendCeilingSource source{
+      domain::SessionSpendCeilingSource::command_line};
+  auto operator==(const SessionSpendCeilingChange&) const -> bool = default;
+};
+
 struct PendingQuestionInput {
   domain::RunId run_id;
   domain::InvocationId invocation_id;
@@ -131,6 +140,9 @@ class RunKernel final {
   auto operator=(RunKernel&&) -> RunKernel& = delete;
 
   [[nodiscard]] auto start(RunStart start)
+      -> std::expected<void, RunKernelError>;
+  [[nodiscard]] auto record_session_spend_ceiling(
+      SessionSpendCeilingChange change)
       -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto cancel(const domain::RunId& run_id,
                             const domain::InferenceId& inference_id,
