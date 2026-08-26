@@ -18,6 +18,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   model_catalog.cpp
   money.cpp
   one_shot.cpp
+  plan.cpp
   persona.cpp
   persona_context.cpp
   pricing.cpp

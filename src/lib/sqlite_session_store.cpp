@@ -1,4 +1,5 @@
 #include <aiforge/adapters/sqlite_session_store.hpp>
+#include <aiforge/domain/plan_projection.hpp>
 #include <aiforge/repository/review_receipt.hpp>
 #include <aiforge/repository/verification_evidence.hpp>
 
@@ -923,6 +924,169 @@ pricing_observation_json(const domain::PricingObservation &observation)
   return parse_snapshot(value);
 }
 
+[[nodiscard]] auto plan_decision_name(const domain::PlanDecision value)
+    -> std::string_view {
+  switch (value) {
+    case domain::PlanDecision::approved: return "approved";
+    case domain::PlanDecision::revision_requested: return "revision_requested";
+    case domain::PlanDecision::rejected: return "rejected";
+  }
+  throw CodecFailure{"invalid plan decision"};
+}
+
+[[nodiscard]] auto parse_plan_decision(const Json& value)
+    -> domain::PlanDecision {
+  using Decision = domain::PlanDecision;
+  return enum_value<Decision>(
+      value.get<std::string>(),
+      {{"approved", Decision::approved},
+       {"revision_requested", Decision::revision_requested},
+       {"rejected", Decision::rejected}});
+}
+
+[[nodiscard]] auto plan_decision_source_name(
+    const domain::PlanDecisionSource value) -> std::string_view {
+  switch (value) {
+    case domain::PlanDecisionSource::user: return "user";
+    case domain::PlanDecisionSource::policy: return "policy";
+  }
+  throw CodecFailure{"invalid plan decision source"};
+}
+
+[[nodiscard]] auto parse_plan_decision_source(const Json& value)
+    -> domain::PlanDecisionSource {
+  using Source = domain::PlanDecisionSource;
+  return enum_value<Source>(value.get<std::string>(),
+                            {{"user", Source::user},
+                             {"policy", Source::policy}});
+}
+
+[[nodiscard]] auto plan_resource_intent_json(
+    const domain::PlanResourceIntent& intent) -> Json {
+  return {{"effect", effect_name(intent.effect)},
+          {"kind", intent.kind},
+          {"value", intent.value}};
+}
+
+[[nodiscard]] auto parse_plan_resource_intent(const Json& value)
+    -> domain::PlanResourceIntent {
+  return {parse_effect(value.at("effect")),
+          value.at("kind").get<std::string>(),
+          value.at("value").get<std::string>()};
+}
+
+[[nodiscard]] auto plan_task_json(const domain::PlanTask& task) -> Json {
+  auto dependencies = Json::array();
+  for (const auto& dependency : task.dependency_task_ids) {
+    dependencies.push_back(id_text(dependency));
+  }
+  auto intents = Json::array();
+  for (const auto& intent : task.resource_intents) {
+    intents.push_back(plan_resource_intent_json(intent));
+  }
+  return {{"task_id", id_text(task.task_id)},
+          {"parent_task_id", optional_id_json(task.parent_task_id)},
+          {"dependency_task_ids", std::move(dependencies)},
+          {"title", task.title},
+          {"acceptance_criteria", task.acceptance_criteria},
+          {"intended_effects", effects_json(task.intended_effects)},
+          {"resource_intents", std::move(intents)}};
+}
+
+[[nodiscard]] auto parse_plan_task(const Json& value) -> domain::PlanTask {
+  const auto& raw_dependencies = value.at("dependency_task_ids");
+  const auto& raw_criteria = value.at("acceptance_criteria");
+  const auto& raw_intents = value.at("resource_intents");
+  if (!raw_dependencies.is_array() || !raw_criteria.is_array() ||
+      !raw_intents.is_array()) {
+    throw CodecFailure{"plan task list is invalid"};
+  }
+  domain::PlanTask task{
+      parse_id<domain::PlanTaskId>(value.at("task_id")),
+      parse_optional_id<domain::PlanTaskId>(value.at("parent_task_id")),
+      {},
+      value.at("title").get<std::string>(),
+      raw_criteria.get<std::vector<std::string>>(),
+      parse_effects(value.at("intended_effects")),
+      {}};
+  task.dependency_task_ids.reserve(raw_dependencies.size());
+  for (const auto& dependency : raw_dependencies) {
+    task.dependency_task_ids.push_back(
+        parse_id<domain::PlanTaskId>(dependency));
+  }
+  task.resource_intents.reserve(raw_intents.size());
+  for (const auto& intent : raw_intents) {
+    task.resource_intents.push_back(parse_plan_resource_intent(intent));
+  }
+  return task;
+}
+
+[[nodiscard]] auto plan_revision_json(const domain::PlanRevision& revision)
+    -> Json {
+  if (!domain::validate_plan_revision(revision)) {
+    throw CodecFailure{"plan revision is invalid"};
+  }
+  auto tasks = Json::array();
+  for (const auto& task : revision.tasks) {
+    tasks.push_back(plan_task_json(task));
+  }
+  return {{"plan_id", id_text(revision.plan_id)},
+          {"revision_id", id_text(revision.revision_id)},
+          {"supersedes_revision_id",
+           optional_id_json(revision.supersedes_revision_id)},
+          {"goal", revision.goal},
+          {"source_snapshot", optional_snapshot_json(revision.source_snapshot)},
+          {"tasks", std::move(tasks)}};
+}
+
+[[nodiscard]] auto parse_plan_revision(const Json& value)
+    -> domain::PlanRevision {
+  const auto& raw_tasks = value.at("tasks");
+  if (!raw_tasks.is_array()) throw CodecFailure{"plan task list is invalid"};
+  domain::PlanRevision revision{
+      parse_id<domain::PlanId>(value.at("plan_id")),
+      parse_id<domain::PlanRevisionId>(value.at("revision_id")),
+      parse_optional_id<domain::PlanRevisionId>(
+          value.at("supersedes_revision_id")),
+      value.at("goal").get<std::string>(),
+      parse_optional_snapshot(value.at("source_snapshot")),
+      {}};
+  revision.tasks.reserve(raw_tasks.size());
+  for (const auto& task : raw_tasks) {
+    revision.tasks.push_back(parse_plan_task(task));
+  }
+  if (!domain::validate_plan_revision(revision)) {
+    throw CodecFailure{"plan revision is invalid"};
+  }
+  return revision;
+}
+
+[[nodiscard]] auto plan_revision_decision_json(
+    const domain::PlanRevisionDecision& decision) -> Json {
+  if (!domain::validate_plan_decision(decision)) {
+    throw CodecFailure{"plan revision decision is invalid"};
+  }
+  return {{"plan_id", id_text(decision.plan_id)},
+          {"revision_id", id_text(decision.revision_id)},
+          {"decision", plan_decision_name(decision.decision)},
+          {"source", plan_decision_source_name(decision.source)},
+          {"reason", optional_string_json(decision.reason)}};
+}
+
+[[nodiscard]] auto parse_plan_revision_decision(const Json& value)
+    -> domain::PlanRevisionDecision {
+  domain::PlanRevisionDecision decision{
+      parse_id<domain::PlanId>(value.at("plan_id")),
+      parse_id<domain::PlanRevisionId>(value.at("revision_id")),
+      parse_plan_decision(value.at("decision")),
+      parse_plan_decision_source(value.at("source")),
+      parse_optional_string(value.at("reason"))};
+  if (!domain::validate_plan_decision(decision)) {
+    throw CodecFailure{"plan revision decision is invalid"};
+  }
+  return decision;
+}
+
 [[nodiscard]] auto optional_digest_json(
     const std::optional<domain::ContentDigest>& digest) -> Json {
   return digest ? digest_json(*digest) : Json(nullptr);
@@ -1691,6 +1855,12 @@ pricing_observation_json(const domain::PricingObservation &observation)
           [](const domain::ReviewOverrideRevoked&) {
             return std::string{"review.override_revoked"};
           },
+          [](const domain::PlanRevisionProposed&) {
+            return std::string{"plan.revision_proposed"};
+          },
+          [](const domain::PlanRevisionDecisionRecorded&) {
+            return std::string{"plan.revision_decision_recorded"};
+          },
           [](const domain::ChildRunCreated&) { return std::string{"run.child_created"}; },
           [](const domain::InterRunMessageSent&) { return std::string{"run.inter_message_sent"}; },
           [](const domain::UnknownEvent& value) { return value.type_name; }},
@@ -1700,7 +1870,7 @@ pricing_observation_json(const domain::PricingObservation &observation)
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 51,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 53,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started", "run.provenance_recorded", "persona.selection_recorded",
@@ -1724,6 +1894,7 @@ pricing_observation_json(const domain::PricingObservation &observation)
       "review.finding_opened", "review.finding_resolved",
       "review.verdict_recorded", "review.verdict_revoked",
       "review.override_recorded", "review.override_revoked",
+      "plan.revision_proposed", "plan.revision_decision_recorded",
       "run.child_created",
       "run.inter_message_sent"};
   return types.contains(type);
@@ -1937,6 +2108,13 @@ pricing_observation_json(const domain::PricingObservation &observation)
                     {"override_id", id_text(value.override_id)},
                     {"revoked_by", review_actor_json(value.revoked_by)},
                     {"reason", value.reason}};
+          },
+          [](const domain::PlanRevisionProposed& value) -> Json {
+            return {{"revision", plan_revision_json(value.revision)}};
+          },
+          [](const domain::PlanRevisionDecisionRecorded& value) -> Json {
+            return {{"decision",
+                     plan_revision_decision_json(value.decision)}};
           },
           [](const domain::ChildRunCreated& value) -> Json {
             return {{"child_run_id", id_text(value.child_run_id)}};
@@ -2235,6 +2413,14 @@ pricing_observation_json(const domain::PricingObservation &observation)
         parse_id<domain::ReviewOverrideId>(value.at("override_id")),
         parse_review_actor(value.at("revoked_by")),
         value.at("reason").get<std::string>()};
+  }
+  if (type == "plan.revision_proposed") {
+    return domain::PlanRevisionProposed{
+        parse_plan_revision(value.at("revision"))};
+  }
+  if (type == "plan.revision_decision_recorded") {
+    return domain::PlanRevisionDecisionRecorded{
+        parse_plan_revision_decision(value.at("decision"))};
   }
   if (type == "run.child_created") {
     return domain::ChildRunCreated{
