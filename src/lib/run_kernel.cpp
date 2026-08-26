@@ -1,5 +1,7 @@
 #include <aiforge/runtime/run_kernel.hpp>
 
+#include <aiforge/domain/usage_ledger.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <concepts>
@@ -2067,6 +2069,73 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
   } catch (...) {
     return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
                                         "run start failed internally"));
+  }
+}
+
+auto RunKernel::record_session_spend_ceiling(
+    SessionSpendCeilingChange change)
+    -> std::expected<void, RunKernelError> {
+  try {
+    if (m_impl->unusable) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    }
+    if (m_impl->active) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "session spend ceiling cannot change while a run is active"));
+    }
+    if (m_impl->projections.contains(change.run_id) ||
+        change.source != domain::SessionSpendCeilingSource::command_line ||
+        !domain::SessionSpendCeiling::create(change.ceiling.amount())) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "session spend ceiling change is invalid"));
+    }
+
+    domain::SessionSpendCeilingProjection ceiling_projection;
+    for (const auto& event : m_impl->event_log.events()) {
+      if (!ceiling_projection.apply(event)) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::projection_rejected,
+            "session spend ceiling history is invalid"));
+      }
+    }
+    if (ceiling_projection.ceiling() &&
+        domain::compare(change.ceiling.amount(),
+                        ceiling_projection.ceiling()->amount()) ==
+            std::strong_ordering::greater) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "session spend ceiling cannot be widened"));
+    }
+
+    auto transaction = m_impl->transaction();
+    if (auto recorded = m_impl->record(change.run_id,
+                                       std::move(change.attributes),
+                                       transaction);
+        !recorded) {
+      return recorded;
+    }
+    if (auto recorded = m_impl->record(
+            change.run_id,
+            domain::SessionSpendCeilingSet{std::move(change.ceiling),
+                                           change.source},
+            transaction);
+        !recorded) {
+      return recorded;
+    }
+    if (auto recorded = m_impl->record(change.run_id, domain::RunCompleted{},
+                                       transaction);
+        !recorded) {
+      return recorded;
+    }
+    return m_impl->commit(std::move(transaction));
+  } catch (...) {
+    return std::unexpected(kernel_error(
+        RunKernelErrorCode::internal_failure,
+        "session spend ceiling change failed internally"));
   }
 }
 

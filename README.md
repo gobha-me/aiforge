@@ -79,6 +79,7 @@ export VENICE_API_KEY=your-key      # takes precedence over the stored key
 ./build/src/bin/aiforge --resume session-id "Reopen this session"
 ./build/src/bin/aiforge --ephemeral "Do not retain this request"
 ./build/src/bin/aiforge --model model-id "Use this model"
+./build/src/bin/aiforge --session-max-spend 5.00 "Bound this session"
 ./build/src/bin/aiforge models
 ./build/src/bin/aiforge                 # interactive Chat
 ./build/src/bin/aiforge --continue      # interactive latest session
@@ -140,8 +141,8 @@ Tab completes slash-command names from the same registry used by dispatch and
 help. `/help [command]` opens transient help that never enters session history;
 `/quit` exits; `/clear` clears only the visible transcript projection while
 retaining durable events and prompt recall; and `/edit` opens an empty external
-draft. `/usage` opens the selected session's event-derived token and
-provider-reported cost summary. Unknown, unavailable, malformed, and oversized
+draft. `/usage` opens the selected session's event-derived token, cost, and
+spend ceiling summary. Unknown, unavailable, malformed, and oversized
 slash commands are rejected locally and never become model content.
 
 ## File-backed personas
@@ -208,6 +209,27 @@ advances it from the same events as the transcript. Its header shows compact
 input/output usage and any reported amounts; `/usage` shows all four token
 buckets, inference lifecycle counts, and cost-report coverage. Missing and
 partial reports remain explicit, including when another unit reports zero.
+
+## Durable session inference spend ceiling
+
+`--session-max-spend <USD>` sets a positive decimal USD ceiling, with at most
+six fractional digits, on a new or existing session. The ceiling is an
+append-only session policy fact: omitting the option on resume inherits it,
+repeating it is idempotent, and a later command may narrow but never widen or
+remove it. The root one-shot command, `chat`, and interactive startup accept the
+same option. Ephemeral sessions enforce the ceiling for their lifetime but do
+not persist it.
+
+Before starting each inference, AIForge accounts for every prior inference in
+the selected session. Provider-reported USD is authoritative when present;
+otherwise a durable catalog-derived USD estimate is used. Other units such as
+`venice.diem` are neither converted nor combined with USD. If any inference has
+neither reported USD nor a valid USD estimate, accounting is unavailable and
+the next inference is refused. The request that crosses the ceiling completes,
+because there is no trustworthy pre-call quote; subsequent requests are
+blocked. One-shot diagnostics print `spend:` on stderr, while the interactive
+header and `/usage` show accounted spend, ceiling, remaining amount, coverage,
+and whether the ceiling has been reached.
 
 ## Provider-reported inference cost
 

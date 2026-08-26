@@ -84,6 +84,19 @@ struct SessionCostEstimate {
   auto operator==(const SessionCostEstimate &) const -> bool = default;
 };
 
+struct SessionSpendSummary {
+  SessionSpendCeiling ceiling;
+  std::optional<MonetaryAmount> accounted;
+  std::optional<MonetaryAmount> remaining;
+  std::size_t reported_inferences{};
+  std::size_t estimated_inferences{};
+  std::size_t total_inferences{};
+  std::vector<CostEstimateFailureCount> unavailable;
+  std::optional<CostEstimateUnavailableReason> aggregation_failure;
+  bool reached{};
+  auto operator==(const SessionSpendSummary &) const -> bool = default;
+};
+
 [[nodiscard]] auto estimate_inference_cost(const InferenceUsageRecord &record,
                                            CostEstimateUnit unit)
     -> std::expected<InferenceCostEstimate, CostEstimateUnavailable>;
@@ -91,6 +104,10 @@ struct SessionCostEstimate {
 [[nodiscard]] auto summarize_cost_estimates(
     std::span<const InferenceUsageRecord> records, CostEstimateUnit unit)
     -> SessionCostEstimate;
+
+[[nodiscard]] auto summarize_session_spend(
+    std::span<const InferenceUsageRecord> records,
+    const SessionSpendCeiling &ceiling) -> SessionSpendSummary;
 
 [[nodiscard]] auto cost_estimate_unit_name(CostEstimateUnit unit) noexcept
     -> std::string_view;
@@ -109,6 +126,8 @@ enum class UsageLedgerErrorCode {
   usage_overflow,
   cost_overflow,
   invalid_pricing,
+  invalid_ceiling,
+  ceiling_widening,
 };
 
 struct UsageLedgerError {
@@ -145,6 +164,25 @@ private:
   std::vector<InferenceUsageRecord> m_records;
   Usage m_total_usage;
   std::optional<ReportedCost> m_total_reported_cost;
+  std::set<EventId> m_event_ids;
+  std::uint64_t m_last_sequence{};
+};
+
+class SessionSpendCeilingProjection final {
+public:
+  [[nodiscard]] auto apply(const RunEvent &event)
+      -> std::expected<void, UsageLedgerError>;
+
+  [[nodiscard]] auto ceiling() const noexcept
+      -> const std::optional<SessionSpendCeiling> & {
+    return m_ceiling;
+  }
+  [[nodiscard]] auto last_sequence() const noexcept -> std::uint64_t {
+    return m_last_sequence;
+  }
+
+private:
+  std::optional<SessionSpendCeiling> m_ceiling;
   std::set<EventId> m_event_ids;
   std::uint64_t m_last_sequence{};
 };

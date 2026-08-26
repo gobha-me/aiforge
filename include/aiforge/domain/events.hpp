@@ -42,6 +42,16 @@ struct PersonaSelectionRecorded {
   auto operator==(const PersonaSelectionRecorded&) const -> bool = default;
 };
 
+enum class SessionSpendCeilingSource {
+  command_line,
+};
+
+struct SessionSpendCeilingSet {
+  SessionSpendCeiling ceiling;
+  SessionSpendCeilingSource source{SessionSpendCeilingSource::command_line};
+  auto operator==(const SessionSpendCeilingSet&) const -> bool = default;
+};
+
 struct RunAwaitingInput {
   QuestionId question_id;
   auto operator==(const RunAwaitingInput&) const -> bool = default;
@@ -376,6 +386,7 @@ struct UnknownEvent {
 
 using RunEventPayload = std::variant<
     RunStarted, RunProvenanceRecorded, PersonaSelectionRecorded,
+    SessionSpendCeilingSet,
     RunAwaitingInput, RunResumed,
     RunCompletionRequested, RunCompleted,
     RunFailed, RunCancelRequested, RunCancelled, UserContentAdded,

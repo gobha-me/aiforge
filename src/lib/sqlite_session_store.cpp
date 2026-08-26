@@ -266,6 +266,23 @@ template <typename Enum>
               domain::PolicyDecisionSource::user_approval}});
 }
 
+[[nodiscard]] auto spend_ceiling_source_name(
+    const domain::SessionSpendCeilingSource value) -> std::string_view {
+  switch (value) {
+    case domain::SessionSpendCeilingSource::command_line:
+      return "command_line";
+  }
+  throw CodecFailure{"invalid session spend ceiling source"};
+}
+
+[[nodiscard]] auto parse_spend_ceiling_source(const Json& value)
+    -> domain::SessionSpendCeilingSource {
+  const auto name = value.get<std::string>();
+  return enum_value<domain::SessionSpendCeilingSource>(
+      name,
+      {{"command_line", domain::SessionSpendCeilingSource::command_line}});
+}
+
 [[nodiscard]] auto approval_name(const domain::ApprovalDecision value)
     -> std::string_view {
   switch (value) {
@@ -463,6 +480,24 @@ template <typename Enum>
   auto cost = domain::ReportedCost::create(std::move(amounts));
   if (!cost) throw CodecFailure{"reported cost is invalid"};
   return std::move(*cost);
+}
+
+[[nodiscard]] auto session_spend_ceiling_json(
+    const domain::SessionSpendCeiling& ceiling) -> Json {
+  return {{"unit", "USD"}, {"amount", ceiling.amount().to_string()}};
+}
+
+[[nodiscard]] auto parse_session_spend_ceiling(const Json& value)
+    -> domain::SessionSpendCeiling {
+  if (value.at("unit").get<std::string>() != "USD") {
+    throw CodecFailure{"session spend ceiling unit is invalid"};
+  }
+  auto ceiling =
+      domain::SessionSpendCeiling::from(value.at("amount").get<std::string>());
+  if (!ceiling) {
+    throw CodecFailure{"session spend ceiling amount is invalid"};
+  }
+  return std::move(*ceiling);
 }
 
 [[nodiscard]] auto metadata_json(const domain::Metadata& metadata) -> Json {
@@ -1589,6 +1624,7 @@ pricing_observation_json(const domain::PricingObservation &observation)
           [](const domain::RunStarted&) { return std::string{"run.started"}; },
           [](const domain::RunProvenanceRecorded&) { return std::string{"run.provenance_recorded"}; },
           [](const domain::PersonaSelectionRecorded&) { return std::string{"persona.selection_recorded"}; },
+          [](const domain::SessionSpendCeilingSet&) { return std::string{"session.spend_ceiling_set"}; },
           [](const domain::RunAwaitingInput&) { return std::string{"run.awaiting_input"}; },
           [](const domain::RunResumed&) { return std::string{"run.resumed"}; },
           [](const domain::RunCompletionRequested&) { return std::string{"run.completion_requested"}; },
@@ -1664,10 +1700,11 @@ pricing_observation_json(const domain::PricingObservation &observation)
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 50,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 51,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started", "run.provenance_recorded", "persona.selection_recorded",
+      "session.spend_ceiling_set",
       "run.awaiting_input", "run.resumed",
       "run.completion_requested", "run.completed", "run.failed",
       "run.cancel_requested", "run.cancelled", "content.user_added",
@@ -1706,6 +1743,10 @@ pricing_observation_json(const domain::PricingObservation &observation)
           },
           [](const domain::PersonaSelectionRecorded& value) -> Json {
             return {{"selection", persona_selection_json(value.selection)}};
+          },
+          [](const domain::SessionSpendCeilingSet& value) -> Json {
+            return {{"ceiling", session_spend_ceiling_json(value.ceiling)},
+                    {"source", spend_ceiling_source_name(value.source)}};
           },
           [](const domain::RunAwaitingInput& value) -> Json {
             return {{"question_id", id_text(value.question_id)}};
@@ -1948,6 +1989,11 @@ pricing_observation_json(const domain::PricingObservation &observation)
   if (type == "persona.selection_recorded") {
     return domain::PersonaSelectionRecorded{
         parse_persona_selection(value.at("selection"))};
+  }
+  if (type == "session.spend_ceiling_set") {
+    return domain::SessionSpendCeilingSet{
+        parse_session_spend_ceiling(value.at("ceiling")),
+        parse_spend_ceiling_source(value.at("source"))};
   }
   if (type == "run.awaiting_input") {
     return domain::RunAwaitingInput{

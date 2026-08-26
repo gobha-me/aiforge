@@ -171,6 +171,8 @@ auto warning(std::ostream& error, const std::string_view message) -> bool {
       return {cli::CommandFailureKind::cancelled, error.message};
     case surfaces::OneShotErrorCode::model_lookup_failed:
     case surfaces::OneShotErrorCode::context_failed:
+    case surfaces::OneShotErrorCode::spend_ceiling_reached:
+    case surfaces::OneShotErrorCode::spend_accounting_unavailable:
     case surfaces::OneShotErrorCode::run_failed:
     case surfaces::OneShotErrorCode::output_failed:
     case surfaces::OneShotErrorCode::internal_failure:
@@ -245,7 +247,7 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
     surfaces::OneShotRequest one_shot_request{
         std::string{request.prompt}, std::move(*input), std::move(*model),
         session_mode, std::move(request.session_id), std::move(provenance),
-        std::move(request.persona)};
+        std::move(request.persona), std::move(request.session_spend_ceiling)};
 
     std::expected<surfaces::OneShotResult, surfaces::OneShotError> result =
         std::unexpected(surfaces::OneShotError{

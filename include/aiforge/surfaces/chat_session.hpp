@@ -22,6 +22,8 @@ enum class ChatSessionErrorCode {
   model_lookup_failed,
   context_failed,
   session_failed,
+  spend_ceiling_reached,
+  spend_accounting_unavailable,
   run_failed,
   cancelled,
   internal_failure,
@@ -55,6 +57,7 @@ struct ChatSessionOpen {
   // answerable. Its tool section is filled by the run kernel.
   std::optional<domain::RunProvenance> provenance{};
   persona::PersonaDirective persona{};
+  std::optional<domain::SessionSpendCeiling> session_spend_ceiling{};
 };
 
 struct ChatPersonaState {

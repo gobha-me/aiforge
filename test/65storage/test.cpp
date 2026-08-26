@@ -212,6 +212,9 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
               "personas/reviewer.md",
               {"sha256", std::string(64, 'a'), 7}},
           std::nullopt}},
+      domain::SessionSpendCeilingSet{
+          domain::SessionSpendCeiling::from("12.345678").value(),
+          domain::SessionSpendCeilingSource::command_line},
       domain::RunAwaitingInput{question},
       domain::RunResumed{question},
       domain::RunCompletionRequested{},

@@ -1,3 +1,4 @@
+#include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/runtime/context_builder.hpp>
 #include <aiforge/runtime/persona.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
@@ -86,6 +87,78 @@ template <typename IdType>
 [[nodiscard]] auto kernel_error(const runtime::RunKernelError& value)
     -> ChatSessionError {
   return {ChatSessionErrorCode::run_failed, value.message, value.retryable};
+}
+
+struct SpendState {
+  domain::UsageLedgerProjection ledger;
+  domain::SessionSpendCeilingProjection ceiling;
+};
+
+[[nodiscard]] auto rebuild_spend_ceiling(const domain::SessionEventLog &log)
+    -> std::expected<domain::SessionSpendCeilingProjection, ChatSessionError> {
+  domain::SessionSpendCeilingProjection ceiling;
+  for (const auto &event : log.events()) {
+    if (!ceiling.apply(event)) {
+      return error(ChatSessionErrorCode::session_failed,
+                   "session spend ceiling history is invalid");
+    }
+  }
+  return ceiling;
+}
+
+[[nodiscard]] auto rebuild_spend_state(const domain::SessionEventLog &log)
+    -> std::expected<SpendState, ChatSessionError> {
+  SpendState state;
+  for (const auto &event : log.events()) {
+    if (!state.ledger.apply(event) || !state.ceiling.apply(event)) {
+      return error(ChatSessionErrorCode::session_failed,
+                   "session spend history is invalid");
+    }
+  }
+  return state;
+}
+
+[[nodiscard]] auto apply_requested_spend_ceiling(
+    runtime::RunKernel &kernel,
+    const std::optional<domain::SessionSpendCeiling> &requested,
+    const ChatIdentitySuffixSource &suffix_source,
+    const std::optional<domain::PersonaId> &persona_id)
+    -> std::expected<void, ChatSessionError> {
+  auto ceiling = rebuild_spend_ceiling(kernel.event_log());
+  if (!ceiling)
+    return std::unexpected(std::move(ceiling.error()));
+  if (!requested)
+    return {};
+  if (ceiling->ceiling()) {
+    const auto ordering =
+        domain::compare(requested->amount(), ceiling->ceiling()->amount());
+    if (ordering == std::strong_ordering::greater) {
+      return error(ChatSessionErrorCode::invalid_input,
+                   "session spend ceiling cannot be widened");
+    }
+    if (ordering == std::strong_ordering::equal)
+      return {};
+  }
+
+  const auto suffix = suffix_source();
+  auto run_id = make_id<domain::RunId>("spend-policy", suffix);
+  auto surface_id = make_id<domain::SurfaceId>("session-policy", suffix);
+  auto workspace_id = make_id<domain::WorkspaceId>("chat", suffix);
+  auto permission_id = make_id<domain::PermissionProfileId>("observe", suffix);
+  if (!run_id || !surface_id || !workspace_id || !permission_id) {
+    return error(ChatSessionErrorCode::internal_failure,
+                 "session spend identity generation failed");
+  }
+  auto recorded = kernel.record_session_spend_ceiling(
+      {*run_id,
+       {*surface_id, *workspace_id, *permission_id, persona_id},
+       *requested,
+       domain::SessionSpendCeilingSource::command_line});
+  if (!recorded) {
+    return error(ChatSessionErrorCode::session_failed, recorded.error().message,
+                 recorded.error().retryable);
+  }
+  return {};
 }
 
 struct PersonaSetup {
@@ -329,6 +402,17 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
     if (!persona_setup) {
       return std::unexpected(std::move(persona_setup.error()));
     }
+    const auto persona_id =
+        persona_setup->document
+            ? std::optional<domain::PersonaId>{
+                  persona_setup->document->reference.persona_id}
+            : std::nullopt;
+    if (auto applied = apply_requested_spend_ceiling(
+            *kernel, request.session_spend_ceiling,
+            dependencies.identity_suffix_source, persona_id);
+        !applied) {
+      return std::unexpected(std::move(applied.error()));
+    }
     auto impl = std::make_unique<Impl>(Impl{
         request.model_id,
         *model,
@@ -370,6 +454,27 @@ auto ChatSession::submit(std::string prompt)
     if (!m_impl->persona_attention.empty()) {
       return error(ChatSessionErrorCode::context_failed,
                    m_impl->persona_attention);
+    }
+    auto ceiling = rebuild_spend_ceiling(m_impl->kernel->event_log());
+    if (!ceiling) return std::unexpected(std::move(ceiling.error()));
+    if (ceiling->ceiling()) {
+      auto spend_state = rebuild_spend_state(m_impl->kernel->event_log());
+      if (!spend_state) {
+        return std::unexpected(std::move(spend_state.error()));
+      }
+      const auto spend = domain::summarize_session_spend(
+          spend_state->ledger.records(), *spend_state->ceiling.ceiling());
+      if (!spend.accounted) {
+        return error(ChatSessionErrorCode::spend_accounting_unavailable,
+                     "session spend accounting is unavailable; refusing "
+                     "another inference");
+      }
+      if (spend.reached) {
+        return error(ChatSessionErrorCode::spend_ceiling_reached,
+                     "session spend ceiling reached (USD " +
+                         spend.accounted->amount().to_string() + " of " +
+                         spend.ceiling.amount().to_string() + ")");
+      }
     }
     if (m_impl->persona_document) {
       if (m_impl->persona_source == nullptr) {
