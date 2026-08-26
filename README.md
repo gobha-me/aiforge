@@ -235,13 +235,33 @@ live/fresh-cache/stale-cache origin, optional source revision, exact normalized
 decimal rates, and a deterministic rate-card digest. Input, output, cache-read,
 and cache-write buckets remain distinct, as do base and extended tiers.
 
-These observations are provenance for later estimates; they are not quotes or
-actual charges. AIForge does not yet multiply usage by catalog rates, guess
-whether an extended threshold counts prompt or total tokens, or reinterpret a
-reported cache-read count as a cache write. The replaceable model-catalog cache
-stores decimal rates as strings in schema version 2; older cache schemas are
-refreshed through the existing catalog fallback policy. Session replay rebuilds
-the same pricing context without consulting the cache or provider.
+These observations are estimate provenance; they are not quotes or actual
+charges. AIForge never guesses whether an extended threshold counts prompt or
+total tokens, or reinterprets a reported cache-read count as a cache write. The
+replaceable model-catalog cache stores decimal rates as strings in schema
+version 2; older cache schemas are refreshed through the existing catalog
+fallback policy. Session replay rebuilds the same pricing context without
+consulting the cache or provider.
+
+## Conservative catalog cost estimates
+
+AIForge derives catalog estimates from the durable usage and pricing facts for
+an inference. They remain separate from provider-reported actual charges and
+from future pre-run quotes. Input tokens reported as cache reads are subtracted
+from full-rate input and use the cache-input rate; output pricing already covers
+reasoning tokens, so reasoning is not counted twice. Arithmetic is exact and
+checked at the catalog's per-million-token basis rather than rounded.
+
+An extended tier is selected only when both plausible interpretations of
+Venice's context threshold agree: base when input plus output is at or below the
+threshold, extended when input alone exceeds it. The estimate is explicitly
+unavailable in the overlap. It is also unavailable when cache-write pricing is
+present because current usage has no cache-write bucket, or when usage, rates,
+precision, or arithmetic are insufficient. USD and Venice diem coverage are
+reported independently. One-shot mode writes estimates only to stderr; the TUI
+header and `/usage` label partial coverage and keep catalog-derived amounts
+visibly distinct from provider observations. Replay performs no catalog or
+provider request.
 
 Ctrl+E restores the terminal and opens the current draft in `$VISUAL` or
 `$EDITOR`. The editor setting names one executable only; arguments and shell

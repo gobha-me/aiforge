@@ -237,6 +237,34 @@ struct InferenceCounts {
   return result;
 }
 
+[[nodiscard]] auto estimate_summary_text(
+    const domain::SessionCostEstimate& estimate) -> std::string {
+  if (!estimate.subtotal) return "unavailable";
+  auto result = estimate.subtotal->amount().to_string() + " " +
+                std::string{estimate.subtotal->unit()};
+  if (estimate.estimated_inferences != estimate.total_inferences) {
+    result += std::format(" ({} of {})", estimate.estimated_inferences,
+                          estimate.total_inferences);
+  }
+  return result;
+}
+
+[[nodiscard]] auto estimate_failures_text(
+    const domain::SessionCostEstimate& estimate) -> std::string {
+  std::string result;
+  for (const auto& failure : estimate.unavailable) {
+    if (!result.empty()) result += ", ";
+    result += std::string{domain::cost_estimate_reason_name(failure.reason)};
+    result += "=" + std::to_string(failure.count);
+  }
+  if (estimate.aggregation_failure) {
+    if (!result.empty()) result += ", ";
+    result += std::string{domain::cost_estimate_reason_name(
+        *estimate.aggregation_failure)};
+  }
+  return result;
+}
+
 [[nodiscard]] auto usage_header_text(
     const domain::UsageLedgerProjection& ledger) -> std::string {
   const auto& usage = ledger.total_usage();
@@ -253,6 +281,15 @@ struct InferenceCounts {
     result += " | reported ";
     result += reported_cost_text(*ledger.total_reported_cost());
     if (counts.costs_reported != ledger.records().size()) result += " (partial)";
+  }
+  const auto usd = domain::summarize_cost_estimates(
+      ledger.records(), domain::CostEstimateUnit::usd);
+  const auto diem = domain::summarize_cost_estimates(
+      ledger.records(), domain::CostEstimateUnit::venice_diem);
+  if (usd.subtotal || diem.subtotal) {
+    result += " | estimated";
+    if (usd.subtotal) result += " " + estimate_summary_text(usd);
+    if (diem.subtotal) result += " " + estimate_summary_text(diem);
   }
   return result;
 }
@@ -284,7 +321,22 @@ struct InferenceCounts {
     lines.push_back(std::format(
         "Reported cost: unavailable (0 of {} inferences reported)", total));
   }
-  lines.push_back("Reported amounts are provider observations, not estimates.");
+  for (const auto unit : {domain::CostEstimateUnit::usd,
+                          domain::CostEstimateUnit::venice_diem}) {
+    const auto estimate =
+        domain::summarize_cost_estimates(ledger.records(), unit);
+    auto line = "Catalog estimate (" +
+                std::string{domain::cost_estimate_unit_name(unit)} + "): " +
+                estimate_summary_text(estimate);
+    line += std::format(" ({} of {} inferences estimated)",
+                        estimate.estimated_inferences,
+                        estimate.total_inferences);
+    const auto failures = estimate_failures_text(estimate);
+    if (!failures.empty()) line += "; unavailable: " + failures;
+    lines.push_back(std::move(line));
+  }
+  lines.push_back(
+      "Reported amounts are provider observations; catalog estimates are derived, not quotes.");
   return lines;
 }
 

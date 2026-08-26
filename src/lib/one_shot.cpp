@@ -1,3 +1,4 @@
+#include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/presentation/text.hpp>
 #include <aiforge/runtime/context_builder.hpp>
 #include <aiforge/runtime/persona.hpp>
@@ -92,6 +93,40 @@ auto write(std::ostream& stream, const std::string_view value) -> bool {
   } catch (...) {
     return false;
   }
+}
+
+[[nodiscard]] auto estimate_line(
+    const std::vector<domain::SessionCostEstimate>& estimates) -> std::string {
+  std::string result{"estimate:"};
+  for (const auto& estimate : estimates) {
+    result += " " +
+              std::string{domain::cost_estimate_unit_name(estimate.unit)} +
+              "=";
+    if (estimate.subtotal) {
+      result += estimate.subtotal->amount().to_string();
+    } else {
+      result += "unavailable";
+    }
+    if (estimate.estimated_inferences != estimate.total_inferences ||
+        !estimate.unavailable.empty() || estimate.aggregation_failure) {
+      result += "[" + std::to_string(estimate.estimated_inferences) + "/" +
+                std::to_string(estimate.total_inferences);
+      for (const auto& failure : estimate.unavailable) {
+        result += ";" +
+                  std::string{
+                      domain::cost_estimate_reason_name(failure.reason)} +
+                  "=" + std::to_string(failure.count);
+      }
+      if (estimate.aggregation_failure) {
+        result += ";" + std::string{domain::cost_estimate_reason_name(
+                             *estimate.aggregation_failure)};
+      }
+      result += "]";
+    }
+  }
+  result += " (catalog-derived)";
+  result.push_back('\n');
+  return result;
 }
 
 template <typename IdType>
@@ -624,7 +659,27 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       return one_shot_error(OneShotErrorCode::output_failed,
                             "diagnostic output failed");
     }
-    return OneShotResult{usage, reported_cost, session_id, durable};
+    domain::UsageLedgerProjection run_ledger;
+    for (const auto& event : kernel->event_log().events()) {
+      if (event.metadata.run_id != *run_id) continue;
+      auto applied = run_ledger.apply(event);
+      if (!applied) {
+        return one_shot_error(OneShotErrorCode::run_failed,
+                              "one-shot cost estimate replay failed");
+      }
+    }
+    std::vector<domain::SessionCostEstimate> estimates;
+    estimates.reserve(2);
+    estimates.push_back(domain::summarize_cost_estimates(
+        run_ledger.records(), domain::CostEstimateUnit::usd));
+    estimates.push_back(domain::summarize_cost_estimates(
+        run_ledger.records(), domain::CostEstimateUnit::venice_diem));
+    if (!write(error, estimate_line(estimates))) {
+      return one_shot_error(OneShotErrorCode::output_failed,
+                            "diagnostic output failed");
+    }
+    return OneShotResult{usage, reported_cost, std::move(estimates), session_id,
+                         durable};
   } catch (...) {
     return one_shot_error(OneShotErrorCode::internal_failure,
                           "one-shot execution failed internally");

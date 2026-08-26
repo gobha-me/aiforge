@@ -55,6 +55,24 @@ auto reported_cost() -> domain::ReportedCost {
       .value();
 }
 
+auto pricing_observation() -> domain::PricingObservation {
+  domain::TextPricing pricing;
+  pricing.base.input = domain::PriceRate{
+      domain::DecimalAmount::from("1").value(),
+      domain::DecimalAmount::from("1").value()};
+  pricing.base.output = domain::PriceRate{
+      domain::DecimalAmount::from("2").value(),
+      domain::DecimalAmount::from("2").value()};
+  pricing.base.cache_input = domain::PriceRate{
+      domain::DecimalAmount::from("0.5").value(),
+      domain::DecimalAmount::from("0.5").value()};
+  return domain::make_pricing_observation(
+             make_id<domain::ModelId>("model"), "test.models", std::nullopt,
+             domain::EventTimestamp{123ms},
+             domain::PricingCatalogOrigin::live, std::move(pricing))
+      .value();
+}
+
 auto normalized_screen(const termforge::Screen& screen) -> std::string {
   std::ostringstream normalized;
   normalized << screen.cols() << 'x' << screen.rows() << ':';
@@ -386,7 +404,7 @@ class GatedBackendState final {
         backend::BackendEvent{backend::ResponseStarted{"response"}},
         backend::BackendEvent{backend::ContentDelta{
             request.assistant_message_id, domain::TextBlock{"hello"}}},
-        backend::BackendEvent{backend::UsageObserved{{3, 2, 1, 4}}},
+        backend::BackendEvent{backend::UsageObserved{{3, 2, 1, 1}}},
         backend::BackendEvent{backend::CostObserved{reported_cost()}},
         backend::BackendEvent{
             backend::ResponseFinished{domain::FinishReason::stop}},
@@ -520,7 +538,8 @@ class GatedBackend final : public backend::Backend,
   auto lookup(const domain::ModelId& model_id, std::stop_token)
       -> std::expected<backend::ModelContextInfo,
                        backend::BackendError> override {
-    return backend::ModelContextInfo{model_id, 8192, 1024};
+    return backend::ModelContextInfo{model_id, 8192, 1024,
+                                     pricing_observation()};
   }
 
   auto start(backend::BackendRequest request, std::stop_token)
@@ -717,7 +736,7 @@ auto chat_scenario() -> testing::TuiScenario {
   value.scenario_id = "interactive-chat-stream";
   value.corpus_version = "1";
   value.application_revision = "test-revision";
-  value.initial_size = {180, 10, 1800, 200};
+  value.initial_size = {240, 10, 2400, 200};
   value.backend_script = {"response-started", "delta:hello", "usage", "cost",
                           "response-finished", "end"};
   const auto enter = testing::TuiScenarioPost{
@@ -1243,9 +1262,11 @@ TEST_CASE("interactive chat records and replays a gated backend stream",
                               }));
   REQUIRE(std::ranges::any_of(
       result->recorded.normalized_frames, [](const std::string& frame) {
-        return frame.find("usage 3 in/2 out/1 cached/4 reasoning") !=
+        return frame.find("usage 3 in/2 out/1 cached/1 reasoning") !=
                    std::string::npos &&
                frame.find("reported 0 USD + 0.0645375 venice.diem") !=
+                   std::string::npos &&
+               frame.find("estimated 0.0000065 USD 0.0000065 venice.diem") !=
                    std::string::npos;
       }));
   REQUIRE(std::ranges::any_of(
@@ -1254,10 +1275,12 @@ TEST_CASE("interactive chat records and replays a gated backend stream",
                    std::string::npos &&
                frame.find("Input tokens: 3") != std::string::npos &&
                frame.find("Cached input tokens: 1") != std::string::npos &&
-               frame.find("Reasoning tokens: 4") != std::string::npos &&
+               frame.find("Reasoning tokens: 1") != std::string::npos &&
                frame.find("1 completed") != std::string::npos &&
                frame.find(
                    "Reported cost: 0 USD + 0.0645375 venice.diem (1 of 1") !=
+                   std::string::npos &&
+               frame.find("Catalog estimate (USD): 0.0000065 USD") !=
                    std::string::npos;
       }));
   REQUIRE(std::ranges::any_of(
