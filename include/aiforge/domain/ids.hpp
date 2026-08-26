@@ -68,6 +68,9 @@ struct ReviewReceiptIdTag;
 struct ReviewRequirementIdTag;
 struct ReviewFindingIdTag;
 struct ReviewOverrideIdTag;
+struct PlanIdTag;
+struct PlanRevisionIdTag;
+struct PlanTaskIdTag;
 
 using SessionId = Id<SessionIdTag>;
 using RunId = Id<RunIdTag>;
@@ -96,5 +99,8 @@ using ReviewReceiptId = Id<ReviewReceiptIdTag>;
 using ReviewRequirementId = Id<ReviewRequirementIdTag>;
 using ReviewFindingId = Id<ReviewFindingIdTag>;
 using ReviewOverrideId = Id<ReviewOverrideIdTag>;
+using PlanId = Id<PlanIdTag>;
+using PlanRevisionId = Id<PlanRevisionIdTag>;
+using PlanTaskId = Id<PlanTaskIdTag>;
 
 }  // namespace aiforge::domain

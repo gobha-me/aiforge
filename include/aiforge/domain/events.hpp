@@ -11,6 +11,7 @@
 #include <aiforge/domain/content.hpp>
 #include <aiforge/domain/money.hpp>
 #include <aiforge/domain/persona.hpp>
+#include <aiforge/domain/plan.hpp>
 #include <aiforge/domain/pricing.hpp>
 #include <aiforge/domain/provenance.hpp>
 #include <aiforge/domain/review_receipt.hpp>
@@ -364,6 +365,16 @@ struct ReviewOverrideRevoked {
   auto operator==(const ReviewOverrideRevoked&) const -> bool = default;
 };
 
+struct PlanRevisionProposed {
+  PlanRevision revision;
+  auto operator==(const PlanRevisionProposed&) const -> bool = default;
+};
+
+struct PlanRevisionDecisionRecorded {
+  PlanRevisionDecision decision;
+  auto operator==(const PlanRevisionDecisionRecorded&) const -> bool = default;
+};
+
 struct ChildRunCreated {
   RunId child_run_id;
   auto operator==(const ChildRunCreated&) const -> bool = default;
@@ -401,7 +412,9 @@ using RunEventPayload = std::variant<
     ArtifactRemovedFromView, VerificationEvidenceRecorded, ReviewReceiptDrafted,
     ReviewRequested, ReviewFindingOpened, ReviewFindingResolved,
     ReviewVerdictRecorded, ReviewVerdictRevoked, ReviewOverrideRecorded,
-    ReviewOverrideRevoked, ChildRunCreated, InterRunMessageSent, UnknownEvent>;
+    ReviewOverrideRevoked, PlanRevisionProposed,
+    PlanRevisionDecisionRecorded, ChildRunCreated, InterRunMessageSent,
+    UnknownEvent>;
 
 struct EventMetadata {
   EventId event_id;

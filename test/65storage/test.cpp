@@ -119,6 +119,24 @@ auto review_draft() -> domain::ReviewReceiptDraft {
         {{artifact, {"sha256", "cccccccccccccccc", 128}}}}}};
 }
 
+auto plan_revision() -> domain::PlanRevision {
+  return {
+      make_id<domain::PlanId>("plan"),
+      make_id<domain::PlanRevisionId>("revision-1"),
+      std::nullopt,
+      "Implement the accepted work",
+      domain::RepositorySnapshotIdentity{
+          make_id<domain::RepositoryId>("repository"),
+          {"sha256", "dddddddddddddddd", 0}},
+      {{make_id<domain::PlanTaskId>("task"),
+        std::nullopt,
+        {},
+        "Implement the contract",
+        {"The contract replays deterministically"},
+        {domain::Effect::write},
+        {{domain::Effect::write, "repository_path", "include"}}}}};
+}
+
 auto run_provenance() -> domain::RunProvenance {
   return {"0.10.0",
           "venice",
@@ -297,6 +315,11 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
           review_draft().receipt_id,
           make_id<domain::ReviewOverrideId>("review-override"),
           {"maintainer", "Maintainer"}, "override revoked"},
+      domain::PlanRevisionProposed{plan_revision()},
+      domain::PlanRevisionDecisionRecorded{domain::PlanRevisionDecision{
+          plan_revision().plan_id, plan_revision().revision_id,
+          domain::PlanDecision::approved, domain::PlanDecisionSource::user,
+          std::string{"approved after review"}}},
       domain::ChildRunCreated{make_id<domain::RunId>("child")},
       domain::InterRunMessageSent{make_id<domain::RunId>("target"),
                                   {domain::TextBlock{"message"}}},
@@ -439,6 +462,29 @@ TEST_CASE("malformed persisted reported cost fails replay explicitly",
       "\"inference_id\":\"inference\","
       "\"cost\":{\"amounts\":[{\"unit\":\"USD\",\"amount\":\"-1\"}]}}' "
       "WHERE event_id='cost-event'");
+  store = open_store(path);
+  const auto replayed = store->replay_events(session);
+  REQUIRE_FALSE(replayed);
+  REQUIRE(replayed.error().code == storage::SessionStoreErrorCode::corrupt);
+}
+
+TEST_CASE("malformed persisted plan graph fails replay explicitly",
+          "[storage][sqlite][plan][corrupt][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "plan-session", 100);
+  REQUIRE(store->append_events(
+      session,
+      std::array{event(1, domain::PlanRevisionProposed{plan_revision()},
+                       "plan-event")}));
+  store.reset();
+
+  execute_sql(
+      path,
+      "UPDATE events SET payload_json=json_set(payload_json, "
+      "'$.revision.tasks[0].dependency_task_ids',json('[\"missing\"]')) "
+      "WHERE event_id='plan-event'");
   store = open_store(path);
   const auto replayed = store->replay_events(session);
   REQUIRE_FALSE(replayed);

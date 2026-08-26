@@ -9,7 +9,9 @@ selection, and a resumable
 structured `ask_user` tool
 boundary plus a policy-gated bounded argv process executor. Exact-candidate
 review receipts now materialize merge authorization only from current required
-evidence or an explicit trusted override. The interactive
+evidence or an explicit trusted override. Bounded plan revisions, task graphs,
+and exact-revision decisions now have a provider-neutral durable contract and
+replayable projection. The interactive
 Chat workspace uses the same run kernel, context builder, and durable event
 stream as one-shot mode; running `aiforge` without a prompt in a terminal opens
 it. Its slash-command registry keeps dispatch, help, completion, and command
@@ -115,6 +117,22 @@ one-shot surface uses the selected model's reported context window and a
 conservative input estimate before inference. The TermForge bridge uses
 `App::post` only as a wake signal; event-log, projection, and widget mutation
 remain on the UI thread.
+
+## Replayable plan graphs
+
+`aiforge::domain::PlanRevision` records a stable plan and revision identity,
+goal, optional repository snapshot, predecessor revision, and bounded task
+graph. Tasks retain hierarchy and dependency edges, acceptance criteria,
+intended effects, and typed resource intents. A resource intent describes
+prospective scope for later conflict analysis; it is never a capability grant.
+
+`PlanRevisionProposed` and `PlanRevisionDecisionRecorded` append exact-revision
+facts. `PlanGraphProjection` validates revision chains and task DAGs, retains
+prior revisions, and distinguishes proposed, revision-requested, approved, and
+rejected current state. SQLite replay reconstructs the same projection without
+running inference, tools, or child tasks. Runtime approval gates, accepted-task
+materialization, dispatch, and plan-review surfaces remain later children of
+issue #50.
 
 ## Interactive Chat
 
