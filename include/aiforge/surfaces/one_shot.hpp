@@ -7,8 +7,10 @@
 #include <stop_token>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <aiforge/backend/backend.hpp>
+#include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/persona/source.hpp>
 #include <aiforge/storage/session_store.hpp>
 
@@ -74,6 +76,7 @@ struct OneShotRequest {
 struct OneShotResult {
   domain::Usage usage;
   std::optional<domain::ReportedCost> reported_cost;
+  std::vector<domain::SessionCostEstimate> catalog_estimates;
   domain::SessionId session_id;
   bool durable{};
   auto operator==(const OneShotResult&) const -> bool = default;

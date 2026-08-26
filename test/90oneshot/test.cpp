@@ -40,6 +40,24 @@ auto reported_cost() -> domain::ReportedCost {
       .value();
 }
 
+auto pricing_observation() -> domain::PricingObservation {
+  domain::TextPricing pricing;
+  pricing.base.input = domain::PriceRate{
+      domain::DecimalAmount::from("1").value(),
+      domain::DecimalAmount::from("1").value()};
+  pricing.base.output = domain::PriceRate{
+      domain::DecimalAmount::from("2").value(),
+      domain::DecimalAmount::from("2").value()};
+  pricing.base.cache_input = domain::PriceRate{
+      domain::DecimalAmount::from("0.5").value(),
+      domain::DecimalAmount::from("0.5").value()};
+  return domain::make_pricing_observation(
+             make_id<domain::ModelId>("model"), "test.models", std::nullopt,
+             domain::EventTimestamp{std::chrono::milliseconds{123}},
+             domain::PricingCatalogOrigin::live, std::move(pricing))
+      .value();
+}
+
 auto run_provenance() -> domain::RunProvenance {
   return {"0.10.0",
           "venice",
@@ -319,6 +337,7 @@ class CancelBackend final : public backend::Backend {
 TEST_CASE("one-shot streams only sanitized text and builds neutral evidence",
           "[one-shot]") {
   FakeModels models;
+  models.info.pricing_observation = pricing_observation();
   // The surface owns assistant identity, so replace the scripted placeholder
   // when the backend sees the request.
   class RewritingBackend final : public backend::Backend {
@@ -343,6 +362,10 @@ TEST_CASE("one-shot streams only sanitized text and builds neutral evidence",
   REQUIRE(result);
   REQUIRE(result->usage == domain::Usage{3, 2, 1, 0});
   REQUIRE(result->reported_cost == reported_cost());
+  REQUIRE(result->catalog_estimates.size() == 2);
+  REQUIRE(result->catalog_estimates.front().subtotal);
+  REQUIRE(result->catalog_estimates.front().subtotal->amount().to_string() ==
+          "0.0000065");
   REQUIRE(output.str() == "hellored");
   REQUIRE(error.str().find("citation: https://example.test/") !=
           std::string::npos);
@@ -352,6 +375,9 @@ TEST_CASE("one-shot streams only sanitized text and builds neutral evidence",
           std::string::npos);
   REQUIRE(error.str().find(
               "cost: USD=0 venice.diem=0.0645375 (provider-reported)") !=
+          std::string::npos);
+  REQUIRE(error.str().find(
+              "estimate: USD=0.0000065 venice.diem=0.0000065 (catalog-derived)") !=
           std::string::npos);
   REQUIRE(rewriting.captured);
   REQUIRE(rewriting.captured->tools.empty());

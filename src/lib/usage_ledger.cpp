@@ -1,7 +1,10 @@
 #include <aiforge/domain/usage_ledger.hpp>
 
 #include <algorithm>
+#include <array>
 #include <limits>
+#include <string>
+#include <string_view>
 #include <utility>
 
 namespace aiforge::domain {
@@ -34,7 +37,263 @@ Overloaded(Visitors...) -> Overloaded<Visitors...>;
          add_checked(total.reasoning_tokens, addition.reasoning_tokens);
 }
 
+[[nodiscard]] auto multiplied_text(std::uint64_t left, std::uint64_t right)
+    -> std::string {
+  constexpr std::uint64_t base = 1'000'000'000;
+  std::array<std::uint64_t, 3> left_parts{};
+  std::array<std::uint64_t, 3> right_parts{};
+  for (auto &part : left_parts) {
+    part = left % base;
+    left /= base;
+  }
+  for (auto &part : right_parts) {
+    part = right % base;
+    right /= base;
+  }
+  std::array<std::uint64_t, 7> result_parts{};
+  for (std::size_t left_index = 0; left_index < left_parts.size();
+       ++left_index) {
+    for (std::size_t right_index = 0; right_index < right_parts.size();
+         ++right_index) {
+      result_parts[left_index + right_index] +=
+          left_parts[left_index] * right_parts[right_index];
+    }
+  }
+  for (std::size_t index = 0; index + 1 < result_parts.size(); ++index) {
+    result_parts[index + 1] += result_parts[index] / base;
+    result_parts[index] %= base;
+  }
+  auto highest = result_parts.size() - 1;
+  while (highest > 0 && result_parts[highest] == 0) --highest;
+  auto result = std::to_string(result_parts[highest]);
+  while (highest > 0) {
+    --highest;
+    auto part = std::to_string(result_parts[highest]);
+    result += std::string(9U - part.size(), '0') + part;
+  }
+  return result;
+}
+
+[[nodiscard]] auto scaled_amount(const DecimalAmount &rate,
+                                 const std::uint64_t tokens)
+    -> std::expected<DecimalAmount, CostEstimateUnavailable> {
+  auto scale = static_cast<std::size_t>(rate.scale()) + 6U;
+  auto text = multiplied_text(rate.coefficient(), tokens);
+  while (scale > 0 && text.size() > 1 && text.back() == '0') {
+    text.pop_back();
+    --scale;
+  }
+  if (scale != 0) {
+    if (text.size() <= scale) {
+      text = "0." + std::string(scale - text.size(), '0') + text;
+    } else {
+      text.insert(text.size() - scale, 1, '.');
+    }
+  }
+  auto amount = DecimalAmount::from(text);
+  if (!amount) {
+    return std::unexpected(CostEstimateUnavailable{
+        CostEstimateUnavailableReason::arithmetic_overflow});
+  }
+  return *amount;
+}
+
+[[nodiscard]] auto price_for_unit(const PriceRate &price,
+                                  const CostEstimateUnit unit)
+    -> const std::optional<DecimalAmount> & {
+  return unit == CostEstimateUnit::usd ? price.usd : price.diem;
+}
+
+[[nodiscard]] auto unit_present(const TextPriceTier &tier,
+                                const CostEstimateUnit unit) -> bool {
+  const auto present = [unit](const std::optional<PriceRate> &price) {
+    return price && price_for_unit(*price, unit).has_value();
+  };
+  return present(tier.input) || present(tier.output) ||
+         present(tier.cache_input) || present(tier.cache_write);
+}
+
+[[nodiscard]] auto select_tier(const Usage &usage,
+                               const TextPricing &pricing)
+    -> std::expected<std::pair<const TextPriceTier *, PricingTierSelection>,
+                     CostEstimateUnavailable> {
+  if (!pricing.extended || !pricing.extended_threshold_tokens) {
+    return std::pair{&pricing.base, PricingTierSelection::base};
+  }
+  if (usage.output_tokens >
+      std::numeric_limits<std::uint64_t>::max() - usage.input_tokens) {
+    return std::unexpected(CostEstimateUnavailable{
+        CostEstimateUnavailableReason::arithmetic_overflow});
+  }
+  const auto total_tokens = usage.input_tokens + usage.output_tokens;
+  if (total_tokens <= *pricing.extended_threshold_tokens) {
+    return std::pair{&pricing.base, PricingTierSelection::base};
+  }
+  if (usage.input_tokens > *pricing.extended_threshold_tokens) {
+    return std::pair{&*pricing.extended, PricingTierSelection::extended};
+  }
+  return std::unexpected(CostEstimateUnavailable{
+      CostEstimateUnavailableReason::ambiguous_extended_tier});
+}
+
+[[nodiscard]] auto bucket_amount(const std::optional<PriceRate> &price,
+                                 const CostEstimateUnit unit,
+                                 const std::uint64_t tokens)
+    -> std::expected<DecimalAmount, CostEstimateUnavailable> {
+  if (tokens == 0) return DecimalAmount::from("0").value();
+  if (!price || !price_for_unit(*price, unit)) {
+    return std::unexpected(CostEstimateUnavailable{
+        CostEstimateUnavailableReason::missing_rate});
+  }
+  return scaled_amount(*price_for_unit(*price, unit), tokens);
+}
+
+auto add_failure(SessionCostEstimate &summary,
+                 const CostEstimateUnavailableReason reason) -> void {
+  const auto found = std::ranges::find(summary.unavailable, reason,
+                                       &CostEstimateFailureCount::reason);
+  if (found == summary.unavailable.end()) {
+    summary.unavailable.push_back({reason, 1});
+  } else {
+    ++found->count;
+  }
+}
+
 } // namespace
+
+auto cost_estimate_unit_name(const CostEstimateUnit unit) noexcept
+    -> std::string_view {
+  switch (unit) {
+  case CostEstimateUnit::usd: return "USD";
+  case CostEstimateUnit::venice_diem: return "venice.diem";
+  }
+  return "unknown";
+}
+
+auto cost_estimate_reason_name(
+    const CostEstimateUnavailableReason reason) noexcept -> std::string_view {
+  switch (reason) {
+  case CostEstimateUnavailableReason::usage_unobserved:
+    return "usage unavailable";
+  case CostEstimateUnavailableReason::pricing_unobserved:
+    return "pricing unavailable";
+  case CostEstimateUnavailableReason::invalid_pricing:
+    return "pricing invalid";
+  case CostEstimateUnavailableReason::inconsistent_usage:
+    return "usage inconsistent";
+  case CostEstimateUnavailableReason::ambiguous_extended_tier:
+    return "pricing tier ambiguous";
+  case CostEstimateUnavailableReason::cache_write_usage_unavailable:
+    return "cache-write usage unavailable";
+  case CostEstimateUnavailableReason::missing_rate: return "rate unavailable";
+  case CostEstimateUnavailableReason::arithmetic_overflow:
+    return "arithmetic unavailable";
+  }
+  return "unknown";
+}
+
+auto estimate_inference_cost(const InferenceUsageRecord &record,
+                             const CostEstimateUnit unit)
+    -> std::expected<InferenceCostEstimate, CostEstimateUnavailable> {
+  if (!record.usage_observed) {
+    return std::unexpected(CostEstimateUnavailable{
+        CostEstimateUnavailableReason::usage_unobserved});
+  }
+  if (!record.pricing_observation) {
+    return std::unexpected(CostEstimateUnavailable{
+        CostEstimateUnavailableReason::pricing_unobserved});
+  }
+  if (!validate_pricing_observation(*record.pricing_observation)) {
+    return std::unexpected(CostEstimateUnavailable{
+        CostEstimateUnavailableReason::invalid_pricing});
+  }
+  if (record.usage.cached_input_tokens > record.usage.input_tokens ||
+      record.usage.reasoning_tokens > record.usage.output_tokens) {
+    return std::unexpected(CostEstimateUnavailable{
+        CostEstimateUnavailableReason::inconsistent_usage});
+  }
+  auto selected = select_tier(record.usage,
+                              record.pricing_observation->pricing);
+  if (!selected) return std::unexpected(selected.error());
+  const auto &[tier, selection] = *selected;
+  if (tier->cache_write) {
+    return std::unexpected(CostEstimateUnavailable{
+        CostEstimateUnavailableReason::cache_write_usage_unavailable});
+  }
+  if (!unit_present(*tier, unit)) {
+    return std::unexpected(CostEstimateUnavailable{
+        CostEstimateUnavailableReason::missing_rate});
+  }
+
+  const auto uncached = record.usage.input_tokens -
+                        record.usage.cached_input_tokens;
+  auto input = bucket_amount(tier->input, unit, uncached);
+  auto cached = bucket_amount(tier->cache_input, unit,
+                              record.usage.cached_input_tokens);
+  auto output = bucket_amount(tier->output, unit,
+                              record.usage.output_tokens);
+  if (!input) return std::unexpected(input.error());
+  if (!cached) return std::unexpected(cached.error());
+  if (!output) return std::unexpected(output.error());
+  auto input_and_cache = add(*input, *cached);
+  if (!input_and_cache) {
+    return std::unexpected(CostEstimateUnavailable{
+        CostEstimateUnavailableReason::arithmetic_overflow});
+  }
+  auto total = add(*input_and_cache, *output);
+  if (!total) {
+    return std::unexpected(CostEstimateUnavailable{
+        CostEstimateUnavailableReason::arithmetic_overflow});
+  }
+  auto amount = MonetaryAmount::create(
+      std::string{cost_estimate_unit_name(unit)}, *total);
+  if (!amount) {
+    return std::unexpected(CostEstimateUnavailable{
+        CostEstimateUnavailableReason::arithmetic_overflow});
+  }
+  return InferenceCostEstimate{std::move(*amount), selection,
+                               record.pricing_observation->rate_card_digest};
+}
+
+auto summarize_cost_estimates(
+    const std::span<const InferenceUsageRecord> records,
+    const CostEstimateUnit unit) -> SessionCostEstimate {
+  SessionCostEstimate result;
+  result.unit = unit;
+  result.total_inferences = records.size();
+  std::optional<DecimalAmount> total;
+  for (const auto &record : records) {
+    auto estimate = estimate_inference_cost(record, unit);
+    if (!estimate) {
+      add_failure(result, estimate.error().reason);
+      continue;
+    }
+    ++result.estimated_inferences;
+    if (!total) {
+      total = estimate->amount.amount();
+      continue;
+    }
+    auto combined = add(*total, estimate->amount.amount());
+    if (!combined) {
+      result.aggregation_failure =
+          CostEstimateUnavailableReason::arithmetic_overflow;
+      total.reset();
+      continue;
+    }
+    if (!result.aggregation_failure) total = *combined;
+  }
+  if (total && !result.aggregation_failure) {
+    auto subtotal = MonetaryAmount::create(
+        std::string{cost_estimate_unit_name(unit)}, *total);
+    if (subtotal) {
+      result.subtotal = std::move(*subtotal);
+    } else {
+      result.aggregation_failure =
+          CostEstimateUnavailableReason::arithmetic_overflow;
+    }
+  }
+  return result;
+}
 
 auto UsageLedgerProjection::find_record(const InferenceId &inference_id)
     -> InferenceUsageRecord * {
@@ -96,6 +355,7 @@ auto UsageLedgerProjection::apply(const RunEvent &event)
                                  InferenceUsageStatus::active,
                                  {},
                                  {},
+                                 {},
                                  {}});
             return {};
           },
@@ -148,6 +408,7 @@ auto UsageLedgerProjection::apply(const RunEvent &event)
                            "usage ledger total overflow");
             }
             record->usage = next_record_usage;
+            record->usage_observed = true;
             m_total_usage = next_total_usage;
             return {};
           },
