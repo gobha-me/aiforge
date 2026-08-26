@@ -339,7 +339,7 @@ class VeniceStream final : public backend::BackendStream {
   auto produce() -> void {
     venice::StreamAccumulator accumulator{/*keep_chunks=*/false};
     bool response_started{};
-    bool finish_emitted{};
+    bool finish_observed{};
     std::optional<backend::BackendError> local_error;
     std::map<int, domain::InvocationId> invocation_by_index;
     domain::Usage cumulative_usage;
@@ -438,11 +438,14 @@ class VeniceStream final : public backend::BackendStream {
       }
 
       if (delta.finish_reason) {
-        finish_emitted = true;
-        if (!emit(backend::ResponseFinished{
-                finish_reason(*delta.finish_reason)})) {
+        // Venice can send finish_reason before trailing empty-choice usage and
+        // cost frames. ResponseFinished is terminal in the neutral protocol,
+        // so observe it here and emit it only after chat_stream returns.
+        if (finish_observed) {
+          local_error = protocol_error();
           return false;
         }
+        finish_observed = true;
       }
       return true;
     };
@@ -460,13 +463,11 @@ class VeniceStream final : public backend::BackendStream {
       return;
     }
     if (!ensure_started()) return;
-    if (!finish_emitted) {
-      if (response->finish_reason.empty()) {
-        static_cast<void>(emit(protocol_error()));
-      } else {
-        static_cast<void>(emit(
-            backend::ResponseFinished{finish_reason(response->finish_reason)}));
-      }
+    if (!finish_observed || response->finish_reason.empty()) {
+      static_cast<void>(emit(protocol_error()));
+    } else {
+      static_cast<void>(emit(
+          backend::ResponseFinished{finish_reason(response->finish_reason)}));
     }
     static_cast<void>(emit(AdapterEnd{}));
   }

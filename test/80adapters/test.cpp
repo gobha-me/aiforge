@@ -85,9 +85,13 @@ class LocalServer final {
  public:
   explicit LocalServer(std::optional<std::string> echoed_error = std::nullopt,
                        const bool duplicate_cost = false,
-                       std::string cost_value = "0.0645375")
+                       std::string cost_value = "0.0645375",
+                       const bool duplicate_finish = false,
+                       const bool omit_finish = false)
       : m_echoed_error(std::move(echoed_error)),
         m_duplicate_cost(duplicate_cost),
+        m_duplicate_finish(duplicate_finish),
+        m_omit_finish(omit_finish),
         m_cost_value(std::move(cost_value)) {
     m_server.Get(
         "/api/v1/models",
@@ -122,21 +126,32 @@ class LocalServer final {
               "data: "
               "{\"id\":\"response\",\"choices\":[{\"delta\":{\"content\":"
               "\"hello\"}}]}\n\n";
+          if (!m_omit_finish) {
+            stream +=
+                "data: "
+                "{\"id\":\"response\",\"choices\":[{\"delta\":{},\"finish_"
+                "reason\":\"stop\"}]}\n\n";
+            if (m_duplicate_finish) {
+              stream +=
+                  "data: "
+                  "{\"id\":\"response\",\"choices\":[{\"delta\":{},\"finish_"
+                  "reason\":\"stop\"}]}\n\n";
+            }
+          }
           stream +=
               "data: "
-              "{\"id\":\"response\",\"choices\":[{\"delta\":{}}],"
+              "{\"id\":\"response\",\"choices\":[],"
               "\"cost\":{\"usd\":0,\"diem\":" +
               m_cost_value + "}}\n\n";
           if (m_duplicate_cost) {
             stream +=
                 "data: "
-                "{\"id\":\"response\",\"choices\":[{\"delta\":{}}],"
+                "{\"id\":\"response\",\"choices\":[],"
                 "\"cost\":{\"diem\":0.01}}\n\n";
           }
           stream +=
               "data: "
-              "{\"id\":\"response\",\"choices\":[{\"delta\":{},\"finish_"
-              "reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_"
+              "{\"id\":\"response\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_"
               "tokens\":1,\"total_tokens\":3}}\n\n"
               "data: [DONE]\n\n";
           response.set_content(std::move(stream), "text/event-stream");
@@ -180,6 +195,8 @@ class LocalServer final {
   std::string m_model_authorization;
   std::optional<std::string> m_echoed_error;
   bool m_duplicate_cost{};
+  bool m_duplicate_finish{};
+  bool m_omit_finish{};
   std::string m_cost_value;
 };
 
@@ -533,7 +550,7 @@ TEST_CASE("Venice adapter rejects unsupported content without a request",
   REQUIRE(started.error().redacted_message.find("secret") == std::string::npos);
 }
 
-TEST_CASE("Venice adapter maps structured SSE into neutral events",
+TEST_CASE("Venice adapter terminates after trailing response accounting",
           "[adapter][venice]") {
   LocalServer server;
   adapters::VeniceBackend backend{
@@ -576,6 +593,48 @@ TEST_CASE("Venice adapter maps structured SSE into neutral events",
 TEST_CASE("Venice adapter rejects duplicate provider cost frames",
           "[adapter][venice][cost][failure]") {
   LocalServer server{std::nullopt, true};
+  adapters::VeniceBackend backend{
+      secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
+  auto started = backend.start(request(), {});
+  REQUIRE(started);
+
+  std::optional<backend::BackendError> failure;
+  for (;;) {
+    auto next = (*started)->next({});
+    if (!next) {
+      failure = next.error();
+      break;
+    }
+    if (!*next) break;
+  }
+  REQUIRE(failure);
+  REQUIRE(failure->kind == backend::BackendErrorKind::protocol);
+}
+
+TEST_CASE("Venice adapter rejects duplicate provider finish frames",
+          "[adapter][venice][failure]") {
+  LocalServer server{std::nullopt, false, "0.0645375", true};
+  adapters::VeniceBackend backend{
+      secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
+  auto started = backend.start(request(), {});
+  REQUIRE(started);
+
+  std::optional<backend::BackendError> failure;
+  for (;;) {
+    auto next = (*started)->next({});
+    if (!next) {
+      failure = next.error();
+      break;
+    }
+    if (!*next) break;
+  }
+  REQUIRE(failure);
+  REQUIRE(failure->kind == backend::BackendErrorKind::protocol);
+}
+
+TEST_CASE("Venice adapter rejects streams without a finish marker",
+          "[adapter][venice][failure]") {
+  LocalServer server{std::nullopt, false, "0.0645375", false, true};
   adapters::VeniceBackend backend{
       secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
   auto started = backend.start(request(), {});
