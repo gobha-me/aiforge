@@ -11,6 +11,7 @@
 #include <aiforge/backend/backend.hpp>
 #include <aiforge/domain/event_log.hpp>
 #include <aiforge/domain/plan_projection.hpp>
+#include <aiforge/domain/project_backlog_projection.hpp>
 #include <aiforge/domain/run_projection.hpp>
 #include <aiforge/domain/task_scheduler.hpp>
 #include <aiforge/runtime/child_runner.hpp>
@@ -198,6 +199,20 @@ struct ActiveSessionTask {
   auto operator==(const ActiveSessionTask&) const -> bool = default;
 };
 
+struct ProjectTaskPromotion {
+  domain::RunId run_id;
+  domain::RunStarted attributes;
+  domain::ProjectBacklogItem item;
+  auto operator==(const ProjectTaskPromotion &) const -> bool = default;
+};
+
+struct ProjectTaskStatusUpdate {
+  domain::RunId run_id;
+  domain::RunStarted attributes;
+  domain::ProjectBacklogStatusChange change;
+  auto operator==(const ProjectTaskStatusUpdate &) const -> bool = default;
+};
+
 // Implementations may be called from a backend worker. They must not mutate
 // UI state directly; a surface should only wake or enqueue an event for its
 // owner thread.
@@ -251,6 +266,10 @@ class RunKernel final {
       -> std::expected<PlanRevalidationOutcome, RunKernelError>;
   [[nodiscard]] auto dispatch_child(ChildRunStart start)
       -> std::expected<void, RunKernelError>;
+  [[nodiscard]] auto promote_project_task(ProjectTaskPromotion promotion)
+      -> std::expected<void, RunKernelError>;
+  [[nodiscard]] auto update_project_task_status(ProjectTaskStatusUpdate update)
+      -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto cancel(const domain::RunId& run_id,
                             const domain::InferenceId& inference_id,
                             std::optional<std::string> reason = std::nullopt)
@@ -303,6 +322,9 @@ class RunKernel final {
       -> const domain::PlanGraphProjection*;
   [[nodiscard]] auto active_session_tasks() const
       -> std::vector<ActiveSessionTask>;
+  [[nodiscard]] auto
+  project_backlog(const domain::RepositoryId &repository_id) const
+      -> std::expected<domain::ProjectBacklogProjection, RunKernelError>;
 
  private:
   struct Impl;

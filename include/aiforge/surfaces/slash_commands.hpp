@@ -32,6 +32,8 @@ enum class SlashCommandAction {
   disable_persona,
   choose_model,
   show_usage,
+  show_plan,
+  show_tasks,
 };
 
 struct SlashCommandResult {

@@ -14,6 +14,7 @@
 #include <aiforge/domain/persona.hpp>
 #include <aiforge/domain/plan.hpp>
 #include <aiforge/domain/pricing.hpp>
+#include <aiforge/domain/project_backlog.hpp>
 #include <aiforge/domain/provenance.hpp>
 #include <aiforge/domain/review_receipt.hpp>
 #include <aiforge/domain/verification_evidence.hpp>
@@ -401,6 +402,17 @@ struct SessionTaskResultRecorded {
   auto operator==(const SessionTaskResultRecorded&) const -> bool = default;
 };
 
+struct ProjectBacklogItemPromoted {
+  ProjectBacklogItem item;
+  auto operator==(const ProjectBacklogItemPromoted &) const -> bool = default;
+};
+
+struct ProjectBacklogItemStatusChanged {
+  ProjectBacklogStatusChange change;
+  auto operator==(const ProjectBacklogItemStatusChanged &) const
+      -> bool = default;
+};
+
 struct InterRunMessageSent {
   RunId target_run_id;
   std::vector<ContentBlock> content;
@@ -436,7 +448,8 @@ using RunEventPayload = std::variant<
     ReviewOverrideRevoked, PlanRevisionProposed,
     PlanRevisionDecisionRecorded, PlanRevisionInvalidated,
     SessionTasksMaterialized, ChildRunCreated,
-    SessionTaskResultRecorded, InterRunMessageSent,
+    SessionTaskResultRecorded, ProjectBacklogItemPromoted,
+    ProjectBacklogItemStatusChanged, InterRunMessageSent,
     UnknownEvent>;
 
 struct EventMetadata {

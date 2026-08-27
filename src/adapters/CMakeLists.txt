@@ -10,7 +10,9 @@ add_library(${PROJECT_NAME}_adapters STATIC
   process_models.cpp
   process_tool.cpp
   process_one_shot.cpp
+  process_plan.cpp
   process_provenance.cpp
+  process_repository.cpp
   process_draft_editor.cpp
   process_interactive.cpp
   termforge_run_bridge.cpp

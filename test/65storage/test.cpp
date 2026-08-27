@@ -148,6 +148,16 @@ auto plan_revision() -> domain::PlanRevision {
         {"sha256", "eeeeeeeeeeeeeeee", 32}}}};
 }
 
+auto backlog_item() -> domain::ProjectBacklogItem {
+  const auto revision = plan_revision();
+  return {make_id<domain::ProjectBacklogItemId>("backlog-item"),
+          make_id<domain::RepositoryId>("repository"),
+          {make_id<domain::SessionId>("session"), revision.plan_id,
+           revision.revision_id, revision.tasks.front().task_id},
+          revision.tasks.front(),
+          domain::ProjectBacklogDecisionSource::user};
+}
+
 auto child_run_descriptor() -> domain::ChildRunDescriptor {
   return {make_id<domain::RunId>("run"),
           plan_revision().plan_id,
@@ -369,9 +379,66 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
       domain::SessionTaskResultRecorded{session_task_result()},
       domain::InterRunMessageSent{make_id<domain::RunId>("target"),
                                   {domain::TextBlock{"message"}}},
+      domain::ProjectBacklogItemPromoted{backlog_item()},
+      domain::ProjectBacklogItemStatusChanged{
+          {backlog_item().item_id, backlog_item().repository_id,
+           domain::ProjectBacklogItemStatus::resolved,
+           domain::ProjectBacklogDecisionSource::policy,
+           std::string{"completed by another session"},
+           make_id<domain::EventId>("promotion-event")}},
       domain::UnknownEvent{"future.event",
                            {"application/json", "{\"nested\":{\"value\":1}}"}},
   };
+}
+
+TEST_CASE("SQLite discovers repository backlog facts across source sessions",
+          "[storage][sqlite][plan][tasks]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "session", 100);
+  auto item = backlog_item();
+  item.origin.session_id = session;
+  REQUIRE(store->append_events(
+      session,
+      std::array{
+          event(1, domain::ProjectBacklogItemPromoted{item}, "promotion-event"),
+          event(2,
+                domain::ProjectBacklogItemStatusChanged{
+                    {item.item_id, item.repository_id,
+                     domain::ProjectBacklogItemStatus::resolved,
+                     domain::ProjectBacklogDecisionSource::user,
+                     std::string{"implemented"},
+                     make_id<domain::EventId>("promotion-event")}},
+                "status-event")}));
+
+  const auto other_session = create(*store, "other-session", 200);
+  auto other = item;
+  other.item_id = make_id<domain::ProjectBacklogItemId>("other-item");
+  other.repository_id = make_id<domain::RepositoryId>("other-repository");
+  other.origin.session_id = other_session;
+  REQUIRE(store->append_events(
+      other_session,
+      std::array{event(1, domain::ProjectBacklogItemPromoted{other},
+                       "other-promotion")}));
+
+  const auto histories = store->replay_project_backlog(item.repository_id, 10);
+  REQUIRE(histories);
+  REQUIRE(histories->size() == 1);
+  REQUIRE(histories->front().session_id == session);
+  const auto projection =
+      domain::ProjectBacklogProjection::rebuild(item.repository_id, *histories);
+  REQUIRE(projection);
+  REQUIRE(projection->items().size() == 1);
+  REQUIRE(projection->items().front().status ==
+          domain::ProjectBacklogItemStatus::resolved);
+  REQUIRE(projection->items().front().status_reason == "implemented");
+
+  const auto invalid_limit =
+      store->replay_project_backlog(item.repository_id, 0);
+  REQUIRE_FALSE(invalid_limit);
+  REQUIRE(invalid_limit.error().code ==
+          storage::SessionStoreErrorCode::invalid_argument);
 }
 
 auto execute_sql(const std::filesystem::path& path, const std::string& sql)
@@ -432,6 +499,23 @@ TEST_CASE("SQLite store creates restrictive state and rejects unsafe paths",
   REQUIRE_FALSE(symlink);
   REQUIRE(symlink.error().code ==
           storage::SessionStoreErrorCode::permission_denied);
+}
+
+TEST_CASE("SQLite storage version one migrates backlog indexes transactionally",
+          "[storage][sqlite][migration][plan][tasks]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  store.reset();
+  execute_sql(path, "DROP INDEX events_project_backlog_promoted_repository;"
+                    "DROP INDEX events_project_backlog_status_repository;"
+                    "PRAGMA user_version=1;");
+
+  store = open_store(path);
+  const auto repository = make_id<domain::RepositoryId>("repository");
+  const auto histories = store->replay_project_backlog(repository, 10);
+  REQUIRE(histories);
+  REQUIRE(histories->empty());
 }
 
 TEST_CASE("all typed payloads and opaque future payloads round trip",

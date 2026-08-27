@@ -108,6 +108,25 @@ auto ScriptedSessionStore::replay_events(
                                "scripted replay outcome has the wrong type"));
 }
 
+auto ScriptedSessionStore::replay_project_backlog(
+    const domain::RepositoryId &repository_id,
+    const std::size_t maximum_sessions, const std::stop_token stop_token)
+    -> std::expected<std::vector<domain::ProjectBacklogSessionEvents>,
+                     storage::SessionStoreError> {
+  auto result = next(ReplayProjectBacklogCall{repository_id, maximum_sessions},
+                     stop_token);
+  if (!result)
+    return std::unexpected(std::move(result.error()));
+  if (const auto *histories =
+          std::get_if<std::vector<domain::ProjectBacklogSessionEvents>>(
+              &*result)) {
+    return *histories;
+  }
+  return std::unexpected(
+      error(storage::SessionStoreErrorCode::internal_failure,
+            "scripted project-backlog replay outcome has the wrong type"));
+}
+
 auto ScriptedSessionStore::recorded_calls() const noexcept
     -> const std::vector<SessionStoreCall>& {
   return m_recorded_calls;

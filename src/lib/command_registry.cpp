@@ -390,6 +390,63 @@ auto models_handler(CommandContext& context) -> int {
   if (!result.error().message.empty())
     context.error << "aiforge: " << result.error().message << '\n';
   switch (result.error().kind) {
+  case CommandFailureKind::usage:
+    return usage_exit_code;
+  case CommandFailureKind::cancelled:
+    return 130;
+  case CommandFailureKind::runtime:
+    return failure_exit_code;
+  }
+  return failure_exit_code;
+}
+
+auto plan_handler(CommandContext &context) -> int {
+  const auto resume =
+      parsed_text_values(context.invocation, "plan.session.resume");
+  const bool continue_latest =
+      parsed_argument(context.invocation, "plan.session.continue") != nullptr;
+  const bool jsonl =
+      parsed_argument(context.invocation, "plan.jsonl") != nullptr;
+  if (!jsonl) {
+    context.error << "aiforge: plan currently requires --jsonl\n";
+    return usage_exit_code;
+  }
+  if (static_cast<int>(resume.has_value()) +
+          static_cast<int>(continue_latest) !=
+      1) {
+    context.error
+        << "aiforge: plan requires exactly one of --resume or --continue\n";
+    return usage_exit_code;
+  }
+  if (context.environment.input_is_terminal) {
+    context.error
+        << "aiforge: plan --jsonl requires noninteractive standard input\n";
+    return usage_exit_code;
+  }
+  std::optional<domain::SessionId> session_id;
+  if (resume) {
+    if (resume->size() != 1)
+      return usage_exit_code;
+    auto parsed = domain::SessionId::from(std::string{resume->front()});
+    if (!parsed) {
+      context.error << "aiforge: session ID is invalid\n";
+      return usage_exit_code;
+    }
+    session_id = std::move(*parsed);
+  }
+  if (context.environment.plan == nullptr)
+    return unavailable_handler(context);
+  auto result = context.environment.plan->execute(
+      {continue_latest ? PlanCommand::SessionMode::continue_latest
+                       : PlanCommand::SessionMode::resume,
+       std::move(session_id)},
+      context.environment, context.output, context.error);
+  if (result)
+    return success_exit_code;
+  if (!result.error().message.empty()) {
+    context.error << "aiforge: " << result.error().message << '\n';
+  }
+  switch (result.error().kind) {
     case CommandFailureKind::usage: return usage_exit_code;
     case CommandFailureKind::cancelled: return 130;
     case CommandFailureKind::runtime: return failure_exit_code;
@@ -800,6 +857,26 @@ auto builtin_command_registry() -> const CommandRegistry& {
          {},
          {},
          login_handler},
+        {"plan",
+         "plan",
+         "Inspect and control durable plans and tasks through JSON Lines.",
+         false,
+         {{{"plan.jsonl", {"--jsonl"}, ArgumentValueKind::flag, 0, 1},
+           {},
+           "Use the versioned JSON Lines control protocol."},
+          {{"plan.session.resume", {"--resume"}, ArgumentValueKind::text, 0, 1},
+           "session-id",
+           "Resume an exact durable session."},
+          {{"plan.session.continue",
+            {"--continue"},
+            ArgumentValueKind::flag,
+            0,
+            1},
+           {},
+           "Use the most recently active durable session."}},
+         {},
+         {},
+         plan_handler},
         {"config",
          "config",
          "Inspect or update configuration.",

@@ -1,11 +1,12 @@
 #include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
+#include <aiforge/adapters/model_picker_dialog.hpp>
+#include <aiforge/adapters/process_credentials.hpp>
 #include <aiforge/adapters/process_draft_editor.hpp>
 #include <aiforge/adapters/process_interactive.hpp>
 #include <aiforge/adapters/process_model_catalog.hpp>
-#include <aiforge/adapters/process_credentials.hpp>
-#include <aiforge/adapters/model_picker_dialog.hpp>
 #include <aiforge/adapters/process_provenance.hpp>
+#include <aiforge/adapters/process_repository.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/termforge_run_bridge.hpp>
 #include <aiforge/adapters/transcript_view.hpp>
@@ -19,12 +20,15 @@
 #include <chrono>
 #include <cstdlib>
 #include <format>
+#include <functional>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <ostream>
 #include <span>
 #include <string>
 #include <termforge/core/app.hpp>
+#include <termforge/widgets/choice_wizard_dialog.hpp>
 #include <termforge/widgets/composer.hpp>
 #include <termforge/widgets/detail/width.hpp>
 #include <termforge/widgets/focus_ring.hpp>
@@ -48,7 +52,8 @@ class CredentialUnavailableBackend final : public backend::Backend {
     }
     return std::unexpected(backend::BackendError{
         backend::BackendErrorKind::credential_unavailable,
-        "Venice credential is not configured; run 'aiforge login' or set VENICE_API_KEY",
+                              "Venice credential is not configured; run "
+                              "'aiforge login' or set VENICE_API_KEY",
         false, std::nullopt});
   }
 };
@@ -248,6 +253,97 @@ struct InferenceCounts {
   return result;
 }
 
+[[nodiscard]] auto plan_state_text(const domain::PlanGraphState state)
+    -> std::string_view {
+  switch (state) {
+  case domain::PlanGraphState::not_started:
+    return "not started";
+  case domain::PlanGraphState::proposed:
+    return "proposed";
+  case domain::PlanGraphState::revision_requested:
+    return "revision requested";
+  case domain::PlanGraphState::approved:
+    return "approved";
+  case domain::PlanGraphState::rejected:
+    return "rejected";
+  case domain::PlanGraphState::invalidated:
+    return "invalidated";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] auto readiness_text(const domain::TaskReadinessState state)
+    -> std::string_view {
+  switch (state) {
+  case domain::TaskReadinessState::ready:
+    return "ready";
+  case domain::TaskReadinessState::waiting_for_dependencies:
+    return "waiting for dependencies";
+  case domain::TaskReadinessState::blocked_by_dependency:
+    return "blocked by dependency";
+  case domain::TaskReadinessState::blocked_by_resource:
+    return "blocked by resource";
+  case domain::TaskReadinessState::waiting_for_capacity:
+    return "waiting for capacity";
+  case domain::TaskReadinessState::running:
+    return "running";
+  case domain::TaskReadinessState::completed:
+    return "completed";
+  case domain::TaskReadinessState::failed:
+    return "failed";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] auto
+session_task_state_text(const runtime::SessionTaskState state)
+    -> std::string_view {
+  switch (state) {
+  case runtime::SessionTaskState::pending:
+    return "pending";
+  case runtime::SessionTaskState::dispatched:
+    return "dispatched";
+  case runtime::SessionTaskState::completed:
+    return "completed";
+  case runtime::SessionTaskState::failed:
+    return "failed";
+  case runtime::SessionTaskState::cancelled:
+    return "cancelled";
+  case runtime::SessionTaskState::timed_out:
+    return "timed out";
+  case runtime::SessionTaskState::budget_exhausted:
+    return "budget exhausted";
+  case runtime::SessionTaskState::unavailable:
+    return "unavailable";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] auto effect_text(const domain::Effect effect)
+    -> std::string_view {
+  switch (effect) {
+  case domain::Effect::read:
+    return "read";
+  case domain::Effect::write:
+    return "write";
+  case domain::Effect::remove:
+    return "remove";
+  case domain::Effect::execute:
+    return "execute";
+  case domain::Effect::network:
+    return "network";
+  case domain::Effect::communicate:
+    return "communicate";
+  case domain::Effect::spend:
+    return "spend";
+  case domain::Effect::change_infrastructure:
+    return "change infrastructure";
+  case domain::Effect::change_privileges:
+    return "change privileges";
+  }
+  return "unknown";
+}
+
 [[nodiscard]] auto estimate_summary_text(
     const domain::SessionCostEstimate& estimate) -> std::string {
   if (!estimate.subtotal) return "unavailable";
@@ -330,8 +426,8 @@ struct InferenceCounts {
       std::format("Output tokens: {}", usage.output_tokens),
       std::format("Cached input tokens: {}", usage.cached_input_tokens),
       std::format("Reasoning tokens: {}", usage.reasoning_tokens),
-      std::format(
-          "Inferences: {} total | {} completed | {} failed | {} cancelled | {} active",
+      std::format("Inferences: {} total | {} completed | {} failed | {} "
+                  "cancelled | {} active",
           total, counts.completed, counts.failed, counts.cancelled,
           counts.active),
   };
@@ -373,8 +469,8 @@ struct InferenceCounts {
                       spend.remaining->amount().to_string());
       lines.push_back(std::string{"Spend ceiling state: "} +
                       (spend.reached ? "reached" : "open"));
-      lines.push_back(std::format(
-          "Spend coverage: {} provider-reported + {} catalog-derived of {} inferences",
+      lines.push_back(std::format("Spend coverage: {} provider-reported + {} "
+                                  "catalog-derived of {} inferences",
           spend.reported_inferences, spend.estimated_inferences,
           spend.total_inferences));
     } else {
@@ -395,8 +491,8 @@ struct InferenceCounts {
   } else {
     lines.push_back("Spend ceiling: not set");
   }
-  lines.push_back(
-      "Reported amounts are provider observations; catalog estimates are derived, not quotes.");
+  lines.push_back("Reported amounts are provider observations; catalog "
+                  "estimates are derived, not quotes.");
   return lines;
 }
 
@@ -521,6 +617,7 @@ class ChatAppImpl final : public InteractiveChatApp {
 
   auto on_start() -> void override {
     if (m_rendered_output != nullptr) driver().set_output(m_rendered_output);
+    ensure_plan_review();
   }
 
   auto on_event(const termforge::Event& event) -> void override {
@@ -573,7 +670,7 @@ class ChatAppImpl final : public InteractiveChatApp {
         if (m_session->active()) {
           m_status = "Ctrl+D is unavailable while a run is active";
         } else {
-          quit();
+          request_close();
         }
         return;
       }
@@ -631,6 +728,7 @@ class ChatAppImpl final : public InteractiveChatApp {
       }
       if (!apply_events(*drained)) return;
     }
+    ensure_plan_review();
     if (m_stop_token.stop_requested()) {
       if (m_session->active()) {
         auto cancelled = m_session->cancel_active("interrupt");
@@ -823,6 +921,137 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
+  [[nodiscard]] auto repository_snapshot()
+      -> std::expected<domain::RepositorySnapshot, std::string> {
+    return observe_process_repository(m_stop_token);
+  }
+
+  auto show_plan() -> bool {
+    auto state = m_session->plan_task_state();
+    if (!state) {
+      m_status = state.error().message;
+      return false;
+    }
+    if (!state->plan) {
+      show_panel("Plan review", {"This session has no plan."},
+                 "No plan is available");
+      return true;
+    }
+    std::vector<std::string> lines;
+    lines.push_back("State: " +
+                    std::string{plan_state_text(state->plan_state)});
+    lines.push_back("Goal: " + state->plan->revision.goal);
+    lines.push_back("Plan: " +
+                    std::string{state->plan->revision.plan_id.value()});
+    lines.push_back("Revision: " +
+                    std::string{state->plan->revision.revision_id.value()});
+    if (state->plan->revision.source_snapshot) {
+      const auto &source = *state->plan->revision.source_snapshot;
+      lines.push_back("Source: " + std::string{source.repository_id.value()} +
+                      " " + source.fingerprint.algorithm + ":" +
+                      source.fingerprint.value);
+    }
+    for (const auto &evidence : state->plan->revision.evidence) {
+      lines.push_back("Evidence: " + std::string{evidence.evidence_id.value()} +
+                      " " + evidence.digest.algorithm + ":" +
+                      evidence.digest.value);
+    }
+    for (const auto &task : state->plan->revision.tasks) {
+      std::string line =
+          "[" + std::string{task.task_id.value()} + "] " + task.title;
+      if (task.parent_task_id) {
+        line += " (parent " + std::string{task.parent_task_id->value()} + ")";
+      }
+      lines.push_back(std::move(line));
+      for (const auto &criterion : task.acceptance_criteria) {
+        lines.push_back("  criterion: " + criterion);
+      }
+      std::string effects{"  effects:"};
+      for (const auto effect : task.intended_effects) {
+        effects += " " + std::string{effect_text(effect)};
+      }
+      lines.push_back(std::move(effects));
+      if (!task.dependency_task_ids.empty()) {
+        std::string dependencies{"  depends:"};
+        for (const auto &dependency : task.dependency_task_ids) {
+          dependencies += " " + std::string{dependency.value()};
+        }
+        lines.push_back(std::move(dependencies));
+      }
+      for (const auto &intent : task.resource_intents) {
+        lines.push_back("  resource: " + intent.kind + ":" + intent.value);
+      }
+    }
+    if (state->schedule) {
+      lines.push_back(
+          "Proposed concurrency: " +
+          std::to_string(state->schedule->dispatchable_task_ids.size()));
+      for (const auto &task : state->schedule->tasks) {
+        std::string schedule = "Schedule " + std::string{task.task_id.value()} +
+                               ": " + std::string{readiness_text(task.state)};
+        if (!task.blockers.empty()) {
+          schedule += " (blocked by";
+          for (const auto &blocker : task.blockers) {
+            schedule += " " + std::string{blocker.value()};
+          }
+          schedule += ")";
+        }
+        lines.push_back(std::move(schedule));
+      }
+    }
+    show_panel("Plan review", std::move(lines),
+               state->pending_decision
+                   ? "Plan decision is pending in the review dialog"
+                   : "Plan state is rebuilt from durable events");
+    return true;
+  }
+
+  auto show_tasks() -> bool {
+    auto snapshot = repository_snapshot();
+    auto state = m_session->plan_task_state(
+        snapshot ? std::optional{snapshot->root.repository_id} : std::nullopt);
+    if (!state) {
+      m_status = state.error().message;
+      return false;
+    }
+    std::vector<std::string> lines{"Active session tasks"};
+    std::vector<std::string> completed;
+    for (const auto &task : state->session_tasks) {
+      auto line = "[" + std::string{task.task.task_id.value()} + "] " +
+                  task.task.title + " — " +
+                  std::string{session_task_state_text(task.state)};
+      if (task.state == runtime::SessionTaskState::completed) {
+        completed.push_back(std::move(line));
+      } else {
+        lines.push_back(std::move(line));
+      }
+    }
+    if (lines.size() == 1)
+      lines.push_back("  none");
+    lines.push_back("Project backlog");
+    if (!snapshot) {
+      lines.push_back("  unavailable: " + snapshot.error());
+    } else if (state->project_backlog.empty()) {
+      lines.push_back("  none");
+    } else {
+      for (const auto &item : state->project_backlog) {
+        lines.push_back("[" + std::string{item.item.item_id.value()} + "] " +
+                        item.item.task.title + " — " +
+                        (item.status == domain::ProjectBacklogItemStatus::open
+                             ? "open"
+                             : "resolved"));
+      }
+    }
+    if (!completed.empty()) {
+      lines.push_back("Completed session history");
+      lines.insert(lines.end(), std::make_move_iterator(completed.begin()),
+                   std::make_move_iterator(completed.end()));
+    }
+    show_panel("Tasks", std::move(lines),
+               "Session and project task state is event-derived");
+    return true;
+  }
+
   auto switch_session(const surfaces::ChatSessionOpen::Mode mode,
                       std::optional<domain::SessionId> session_id) -> bool {
     if (m_session->active()) {
@@ -964,7 +1193,7 @@ class ChatAppImpl final : public InteractiveChatApp {
         return true;
       case surfaces::SlashCommandAction::quit:
         m_composer.clear();
-        quit();
+        request_close();
         return true;
       case surfaces::SlashCommandAction::clear_view: {
         auto cleared = m_transcript.clear_view();
@@ -996,21 +1225,25 @@ class ChatAppImpl final : public InteractiveChatApp {
           m_status = "Session ID is invalid";
           return false;
         }
-        if (!switch_session(surfaces::ChatSessionOpen::Mode::resume,
-                            std::move(*session_id))) {
-          return false;
-        }
-        m_composer.clear();
+        request_close([this, session_id = std::move(*session_id)]() mutable {
+          if (switch_session(surfaces::ChatSessionOpen::Mode::resume,
+                             std::move(session_id))) {
+            m_composer.clear();
+          ensure_plan_review();
+          }
+        });
         return true;
       }
       case surfaces::SlashCommandAction::new_session:
-        if (!switch_session(m_session_store == nullptr
-                                ? surfaces::ChatSessionOpen::Mode::ephemeral
-                                : surfaces::ChatSessionOpen::Mode::create,
-                            std::nullopt)) {
-          return false;
-        }
-        m_composer.clear();
+        request_close([this] {
+          if (switch_session(m_session_store == nullptr
+                                 ? surfaces::ChatSessionOpen::Mode::ephemeral
+                                 : surfaces::ChatSessionOpen::Mode::create,
+                             std::nullopt)) {
+            m_composer.clear();
+          ensure_plan_review();
+          }
+        });
         return true;
       case surfaces::SlashCommandAction::list_personas:
         if (!show_personas()) return false;
@@ -1067,6 +1300,16 @@ class ChatAppImpl final : public InteractiveChatApp {
         show_usage();
         m_composer.clear();
         return true;
+      case surfaces::SlashCommandAction::show_plan:
+        if (!show_plan())
+          return false;
+        m_composer.clear();
+        return true;
+      case surfaces::SlashCommandAction::show_tasks:
+        if (!show_tasks())
+          return false;
+        m_composer.clear();
+        return true;
     }
     m_status = "Slash command result is unsupported";
     return false;
@@ -1114,6 +1357,323 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_composer.push_history(std::move(prompts[index]));
       }
     }
+  }
+
+  template <typename Id>
+  [[nodiscard]] auto control_id(const std::string_view prefix,
+                                const std::uint64_t suffix)
+      -> std::optional<Id> {
+    auto value = Id::from(std::string{prefix} + '-' + std::to_string(suffix));
+    if (!value)
+      return std::nullopt;
+    return std::move(*value);
+  }
+
+  [[nodiscard]] auto control_attributes() -> std::optional<domain::RunStarted> {
+    auto surface = domain::SurfaceId::from("interactive");
+    auto workspace = domain::WorkspaceId::from("chat");
+    auto permission = domain::PermissionProfileId::from("plan-control");
+    if (!surface || !workspace || !permission)
+      return std::nullopt;
+    return domain::RunStarted{*surface, *workspace, *permission, std::nullopt};
+  }
+
+  auto ensure_plan_review() -> void {
+    if (!m_session || m_plan_review_active || m_close_dialog_active)
+      return;
+    auto state = m_session->plan_task_state();
+    if (!state || !state->pending_decision || !state->plan)
+      return;
+    const auto pending = *state->pending_decision;
+    const auto revision = state->plan->revision;
+    const auto review_key =
+        std::pair{m_session->session_id(), revision.revision_id};
+    if (m_reviewed_plan == review_key)
+      return;
+    if (!m_plan_dialog) {
+      m_plan_dialog = std::make_unique<termforge::ChoiceWizardDialog>();
+    }
+    std::string text = "Plan " + std::string{revision.plan_id.value()} +
+                       "\nGoal: " + revision.goal;
+    if (revision.source_snapshot) {
+      text += "\nSource: " +
+              std::string{revision.source_snapshot->repository_id.value()} +
+              " " + revision.source_snapshot->fingerprint.algorithm + ":" +
+              revision.source_snapshot->fingerprint.value;
+    }
+    for (const auto &evidence : revision.evidence) {
+      text += "\nEvidence: " + std::string{evidence.evidence_id.value()} + " " +
+              evidence.digest.algorithm + ":" + evidence.digest.value;
+    }
+    for (const auto &task : revision.tasks) {
+      text += "\n\n[" + std::string{task.task_id.value()} + "] " + task.title;
+      if (!task.dependency_task_ids.empty()) {
+        text += "\nDepends on:";
+        for (const auto &dependency : task.dependency_task_ids) {
+          text += " " + std::string{dependency.value()};
+        }
+      }
+      for (const auto &criterion : task.acceptance_criteria) {
+        text += "\nCriterion: " + criterion;
+      }
+      text += "\nEffects:";
+      for (const auto effect : task.intended_effects) {
+        text += " " + std::string{effect_text(effect)};
+      }
+      for (const auto &intent : task.resource_intents) {
+        text += "\nResource: " + intent.kind + ":" + intent.value;
+      }
+    }
+    if (state->schedule) {
+      text += "\n\nProposed concurrency: " +
+              std::to_string(state->schedule->dispatchable_task_ids.size());
+      for (const auto &task : state->schedule->tasks) {
+        text += "\nSchedule " + std::string{task.task_id.value()} + ": " +
+                std::string{readiness_text(task.state)};
+        if (!task.blockers.empty()) {
+          text += " (blocked by";
+          for (const auto &blocker : task.blockers) {
+            text += " " + std::string{blocker.value()};
+          }
+          text += ")";
+        }
+      }
+    }
+    termforge::ChoiceWizardPage page;
+    page.title = "Review plan " + std::string{revision.revision_id.value()};
+    page.text = std::move(text);
+    page.mode = termforge::ChoiceMode::Single;
+    page.minimum_selected = 1;
+    page.maximum_selected = 1;
+    page.choices = {
+        {"Approve", "Materialize the exact displayed revision."},
+        {"Revise", "Request a superseding revision; enter a reason below."},
+        {"Reject", "Reject the exact displayed revision."}};
+    page.other_enabled = true;
+    page.other_label = "Reason";
+    page.other_placeholder = "Required for Revise; optional for Reject";
+    if (!m_plan_dialog->set_pages({std::move(page)})) {
+      m_status = "Plan review dialog rejected the plan";
+      return;
+    }
+    m_reviewed_plan = review_key;
+    m_plan_review_active = true;
+    m_plan_dialog->on_result([this, pending, revision](
+                                 std::optional<termforge::ChoiceWizardResult>
+                                     result) {
+      pop_overlay();
+      m_plan_review_active = false;
+      if (!result || result->pages.size() != 1 ||
+          result->pages.front().selected_indices.size() != 1) {
+        m_status = "Plan review cancelled; the revision remains pending";
+        return;
+      }
+      const auto selected = result->pages.front().selected_indices.front();
+      if (selected > 2) {
+        m_status = "Plan review returned an invalid action";
+        return;
+      }
+      auto reason = result->pages.front().other;
+      if (selected == 1 && (!reason || reason->empty())) {
+        m_status = "A revision request requires a reason";
+        m_reviewed_plan.reset();
+        ensure_plan_review();
+        return;
+      }
+      runtime::PlanApprovalEnvironment environment;
+      if (selected == 0) {
+        if (!revision.evidence.empty()) {
+          m_status =
+              "Plan approval blocked: bound evidence cannot be re-established";
+          return;
+        }
+        if (revision.source_snapshot) {
+          auto snapshot = repository_snapshot();
+          if (!snapshot) {
+            m_status = "Plan approval blocked: " + snapshot.error();
+            return;
+          }
+          environment.source_snapshot = domain::snapshot_identity(*snapshot);
+        }
+      }
+      const auto decision = selected == 0 ? domain::PlanDecision::approved
+                            : selected == 1
+                                ? domain::PlanDecision::revision_requested
+                                : domain::PlanDecision::rejected;
+      auto decided = m_session->decide_plan(
+          pending.run_id,
+          {pending.plan_id, pending.revision_id, decision,
+           domain::PlanDecisionSource::user, std::move(reason)},
+          std::move(environment));
+      if (!decided) {
+        m_status = decided.error().message;
+        return;
+      }
+      m_status = decision == domain::PlanDecision::approved
+                     ? "Plan approved and session tasks materialized"
+                 : decision == domain::PlanDecision::revision_requested
+                     ? "Plan revision requested"
+                     : "Plan rejected";
+    });
+    push_overlay(*m_plan_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                  .dismiss_on_click_outside = false});
+    m_status = "Review the exact proposed plan";
+  }
+
+  auto request_close(std::function<void()> action = {}) -> void {
+    if (!action)
+      action = [this] { quit(); };
+    if (m_close_dialog_active || m_plan_review_active) {
+      m_status = "Close is unavailable while another decision is open";
+      return;
+    }
+    auto state = m_session->plan_task_state();
+    if (!state) {
+      m_status = state.error().message;
+      return;
+    }
+    std::vector<runtime::ActiveSessionTask> unresolved;
+    for (const auto &task : state->session_tasks) {
+      if (task.state == runtime::SessionTaskState::completed)
+        continue;
+      unresolved.push_back(task);
+    }
+    if (unresolved.empty()) {
+      action();
+      return;
+    }
+
+    auto snapshot = repository_snapshot();
+    if (snapshot) {
+      state = m_session->plan_task_state(snapshot->root.repository_id);
+      if (!state) {
+        m_status = state.error().message;
+        return;
+      }
+      unresolved.erase(
+          std::remove_if(
+              unresolved.begin(), unresolved.end(),
+              [&](const auto &task) {
+                const auto promoted = std::ranges::any_of(
+                    state->project_backlog, [&](const auto &item) {
+                      return item.item.origin.session_id ==
+                                 m_session->session_id() &&
+                             item.item.origin.plan_id == task.plan_id &&
+                             item.item.origin.revision_id == task.revision_id &&
+                             item.item.origin.task_id == task.task.task_id;
+                    });
+                return promoted;
+              }),
+          unresolved.end());
+    }
+    if (unresolved.empty()) {
+      action();
+      return;
+    }
+    if (!m_close_dialog) {
+      m_close_dialog = std::make_unique<termforge::ChoiceWizardDialog>();
+    }
+    termforge::ChoiceWizardPage tasks;
+    tasks.title = "Unresolved session tasks";
+    tasks.text = "Select tasks to promote before leaving this session.";
+    tasks.mode = termforge::ChoiceMode::Multiple;
+    tasks.minimum_selected = 0;
+    tasks.maximum_selected = unresolved.size();
+    for (const auto &task : unresolved) {
+      tasks.choices.push_back(
+          {task.task.title, std::string{session_task_state_text(task.state)}});
+    }
+    termforge::ChoiceWizardPage decision;
+    decision.title = "Session cleanup";
+    decision.text = snapshot ? "Promotion is explicit; unselected tasks remain "
+                               "only in this session."
+                             : "The repository is unavailable, so tasks can "
+                               "only remain session-local.";
+    decision.mode = termforge::ChoiceMode::Single;
+    decision.minimum_selected = 1;
+    decision.maximum_selected = 1;
+    if (snapshot) {
+      decision.choices.push_back(
+          {"Promote selected", "Append project-backlog promotion facts."});
+    }
+    decision.choices.push_back(
+        {"Leave session-local",
+         "Keep unresolved work only in session history."});
+    decision.choices.push_back({"Cancel", "Return to the current session."});
+    if (!m_close_dialog->set_pages({std::move(tasks), std::move(decision)})) {
+      m_status = "Session cleanup dialog rejected its task list";
+      return;
+    }
+    m_close_action = std::move(action);
+    m_close_dialog_active = true;
+    const auto repository_id =
+        snapshot ? std::optional{snapshot->root.repository_id} : std::nullopt;
+    m_close_dialog->on_result(
+        [this, unresolved = std::move(unresolved), repository_id](
+            std::optional<termforge::ChoiceWizardResult> result) mutable {
+          pop_overlay();
+          m_close_dialog_active = false;
+          if (!result || result->pages.size() != 2 ||
+              result->pages[1].selected_indices.size() != 1) {
+            m_status = "Session close cancelled";
+            m_close_action = {};
+            return;
+          }
+          const auto decision = result->pages[1].selected_indices.front();
+          const auto cancel_index = repository_id ? 2U : 1U;
+          const auto leave_index = repository_id ? 1U : 0U;
+          if (decision == cancel_index) {
+            m_status = "Session close cancelled";
+            m_close_action = {};
+            return;
+          }
+          if (repository_id && decision == 0U) {
+            for (const auto index : result->pages[0].selected_indices) {
+              if (index >= unresolved.size()) {
+                m_status = "Session cleanup returned an invalid task";
+                m_close_action = {};
+                return;
+              }
+              const auto suffix = static_cast<std::uint64_t>(
+                  m_session->event_log().last_sequence() + 1U);
+              auto run_id = control_id<domain::RunId>("task-promotion", suffix);
+              auto item_id = control_id<domain::ProjectBacklogItemId>(
+                  "backlog-item", suffix);
+              auto attributes = control_attributes();
+              if (!run_id || !item_id || !attributes) {
+                m_status = "Project task identity generation failed";
+                m_close_action = {};
+                return;
+              }
+              const auto &task = unresolved[index];
+              auto promoted = m_session->promote_project_task(
+                  {*run_id,
+                   *attributes,
+                   {*item_id,
+                    *repository_id,
+                    {m_session->session_id(), task.plan_id, task.revision_id,
+                     task.task.task_id},
+                    task.task,
+                    domain::ProjectBacklogDecisionSource::user}});
+              if (!promoted) {
+                m_status = promoted.error().message;
+                m_close_action = {};
+                return;
+              }
+            }
+          } else if (decision != leave_index) {
+            m_status = "Session cleanup returned an invalid action";
+            m_close_action = {};
+            return;
+          }
+          auto next = std::move(m_close_action);
+          m_close_action = {};
+          if (next)
+            next();
+        });
+    push_overlay(*m_close_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                   .dismiss_on_click_outside = false});
+    m_status = "Resolve session cleanup before leaving";
   }
 
   auto show_models() -> bool {
@@ -1223,6 +1783,13 @@ class ChatAppImpl final : public InteractiveChatApp {
   bool m_history_enabled{true};
   std::size_t m_history_cutoff{};
   std::unique_ptr<ModelPickerDialog> m_model_picker;
+  std::unique_ptr<termforge::ChoiceWizardDialog> m_plan_dialog;
+  std::unique_ptr<termforge::ChoiceWizardDialog> m_close_dialog;
+  bool m_plan_review_active{};
+  bool m_close_dialog_active{};
+  std::optional<std::pair<domain::SessionId, domain::PlanRevisionId>>
+      m_reviewed_plan;
+  std::function<void()> m_close_action;
 };
 
 }  // namespace

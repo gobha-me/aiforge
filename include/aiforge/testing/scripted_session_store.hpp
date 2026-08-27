@@ -35,9 +35,15 @@ struct ReplayEventsCall {
   auto operator==(const ReplayEventsCall&) const -> bool = default;
 };
 
+struct ReplayProjectBacklogCall {
+  domain::RepositoryId repository_id;
+  std::size_t maximum_sessions{};
+  auto operator==(const ReplayProjectBacklogCall &) const -> bool = default;
+};
+
 using SessionStoreCall =
     std::variant<CreateSessionCall, OpenSessionCall, ListSessionsCall,
-                 AppendEventsCall, ReplayEventsCall>;
+                 AppendEventsCall, ReplayEventsCall, ReplayProjectBacklogCall>;
 
 struct VoidSessionStoreResult {
   auto operator==(const VoidSessionStoreResult&) const -> bool = default;
@@ -46,7 +52,8 @@ struct VoidSessionStoreResult {
 using SessionStoreOutcome =
     std::variant<VoidSessionStoreResult, storage::SessionInfo,
                  std::vector<storage::SessionInfo>,
-                 std::vector<domain::RunEvent>, storage::SessionStoreError>;
+                 std::vector<domain::RunEvent>,
+                 std::vector<domain::ProjectBacklogSessionEvents>, storage::SessionStoreError>;
 
 struct SessionStoreExchange {
   SessionStoreCall expected_call;
@@ -77,6 +84,13 @@ class ScriptedSessionStore final : public storage::SessionStore {
   [[nodiscard]] auto replay_events(
       const domain::SessionId& session_id, std::stop_token stop_token = {})
       -> std::expected<std::vector<domain::RunEvent>,
+                       storage::SessionStoreError> override;
+
+  [[nodiscard]] auto
+  replay_project_backlog(const domain::RepositoryId &repository_id,
+                         std::size_t maximum_sessions,
+                         std::stop_token stop_token = {})
+      -> std::expected<std::vector<domain::ProjectBacklogSessionEvents>,
                        storage::SessionStoreError> override;
 
   [[nodiscard]] auto recorded_calls() const noexcept

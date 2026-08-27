@@ -99,6 +99,26 @@ class LoginCommand {
       -> std::expected<void, CommandFailure> = 0;
 };
 
+class PlanCommand {
+public:
+  virtual ~PlanCommand() = default;
+
+  enum class SessionMode {
+    resume,
+    continue_latest,
+  };
+
+  struct Request {
+    SessionMode session_mode{SessionMode::resume};
+    std::optional<domain::SessionId> session_id;
+  };
+
+  [[nodiscard]] virtual auto execute(Request request,
+                                     CommandEnvironment &environment,
+                                     std::ostream &output, std::ostream &error)
+      -> std::expected<void, CommandFailure> = 0;
+};
+
 struct CommandEnvironment {
   std::istream& input;
   bool input_is_terminal{true};
@@ -110,6 +130,7 @@ struct CommandEnvironment {
   ModelsCommand* models{};
   LoginCommand* login{};
   int input_descriptor{-1};
+  PlanCommand *plan{};
 };
 
 struct CommandContext {

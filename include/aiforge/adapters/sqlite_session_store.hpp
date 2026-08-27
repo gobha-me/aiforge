@@ -62,6 +62,12 @@ class SqliteSessionStore final : public storage::SessionStore {
       const domain::SessionId& session_id, std::stop_token stop_token = {})
       -> std::expected<std::vector<domain::RunEvent>,
                        storage::SessionStoreError> override;
+  [[nodiscard]] auto
+  replay_project_backlog(const domain::RepositoryId &repository_id,
+                         std::size_t maximum_sessions,
+                         std::stop_token stop_token = {})
+      -> std::expected<std::vector<domain::ProjectBacklogSessionEvents>,
+                       storage::SessionStoreError> override;
 
  private:
   struct Impl;

@@ -173,7 +173,7 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   const auto& registry = builtin_slash_command_registry();
   const auto listed = registry.describe();
   REQUIRE(listed);
-  REQUIRE(listed->size() == 8);
+  REQUIRE(listed->size() == 10);
   REQUIRE((*listed)[0].name == "help");
   REQUIRE((*listed)[1].name == "quit");
   REQUIRE((*listed)[2].name == "clear");
@@ -182,6 +182,8 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   REQUIRE((*listed)[5].name == "persona");
   REQUIRE((*listed)[6].name == "model");
   REQUIRE((*listed)[7].name == "usage");
+  REQUIRE((*listed)[8].name == "plan");
+  REQUIRE((*listed)[9].name == "tasks");
 
   const auto help = registry.dispatch("/help /clear");
   REQUIRE(help);
@@ -255,6 +257,20 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   REQUIRE_FALSE(invalid_usage);
   REQUIRE(invalid_usage.error().code ==
           SlashCommandErrorCode::invalid_arguments);
+
+  const auto plan = registry.dispatch("/plan");
+  REQUIRE(plan);
+  REQUIRE((*plan)->action == SlashCommandAction::show_plan);
+
+  const auto tasks = registry.dispatch("/tasks");
+  REQUIRE(tasks);
+  REQUIRE((*tasks)->action == SlashCommandAction::show_tasks);
+
+  for (const auto invalid : {"/plan now", "/tasks now"}) {
+    const auto rejected = registry.dispatch(invalid);
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error().code == SlashCommandErrorCode::invalid_arguments);
+  }
 
   for (const auto invalid : {"/persona set", "/persona off now",
                              "/persona set two names", "/persona unknown"}) {

@@ -85,6 +85,8 @@ export VENICE_API_KEY=your-key      # takes precedence over the stored key
 ./build/src/bin/aiforge models
 ./build/src/bin/aiforge                 # interactive Chat
 ./build/src/bin/aiforge --continue      # interactive latest session
+printf '%s\n' '{"schema_version":1,"request_id":"inspect-1","operation":"inspect"}' \
+  | ./build/src/bin/aiforge plan --jsonl --continue
 git diff | ./build/src/bin/aiforge "Review this diff"
 ./build/src/bin/aiforge --help
 ./build/src/bin/aiforge --version
@@ -145,8 +147,31 @@ idempotent.
 revision's bound snapshot or evidence changes. Its tasks then disappear from
 the active-task projection. Approval and materialization grant no capabilities
 and replay performs no inference, tool call, or task dispatch. Child-run
-dispatch and conflict scheduling build on this projection; plan-review surfaces
-remain a later child of issue #50.
+dispatch and conflict scheduling build on this projection.
+
+`PlanTaskController` exposes the same exact state to interactive and headless
+surfaces. Interactive Chat reviews a newly pending revision once through an
+Approve/Revise/Reject dialog; revision requests require a reason. `/plan` shows
+the current revision and derived readiness schedule. `/tasks` separates active
+session tasks, repository-scoped backlog items, and completed session history.
+
+When closing or switching a session with unresolved tasks, one bounded dialog
+can promote selected tasks to the current repository backlog, leave them local
+to the session, or cancel. Promotion and later open/resolved status changes are
+append-only facts in each task's source session. The repository view is rebuilt
+across sessions by exact repository identity; there is no second mutable task
+store. Status changes carry the prior status event ID as a compare-and-set
+precondition, and resolution requires a reason.
+
+For automation, `aiforge plan --jsonl` requires nonterminal stdin and exactly
+one of `--resume <session-id>` or `--continue`. Version-1 strict JSON Lines
+supports `inspect`, `decide`, `promote`, and `set_backlog_status`. Each input
+line receives exactly one response line on stdout; malformed JSON, duplicate
+keys or request IDs, unknown fields, stale identities, and unbounded input fail
+closed. Stable mutation IDs are caller supplied so retry behavior is explicit.
+See
+[`ADR 0008`](docs/adr/0008-plan-task-control-and-project-backlog.md) for the
+durable contract.
 
 ## Bounded task dispatch and reconciliation
 
@@ -195,7 +220,9 @@ help. `/help [command]` opens transient help that never enters session history;
 `/quit` exits; `/clear` clears only the visible transcript projection while
 retaining durable events and prompt recall; and `/edit` opens an empty external
 draft. `/usage` opens the selected session's event-derived token, cost, and
-spend ceiling summary. Unknown, unavailable, malformed, and oversized
+spend ceiling summary. `/plan` opens exact plan and schedule state, while
+`/tasks` opens session and repository task projections. Unknown, unavailable,
+malformed, and oversized
 slash commands are rejected locally and never become model content.
 
 ## File-backed personas

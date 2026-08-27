@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <aiforge/domain/events.hpp>
+#include <aiforge/domain/project_backlog_projection.hpp>
 
 namespace aiforge::storage {
 
@@ -80,6 +81,19 @@ class SessionStore {
   [[nodiscard]] virtual auto replay_events(
       const domain::SessionId& session_id, std::stop_token stop_token = {})
       -> std::expected<std::vector<domain::RunEvent>, SessionStoreError> = 0;
+  [[nodiscard]] virtual auto
+  replay_project_backlog(const domain::RepositoryId &repository_id,
+                         std::size_t maximum_sessions,
+                         std::stop_token stop_token = {})
+      -> std::expected<std::vector<domain::ProjectBacklogSessionEvents>,
+                       SessionStoreError> {
+    static_cast<void>(repository_id);
+    static_cast<void>(maximum_sessions);
+    static_cast<void>(stop_token);
+    return std::unexpected(SessionStoreError{
+        SessionStoreErrorCode::unsupported_version,
+        "session store does not support project-backlog queries", false});
+  }
 };
 
 }  // namespace aiforge::storage
