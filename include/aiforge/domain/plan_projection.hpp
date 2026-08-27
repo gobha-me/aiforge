@@ -15,6 +15,7 @@ namespace aiforge::domain {
 
 struct PlanGraphLimits {
   std::size_t maximum_tasks{256};
+  std::size_t maximum_evidence_bindings{256};
   std::size_t maximum_dependencies_per_task{64};
   std::size_t maximum_acceptance_criteria_per_task{32};
   std::size_t maximum_resource_intents_per_task{32};
@@ -57,6 +58,7 @@ enum class PlanGraphState {
   revision_requested,
   approved,
   rejected,
+  invalidated,
 };
 
 struct ProjectedPlanRevision {
@@ -64,6 +66,9 @@ struct ProjectedPlanRevision {
   std::optional<EventId> proposal_event_id;
   std::optional<EventId> decision_event_id;
   std::optional<PlanRevisionDecision> decision;
+  std::optional<EventId> invalidation_event_id;
+  std::vector<PlanInvalidationTrigger> invalidation_triggers;
+  std::optional<EventId> materialization_event_id;
   auto operator==(const ProjectedPlanRevision &) const -> bool = default;
 };
 
@@ -73,6 +78,10 @@ struct ProjectedPlanRevision {
 
 [[nodiscard]] auto validate_plan_decision(const PlanRevisionDecision &decision,
                                           const PlanGraphLimits &limits = {})
+    -> std::expected<void, PlanGraphError>;
+
+[[nodiscard]] auto
+validate_plan_invalidation(const PlanRevisionInvalidation &invalidation)
     -> std::expected<void, PlanGraphError>;
 
 class PlanGraphProjection final {
@@ -95,6 +104,7 @@ public:
   [[nodiscard]] auto current_revision() const noexcept
       -> const ProjectedPlanRevision *;
   [[nodiscard]] auto state() const noexcept -> PlanGraphState;
+  [[nodiscard]] auto active_tasks() const noexcept -> std::span<const PlanTask>;
   [[nodiscard]] auto last_sequence() const noexcept -> std::uint64_t {
     return m_last_sequence;
   }

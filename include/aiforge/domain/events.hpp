@@ -375,6 +375,17 @@ struct PlanRevisionDecisionRecorded {
   auto operator==(const PlanRevisionDecisionRecorded&) const -> bool = default;
 };
 
+struct PlanRevisionInvalidated {
+  PlanRevisionInvalidation invalidation;
+  auto operator==(const PlanRevisionInvalidated&) const -> bool = default;
+};
+
+struct SessionTasksMaterialized {
+  PlanId plan_id;
+  PlanRevisionId revision_id;
+  auto operator==(const SessionTasksMaterialized&) const -> bool = default;
+};
+
 struct ChildRunCreated {
   RunId child_run_id;
   auto operator==(const ChildRunCreated&) const -> bool = default;
@@ -413,7 +424,8 @@ using RunEventPayload = std::variant<
     ReviewRequested, ReviewFindingOpened, ReviewFindingResolved,
     ReviewVerdictRecorded, ReviewVerdictRevoked, ReviewOverrideRecorded,
     ReviewOverrideRevoked, PlanRevisionProposed,
-    PlanRevisionDecisionRecorded, ChildRunCreated, InterRunMessageSent,
+    PlanRevisionDecisionRecorded, PlanRevisionInvalidated,
+    SessionTasksMaterialized, ChildRunCreated, InterRunMessageSent,
     UnknownEvent>;
 
 struct EventMetadata {

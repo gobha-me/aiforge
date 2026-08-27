@@ -92,6 +92,9 @@ failure(const PlanGraphErrorCode code, std::string message,
   constexpr PlanGraphLimits maximums;
   return limits.maximum_tasks > 0 &&
          limits.maximum_tasks <= maximums.maximum_tasks &&
+         limits.maximum_evidence_bindings > 0 &&
+         limits.maximum_evidence_bindings <=
+             maximums.maximum_evidence_bindings &&
          limits.maximum_dependencies_per_task > 0 &&
          limits.maximum_dependencies_per_task <=
              maximums.maximum_dependencies_per_task &&
@@ -135,6 +138,12 @@ failure(const PlanGraphErrorCode code, std::string message,
 [[nodiscard]] auto known_source(const PlanDecisionSource source) -> bool {
   return source == PlanDecisionSource::user ||
          source == PlanDecisionSource::policy;
+}
+
+[[nodiscard]] auto known_invalidation_trigger(
+    const PlanInvalidationTrigger trigger) -> bool {
+  return trigger == PlanInvalidationTrigger::source_snapshot_changed ||
+         trigger == PlanInvalidationTrigger::evidence_changed;
 }
 
 [[nodiscard]] auto valid_digest(const ContentDigest &digest) -> bool {
@@ -197,6 +206,14 @@ template <typename Edges>
           std::get_if<PlanRevisionDecisionRecorded>(&payload)) {
     return &recorded->decision.plan_id;
   }
+  if (const auto *invalidated =
+          std::get_if<PlanRevisionInvalidated>(&payload)) {
+    return &invalidated->invalidation.plan_id;
+  }
+  if (const auto *materialized =
+          std::get_if<SessionTasksMaterialized>(&payload)) {
+    return &materialized->plan_id;
+  }
   return nullptr;
 }
 
@@ -220,8 +237,12 @@ auto validate_plan_revision(const PlanRevision &revision,
                      "plan revision metadata is invalid", revision.plan_id,
                      revision.revision_id);
     }
-    if (revision.tasks.empty() ||
-        revision.tasks.size() > limits.maximum_tasks) {
+    if (revision.evidence.size() > limits.maximum_evidence_bindings) {
+      return failure(PlanGraphErrorCode::resource_exhausted,
+                     "plan evidence count exceeds its bound",
+                     revision.plan_id, revision.revision_id);
+    }
+    if (revision.tasks.empty() || revision.tasks.size() > limits.maximum_tasks) {
       return failure(PlanGraphErrorCode::resource_exhausted,
                      "plan task count is outside its bounds", revision.plan_id,
                      revision.revision_id);
@@ -233,6 +254,20 @@ auto validate_plan_revision(const PlanRevision &revision,
       return failure(PlanGraphErrorCode::resource_exhausted,
                      "plan text exceeds its aggregate bound", revision.plan_id,
                      revision.revision_id);
+    }
+
+    std::set<EvidenceId> evidence_ids;
+    for (const auto &binding : revision.evidence) {
+      if (!valid_digest(binding.digest) ||
+          !evidence_ids.insert(binding.evidence_id).second ||
+          !add_text_bytes(total_text_bytes, binding.digest.algorithm,
+                          limits.maximum_total_text_bytes) ||
+          !add_text_bytes(total_text_bytes, binding.digest.value,
+                          limits.maximum_total_text_bytes)) {
+        return failure(PlanGraphErrorCode::invalid_plan,
+                       "plan evidence binding is invalid or duplicated",
+                       revision.plan_id, revision.revision_id);
+      }
     }
 
     std::map<PlanTaskId, std::size_t> indices;
@@ -374,6 +409,27 @@ auto validate_plan_decision(const PlanRevisionDecision &decision,
   }
 }
 
+auto validate_plan_invalidation(const PlanRevisionInvalidation &invalidation)
+    -> std::expected<void, PlanGraphError> {
+  try {
+    std::set<PlanInvalidationTrigger> triggers;
+    if (invalidation.triggers.empty() ||
+        std::ranges::any_of(invalidation.triggers, [&](const auto trigger) {
+          return !known_invalidation_trigger(trigger) ||
+                 !triggers.insert(trigger).second;
+        })) {
+      return failure(PlanGraphErrorCode::invalid_transition,
+                     "plan revision invalidation is invalid",
+                     invalidation.plan_id, invalidation.revision_id);
+    }
+    return {};
+  } catch (...) {
+    return failure(PlanGraphErrorCode::internal_failure,
+                   "plan invalidation validation failed internally",
+                   invalidation.plan_id, invalidation.revision_id);
+  }
+}
+
 auto PlanGraphProjection::current_revision() const noexcept
     -> const ProjectedPlanRevision * {
   return m_revisions.empty() ? nullptr : &m_revisions.back();
@@ -383,6 +439,8 @@ auto PlanGraphProjection::state() const noexcept -> PlanGraphState {
   const auto *current = current_revision();
   if (current == nullptr)
     return PlanGraphState::not_started;
+  if (current->invalidation_event_id)
+    return PlanGraphState::invalidated;
   if (!current->decision)
     return PlanGraphState::proposed;
   switch (current->decision->decision) {
@@ -394,6 +452,16 @@ auto PlanGraphProjection::state() const noexcept -> PlanGraphState {
     return PlanGraphState::rejected;
   }
   return PlanGraphState::proposed;
+}
+
+auto PlanGraphProjection::active_tasks() const noexcept
+    -> std::span<const PlanTask> {
+  const auto *current = current_revision();
+  if (current == nullptr || state() != PlanGraphState::approved ||
+      !current->materialization_event_id) {
+    return {};
+  }
+  return current->revision.tasks;
 }
 
 auto PlanGraphProjection::apply(const RunEvent &event,
@@ -478,7 +546,8 @@ auto PlanGraphProjection::apply_in_place(const RunEvent &event,
     if (!m_plan_id)
       m_plan_id = proposed->revision.plan_id;
     m_revisions.push_back({proposed->revision, event.metadata.event_id,
-                           std::nullopt, std::nullopt});
+                           std::nullopt, std::nullopt, std::nullopt, {},
+                           std::nullopt});
   } else if (const auto *recorded =
                  std::get_if<PlanRevisionDecisionRecorded>(&event.payload)) {
     if (auto valid = validate_plan_decision(recorded->decision, limits);
@@ -498,14 +567,56 @@ auto PlanGraphProjection::apply_in_place(const RunEvent &event,
                      recorded->decision.plan_id,
                      recorded->decision.revision_id);
     }
-    if (current->decision) {
+    if (current->decision || current->invalidation_event_id) {
       return failure(PlanGraphErrorCode::invalid_transition,
-                     "plan revision already has a decision",
+                     "plan revision already has a decision or invalidation",
                      recorded->decision.plan_id,
                      recorded->decision.revision_id);
     }
     current->decision_event_id = event.metadata.event_id;
     current->decision = recorded->decision;
+  } else if (const auto *invalidated =
+                 std::get_if<PlanRevisionInvalidated>(&event.payload)) {
+    if (auto valid = validate_plan_invalidation(invalidated->invalidation);
+        !valid) {
+      return std::unexpected(std::move(valid.error()));
+    }
+    auto *current = m_revisions.empty() ? nullptr : &m_revisions.back();
+    if (current == nullptr ||
+        invalidated->invalidation.revision_id !=
+            current->revision.revision_id) {
+      return failure(PlanGraphErrorCode::wrong_revision,
+                     "plan invalidation does not target the current revision",
+                     invalidated->invalidation.plan_id,
+                     invalidated->invalidation.revision_id);
+    }
+    if (current->invalidation_event_id ||
+        (current->decision &&
+         current->decision->decision != PlanDecision::approved)) {
+      return failure(PlanGraphErrorCode::invalid_transition,
+                     "plan revision cannot be invalidated in its current state",
+                     invalidated->invalidation.plan_id,
+                     invalidated->invalidation.revision_id);
+    }
+    current->invalidation_event_id = event.metadata.event_id;
+    current->invalidation_triggers = invalidated->invalidation.triggers;
+  } else if (const auto *materialized =
+                 std::get_if<SessionTasksMaterialized>(&event.payload)) {
+    auto *current = m_revisions.empty() ? nullptr : &m_revisions.back();
+    if (current == nullptr ||
+        materialized->revision_id != current->revision.revision_id) {
+      return failure(PlanGraphErrorCode::wrong_revision,
+                     "task materialization does not target the current revision",
+                     materialized->plan_id, materialized->revision_id);
+    }
+    if (current->invalidation_event_id || !current->decision ||
+        current->decision->decision != PlanDecision::approved ||
+        current->materialization_event_id) {
+      return failure(PlanGraphErrorCode::invalid_transition,
+                     "session tasks require one current approved revision",
+                     materialized->plan_id, materialized->revision_id);
+    }
+    current->materialization_event_id = event.metadata.event_id;
   }
 
   m_event_ids.insert(event.metadata.event_id);

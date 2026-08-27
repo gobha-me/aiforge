@@ -43,7 +43,8 @@ auto revision(std::string revision_id = "revision-1",
         "Build the projection",
         {"Replay is deterministic"},
         {domain::Effect::write},
-        {{domain::Effect::write, "repository_path", "src"}}}}};
+        {{domain::Effect::write, "repository_path", "src"}}}},
+      {}};
 }
 
 auto decision(const domain::PlanRevision &value,
@@ -115,6 +116,16 @@ TEST_CASE("plan validation rejects malformed and unbounded task graphs",
   result = domain::validate_plan_revision(value);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code == domain::PlanGraphErrorCode::invalid_task);
+
+  value = revision();
+  value.evidence = {
+      {id<domain::EvidenceId>("evidence"),
+       {"sha256", "aaaaaaaaaaaaaaaa", 16}},
+      {id<domain::EvidenceId>("evidence"),
+       {"sha256", "bbbbbbbbbbbbbbbb", 16}}};
+  result = domain::validate_plan_revision(value);
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == domain::PlanGraphErrorCode::invalid_plan);
 
   value = revision();
   limits = {};
@@ -233,4 +244,11 @@ TEST_CASE("plan decisions reject unknown enum values and bounded reasons",
   result = domain::validate_plan_decision(recorded);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code == domain::PlanGraphErrorCode::invalid_decision);
+
+  domain::PlanRevisionInvalidation invalidation{
+      value.plan_id, value.revision_id, {}};
+  result = domain::validate_plan_invalidation(invalidation);
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code ==
+          domain::PlanGraphErrorCode::invalid_transition);
 }

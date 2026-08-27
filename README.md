@@ -128,11 +128,25 @@ prospective scope for later conflict analysis; it is never a capability grant.
 
 `PlanRevisionProposed` and `PlanRevisionDecisionRecorded` append exact-revision
 facts. `PlanGraphProjection` validates revision chains and task DAGs, retains
-prior revisions, and distinguishes proposed, revision-requested, approved, and
-rejected current state. SQLite replay reconstructs the same projection without
-running inference, tools, or child tasks. Runtime approval gates, accepted-task
-materialization, dispatch, and plan-review surfaces remain later children of
-issue #50.
+prior revisions, and distinguishes proposed, revision-requested, approved,
+rejected, and invalidated current state. Revisions may also bind the exact
+repository snapshot and bounded evidence IDs and digests used to approve them.
+Evidence-bearing proposals use event schema version 2; schema-version-1
+proposals remain readable with an empty evidence set.
+
+`RunKernel::start_plan`, `revise_plan`, and `decide_plan` make proposal and
+decision handling runtime-owned rather than an `ask_user` question. Approval
+rechecks the bound snapshot and evidence, records the decision and
+`SessionTasksMaterialized` atomically, and completes the control run. Revision
+requests remain resumable after durable replay, and exact retries are
+idempotent.
+
+`revalidate_plan_approval` appends `PlanRevisionInvalidated` when a materialized
+revision's bound snapshot or evidence changes. Its tasks then disappear from
+the active-task projection. Approval and materialization grant no capabilities
+and replay performs no inference, tool call, or task dispatch. Child-run
+dispatch, conflict scheduling, and plan-review surfaces remain later children
+of issue #50.
 
 ## Interactive Chat
 

@@ -118,6 +118,45 @@ auto RunProjection::apply(const RunEvent& event) -> std::expected<void, Projecti
             m_status = RunStatus::running;
             return {};
           },
+          [&](const PlanRevisionProposed&)
+              -> std::expected<void, ProjectionError> {
+            if ((m_status != RunStatus::running &&
+                 m_status != RunStatus::awaiting_plan_revision) ||
+                m_active_inference_id) {
+              return transition_error(
+                  "a plan may be proposed only between inference attempts");
+            }
+            m_status = RunStatus::awaiting_plan_decision;
+            return {};
+          },
+          [&](const PlanRevisionDecisionRecorded& recorded)
+              -> std::expected<void, ProjectionError> {
+            if (m_status != RunStatus::awaiting_plan_decision) {
+              return transition_error(
+                  "a plan decision requires an awaiting plan revision");
+            }
+            m_status = recorded.decision.decision ==
+                               PlanDecision::revision_requested
+                           ? RunStatus::awaiting_plan_revision
+                           : RunStatus::running;
+            return {};
+          },
+          [&](const PlanRevisionInvalidated&)
+              -> std::expected<void, ProjectionError> {
+            if (m_status != RunStatus::running &&
+                m_status != RunStatus::awaiting_plan_decision) {
+              return transition_error(
+                  "plan invalidation requires a live control run");
+            }
+            if (m_status == RunStatus::awaiting_plan_decision) {
+              m_status = RunStatus::awaiting_plan_revision;
+            }
+            return {};
+          },
+          [&](const SessionTasksMaterialized&)
+              -> std::expected<void, ProjectionError> {
+            return require_running();
+          },
           [&](const RunCompletionRequested&) -> std::expected<void, ProjectionError> {
             return require_running();
           },
