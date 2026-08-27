@@ -214,6 +214,18 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
   return no_arguments(arguments, SlashCommandAction::show_usage);
 }
 
+[[nodiscard]] auto plan_handler(std::string_view arguments,
+                                const SlashCommandContext &)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  return no_arguments(arguments, SlashCommandAction::show_plan);
+}
+
+[[nodiscard]] auto tasks_handler(std::string_view arguments,
+                                 const SlashCommandContext &)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  return no_arguments(arguments, SlashCommandAction::show_tasks);
+}
+
 [[nodiscard]] auto builtin_specs() -> std::vector<SlashCommandSpec> {
   return {
       {"help", "help", "[command]", "Show available slash commands.",
@@ -234,6 +246,10 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
        "Choose a text model for future runs.", idle_available, model_handler},
       {"usage", "usage", "", "Show session usage and reported cost.",
        idle_available, usage_handler},
+      {"plan", "plan", "", "Show the current plan and review state.",
+       idle_available, plan_handler},
+      {"tasks", "tasks", "", "Show session tasks and project backlog.",
+       idle_available, tasks_handler},
   };
 }
 

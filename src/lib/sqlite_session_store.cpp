@@ -35,7 +35,7 @@ namespace {
 using Json = nlohmann::json;
 using storage::SessionStoreError;
 using storage::SessionStoreErrorCode;
-constexpr int storage_format_version = 1;
+constexpr int storage_format_version = 2;
 
 template <typename... Visitors>
 struct Overloaded : Visitors... {
@@ -1235,6 +1235,109 @@ session_task_result_json(const domain::SessionTaskResult& result) -> Json {
   return task;
 }
 
+[[nodiscard]] auto
+project_backlog_source_name(const domain::ProjectBacklogDecisionSource source)
+    -> std::string_view {
+  switch (source) {
+  case domain::ProjectBacklogDecisionSource::user:
+    return "user";
+  case domain::ProjectBacklogDecisionSource::policy:
+    return "policy";
+  }
+  throw CodecFailure{"invalid project-backlog decision source"};
+}
+
+[[nodiscard]] auto parse_project_backlog_source(const Json &value)
+    -> domain::ProjectBacklogDecisionSource {
+  using Source = domain::ProjectBacklogDecisionSource;
+  return enum_value<Source>(
+      value.get<std::string>(),
+      {{"user", Source::user}, {"policy", Source::policy}});
+}
+
+[[nodiscard]] auto
+project_backlog_status_name(const domain::ProjectBacklogItemStatus status)
+    -> std::string_view {
+  switch (status) {
+  case domain::ProjectBacklogItemStatus::open:
+    return "open";
+  case domain::ProjectBacklogItemStatus::resolved:
+    return "resolved";
+  }
+  throw CodecFailure{"invalid project-backlog status"};
+}
+
+[[nodiscard]] auto parse_project_backlog_status(const Json &value)
+    -> domain::ProjectBacklogItemStatus {
+  using Status = domain::ProjectBacklogItemStatus;
+  return enum_value<Status>(
+      value.get<std::string>(),
+      {{"open", Status::open}, {"resolved", Status::resolved}});
+}
+
+[[nodiscard]] auto
+project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
+  if (!domain::validate_project_backlog_item(item)) {
+    throw CodecFailure{"project-backlog item is invalid"};
+  }
+  return {{"item_id", id_text(item.item_id)},
+          {"repository_id", id_text(item.repository_id)},
+          {"origin",
+           {{"session_id", id_text(item.origin.session_id)},
+            {"plan_id", id_text(item.origin.plan_id)},
+            {"revision_id", id_text(item.origin.revision_id)},
+            {"task_id", id_text(item.origin.task_id)}}},
+          {"task", plan_task_json(item.task)},
+          {"source", project_backlog_source_name(item.source)}};
+}
+
+[[nodiscard]] auto parse_project_backlog_item(const Json &value)
+    -> domain::ProjectBacklogItem {
+  const auto &origin = value.at("origin");
+  domain::ProjectBacklogItem item{
+      parse_id<domain::ProjectBacklogItemId>(value.at("item_id")),
+      parse_id<domain::RepositoryId>(value.at("repository_id")),
+      {parse_id<domain::SessionId>(origin.at("session_id")),
+       parse_id<domain::PlanId>(origin.at("plan_id")),
+       parse_id<domain::PlanRevisionId>(origin.at("revision_id")),
+       parse_id<domain::PlanTaskId>(origin.at("task_id"))},
+      parse_plan_task(value.at("task")),
+      parse_project_backlog_source(value.at("source"))};
+  if (!domain::validate_project_backlog_item(item)) {
+    throw CodecFailure{"project-backlog item is invalid"};
+  }
+  return item;
+}
+
+[[nodiscard]] auto project_backlog_status_change_json(
+    const domain::ProjectBacklogStatusChange &change) -> Json {
+  if (!domain::validate_project_backlog_status_change(change)) {
+    throw CodecFailure{"project-backlog status change is invalid"};
+  }
+  return {{"item_id", id_text(change.item_id)},
+          {"repository_id", id_text(change.repository_id)},
+          {"status", project_backlog_status_name(change.status)},
+          {"source", project_backlog_source_name(change.source)},
+          {"reason", optional_string_json(change.reason)},
+          {"expected_status_event_id",
+           optional_id_json(change.expected_status_event_id)}};
+}
+
+[[nodiscard]] auto parse_project_backlog_status_change(const Json &value)
+    -> domain::ProjectBacklogStatusChange {
+  domain::ProjectBacklogStatusChange change{
+      parse_id<domain::ProjectBacklogItemId>(value.at("item_id")),
+      parse_id<domain::RepositoryId>(value.at("repository_id")),
+      parse_project_backlog_status(value.at("status")),
+      parse_project_backlog_source(value.at("source")),
+      parse_optional_string(value.at("reason")),
+      parse_optional_id<domain::EventId>(value.at("expected_status_event_id"))};
+  if (!domain::validate_project_backlog_status_change(change)) {
+    throw CodecFailure{"project-backlog status change is invalid"};
+  }
+  return change;
+}
+
 [[nodiscard]] auto plan_revision_json(const domain::PlanRevision& revision,
                                       const bool include_evidence)
     -> Json {
@@ -2139,6 +2242,12 @@ session_task_result_json(const domain::SessionTaskResult& result) -> Json {
           [](const domain::SessionTaskResultRecorded&) {
             return std::string{"session.task_result_recorded"};
           },
+          [](const domain::ProjectBacklogItemPromoted &) {
+            return std::string{"project_backlog.item_promoted"};
+          },
+          [](const domain::ProjectBacklogItemStatusChanged &) {
+            return std::string{"project_backlog.item_status_changed"};
+          },
           [](const domain::InterRunMessageSent&) { return std::string{"run.inter_message_sent"}; },
           [](const domain::UnknownEvent& value) { return value.type_name; }},
       payload);
@@ -2147,7 +2256,7 @@ session_task_result_json(const domain::SessionTaskResult& result) -> Json {
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 56,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 58,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started", "run.provenance_recorded", "persona.selection_recorded",
@@ -2175,6 +2284,8 @@ session_task_result_json(const domain::SessionTaskResult& result) -> Json {
       "plan.revision_invalidated", "session.tasks_materialized",
       "run.child_created",
       "session.task_result_recorded",
+      "project_backlog.item_promoted",
+      "project_backlog.item_status_changed",
       "run.inter_message_sent"};
   return types.contains(type);
 }
@@ -2434,6 +2545,13 @@ session_task_result_json(const domain::SessionTaskResult& result) -> Json {
           },
           [](const domain::SessionTaskResultRecorded& value) -> Json {
             return {{"result", session_task_result_json(value.result)}};
+          },
+          [](const domain::ProjectBacklogItemPromoted &value) -> Json {
+            return {{"item", project_backlog_item_json(value.item)}};
+          },
+          [](const domain::ProjectBacklogItemStatusChanged &value) -> Json {
+            return {
+                {"change", project_backlog_status_change_json(value.change)}};
           },
           [](const domain::InterRunMessageSent& value) -> Json {
             return {{"target_run_id", id_text(value.target_run_id)},
@@ -2767,6 +2885,14 @@ session_task_result_json(const domain::SessionTaskResult& result) -> Json {
     return domain::SessionTaskResultRecorded{
         parse_session_task_result(value.at("result"))};
   }
+  if (type == "project_backlog.item_promoted") {
+    return domain::ProjectBacklogItemPromoted{
+        parse_project_backlog_item(value.at("item"))};
+  }
+  if (type == "project_backlog.item_status_changed") {
+    return domain::ProjectBacklogItemStatusChanged{
+        parse_project_backlog_status_change(value.at("change"))};
+  }
   if (type == "run.inter_message_sent") {
     return domain::InterRunMessageSent{
         parse_id<domain::RunId>(value.at("target_run_id")),
@@ -2847,7 +2973,8 @@ struct EncodedPayload {
           child != nullptr && child->descriptor) {
         return std::unexpected(store_error(
             SessionStoreErrorCode::invalid_argument,
-            "child-run dispatch metadata requires event schema version 2 or 3"));
+                        "child-run dispatch metadata requires event schema "
+                        "version 2 or 3"));
       }
     }
     return EncodedPayload{
@@ -3205,6 +3332,27 @@ class Transaction final {
                                        "session database uses a newer storage version"));
   }
   if (version == storage_format_version) return {};
+  if (version == 1) {
+    auto begun = begin_immediate(database);
+    if (!begun)
+      return begun;
+    const auto upgraded =
+        execute(database,
+                "CREATE INDEX events_project_backlog_promoted_repository "
+                "ON events(json_extract(payload_json,'$.item.repository_id'),"
+                "session_id,sequence) "
+                "WHERE payload_type='project_backlog.item_promoted';"
+                "CREATE INDEX events_project_backlog_status_repository "
+                "ON events(json_extract(payload_json,'$.change.repository_id'),"
+                "session_id,sequence) "
+                "WHERE payload_type='project_backlog.item_status_changed';"
+                "PRAGMA user_version=2;");
+    if (!upgraded) {
+      rollback(database);
+      return upgraded;
+    }
+    return commit(database);
+  }
   if (version != 0) {
     return std::unexpected(store_error(SessionStoreErrorCode::unsupported_version,
                                        "session database version is unsupported"));
@@ -3246,7 +3394,15 @@ class Transaction final {
       ") STRICT;"
       "CREATE INDEX events_session_timestamp "
       "ON events(session_id,timestamp_ms);"
-      "PRAGMA user_version=1;");
+      "CREATE INDEX events_project_backlog_promoted_repository "
+      "ON events(json_extract(payload_json,'$.item.repository_id'),"
+      "session_id,sequence) "
+      "WHERE payload_type='project_backlog.item_promoted';"
+      "CREATE INDEX events_project_backlog_status_repository "
+      "ON events(json_extract(payload_json,'$.change.repository_id'),"
+      "session_id,sequence) "
+      "WHERE payload_type='project_backlog.item_status_changed';"
+      "PRAGMA user_version=2;");
   if (!schema) {
     rollback(database);
     return schema;
@@ -3782,6 +3938,88 @@ auto SqliteSessionStore::replay_events(
   } catch (...) {
     return std::unexpected(store_error(SessionStoreErrorCode::internal_failure,
                                        "session replay failed internally"));
+  }
+}
+
+auto SqliteSessionStore::replay_project_backlog(
+    const domain::RepositoryId &repository_id,
+    const std::size_t maximum_sessions, const std::stop_token stop_token)
+    -> std::expected<std::vector<domain::ProjectBacklogSessionEvents>,
+                     storage::SessionStoreError> {
+  try {
+    if (stop_token.stop_requested())
+      return std::unexpected(cancelled_error());
+    if (maximum_sessions == 0 || maximum_sessions > 4096) {
+      return std::unexpected(store_error(
+          SessionStoreErrorCode::invalid_argument,
+          "project-backlog session limit must be between 1 and 4096"));
+    }
+    std::vector<domain::SessionId> session_ids;
+    {
+      std::lock_guard lock(m_impl->mutex);
+      auto begun = execute(m_impl->database, "BEGIN");
+      if (!begun)
+        return std::unexpected(std::move(begun.error()));
+      Transaction transaction{m_impl->database};
+      auto statement =
+          prepare(m_impl->database,
+                  "SELECT session_id FROM ("
+                  "SELECT session_id FROM events "
+                  "WHERE payload_type='project_backlog.item_promoted' "
+                  "AND json_extract(payload_json,'$.item.repository_id')=?1 "
+                  "UNION "
+                  "SELECT session_id FROM events "
+                  "WHERE payload_type='project_backlog.item_status_changed' "
+                  "AND json_extract(payload_json,'$.change.repository_id')=?1"
+                  ") ORDER BY session_id LIMIT ?2");
+      if (!statement)
+        return std::unexpected(std::move(statement.error()));
+      auto bound = bind_text(statement->get(), 1, repository_id.value());
+      if (!bound)
+        return std::unexpected(std::move(bound.error()));
+      const auto limit_result =
+          sqlite3_bind_int64(statement->get(), 2,
+                             static_cast<sqlite3_int64>(maximum_sessions + 1U));
+      if (limit_result != SQLITE_OK) {
+        return std::unexpected(sqlite_error(limit_result));
+      }
+      while (true) {
+        if (stop_token.stop_requested()) {
+          return std::unexpected(cancelled_error());
+        }
+        const auto result = sqlite3_step(statement->get());
+        if (result == SQLITE_DONE)
+          break;
+        if (result != SQLITE_ROW)
+          return std::unexpected(sqlite_error(result));
+        auto session_id = column_id<domain::SessionId>(statement->get(), 0);
+        if (!session_id)
+          return std::unexpected(std::move(session_id.error()));
+        session_ids.push_back(std::move(*session_id));
+      }
+      auto committed = execute(m_impl->database, "COMMIT");
+      if (!committed)
+        return std::unexpected(std::move(committed.error()));
+      transaction.complete();
+    }
+    if (session_ids.size() > maximum_sessions) {
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::resource_exhausted,
+                      "project-backlog query exceeds the session limit"));
+    }
+    std::vector<domain::ProjectBacklogSessionEvents> histories;
+    histories.reserve(session_ids.size());
+    for (auto &session_id : session_ids) {
+      auto events = replay_events(session_id, stop_token);
+      if (!events)
+        return std::unexpected(std::move(events.error()));
+      histories.push_back({std::move(session_id), std::move(*events)});
+    }
+    return histories;
+  } catch (...) {
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::internal_failure,
+                    "project-backlog replay failed internally"));
   }
 }
 

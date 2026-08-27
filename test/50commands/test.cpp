@@ -115,6 +115,27 @@ class FakeLogin final : public LoginCommand {
   std::optional<CommandFailure> failure;
 };
 
+class FakePlan final : public PlanCommand {
+public:
+  auto execute(Request request, CommandEnvironment &, std::ostream &output,
+               std::ostream &error)
+      -> std::expected<void, CommandFailure> override {
+    ++calls;
+    seen_mode = request.session_mode;
+    seen_session_id = std::move(request.session_id);
+    output << "jsonl\n";
+    error << "diagnostic\n";
+    if (failure)
+      return std::unexpected(*failure);
+    return {};
+  }
+
+  int calls{};
+  SessionMode seen_mode{SessionMode::resume};
+  std::optional<aiforge::domain::SessionId> seen_session_id;
+  std::optional<CommandFailure> failure;
+};
+
 [[nodiscard]] auto root_command(CommandHandler handler = success_handler)
     -> CommandSpec {
   return {"root", "", "Test command registry.", false, {}, {}, {}, handler};
@@ -284,7 +305,7 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
   const auto& registry = builtin_command_registry();
   const auto schema = make_parser_schema(registry);
   REQUIRE(schema);
-  REQUIRE(schema->root.subcommands.size() == 5);
+  REQUIRE(schema->root.subcommands.size() == 6);
   const auto config =
       std::ranges::find(schema->root.subcommands, "config", &CommandSchema::id);
   REQUIRE(config != schema->root.subcommands.end());
@@ -312,6 +333,59 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
   REQUIRE(dispatch(registry, {"version"}, output, error) == 0);
   REQUIRE(output.starts_with("aiforge "));
   REQUIRE(error.empty());
+}
+
+TEST_CASE("plan command requires explicit noninteractive JSONL session mode",
+          "[commands][plan]") {
+  const auto &registry = builtin_command_registry();
+  FakePlan plan;
+  std::istringstream input;
+  CommandEnvironment environment{input, false, false, false, {}};
+  environment.plan = &plan;
+  std::ostringstream output;
+  std::ostringstream error;
+
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"plan", "--jsonl", "--resume",
+                                            "session-42"},
+              environment, output, error) == 0);
+  REQUIRE(plan.calls == 1);
+  REQUIRE(plan.seen_mode == PlanCommand::SessionMode::resume);
+  REQUIRE(plan.seen_session_id ==
+          aiforge::domain::SessionId::from("session-42").value());
+  REQUIRE(output.str() == "jsonl\n");
+  REQUIRE(error.str() == "diagnostic\n");
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"plan", "--jsonl", "--continue"},
+              environment, output, error) == 0);
+  REQUIRE(plan.calls == 2);
+  REQUIRE(plan.seen_mode == PlanCommand::SessionMode::continue_latest);
+  REQUIRE_FALSE(plan.seen_session_id);
+
+  for (const auto &arguments :
+       {std::vector<std::string_view>{"plan", "--continue"},
+        std::vector<std::string_view>{"plan", "--jsonl"},
+        std::vector<std::string_view>{"plan", "--jsonl", "--continue",
+                                      "--resume", "session-42"}}) {
+    output.str({});
+    error.str({});
+    REQUIRE(CommandDispatcher{}.dispatch(registry, arguments, environment,
+                                         output, error) == 2);
+  }
+
+  environment.input_is_terminal = true;
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"plan", "--jsonl", "--continue"},
+              environment, output, error) == 2);
+  REQUIRE(error.str().find("noninteractive") != std::string::npos);
 }
 
 TEST_CASE("builtin one-shot routes root and chat prompts through one service",

@@ -20,9 +20,11 @@ add_library(${PROJECT_NAME}_lib STATIC
   money.cpp
   one_shot.cpp
   plan.cpp
+  plan_task_controller.cpp
   persona.cpp
   persona_context.cpp
   pricing.cpp
+  project_backlog.cpp
   presentation_text.cpp
   project_instructions.cpp
   provenance.cpp

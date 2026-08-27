@@ -3283,6 +3283,153 @@ auto RunKernel::dispatch_child(ChildRunStart start)
   }
 }
 
+auto RunKernel::promote_project_task(ProjectTaskPromotion promotion)
+    -> std::expected<void, RunKernelError> {
+  try {
+    if (m_impl->unusable) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    }
+    if (m_impl->active || !m_impl->active_children.empty()) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::run_already_active,
+                       "project task promotion requires an idle session"));
+    }
+    if (m_impl->projections.contains(promotion.run_id) ||
+        promotion.item.origin.session_id != m_impl->event_log.session_id() ||
+        !domain::validate_project_backlog_item(promotion.item)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_plan_state,
+          "project task promotion contains invalid or reused identity"));
+    }
+    const auto found =
+        m_impl->plan_projections.find(promotion.item.origin.plan_id);
+    const auto *current = found == m_impl->plan_projections.end()
+                              ? nullptr
+                              : found->second.current_revision();
+    if (current == nullptr ||
+        found->second.state() != domain::PlanGraphState::approved ||
+        !current->materialization_event_id ||
+        current->revision.revision_id != promotion.item.origin.revision_id) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_plan_state,
+          "only current materialized session tasks can be promoted"));
+    }
+    const auto task = std::ranges::find(current->revision.tasks,
+                                        promotion.item.origin.task_id,
+                                        &domain::PlanTask::task_id);
+    const auto *execution =
+        found->second.task_execution(promotion.item.origin.task_id);
+    if (task == current->revision.tasks.end() || promotion.item.task != *task ||
+        execution == nullptr ||
+        (!execution->attempts.empty() && execution->attempts.back().result &&
+         execution->attempts.back().result->outcome ==
+             domain::SessionTaskOutcome::completed)) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_plan_state,
+                       "only unresolved exact session tasks can be promoted"));
+    }
+    auto backlog = project_backlog(promotion.item.repository_id);
+    if (!backlog)
+      return std::unexpected(std::move(backlog.error()));
+    if (backlog->find(promotion.item.item_id) != nullptr ||
+        std::ranges::any_of(backlog->items(), [&](const auto &item) {
+          return item.item.origin == promotion.item.origin;
+        })) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_plan_state,
+                       "session task is already promoted"));
+    }
+
+    auto transaction = m_impl->transaction();
+    if (auto recorded = m_impl->record(
+            promotion.run_id, std::move(promotion.attributes), transaction);
+        !recorded) {
+      return recorded;
+    }
+    if (auto recorded = m_impl->record(
+            promotion.run_id,
+            domain::ProjectBacklogItemPromoted{std::move(promotion.item)},
+            transaction);
+        !recorded) {
+      return recorded;
+    }
+    if (auto recorded = m_impl->record(promotion.run_id, domain::RunCompleted{},
+                                       transaction);
+        !recorded) {
+      return recorded;
+    }
+    return m_impl->commit(std::move(transaction));
+  } catch (...) {
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::internal_failure,
+                     "project task promotion failed internally"));
+  }
+}
+
+auto RunKernel::update_project_task_status(ProjectTaskStatusUpdate update)
+    -> std::expected<void, RunKernelError> {
+  try {
+    if (m_impl->unusable) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    }
+    if (m_impl->active || !m_impl->active_children.empty()) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::run_already_active,
+                       "project task status requires an idle source session"));
+    }
+    if (m_impl->projections.contains(update.run_id) ||
+        !domain::validate_project_backlog_status_change(update.change)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_plan_state,
+          "project task status contains invalid or reused identity"));
+    }
+    auto backlog = project_backlog(update.change.repository_id);
+    if (!backlog)
+      return std::unexpected(std::move(backlog.error()));
+    const auto *item = backlog->find(update.change.item_id);
+    if (item == nullptr ||
+        item->item.origin.session_id != m_impl->event_log.session_id()) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::wrong_plan,
+          "project task status must target an item in its source session"));
+    }
+    if (update.change.expected_status_event_id != item->status_event_id ||
+        update.change.status == item->status) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_plan_state,
+          "project task status is stale or does not change state"));
+    }
+
+    auto transaction = m_impl->transaction();
+    if (auto recorded = m_impl->record(
+            update.run_id, std::move(update.attributes), transaction);
+        !recorded) {
+      return recorded;
+    }
+    if (auto recorded = m_impl->record(
+            update.run_id,
+            domain::ProjectBacklogItemStatusChanged{std::move(update.change)},
+            transaction);
+        !recorded) {
+      return recorded;
+    }
+    if (auto recorded =
+            m_impl->record(update.run_id, domain::RunCompleted{}, transaction);
+        !recorded) {
+      return recorded;
+    }
+    return m_impl->commit(std::move(transaction));
+  } catch (...) {
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::internal_failure,
+                     "project task status failed internally"));
+  }
+}
+
 auto RunKernel::cancel(const domain::RunId& run_id,
                        const domain::InferenceId& inference_id,
                        std::optional<std::string> reason)
@@ -3948,6 +4095,28 @@ auto RunKernel::active_session_tasks() const
     }
   }
   return result;
+}
+
+auto RunKernel::project_backlog(const domain::RepositoryId &repository_id) const
+    -> std::expected<domain::ProjectBacklogProjection, RunKernelError> {
+  try {
+    std::vector<domain::ProjectBacklogSessionEvents> histories;
+    histories.push_back({m_impl->event_log.session_id(),
+                         {m_impl->event_log.events().begin(),
+                          m_impl->event_log.events().end()}});
+    auto projection =
+        domain::ProjectBacklogProjection::rebuild(repository_id, histories);
+    if (!projection) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::replay_rejected,
+          "project-backlog events could not rebuild their projection"));
+    }
+    return std::move(*projection);
+  } catch (...) {
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::internal_failure,
+                     "project-backlog projection failed internally"));
+  }
 }
 
 }  // namespace aiforge::runtime

@@ -13,6 +13,7 @@
 #include <aiforge/adapters/process_login.hpp>
 #include <aiforge/adapters/process_models.hpp>
 #include <aiforge/adapters/process_one_shot.hpp>
+#include <aiforge/adapters/process_plan.hpp>
 #endif
 
 #ifndef _WIN32
@@ -68,15 +69,18 @@ auto main(const int argc, char* argv[]) -> int {
   aiforge::adapters::ProcessInteractiveCommand interactive;
   aiforge::adapters::ProcessLoginCommand login;
   aiforge::adapters::ProcessModelsCommand models;
+  aiforge::adapters::ProcessPlanCommand plan;
   aiforge::cli::OneShotCommand* one_shot_service = &one_shot;
   aiforge::cli::InteractiveCommand* interactive_service = &interactive;
   aiforge::cli::ModelsCommand* models_service = &models;
   aiforge::cli::LoginCommand* login_service = &login;
+  aiforge::cli::PlanCommand *plan_service = &plan;
 #else
   aiforge::cli::OneShotCommand* one_shot_service = nullptr;
   aiforge::cli::InteractiveCommand* interactive_service = nullptr;
   aiforge::cli::ModelsCommand* models_service = nullptr;
   aiforge::cli::LoginCommand* login_service = nullptr;
+  aiforge::cli::PlanCommand *plan_service = nullptr;
 #endif
   aiforge::cli::CommandEnvironment environment{std::cin,
 #ifdef _WIN32
@@ -94,9 +98,11 @@ auto main(const int argc, char* argv[]) -> int {
                                                models_service,
                                                login_service,
 #ifdef _WIN32
-                                               -1};
+                                               -1,
+                                               plan_service};
 #else
-                                               STDIN_FILENO};
+                                               STDIN_FILENO,
+                                               plan_service};
 #endif
   const auto result =
       aiforge::cli::run_cli(arguments, environment, std::cout, std::cerr);

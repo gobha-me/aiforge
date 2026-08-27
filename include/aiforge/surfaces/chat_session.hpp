@@ -2,6 +2,7 @@
 
 #include <aiforge/backend/backend.hpp>
 #include <aiforge/persona/source.hpp>
+#include <aiforge/runtime/plan_task_controller.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/storage/session_store.hpp>
 #include <cstddef>
@@ -118,6 +119,21 @@ class ChatSession final {
   [[nodiscard]] auto select_model(domain::ModelId model_id)
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto persona_state() const -> ChatPersonaState;
+
+  [[nodiscard]] auto plan_task_state(
+      std::optional<domain::RepositoryId> repository_id = std::nullopt)
+      -> std::expected<runtime::PlanTaskState, ChatSessionError>;
+  [[nodiscard]] auto
+  decide_plan(const domain::RunId &run_id,
+              domain::PlanRevisionDecision decision,
+              runtime::PlanApprovalEnvironment environment = {})
+      -> std::expected<runtime::PlanDecisionOutcome, ChatSessionError>;
+  [[nodiscard]] auto
+  promote_project_task(runtime::ProjectTaskPromotion promotion)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto
+  update_project_task_status(runtime::ProjectTaskStatusUpdate update)
+      -> std::expected<void, ChatSessionError>;
 
   [[nodiscard]] auto submitted_prompts() const -> std::vector<std::string>;
   [[nodiscard]] auto event_log() const noexcept

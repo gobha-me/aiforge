@@ -247,7 +247,8 @@ struct PersonaSetup {
     if (allow_attention) {
       return PersonaSetup{
           std::nullopt, std::nullopt,
-          "Persona changed since this session was recorded; select it again or turn it off"};
+                          "Persona changed since this session was recorded; "
+                          "select it again or turn it off"};
     }
     return error(ChatSessionErrorCode::context_failed,
                  "persona changed since this session was recorded");
@@ -282,6 +283,7 @@ struct ChatSession::Impl {
   std::optional<domain::PersonaDocument> persona_document;
   std::optional<domain::PersonaSelection> next_persona_selection;
   std::string persona_attention;
+  storage::SessionStore *session_store{};
   std::unique_ptr<runtime::RunKernel> kernel;
 };
 
@@ -427,7 +429,7 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
         stop_token,
         std::move(persona_setup->document),
         std::move(persona_setup->next_selection),
-        std::move(persona_setup->attention),
+        std::move(persona_setup->attention), session_store,
         std::move(kernel)});
     return std::unique_ptr<ChatSession>{new ChatSession{std::move(impl)}};
   } catch (...) {
@@ -734,6 +736,59 @@ auto ChatSession::persona_state() const -> ChatPersonaState {
                     m_impl->persona_document->reference}
               : std::nullopt,
           !m_impl->persona_attention.empty(), m_impl->persona_attention};
+}
+
+auto ChatSession::plan_task_state(
+    std::optional<domain::RepositoryId> repository_id)
+    -> std::expected<runtime::PlanTaskState, ChatSessionError> {
+  runtime::PlanTaskController controller{*m_impl->kernel,
+                                         m_impl->session_store};
+  auto state = controller.inspect(std::move(repository_id));
+  if (!state) {
+    return error(ChatSessionErrorCode::session_failed, state.error().message,
+                 state.error().retryable);
+  }
+  return std::move(*state);
+}
+
+auto ChatSession::decide_plan(const domain::RunId &run_id,
+                              domain::PlanRevisionDecision decision,
+                              runtime::PlanApprovalEnvironment environment)
+    -> std::expected<runtime::PlanDecisionOutcome, ChatSessionError> {
+  runtime::PlanTaskController controller{*m_impl->kernel,
+                                         m_impl->session_store};
+  auto result =
+      controller.decide(run_id, std::move(decision), std::move(environment));
+  if (!result) {
+    return error(ChatSessionErrorCode::session_failed, result.error().message,
+                 result.error().retryable);
+  }
+  return *result;
+}
+
+auto ChatSession::promote_project_task(runtime::ProjectTaskPromotion promotion)
+    -> std::expected<void, ChatSessionError> {
+  runtime::PlanTaskController controller{*m_impl->kernel,
+                                         m_impl->session_store};
+  auto result = controller.promote(std::move(promotion));
+  if (!result) {
+    return error(ChatSessionErrorCode::session_failed, result.error().message,
+                 result.error().retryable);
+  }
+  return {};
+}
+
+auto ChatSession::update_project_task_status(
+    runtime::ProjectTaskStatusUpdate update)
+    -> std::expected<void, ChatSessionError> {
+  runtime::PlanTaskController controller{*m_impl->kernel,
+                                         m_impl->session_store};
+  auto result = controller.set_backlog_status(std::move(update));
+  if (!result) {
+    return error(ChatSessionErrorCode::session_failed, result.error().message,
+                 result.error().retryable);
+  }
+  return {};
 }
 
 auto ChatSession::submitted_prompts() const -> std::vector<std::string> {

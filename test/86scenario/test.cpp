@@ -5,9 +5,9 @@
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <condition_variable>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -858,6 +858,34 @@ auto empty_usage_scenario() -> testing::TuiScenario {
   return value;
 }
 
+auto empty_plan_tasks_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-empty-plan-tasks";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 12, 1000, 240};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  const auto escape = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Escape, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/plan"}}},
+      {0, enter},
+      {1, escape},
+      {2, testing::TuiScenarioPost{termforge::PasteEvent{"/tasks"}}},
+      {2, enter},
+      {3, testing::TuiScenarioResize{{24, 5, 240, 100}}},
+      {4, escape},
+      {5, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Char, U'd', true, false, false,
+              termforge::KeyAction::Press}}},
+  };
+  value.limits.maximum_frames = 20;
+  return value;
+}
+
 auto active_control_d_scenario() -> testing::TuiScenario {
   auto value = chat_scenario();
   value.scenario_id = "interactive-active-control-d";
@@ -1379,6 +1407,27 @@ TEST_CASE("interactive usage keeps absent cost explicit", "[scenario][usage]") {
                frame.find("Reported cost: unavailable (no inferences)") !=
                    std::string::npos;
       }));
+}
+
+TEST_CASE("interactive plan and task views remain bounded without state",
+          "[scenario][plan][tasks]") {
+  const auto result =
+      testing::run_tui_scenario(empty_plan_tasks_scenario(), chat_factory());
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string &frame) {
+        return frame.find("This session has no plan") != std::string::npos;
+      }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string &frame) {
+        return frame.find("Active session tasks") != std::string::npos &&
+               frame.find("Project backlog") != std::string::npos;
+      }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames,
+      [](const std::string &frame) { return frame.starts_with("24x5:"); }));
 }
 
 TEST_CASE("active Ctrl+D neither exits nor cancels the run",
