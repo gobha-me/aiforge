@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <expected>
 #include <memory>
 #include <optional>
@@ -55,6 +56,11 @@ class ChildRunResultStream {
 class ChildRunner {
  public:
   virtual ~ChildRunner() = default;
+
+  [[nodiscard]] virtual auto maximum_concurrency() const noexcept
+      -> std::size_t {
+    return 1;
+  }
 
   [[nodiscard]] virtual auto start(ChildRunInvocation invocation,
                                    std::stop_token stop_token)

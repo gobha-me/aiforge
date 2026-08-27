@@ -403,7 +403,7 @@ TEST_CASE("accepted task executes once and records a bounded terminal result",
     return std::holds_alternative<domain::ChildRunCreated>(event.payload);
   });
   REQUIRE(created != events.end());
-  REQUIRE(created->metadata.schema_version == 2);
+  REQUIRE(created->metadata.schema_version == 3);
   REQUIRE(created->metadata.parent_run_id == id<domain::RunId>("planning-run"));
 }
 

@@ -1097,19 +1097,22 @@ child_run_context_json(const domain::ChildRunContextBinding& context) -> Json {
 }
 
 [[nodiscard]] auto
-child_run_descriptor_json(const domain::ChildRunDescriptor& descriptor)
+child_run_descriptor_json(const domain::ChildRunDescriptor& descriptor,
+                          const bool include_attempt)
     -> Json {
   if (!domain::validate_child_run_descriptor(descriptor)) {
     throw CodecFailure{"child-run descriptor is invalid"};
   }
-  return {{"parent_run_id", id_text(descriptor.parent_run_id)},
-          {"plan_id", id_text(descriptor.plan_id)},
-          {"revision_id", id_text(descriptor.revision_id)},
-          {"task_id", id_text(descriptor.task_id)},
-          {"context", child_run_context_json(descriptor.context)},
-          {"budget", child_run_budget_json(descriptor.budget)},
-          {"effects", effects_json(descriptor.effects)},
-          {"capability_scopes", scopes_json(descriptor.capability_scopes)}};
+  Json result{{"parent_run_id", id_text(descriptor.parent_run_id)},
+              {"plan_id", id_text(descriptor.plan_id)},
+              {"revision_id", id_text(descriptor.revision_id)},
+              {"task_id", id_text(descriptor.task_id)},
+              {"context", child_run_context_json(descriptor.context)},
+              {"budget", child_run_budget_json(descriptor.budget)},
+              {"effects", effects_json(descriptor.effects)},
+              {"capability_scopes", scopes_json(descriptor.capability_scopes)}};
+  if (include_attempt) result["attempt"] = descriptor.attempt;
+  return result;
 }
 
 [[nodiscard]] auto parse_child_run_descriptor(const Json& value)
@@ -1122,7 +1125,9 @@ child_run_descriptor_json(const domain::ChildRunDescriptor& descriptor)
       parse_child_run_context(value.at("context")),
       parse_child_run_budget(value.at("budget")),
       parse_effects(value.at("effects")),
-      parse_scopes(value.at("capability_scopes"))};
+      parse_scopes(value.at("capability_scopes")),
+      value.contains("attempt") ? value.at("attempt").get<std::uint32_t>()
+                                : 1U};
   if (!domain::validate_child_run_descriptor(result)) {
     throw CodecFailure{"child-run descriptor is invalid"};
   }
@@ -2179,7 +2184,8 @@ session_task_result_json(const domain::SessionTaskResult& result) -> Json {
     -> bool {
   return (schema_version == 1 && known_payload_type(type)) ||
          (schema_version == 2 &&
-          ( type == "plan.revision_proposed" || type == "run.child_created"));
+          (type == "plan.revision_proposed" || type == "run.child_created")) ||
+         (schema_version == 3 && type == "run.child_created");
 }
 
 [[nodiscard]] auto payload_json(const domain::RunEventPayload& payload,
@@ -2416,8 +2422,13 @@ session_task_result_json(const domain::SessionTaskResult& result) -> Json {
                 throw CodecFailure{
                     "schema-v2 child run lacks a dispatch descriptor"};
               }
+              if (schema_version < 3 && value.descriptor->attempt != 1) {
+                throw CodecFailure{
+                    "schema-v2 child run cannot encode a retry attempt"};
+              }
               result["descriptor"] =
-                  child_run_descriptor_json(*value.descriptor);
+                  child_run_descriptor_json(*value.descriptor,
+                                            schema_version >= 3);
             }
             return result;
           },
@@ -2456,7 +2467,8 @@ session_task_result_json(const domain::SessionTaskResult& result) -> Json {
       payload);
 }
 
-[[nodiscard]] auto parse_payload(const std::string_view type, const Json& value)
+[[nodiscard]] auto parse_payload(const std::string_view type, const Json& value,
+                                 const std::uint32_t schema_version)
     -> domain::RunEventPayload {
   if (type == "run.started") {
     return domain::RunStarted{
@@ -2737,9 +2749,17 @@ session_task_result_json(const domain::SessionTaskResult& result) -> Json {
         parse_id<domain::PlanRevisionId>(value.at("revision_id"))};
   }
   if (type == "run.child_created") {
+    const auto has_descriptor = value.contains("descriptor");
+    const auto has_attempt =
+        has_descriptor && value.at("descriptor").contains("attempt");
+    if ((schema_version == 1 && has_descriptor) ||
+        (schema_version == 2 && (!has_descriptor || has_attempt)) ||
+        (schema_version == 3 && (!has_descriptor || !has_attempt))) {
+      throw CodecFailure{"child-run dispatch does not match its event schema"};
+    }
     return domain::ChildRunCreated{
         parse_id<domain::RunId>(value.at("child_run_id")),
-        value.contains("descriptor")
+        has_descriptor
             ? std::optional{parse_child_run_descriptor(value.at("descriptor"))}
             : std::nullopt};
   }
@@ -2827,7 +2847,7 @@ struct EncodedPayload {
           child != nullptr && child->descriptor) {
         return std::unexpected(store_error(
             SessionStoreErrorCode::invalid_argument,
-            "child-run dispatch metadata requires event schema version 2"));
+            "child-run dispatch metadata requires event schema version 2 or 3"));
       }
     }
     return EncodedPayload{
@@ -3729,7 +3749,7 @@ auto SqliteSessionStore::replay_events(
             *type, domain::StructuredDataBlock{"application/json", *document}};
       } else {
         try {
-          auto decoded = parse_payload(*type, *parsed);
+          auto decoded = parse_payload(*type, *parsed, schema_version);
           if (payload_type(decoded) != *type ||
               payload_json(decoded, schema_version).dump() != *document) {
             return fail(store_error(

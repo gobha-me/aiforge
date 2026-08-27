@@ -70,7 +70,7 @@ auto event(const std::uint64_t sequence, Payload payload, std::string id = {})
   }
   if (const auto* child = std::get_if<domain::ChildRunCreated>(&result.payload);
       child != nullptr && child->descriptor) {
-    result.metadata.schema_version = 2;
+    result.metadata.schema_version = 3;
   }
   return result;
 }
@@ -494,6 +494,7 @@ TEST_CASE("all typed payloads and opaque future payloads round trip",
   REQUIRE_FALSE(rejected);
   REQUIRE(rejected.error().code ==
           storage::SessionStoreErrorCode::invalid_argument);
+
 }
 
 TEST_CASE("malformed persisted reported cost fails replay explicitly",
@@ -570,6 +571,57 @@ TEST_CASE("persisted plan revisions without evidence decode compatibly",
   const auto& proposed =
       std::get<domain::PlanRevisionProposed>(replayed->front().payload);
   REQUIRE(proposed.revision.evidence.empty());
+}
+
+TEST_CASE("schema-v2 child dispatches decode first attempts compatibly",
+          "[storage][sqlite][child-run][compatibility]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "legacy-child-session", 100);
+  auto legacy = event(
+      1,
+      domain::ChildRunCreated{make_id<domain::RunId>("child"),
+                              child_run_descriptor()},
+      "legacy-child-event");
+  legacy.metadata.schema_version = 2;
+  REQUIRE(store->append_events(session, std::array{legacy}));
+  const auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  REQUIRE(*replayed == std::vector<domain::RunEvent>{legacy});
+
+  auto retry_descriptor = child_run_descriptor();
+  retry_descriptor.attempt = 2;
+  auto retry = event(
+      2,
+      domain::ChildRunCreated{make_id<domain::RunId>("retry-child"),
+                              std::move(retry_descriptor)},
+      "legacy-retry-event");
+  retry.metadata.schema_version = 2;
+  const auto rejected = store->append_events(session, std::array{retry});
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code ==
+          storage::SessionStoreErrorCode::invalid_argument);
+
+  store.reset();
+  execute_sql(path,
+              "UPDATE events SET payload_json=json_set(payload_json, "
+              "'$.descriptor.attempt',2) "
+              "WHERE event_id='legacy-child-event'");
+  store = open_store(path);
+  auto corrupt = store->replay_events(session);
+  REQUIRE_FALSE(corrupt);
+  REQUIRE(corrupt.error().code == storage::SessionStoreErrorCode::corrupt);
+
+  store.reset();
+  execute_sql(path,
+              "UPDATE events SET schema_version=3, "
+              "payload_json=json_remove(payload_json,'$.descriptor.attempt') "
+              "WHERE event_id='legacy-child-event'");
+  store = open_store(path);
+  corrupt = store->replay_events(session);
+  REQUIRE_FALSE(corrupt);
+  REQUIRE(corrupt.error().code == storage::SessionStoreErrorCode::corrupt);
 }
 
 TEST_CASE("forged persisted pricing observation fails replay explicitly",

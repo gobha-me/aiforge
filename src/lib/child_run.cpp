@@ -74,9 +74,11 @@ auto validate_child_run_descriptor(const ChildRunDescriptor& descriptor)
     constexpr std::size_t maximum_context_evidence{1024};
     constexpr std::size_t maximum_effects{16};
     constexpr std::size_t maximum_scopes{256};
+    constexpr std::uint32_t maximum_attempts{8};
 
     const auto& budget = descriptor.budget;
-    if (budget.maximum_inferences == 0 ||
+    if (descriptor.attempt == 0 || descriptor.attempt > maximum_attempts ||
+        budget.maximum_inferences == 0 ||
         budget.maximum_inferences > maximum_inferences ||
         budget.maximum_tool_invocations > maximum_tools ||
         budget.maximum_input_tokens == 0 ||

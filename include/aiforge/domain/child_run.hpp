@@ -40,6 +40,7 @@ struct ChildRunDescriptor {
   ChildRunBudget budget;
   std::vector<Effect> effects;
   std::vector<CapabilityScope> capability_scopes;
+  std::uint32_t attempt{1};
   auto operator==(const ChildRunDescriptor&) const -> bool = default;
 };
 
