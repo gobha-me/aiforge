@@ -3,6 +3,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   bootstrap.cpp
   cli11_parser.cpp
   chat_session.cpp
+  child_run.cpp
   command_registry.cpp
   conversation_context.cpp
   config.cpp
@@ -33,6 +34,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   run_projection.cpp
   scripted_artifact_store.cpp
   scripted_backend.cpp
+  scripted_child_runner.cpp
   scripted_exact_source_editor.cpp
   scripted_hosted_review_check.cpp
   scripted_language_analysis_source.cpp

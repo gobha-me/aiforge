@@ -214,6 +214,13 @@ template <typename Edges>
           std::get_if<SessionTasksMaterialized>(&payload)) {
     return &materialized->plan_id;
   }
+  if (const auto* created = std::get_if<ChildRunCreated>(&payload);
+      created != nullptr && created->descriptor) {
+    return &created->descriptor->plan_id;
+  }
+  if (const auto* result = std::get_if<SessionTaskResultRecorded>(&payload)) {
+    return &result->result.plan_id;
+  }
   return nullptr;
 }
 
@@ -464,6 +471,24 @@ auto PlanGraphProjection::active_tasks() const noexcept
   return current->revision.tasks;
 }
 
+auto PlanGraphProjection::task_executions() const noexcept
+    -> std::span<const ProjectedPlanRevision::TaskExecution> {
+  const auto* current = current_revision();
+  if (current == nullptr || state() != PlanGraphState::approved ||
+      !current->materialization_event_id) {
+    return {};
+  }
+  return current->task_executions;
+}
+
+auto PlanGraphProjection::task_execution(const PlanTaskId& task_id)
+    const noexcept -> const ProjectedPlanRevision::TaskExecution* {
+  const auto executions = task_executions();
+  const auto found = std::ranges::find(
+      executions, task_id, &ProjectedPlanRevision::TaskExecution::task_id);
+  return found == executions.end() ? nullptr : &*found;
+}
+
 auto PlanGraphProjection::apply(const RunEvent &event,
                                 const PlanGraphLimits &limits)
     -> std::expected<void, PlanGraphError> {
@@ -547,7 +572,7 @@ auto PlanGraphProjection::apply_in_place(const RunEvent &event,
       m_plan_id = proposed->revision.plan_id;
     m_revisions.push_back({proposed->revision, event.metadata.event_id,
                            std::nullopt, std::nullopt, std::nullopt, {},
-                           std::nullopt});
+                           std::nullopt, {}});
   } else if (const auto *recorded =
                  std::get_if<PlanRevisionDecisionRecorded>(&event.payload)) {
     if (auto valid = validate_plan_decision(recorded->decision, limits);
@@ -617,6 +642,80 @@ auto PlanGraphProjection::apply_in_place(const RunEvent &event,
                      materialized->plan_id, materialized->revision_id);
     }
     current->materialization_event_id = event.metadata.event_id;
+    current->task_executions.reserve(current->revision.tasks.size());
+    for (const auto& task : current->revision.tasks) {
+      current->task_executions.push_back(
+          {task.task_id, std::nullopt, std::nullopt, std::nullopt});
+    }
+  } else if (const auto* created = std::get_if<ChildRunCreated>(&event.payload);
+             created != nullptr && created->descriptor) {
+    const auto& descriptor = *created->descriptor;
+    auto* current = m_revisions.empty() ? nullptr : &m_revisions.back();
+    if (current == nullptr ||
+        descriptor.revision_id != current->revision.revision_id) {
+      return failure(PlanGraphErrorCode::wrong_revision,
+                     "child run does not target the current revision",
+                     descriptor.plan_id, descriptor.revision_id,
+                     descriptor.task_id);
+    }
+    if (state() != PlanGraphState::approved ||
+        !current->materialization_event_id ||
+        created->child_run_id != event.metadata.run_id ||
+        !event.metadata.parent_run_id ||
+        *event.metadata.parent_run_id != descriptor.parent_run_id ||
+        !validate_child_run_descriptor(descriptor)) {
+      return failure(PlanGraphErrorCode::invalid_transition,
+                     "child run does not match a current materialized task",
+                     descriptor.plan_id, descriptor.revision_id,
+                     descriptor.task_id);
+    }
+    auto execution =
+        std::ranges::find(current->task_executions, descriptor.task_id,
+                          &ProjectedPlanRevision::TaskExecution::task_id);
+    if (execution == current->task_executions.end()) {
+      return failure(PlanGraphErrorCode::unknown_reference,
+                     "child run targets an unknown task", descriptor.plan_id,
+                     descriptor.revision_id, descriptor.task_id);
+    }
+    if (execution->child_run_id) {
+      return failure(PlanGraphErrorCode::invalid_transition,
+                     "session task already has a child run", descriptor.plan_id,
+                     descriptor.revision_id, descriptor.task_id);
+    }
+    execution->child_run_id = created->child_run_id;
+    execution->dispatch = descriptor;
+  } else if (const auto* recorded =
+                 std::get_if<SessionTaskResultRecorded>(&event.payload)) {
+    const auto& result = recorded->result;
+    auto* current = m_revisions.empty() ? nullptr : &m_revisions.back();
+    if (current == nullptr ||
+        result.revision_id != current->revision.revision_id) {
+      return failure(PlanGraphErrorCode::wrong_revision,
+                     "task result does not target the current revision",
+                     result.plan_id, result.revision_id, result.task_id);
+    }
+    auto execution =
+        std::ranges::find(current->task_executions, result.task_id,
+                          &ProjectedPlanRevision::TaskExecution::task_id);
+    if (execution == current->task_executions.end() ||
+        !execution->child_run_id || !execution->dispatch ||
+        *execution->child_run_id != result.child_run_id ||
+        execution->dispatch->plan_id != result.plan_id ||
+        execution->dispatch->revision_id != result.revision_id ||
+        execution->dispatch->task_id != result.task_id || execution->result) {
+      return failure(PlanGraphErrorCode::invalid_transition,
+                     "task result has no matching unterminated child run",
+                     result.plan_id, result.revision_id, result.task_id);
+    }
+    if (!validate_session_task_result(result, execution->dispatch->budget) ||
+        result.child_run_id != event.metadata.run_id ||
+        !event.metadata.parent_run_id ||
+        *event.metadata.parent_run_id != execution->dispatch->parent_run_id) {
+      return failure(PlanGraphErrorCode::invalid_transition,
+                     "session task result is malformed", result.plan_id,
+                     result.revision_id, result.task_id);
+    }
+    execution->result = result;
   }
 
   m_event_ids.insert(event.metadata.event_id);
