@@ -3,6 +3,7 @@
 #include <aiforge/domain/usage_ledger.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <concepts>
 #include <condition_variable>
@@ -59,6 +60,80 @@ using WorkerUpdate =
                                 const bool retryable = false)
     -> RunKernelError {
   return RunKernelError{code, std::move(message), retryable};
+}
+
+[[nodiscard]] auto plan_id_from(const domain::RunEventPayload& payload)
+    -> const domain::PlanId* {
+  if (const auto* value =
+          std::get_if<domain::PlanRevisionProposed>(&payload)) {
+    return &value->revision.plan_id;
+  }
+  if (const auto* value =
+          std::get_if<domain::PlanRevisionDecisionRecorded>(&payload)) {
+    return &value->decision.plan_id;
+  }
+  if (const auto* value =
+          std::get_if<domain::PlanRevisionInvalidated>(&payload)) {
+    return &value->invalidation.plan_id;
+  }
+  if (const auto* value =
+          std::get_if<domain::SessionTasksMaterialized>(&payload)) {
+    return &value->plan_id;
+  }
+  return nullptr;
+}
+
+[[nodiscard]] auto valid_plan_digest(const domain::ContentDigest& digest)
+    -> bool {
+  return !digest.algorithm.empty() && digest.algorithm.size() <= 128 &&
+         !digest.value.empty() && digest.value.size() <= 512 &&
+         std::ranges::all_of(digest.algorithm, [](const unsigned char value) {
+           return std::isalnum(value) != 0 || value == '-' || value == '_' ||
+                  value == '.';
+         }) &&
+         std::ranges::all_of(digest.value, [](const unsigned char value) {
+           return std::isxdigit(value) != 0;
+         });
+}
+
+[[nodiscard]] auto valid_plan_environment(
+    const PlanApprovalEnvironment& environment) -> bool {
+  constexpr std::size_t maximum_bindings{256};
+  if (environment.evidence.size() > maximum_bindings ||
+      (environment.source_snapshot &&
+       !valid_plan_digest(environment.source_snapshot->fingerprint))) {
+    return false;
+  }
+  std::set<domain::EvidenceId> ids;
+  return std::ranges::all_of(environment.evidence, [&](const auto& binding) {
+    return valid_plan_digest(binding.digest) &&
+           ids.insert(binding.evidence_id).second;
+  });
+}
+
+[[nodiscard]] auto plan_basis_drift(
+    const domain::PlanRevision& revision,
+    const PlanApprovalEnvironment& environment)
+    -> std::vector<domain::PlanInvalidationTrigger> {
+  std::vector<domain::PlanInvalidationTrigger> result;
+  if (revision.source_snapshot &&
+      (!environment.source_snapshot ||
+       *environment.source_snapshot != *revision.source_snapshot)) {
+    result.push_back(
+        domain::PlanInvalidationTrigger::source_snapshot_changed);
+  }
+  const auto evidence_changed =
+      std::ranges::any_of(revision.evidence, [&](const auto& expected) {
+        const auto found = std::ranges::find(
+            environment.evidence, expected.evidence_id,
+            &domain::PlanEvidenceBinding::evidence_id);
+        return found == environment.evidence.end() ||
+               found->digest != expected.digest;
+      });
+  if (evidence_changed) {
+    result.push_back(domain::PlanInvalidationTrigger::evidence_changed);
+  }
+  return result;
 }
 
 [[nodiscard]] auto has_control_character(const std::string_view value) -> bool {
@@ -461,11 +536,13 @@ struct RunKernel::Impl {
     bool cancel_requested{};
     bool run_terminal{};
     std::optional<std::string> cancel_reason;
+    std::optional<domain::PlanId> planning_plan_id;
   };
 
   struct Transaction {
     domain::SessionEventLog event_log;
     std::map<domain::RunId, domain::RunProjection> projections;
+    std::map<domain::PlanId, domain::PlanGraphProjection> plan_projections;
     std::set<domain::InvocationId> used_invocation_ids;
     std::optional<ActiveRun> active;
     std::vector<domain::RunEvent> events;
@@ -498,7 +575,8 @@ struct RunKernel::Impl {
   }
 
   [[nodiscard]] auto transaction() const -> Transaction {
-    return {event_log, projections, used_invocation_ids, active, {}};
+    return {event_log, projections, plan_projections, used_invocation_ids,
+            active, {}};
   }
 
   [[nodiscard]] auto valid_limits() const noexcept -> bool {
@@ -533,6 +611,7 @@ struct RunKernel::Impl {
     }
     event_log = std::move(transaction.event_log);
     projections = std::move(transaction.projections);
+    plan_projections = std::move(transaction.plan_projections);
     used_invocation_ids = std::move(transaction.used_invocation_ids);
     active = std::move(transaction.active);
     return {};
@@ -653,8 +732,12 @@ struct RunKernel::Impl {
       return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
                                           "could not create an event ID"));
     }
+    const std::uint32_t schema_version =
+        std::holds_alternative<domain::PlanRevisionProposed>(payload) ? 2U
+                                                                      : 1U;
     return domain::RunEvent{domain::EventMetadata{std::move(*event_id), run_id,
-                                                  sequence, 1, timestamp(),
+                                                  sequence, schema_version,
+                                                  timestamp(),
                                                   std::nullopt, std::nullopt,
                                                   std::move(invocation_id)},
                             std::move(payload)};
@@ -695,6 +778,18 @@ struct RunKernel::Impl {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::projection_rejected,
                        "run projection rejected a generated event"));
+    }
+    if (const auto* plan_id = plan_id_from(event->payload)) {
+      auto plan_candidate = transaction.plan_projections.contains(*plan_id)
+                                ? transaction.plan_projections.at(*plan_id)
+                                : domain::PlanGraphProjection{};
+      if (!plan_candidate.apply(*event)) {
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::invalid_plan_state,
+                         "plan projection rejected a generated event"));
+      }
+      transaction.plan_projections.insert_or_assign(
+          *plan_id, std::move(plan_candidate));
     }
     if (!transaction.event_log.append(*event)) {
       return std::unexpected(
@@ -1498,6 +1593,7 @@ struct RunKernel::Impl {
 
   domain::SessionEventLog event_log;
   std::map<domain::RunId, domain::RunProjection> projections;
+  std::map<domain::PlanId, domain::PlanGraphProjection> plan_projections;
   std::set<domain::InvocationId> used_invocation_ids;
   backend::Backend& backend_port;
   RunWakeSink* wake;
@@ -1570,6 +1666,7 @@ auto RunKernel::open_durable(DurableSessionOpen session,
 
       domain::SessionEventLog event_log{session.session_id};
       std::map<domain::RunId, domain::RunProjection> projections;
+      std::map<domain::PlanId, domain::PlanGraphProjection> plan_projections;
       std::set<domain::InvocationId> invocation_ids;
       for (const auto& event : *events) {
         auto projection = projections.contains(event.metadata.run_id)
@@ -1579,6 +1676,18 @@ auto RunKernel::open_durable(DurableSessionOpen session,
           return std::unexpected(kernel_error(
               RunKernelErrorCode::replay_rejected,
               "durable session events could not rebuild projections"));
+        }
+        if (const auto* plan_id = plan_id_from(event.payload)) {
+          auto plan_projection = plan_projections.contains(*plan_id)
+                                     ? plan_projections.at(*plan_id)
+                                     : domain::PlanGraphProjection{};
+          if (!plan_projection.apply(event)) {
+            return std::unexpected(kernel_error(
+                RunKernelErrorCode::replay_rejected,
+                "durable plan events could not rebuild projections"));
+          }
+          plan_projections.insert_or_assign(*plan_id,
+                                            std::move(plan_projection));
         }
         const auto payload_invocation = tool_invocation_id(event.payload);
         if (payload_invocation &&
@@ -1606,14 +1715,33 @@ auto RunKernel::open_durable(DurableSessionOpen session,
       }
 
       std::optional<domain::RunId> awaiting_run;
+      std::optional<domain::RunId> awaiting_plan_run;
       for (const auto& [run_id, projection] : projections) {
-        if (projection.status() != domain::RunStatus::awaiting_input) continue;
-        if (awaiting_run) {
+        if (projection.status() == domain::RunStatus::awaiting_input) {
+          if (awaiting_run || awaiting_plan_run) {
+            return std::unexpected(kernel_error(
+                RunKernelErrorCode::replay_rejected,
+                "durable session contains multiple awaiting runs"));
+          }
+          awaiting_run = run_id;
+        } else if (projection.status() ==
+                       domain::RunStatus::awaiting_plan_decision ||
+                   projection.status() ==
+                       domain::RunStatus::awaiting_plan_revision) {
+          if (awaiting_run || awaiting_plan_run) {
+            return std::unexpected(kernel_error(
+                RunKernelErrorCode::replay_rejected,
+                "durable session contains multiple awaiting runs"));
+          }
+          awaiting_plan_run = run_id;
+        } else {
+          continue;
+        }
+        if (awaiting_run && awaiting_plan_run) {
           return std::unexpected(kernel_error(
               RunKernelErrorCode::replay_rejected,
               "durable session contains multiple awaiting runs"));
         }
-        awaiting_run = run_id;
       }
       if (awaiting_run) {
         std::optional<domain::InvocationId> invocation_id;
@@ -1865,10 +1993,59 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             false,
             false,
             false,
+            std::nullopt,
             std::nullopt};
+      }
+      if (awaiting_plan_run) {
+        std::optional<domain::RunStarted> started;
+        std::optional<domain::PlanId> plan_id;
+        for (const auto& event : *events) {
+          if (event.metadata.run_id != *awaiting_plan_run) continue;
+          if (const auto* value =
+                  std::get_if<domain::RunStarted>(&event.payload)) {
+            started = *value;
+          } else if (const auto* value =
+                         std::get_if<domain::PlanRevisionProposed>(
+                             &event.payload)) {
+            plan_id = value->revision.plan_id;
+          }
+        }
+        const auto plan_state =
+            plan_id && plan_projections.contains(*plan_id)
+                ? plan_projections.at(*plan_id).state()
+                : domain::PlanGraphState::not_started;
+        if (!started || !plan_id ||
+            (plan_state != domain::PlanGraphState::proposed &&
+             plan_state != domain::PlanGraphState::revision_requested &&
+             plan_state != domain::PlanGraphState::invalidated)) {
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::replay_rejected,
+              "awaiting plan history is incomplete"));
+        }
+        Impl::ActiveRun active{
+            *awaiting_plan_run,
+            started->permission_profile_id,
+            std::nullopt,
+            std::nullopt,
+            {},
+            {},
+            {},
+            {},
+            std::nullopt,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            std::nullopt,
+            std::nullopt};
+        active.planning_plan_id = *plan_id;
+        kernel->m_impl->active = std::move(active);
       }
       kernel->m_impl->event_log = std::move(event_log);
       kernel->m_impl->projections = std::move(projections);
+      kernel->m_impl->plan_projections = std::move(plan_projections);
       kernel->m_impl->used_invocation_ids = std::move(invocation_ids);
     }
     kernel->m_impl->session_store = &store;
@@ -1994,6 +2171,7 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
                            false,
                            false,
                            false,
+                           std::nullopt,
                            std::nullopt};
     auto transaction = m_impl->transaction();
     if (auto result = m_impl->record(start.run_id, std::move(start.attributes),
@@ -2139,6 +2317,311 @@ auto RunKernel::record_session_spend_ceiling(
   }
 }
 
+auto RunKernel::start_plan(PlanStart start)
+    -> std::expected<void, RunKernelError> {
+  try {
+    if (m_impl->unusable) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    }
+    if (!m_impl->valid_limits()) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_limits,
+                       "run kernel limits are outside their supported bounds"));
+    }
+    if (m_impl->active) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::run_already_active, "another run is active"));
+    }
+    if (m_impl->projections.contains(start.run_id) ||
+        !domain::validate_plan_revision(start.revision)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_plan_state,
+          "plan start contains invalid or reused identity"));
+    }
+
+    const auto plan_id = start.revision.plan_id;
+    Impl::ActiveRun active{start.run_id,
+                           start.attributes.permission_profile_id,
+                           std::nullopt,
+                           std::nullopt,
+                           {},
+                           {},
+                           {},
+                           {},
+                           std::nullopt,
+                           false,
+                           false,
+                           false,
+                           false,
+                           false,
+                           false,
+                           std::nullopt,
+                           std::nullopt};
+    active.planning_plan_id = plan_id;
+
+    auto transaction = m_impl->transaction();
+    if (auto recorded = m_impl->record(
+            start.run_id, std::move(start.attributes), transaction);
+        !recorded) {
+      return recorded;
+    }
+    if (auto recorded = m_impl->record(
+            start.run_id,
+            domain::PlanRevisionProposed{std::move(start.revision)},
+            transaction);
+        !recorded) {
+      return recorded;
+    }
+    transaction.active = std::move(active);
+    return m_impl->commit(std::move(transaction));
+  } catch (...) {
+    return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
+                                        "plan start failed internally"));
+  }
+}
+
+auto RunKernel::revise_plan(const domain::RunId& run_id,
+                            domain::PlanRevision revision)
+    -> std::expected<void, RunKernelError> {
+  try {
+    if (m_impl->unusable) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    }
+    if (!m_impl->active || m_impl->active->run_id != run_id) {
+      return std::unexpected(kernel_error(
+          m_impl->active ? RunKernelErrorCode::wrong_run
+                         : RunKernelErrorCode::no_active_run,
+          "plan revision targets no active planning run"));
+    }
+    if (!m_impl->active->planning_plan_id ||
+        *m_impl->active->planning_plan_id != revision.plan_id ||
+        !domain::validate_plan_revision(revision)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::wrong_plan,
+          "plan revision targets another or invalid plan"));
+    }
+    const auto found = m_impl->plan_projections.find(revision.plan_id);
+    if (found == m_impl->plan_projections.end() ||
+        (found->second.state() != domain::PlanGraphState::revision_requested &&
+         found->second.state() != domain::PlanGraphState::invalidated)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_plan_state,
+          "plan is not ready for a superseding revision"));
+    }
+
+    auto transaction = m_impl->transaction();
+    if (auto recorded = m_impl->record(
+            run_id, domain::PlanRevisionProposed{std::move(revision)},
+            transaction);
+        !recorded) {
+      return recorded;
+    }
+    return m_impl->commit(std::move(transaction));
+  } catch (...) {
+    return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
+                                        "plan revision failed internally"));
+  }
+}
+
+auto RunKernel::decide_plan(const domain::RunId& run_id,
+                            domain::PlanRevisionDecision decision,
+                            PlanApprovalEnvironment environment)
+    -> std::expected<PlanDecisionOutcome, RunKernelError> {
+  try {
+    if (m_impl->unusable) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    }
+    if (!domain::validate_plan_decision(decision)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_plan_state,
+          "plan decision is invalid"));
+    }
+    const auto found = m_impl->plan_projections.find(decision.plan_id);
+    const auto* current = found == m_impl->plan_projections.end()
+                              ? nullptr
+                              : found->second.current_revision();
+    if (current == nullptr ||
+        current->revision.revision_id != decision.revision_id) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::wrong_plan,
+          "plan decision does not target the current revision"));
+    }
+    if (current->decision) {
+      if (*current->decision == decision &&
+          (decision.decision != domain::PlanDecision::approved ||
+           current->materialization_event_id)) {
+        return PlanDecisionOutcome::already_recorded;
+      }
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_plan_state,
+          "plan revision already has a different decision"));
+    }
+    if (current->invalidation_event_id) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_plan_state,
+          "an invalidated plan revision cannot be decided"));
+    }
+    if (!m_impl->active || m_impl->active->run_id != run_id ||
+        !m_impl->active->planning_plan_id ||
+        *m_impl->active->planning_plan_id != decision.plan_id) {
+      return std::unexpected(kernel_error(
+          m_impl->active ? RunKernelErrorCode::wrong_run
+                         : RunKernelErrorCode::no_active_run,
+          "plan decision targets no active planning run"));
+    }
+
+    if (decision.decision == domain::PlanDecision::approved) {
+      if (!valid_plan_environment(environment)) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::invalid_plan_state,
+            "plan approval environment is invalid"));
+      }
+      auto triggers = plan_basis_drift(current->revision, environment);
+      if (!triggers.empty()) {
+        auto transaction = m_impl->transaction();
+        if (auto recorded = m_impl->record(
+                run_id,
+                domain::PlanRevisionInvalidated{
+                    {decision.plan_id, decision.revision_id,
+                     std::move(triggers)}},
+                transaction);
+            !recorded) {
+          return std::unexpected(std::move(recorded.error()));
+        }
+        if (auto committed = m_impl->commit(std::move(transaction));
+            !committed) {
+          return std::unexpected(std::move(committed.error()));
+        }
+        return PlanDecisionOutcome::invalidated;
+      }
+    }
+
+    auto transaction = m_impl->transaction();
+    if (auto recorded = m_impl->record(
+            run_id,
+            domain::PlanRevisionDecisionRecorded{std::move(decision)},
+            transaction);
+        !recorded) {
+      return std::unexpected(std::move(recorded.error()));
+    }
+    const auto& projected =
+        transaction.plan_projections.at(current->revision.plan_id);
+    const auto projected_state = projected.state();
+    if (projected_state == domain::PlanGraphState::approved) {
+      if (auto recorded = m_impl->record(
+              run_id,
+              domain::SessionTasksMaterialized{
+                  current->revision.plan_id, current->revision.revision_id},
+              transaction);
+          !recorded) {
+        return std::unexpected(std::move(recorded.error()));
+      }
+    }
+    if (projected_state == domain::PlanGraphState::approved ||
+        projected_state == domain::PlanGraphState::rejected) {
+      if (auto recorded = m_impl->record(run_id, domain::RunCompleted{},
+                                         transaction);
+          !recorded) {
+        return std::unexpected(std::move(recorded.error()));
+      }
+      transaction.active.reset();
+    }
+    if (auto committed = m_impl->commit(std::move(transaction)); !committed) {
+      return std::unexpected(std::move(committed.error()));
+    }
+    return PlanDecisionOutcome::recorded;
+  } catch (...) {
+    return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
+                                        "plan decision failed internally"));
+  }
+}
+
+auto RunKernel::revalidate_plan_approval(
+    PlanApprovalRevalidation revalidation)
+    -> std::expected<PlanRevalidationOutcome, RunKernelError> {
+  try {
+    if (m_impl->unusable) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    }
+    if (!valid_plan_environment(revalidation.environment)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_plan_state,
+          "plan revalidation environment is invalid"));
+    }
+    const auto found = m_impl->plan_projections.find(revalidation.plan_id);
+    const auto* current = found == m_impl->plan_projections.end()
+                              ? nullptr
+                              : found->second.current_revision();
+    if (current == nullptr ||
+        current->revision.revision_id != revalidation.revision_id) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::wrong_plan,
+          "plan revalidation does not target the current revision"));
+    }
+    if (current->invalidation_event_id) {
+      return PlanRevalidationOutcome::already_invalidated;
+    }
+    if (!current->decision ||
+        current->decision->decision != domain::PlanDecision::approved ||
+        !current->materialization_event_id) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_plan_state,
+          "only materialized approved tasks can be revalidated"));
+    }
+    auto triggers =
+        plan_basis_drift(current->revision, revalidation.environment);
+    if (triggers.empty()) return PlanRevalidationOutcome::current;
+    if (m_impl->active) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::run_already_active,
+          "plan revalidation cannot start while another run is active"));
+    }
+    if (m_impl->projections.contains(revalidation.run_id)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_plan_state,
+          "plan revalidation run identity is already present"));
+    }
+
+    auto transaction = m_impl->transaction();
+    if (auto recorded = m_impl->record(
+            revalidation.run_id, std::move(revalidation.attributes),
+            transaction);
+        !recorded) {
+      return std::unexpected(std::move(recorded.error()));
+    }
+    if (auto recorded = m_impl->record(
+            revalidation.run_id,
+            domain::PlanRevisionInvalidated{
+                {revalidation.plan_id, revalidation.revision_id,
+                 std::move(triggers)}},
+            transaction);
+        !recorded) {
+      return std::unexpected(std::move(recorded.error()));
+    }
+    if (auto recorded = m_impl->record(revalidation.run_id,
+                                       domain::RunCompleted{}, transaction);
+        !recorded) {
+      return std::unexpected(std::move(recorded.error()));
+    }
+    if (auto committed = m_impl->commit(std::move(transaction)); !committed) {
+      return std::unexpected(std::move(committed.error()));
+    }
+    return PlanRevalidationOutcome::invalidated;
+  } catch (...) {
+    return std::unexpected(kernel_error(
+        RunKernelErrorCode::internal_failure,
+        "plan approval revalidation failed internally"));
+  }
+}
+
 auto RunKernel::cancel(const domain::RunId& run_id,
                        const domain::InferenceId& inference_id,
                        std::optional<std::string> reason)
@@ -2185,6 +2668,11 @@ auto RunKernel::cancel_run(const domain::RunId& run_id,
     if (m_impl->active->run_id != run_id) {
       return std::unexpected(kernel_error(RunKernelErrorCode::wrong_run,
                                           "cancellation targets another run"));
+    }
+    if (m_impl->active->planning_plan_id) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_plan_state,
+          "planning runs are resolved through plan decisions"));
     }
     if (m_impl->active->run_terminal || m_impl->active->backend_terminal_seen) {
       return std::unexpected(kernel_error(RunKernelErrorCode::already_terminal,
@@ -2680,6 +3168,43 @@ auto RunKernel::pending_question_input() const
     }
   }
   return std::nullopt;
+}
+
+auto RunKernel::pending_plan_decision() const
+    -> std::optional<PendingPlanDecision> {
+  if (!m_impl->active || !m_impl->active->planning_plan_id) {
+    return std::nullopt;
+  }
+  const auto found =
+      m_impl->plan_projections.find(*m_impl->active->planning_plan_id);
+  if (found == m_impl->plan_projections.end() ||
+      found->second.state() != domain::PlanGraphState::proposed ||
+      found->second.current_revision() == nullptr) {
+    return std::nullopt;
+  }
+  const auto& revision = found->second.current_revision()->revision;
+  return PendingPlanDecision{m_impl->active->run_id, revision.plan_id,
+                             revision.revision_id};
+}
+
+auto RunKernel::plan_projection(const domain::PlanId& plan_id) const noexcept
+    -> const domain::PlanGraphProjection* {
+  const auto found = m_impl->plan_projections.find(plan_id);
+  return found == m_impl->plan_projections.end() ? nullptr : &found->second;
+}
+
+auto RunKernel::active_session_tasks() const
+    -> std::vector<ActiveSessionTask> {
+  std::vector<ActiveSessionTask> result;
+  for (const auto& [plan_id, projection] : m_impl->plan_projections) {
+    const auto* current = projection.current_revision();
+    if (current == nullptr) continue;
+    for (const auto& task : projection.active_tasks()) {
+      result.push_back(
+          {plan_id, current->revision.revision_id, task});
+    }
+  }
+  return result;
 }
 
 }  // namespace aiforge::runtime

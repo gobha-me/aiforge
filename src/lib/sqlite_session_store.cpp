@@ -961,6 +961,38 @@ pricing_observation_json(const domain::PricingObservation &observation)
                              {"policy", Source::policy}});
 }
 
+[[nodiscard]] auto plan_invalidation_trigger_name(
+    const domain::PlanInvalidationTrigger value) -> std::string_view {
+  switch (value) {
+    case domain::PlanInvalidationTrigger::source_snapshot_changed:
+      return "source_snapshot_changed";
+    case domain::PlanInvalidationTrigger::evidence_changed:
+      return "evidence_changed";
+  }
+  throw CodecFailure{"invalid plan invalidation trigger"};
+}
+
+[[nodiscard]] auto parse_plan_invalidation_trigger(const Json& value)
+    -> domain::PlanInvalidationTrigger {
+  using Trigger = domain::PlanInvalidationTrigger;
+  return enum_value<Trigger>(
+      value.get<std::string>(),
+      {{"source_snapshot_changed", Trigger::source_snapshot_changed},
+       {"evidence_changed", Trigger::evidence_changed}});
+}
+
+[[nodiscard]] auto plan_evidence_binding_json(
+    const domain::PlanEvidenceBinding& binding) -> Json {
+  return {{"evidence_id", id_text(binding.evidence_id)},
+          {"digest", digest_json(binding.digest)}};
+}
+
+[[nodiscard]] auto parse_plan_evidence_binding(const Json& value)
+    -> domain::PlanEvidenceBinding {
+  return {parse_id<domain::EvidenceId>(value.at("evidence_id")),
+          parse_digest(value.at("digest"))};
+}
+
 [[nodiscard]] auto plan_resource_intent_json(
     const domain::PlanResourceIntent& intent) -> Json {
   return {{"effect", effect_name(intent.effect)},
@@ -1021,7 +1053,8 @@ pricing_observation_json(const domain::PricingObservation &observation)
   return task;
 }
 
-[[nodiscard]] auto plan_revision_json(const domain::PlanRevision& revision)
+[[nodiscard]] auto plan_revision_json(const domain::PlanRevision& revision,
+                                      const bool include_evidence)
     -> Json {
   if (!domain::validate_plan_revision(revision)) {
     throw CodecFailure{"plan revision is invalid"};
@@ -1030,13 +1063,22 @@ pricing_observation_json(const domain::PricingObservation &observation)
   for (const auto& task : revision.tasks) {
     tasks.push_back(plan_task_json(task));
   }
-  return {{"plan_id", id_text(revision.plan_id)},
-          {"revision_id", id_text(revision.revision_id)},
-          {"supersedes_revision_id",
-           optional_id_json(revision.supersedes_revision_id)},
-          {"goal", revision.goal},
-          {"source_snapshot", optional_snapshot_json(revision.source_snapshot)},
-          {"tasks", std::move(tasks)}};
+  Json result{{"plan_id", id_text(revision.plan_id)},
+              {"revision_id", id_text(revision.revision_id)},
+              {"supersedes_revision_id",
+               optional_id_json(revision.supersedes_revision_id)},
+              {"goal", revision.goal},
+              {"source_snapshot",
+               optional_snapshot_json(revision.source_snapshot)},
+              {"tasks", std::move(tasks)}};
+  if (include_evidence) {
+    auto evidence = Json::array();
+    for (const auto& binding : revision.evidence) {
+      evidence.push_back(plan_evidence_binding_json(binding));
+    }
+    result["evidence"] = std::move(evidence);
+  }
+  return result;
 }
 
 [[nodiscard]] auto parse_plan_revision(const Json& value)
@@ -1050,10 +1092,21 @@ pricing_observation_json(const domain::PricingObservation &observation)
           value.at("supersedes_revision_id")),
       value.at("goal").get<std::string>(),
       parse_optional_snapshot(value.at("source_snapshot")),
+      {},
       {}};
   revision.tasks.reserve(raw_tasks.size());
   for (const auto& task : raw_tasks) {
     revision.tasks.push_back(parse_plan_task(task));
+  }
+  if (value.contains("evidence")) {
+    const auto& raw_evidence = value.at("evidence");
+    if (!raw_evidence.is_array()) {
+      throw CodecFailure{"plan evidence list is invalid"};
+    }
+    revision.evidence.reserve(raw_evidence.size());
+    for (const auto& binding : raw_evidence) {
+      revision.evidence.push_back(parse_plan_evidence_binding(binding));
+    }
   }
   if (!domain::validate_plan_revision(revision)) {
     throw CodecFailure{"plan revision is invalid"};
@@ -1085,6 +1138,39 @@ pricing_observation_json(const domain::PricingObservation &observation)
     throw CodecFailure{"plan revision decision is invalid"};
   }
   return decision;
+}
+
+[[nodiscard]] auto plan_revision_invalidation_json(
+    const domain::PlanRevisionInvalidation& invalidation) -> Json {
+  if (!domain::validate_plan_invalidation(invalidation)) {
+    throw CodecFailure{"plan revision invalidation is invalid"};
+  }
+  auto triggers = Json::array();
+  for (const auto trigger : invalidation.triggers) {
+    triggers.push_back(plan_invalidation_trigger_name(trigger));
+  }
+  return {{"plan_id", id_text(invalidation.plan_id)},
+          {"revision_id", id_text(invalidation.revision_id)},
+          {"triggers", std::move(triggers)}};
+}
+
+[[nodiscard]] auto parse_plan_revision_invalidation(const Json& value)
+    -> domain::PlanRevisionInvalidation {
+  const auto& raw_triggers = value.at("triggers");
+  if (!raw_triggers.is_array()) {
+    throw CodecFailure{"plan invalidation trigger list is invalid"};
+  }
+  domain::PlanRevisionInvalidation invalidation{
+      parse_id<domain::PlanId>(value.at("plan_id")),
+      parse_id<domain::PlanRevisionId>(value.at("revision_id")), {}};
+  invalidation.triggers.reserve(raw_triggers.size());
+  for (const auto& trigger : raw_triggers) {
+    invalidation.triggers.push_back(parse_plan_invalidation_trigger(trigger));
+  }
+  if (!domain::validate_plan_invalidation(invalidation)) {
+    throw CodecFailure{"plan revision invalidation is invalid"};
+  }
+  return invalidation;
 }
 
 [[nodiscard]] auto optional_digest_json(
@@ -1861,6 +1947,12 @@ pricing_observation_json(const domain::PricingObservation &observation)
           [](const domain::PlanRevisionDecisionRecorded&) {
             return std::string{"plan.revision_decision_recorded"};
           },
+          [](const domain::PlanRevisionInvalidated&) {
+            return std::string{"plan.revision_invalidated"};
+          },
+          [](const domain::SessionTasksMaterialized&) {
+            return std::string{"session.tasks_materialized"};
+          },
           [](const domain::ChildRunCreated&) { return std::string{"run.child_created"}; },
           [](const domain::InterRunMessageSent&) { return std::string{"run.inter_message_sent"}; },
           [](const domain::UnknownEvent& value) { return value.type_name; }},
@@ -1870,7 +1962,7 @@ pricing_observation_json(const domain::PricingObservation &observation)
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 53,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 55,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started", "run.provenance_recorded", "persona.selection_recorded",
@@ -1895,12 +1987,22 @@ pricing_observation_json(const domain::PricingObservation &observation)
       "review.verdict_recorded", "review.verdict_revoked",
       "review.override_recorded", "review.override_revoked",
       "plan.revision_proposed", "plan.revision_decision_recorded",
+      "plan.revision_invalidated", "session.tasks_materialized",
       "run.child_created",
       "run.inter_message_sent"};
   return types.contains(type);
 }
 
-[[nodiscard]] auto payload_json(const domain::RunEventPayload& payload) -> Json {
+[[nodiscard]] auto known_payload_schema(const std::string_view type,
+                                        const std::uint32_t schema_version)
+    -> bool {
+  return (schema_version == 1 && known_payload_type(type)) ||
+         (schema_version == 2 && type == "plan.revision_proposed");
+}
+
+[[nodiscard]] auto payload_json(const domain::RunEventPayload& payload,
+                                const std::uint32_t schema_version = 1)
+    -> Json {
   return std::visit(
       Overloaded{
           [](const domain::RunStarted& value) -> Json {
@@ -2109,12 +2211,21 @@ pricing_observation_json(const domain::PricingObservation &observation)
                     {"revoked_by", review_actor_json(value.revoked_by)},
                     {"reason", value.reason}};
           },
-          [](const domain::PlanRevisionProposed& value) -> Json {
-            return {{"revision", plan_revision_json(value.revision)}};
+          [schema_version](const domain::PlanRevisionProposed& value) -> Json {
+            return {{"revision", plan_revision_json(
+                                     value.revision, schema_version >= 2)}};
           },
           [](const domain::PlanRevisionDecisionRecorded& value) -> Json {
             return {{"decision",
                      plan_revision_decision_json(value.decision)}};
+          },
+          [](const domain::PlanRevisionInvalidated& value) -> Json {
+            return {{"invalidation", plan_revision_invalidation_json(
+                                         value.invalidation)}};
+          },
+          [](const domain::SessionTasksMaterialized& value) -> Json {
+            return {{"plan_id", id_text(value.plan_id)},
+                    {"revision_id", id_text(value.revision_id)}};
           },
           [](const domain::ChildRunCreated& value) -> Json {
             return {{"child_run_id", id_text(value.child_run_id)}};
@@ -2422,6 +2533,15 @@ pricing_observation_json(const domain::PricingObservation &observation)
     return domain::PlanRevisionDecisionRecorded{
         parse_plan_revision_decision(value.at("decision"))};
   }
+  if (type == "plan.revision_invalidated") {
+    return domain::PlanRevisionInvalidated{
+        parse_plan_revision_invalidation(value.at("invalidation"))};
+  }
+  if (type == "session.tasks_materialized") {
+    return domain::SessionTasksMaterialized{
+        parse_id<domain::PlanId>(value.at("plan_id")),
+        parse_id<domain::PlanRevisionId>(value.at("revision_id"))};
+  }
   if (type == "run.child_created") {
     return domain::ChildRunCreated{
         parse_id<domain::RunId>(value.at("child_run_id"))};
@@ -2481,19 +2601,29 @@ struct EncodedPayload {
       return std::unexpected(store_error(SessionStoreErrorCode::invalid_argument,
                                          "event payload type is invalid"));
     }
-    if (event.metadata.schema_version != 1 &&
+    if (!known_payload_schema(type, event.metadata.schema_version) &&
         !std::holds_alternative<domain::UnknownEvent>(event.payload)) {
       return std::unexpected(store_error(
           SessionStoreErrorCode::unsupported_version,
           "known event payload uses an unsupported schema version"));
     }
-    if (event.metadata.schema_version == 1 && known_payload_type(type) &&
+    if (known_payload_schema(type, event.metadata.schema_version) &&
         std::holds_alternative<domain::UnknownEvent>(event.payload)) {
       return std::unexpected(store_error(
           SessionStoreErrorCode::invalid_argument,
-          "known schema-v1 event type cannot carry an opaque payload"));
+          "known event schema cannot carry an opaque payload"));
     }
-    return EncodedPayload{type, payload_json(event.payload).dump()};
+    if (event.metadata.schema_version == 1) {
+      if (const auto* proposed =
+              std::get_if<domain::PlanRevisionProposed>(&event.payload);
+          proposed != nullptr && !proposed->revision.evidence.empty()) {
+        return std::unexpected(store_error(
+            SessionStoreErrorCode::invalid_argument,
+            "plan evidence requires proposal event schema version 2"));
+      }
+    }
+    return EncodedPayload{
+        type, payload_json(event.payload, event.metadata.schema_version).dump()};
   } catch (const DuplicateJsonKey&) {
     return std::unexpected(store_error(SessionStoreErrorCode::invalid_argument,
                                        "unknown event payload has a duplicate key"));
@@ -3383,14 +3513,14 @@ auto SqliteSessionStore::replay_events(
 
       domain::RunEventPayload payload = domain::UnknownEvent{"uninitialized"};
       const auto schema_version = static_cast<std::uint32_t>(schema_value);
-      if (schema_version != 1 || !known_payload_type(*type)) {
+      if (!known_payload_schema(*type, schema_version)) {
         payload = domain::UnknownEvent{
             *type, domain::StructuredDataBlock{"application/json", *document}};
       } else {
         try {
           auto decoded = parse_payload(*type, *parsed);
           if (payload_type(decoded) != *type ||
-              payload_json(decoded).dump() != *document) {
+              payload_json(decoded, schema_version).dump() != *document) {
             return fail(store_error(
                 SessionStoreErrorCode::corrupt,
                 "known event payload does not match its declared schema"));

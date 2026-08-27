@@ -63,7 +63,12 @@ template <typename Payload>
 auto event(const std::uint64_t sequence, Payload payload, std::string id = {})
     -> domain::RunEvent {
   if (id.empty()) id = "event-" + std::to_string(sequence);
-  return {metadata(sequence, std::move(id)), std::move(payload)};
+  domain::RunEvent result{metadata(sequence, std::move(id)),
+                          std::move(payload)};
+  if (std::holds_alternative<domain::PlanRevisionProposed>(result.payload)) {
+    result.metadata.schema_version = 2;
+  }
+  return result;
 }
 
 auto started() -> domain::RunStarted {
@@ -134,7 +139,9 @@ auto plan_revision() -> domain::PlanRevision {
         "Implement the contract",
         {"The contract replays deterministically"},
         {domain::Effect::write},
-        {{domain::Effect::write, "repository_path", "include"}}}}};
+        {{domain::Effect::write, "repository_path", "include"}}}},
+      {{make_id<domain::EvidenceId>("planning-evidence"),
+        {"sha256", "eeeeeeeeeeeeeeee", 32}}}};
 }
 
 auto run_provenance() -> domain::RunProvenance {
@@ -320,6 +327,11 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
           plan_revision().plan_id, plan_revision().revision_id,
           domain::PlanDecision::approved, domain::PlanDecisionSource::user,
           std::string{"approved after review"}}},
+      domain::PlanRevisionInvalidated{domain::PlanRevisionInvalidation{
+          plan_revision().plan_id, plan_revision().revision_id,
+          {domain::PlanInvalidationTrigger::evidence_changed}}},
+      domain::SessionTasksMaterialized{plan_revision().plan_id,
+                                       plan_revision().revision_id},
       domain::ChildRunCreated{make_id<domain::RunId>("child")},
       domain::InterRunMessageSent{make_id<domain::RunId>("target"),
                                   {domain::TextBlock{"message"}}},
@@ -489,6 +501,29 @@ TEST_CASE("malformed persisted plan graph fails replay explicitly",
   const auto replayed = store->replay_events(session);
   REQUIRE_FALSE(replayed);
   REQUIRE(replayed.error().code == storage::SessionStoreErrorCode::corrupt);
+}
+
+TEST_CASE("persisted plan revisions without evidence decode compatibly",
+          "[storage][sqlite][plan][compatibility]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "legacy-plan-session", 100);
+  auto legacy_revision = plan_revision();
+  legacy_revision.evidence.clear();
+  auto legacy_event = event(
+      1, domain::PlanRevisionProposed{std::move(legacy_revision)},
+      "legacy-plan-event");
+  legacy_event.metadata.schema_version = 1;
+  REQUIRE(store->append_events(session, std::array{legacy_event}));
+  store.reset();
+
+  store = open_store(path);
+  const auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  const auto& proposed =
+      std::get<domain::PlanRevisionProposed>(replayed->front().payload);
+  REQUIRE(proposed.revision.evidence.empty());
 }
 
 TEST_CASE("forged persisted pricing observation fails replay explicitly",

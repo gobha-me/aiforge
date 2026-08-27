@@ -14,6 +14,8 @@ enum class RunStatus {
   not_started,
   running,
   awaiting_input,
+  awaiting_plan_decision,
+  awaiting_plan_revision,
   completed,
   failed,
   cancelled,

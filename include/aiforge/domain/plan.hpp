@@ -16,6 +16,12 @@ struct PlanResourceIntent {
   auto operator==(const PlanResourceIntent &) const -> bool = default;
 };
 
+struct PlanEvidenceBinding {
+  EvidenceId evidence_id;
+  ContentDigest digest;
+  auto operator==(const PlanEvidenceBinding &) const -> bool = default;
+};
+
 struct PlanTask {
   PlanTaskId task_id;
   std::optional<PlanTaskId> parent_task_id;
@@ -36,6 +42,7 @@ struct PlanRevision {
   std::string goal;
   std::optional<RepositorySnapshotIdentity> source_snapshot;
   std::vector<PlanTask> tasks;
+  std::vector<PlanEvidenceBinding> evidence;
   auto operator==(const PlanRevision &) const -> bool = default;
 };
 
@@ -57,6 +64,18 @@ struct PlanRevisionDecision {
   PlanDecisionSource source{PlanDecisionSource::user};
   std::optional<std::string> reason;
   auto operator==(const PlanRevisionDecision &) const -> bool = default;
+};
+
+enum class PlanInvalidationTrigger {
+  source_snapshot_changed,
+  evidence_changed,
+};
+
+struct PlanRevisionInvalidation {
+  PlanId plan_id;
+  PlanRevisionId revision_id;
+  std::vector<PlanInvalidationTrigger> triggers;
+  auto operator==(const PlanRevisionInvalidation &) const -> bool = default;
 };
 
 } // namespace aiforge::domain

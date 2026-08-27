@@ -10,6 +10,7 @@
 
 #include <aiforge/backend/backend.hpp>
 #include <aiforge/domain/event_log.hpp>
+#include <aiforge/domain/plan_projection.hpp>
 #include <aiforge/domain/run_projection.hpp>
 #include <aiforge/runtime/tool_policy.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
@@ -37,6 +38,8 @@ enum class RunKernelErrorCode {
   policy_failure,
   interactive_input_unavailable,
   continuation_not_ready,
+  invalid_plan_state,
+  wrong_plan,
   internal_failure,
 };
 
@@ -107,6 +110,54 @@ struct PendingQuestionInput {
   auto operator==(const PendingQuestionInput&) const -> bool = default;
 };
 
+struct PlanStart {
+  domain::RunId run_id;
+  domain::RunStarted attributes;
+  domain::PlanRevision revision;
+  auto operator==(const PlanStart&) const -> bool = default;
+};
+
+struct PlanApprovalEnvironment {
+  std::optional<domain::RepositorySnapshotIdentity> source_snapshot;
+  std::vector<domain::PlanEvidenceBinding> evidence;
+  auto operator==(const PlanApprovalEnvironment&) const -> bool = default;
+};
+
+enum class PlanDecisionOutcome {
+  recorded,
+  already_recorded,
+  invalidated,
+};
+
+struct PlanApprovalRevalidation {
+  domain::RunId run_id;
+  domain::RunStarted attributes;
+  domain::PlanId plan_id;
+  domain::PlanRevisionId revision_id;
+  PlanApprovalEnvironment environment;
+  auto operator==(const PlanApprovalRevalidation&) const -> bool = default;
+};
+
+enum class PlanRevalidationOutcome {
+  current,
+  invalidated,
+  already_invalidated,
+};
+
+struct PendingPlanDecision {
+  domain::RunId run_id;
+  domain::PlanId plan_id;
+  domain::PlanRevisionId revision_id;
+  auto operator==(const PendingPlanDecision&) const -> bool = default;
+};
+
+struct ActiveSessionTask {
+  domain::PlanId plan_id;
+  domain::PlanRevisionId revision_id;
+  domain::PlanTask task;
+  auto operator==(const ActiveSessionTask&) const -> bool = default;
+};
+
 // Implementations may be called from a backend worker. They must not mutate
 // UI state directly; a surface should only wake or enqueue an event for its
 // owner thread.
@@ -144,6 +195,18 @@ class RunKernel final {
   [[nodiscard]] auto record_session_spend_ceiling(
       SessionSpendCeilingChange change)
       -> std::expected<void, RunKernelError>;
+  [[nodiscard]] auto start_plan(PlanStart start)
+      -> std::expected<void, RunKernelError>;
+  [[nodiscard]] auto revise_plan(const domain::RunId& run_id,
+                                 domain::PlanRevision revision)
+      -> std::expected<void, RunKernelError>;
+  [[nodiscard]] auto decide_plan(
+      const domain::RunId& run_id, domain::PlanRevisionDecision decision,
+      PlanApprovalEnvironment environment = {})
+      -> std::expected<PlanDecisionOutcome, RunKernelError>;
+  [[nodiscard]] auto revalidate_plan_approval(
+      PlanApprovalRevalidation revalidation)
+      -> std::expected<PlanRevalidationOutcome, RunKernelError>;
   [[nodiscard]] auto cancel(const domain::RunId& run_id,
                             const domain::InferenceId& inference_id,
                             std::optional<std::string> reason = std::nullopt)
@@ -187,6 +250,13 @@ class RunKernel final {
       -> std::optional<domain::InferenceId>;
   [[nodiscard]] auto pending_question_input() const
       -> std::optional<PendingQuestionInput>;
+  [[nodiscard]] auto pending_plan_decision() const
+      -> std::optional<PendingPlanDecision>;
+  [[nodiscard]] auto plan_projection(
+      const domain::PlanId& plan_id) const noexcept
+      -> const domain::PlanGraphProjection*;
+  [[nodiscard]] auto active_session_tasks() const
+      -> std::vector<ActiveSessionTask>;
 
  private:
   struct Impl;
