@@ -395,7 +395,7 @@ TEST_CASE("all north-star event families have typed payloads", "[domain]") {
       ArtifactReferenced{artifact, message},
       ArtifactDisplayed{artifact, view, "right-pane"},
       ArtifactRemovedFromView{artifact, view},
-      ChildRunCreated{make_id<RunId>("child")},
+      ChildRunCreated{make_id<RunId>("child"), std::nullopt},
       InterRunMessageSent{make_id<RunId>("target"), {TextBlock{"message"}}},
       UnknownEvent{"future.event"},
   };

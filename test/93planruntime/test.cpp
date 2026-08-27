@@ -237,7 +237,9 @@ TEST_CASE("approval materializes exact tasks and later drift invalidates them",
   for (std::size_t index = 0; index < value.tasks.size(); ++index) {
     REQUIRE(active_tasks[index] == runtime::ActiveSessionTask{
                                         value.plan_id, value.revision_id,
-                                        value.tasks[index]});
+                                        value.tasks[index],
+                                       runtime::SessionTaskState::pending,
+                                       std::nullopt, std::nullopt});
   }
   REQUIRE(kernel.event_log().events().size() == 5);
 

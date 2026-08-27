@@ -12,6 +12,7 @@
 #include <aiforge/domain/event_log.hpp>
 #include <aiforge/domain/plan_projection.hpp>
 #include <aiforge/domain/run_projection.hpp>
+#include <aiforge/runtime/child_runner.hpp>
 #include <aiforge/runtime/tool_policy.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/storage/session_store.hpp>
@@ -40,6 +41,8 @@ enum class RunKernelErrorCode {
   continuation_not_ready,
   invalid_plan_state,
   wrong_plan,
+  invalid_child_state,
+  child_runner_unavailable,
   internal_failure,
 };
 
@@ -78,7 +81,8 @@ struct RunStart {
   // tool identity is the run's actual tool set.
   std::optional<domain::RunProvenance> provenance{};
   // Recorded atomically with run start when a persona is selected or explicitly
-  // disabled. The kernel verifies it against attributes and constructed context.
+  // disabled. The kernel verifies it against attributes and constructed
+  // context.
   std::optional<domain::PersonaSelection> persona_selection{};
   // Durable rate-card provenance for the inference, when the selected model
   // catalog supplied pricing. This is runtime metadata, not a backend option.
@@ -151,10 +155,43 @@ struct PendingPlanDecision {
   auto operator==(const PendingPlanDecision&) const -> bool = default;
 };
 
+struct ChildRunStart {
+  domain::RunId child_run_id;
+  domain::RunId parent_run_id;
+  domain::RunStarted attributes;
+  domain::PlanId plan_id;
+  domain::PlanRevisionId revision_id;
+  domain::PlanTaskId task_id;
+  domain::ContextParcel context;
+  domain::ChildRunBudget budget;
+  // Parent authority is supplied by trusted runtime policy, never by the plan
+  // or model. The requested child set must be a subset of both it and
+  // the accepted task's intended effects.
+  std::vector<domain::Effect> parent_effects;
+  std::vector<domain::CapabilityScope> parent_scopes;
+  std::vector<domain::Effect> requested_effects;
+  std::vector<domain::CapabilityScope> requested_scopes;
+  auto operator==(const ChildRunStart&) const -> bool = default;
+};
+
+enum class SessionTaskState {
+  pending,
+  dispatched,
+  completed,
+  failed,
+  cancelled,
+  timed_out,
+  budget_exhausted,
+  unavailable,
+};
+
 struct ActiveSessionTask {
   domain::PlanId plan_id;
   domain::PlanRevisionId revision_id;
   domain::PlanTask task;
+  SessionTaskState state{SessionTaskState::pending};
+  std::optional<domain::RunId> child_run_id;
+  std::optional<domain::SessionTaskResult> result;
   auto operator==(const ActiveSessionTask&) const -> bool = default;
 };
 
@@ -175,13 +212,15 @@ class RunKernel final {
             RunWakeSink* wake_sink = nullptr,
             TimestampSource timestamp_source = {}, RunKernelLimits limits = {},
             ToolRegistrySnapshot tools = {},
-            std::shared_ptr<ToolPolicy> policy = {});
+            std::shared_ptr<ToolPolicy> policy = {},
+            std::shared_ptr<ChildRunner> child_runner = {});
 
   [[nodiscard]] static auto open_durable(
       DurableSessionOpen session, storage::SessionStore& store,
       backend::Backend& backend, RunWakeSink* wake_sink = nullptr,
       TimestampSource timestamp_source = {}, RunKernelLimits limits = {},
-      ToolRegistrySnapshot tools = {}, std::shared_ptr<ToolPolicy> policy = {})
+      ToolRegistrySnapshot tools = {}, std::shared_ptr<ToolPolicy> policy = {},
+      std::shared_ptr<ChildRunner> child_runner = {})
       -> std::expected<std::unique_ptr<RunKernel>, RunKernelError>;
   ~RunKernel();
 
@@ -207,6 +246,8 @@ class RunKernel final {
   [[nodiscard]] auto revalidate_plan_approval(
       PlanApprovalRevalidation revalidation)
       -> std::expected<PlanRevalidationOutcome, RunKernelError>;
+  [[nodiscard]] auto dispatch_child(ChildRunStart start)
+      -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto cancel(const domain::RunId& run_id,
                             const domain::InferenceId& inference_id,
                             std::optional<std::string> reason = std::nullopt)

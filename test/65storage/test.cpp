@@ -68,6 +68,10 @@ auto event(const std::uint64_t sequence, Payload payload, std::string id = {})
   if (std::holds_alternative<domain::PlanRevisionProposed>(result.payload)) {
     result.metadata.schema_version = 2;
   }
+  if (const auto* child = std::get_if<domain::ChildRunCreated>(&result.payload);
+      child != nullptr && child->descriptor) {
+    result.metadata.schema_version = 2;
+  }
   return result;
 }
 
@@ -142,6 +146,34 @@ auto plan_revision() -> domain::PlanRevision {
         {{domain::Effect::write, "repository_path", "include"}}}},
       {{make_id<domain::EvidenceId>("planning-evidence"),
         {"sha256", "eeeeeeeeeeeeeeee", 32}}}};
+}
+
+auto child_run_descriptor() -> domain::ChildRunDescriptor {
+  return {make_id<domain::RunId>("run"),
+          plan_revision().plan_id,
+          plan_revision().revision_id,
+          plan_revision().tasks.front().task_id,
+          {make_id<domain::ContextParcelId>("context-parcel"),
+           *plan_revision().source_snapshot,
+           {make_id<domain::EvidenceId>("context-evidence")},
+           128,
+           32},
+          {2, 3, 256, 128, std::chrono::seconds{30}},
+          {domain::Effect::write},
+          {{domain::Effect::write, "filesystem.root", "/workspace"}}};
+}
+
+auto session_task_result() -> domain::SessionTaskResult {
+  const auto descriptor = child_run_descriptor();
+  return {descriptor.plan_id,
+          descriptor.revision_id,
+          descriptor.task_id,
+          make_id<domain::RunId>("child"),
+          domain::SessionTaskOutcome::completed,
+          {1, 2, {24, 12, 0, 0}},
+          {make_id<domain::EvidenceId>("result-evidence")},
+          {make_id<domain::ArtifactId>("result-artifact")},
+          std::nullopt};
 }
 
 auto run_provenance() -> domain::RunProvenance {
@@ -332,7 +364,9 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
           {domain::PlanInvalidationTrigger::evidence_changed}}},
       domain::SessionTasksMaterialized{plan_revision().plan_id,
                                        plan_revision().revision_id},
-      domain::ChildRunCreated{make_id<domain::RunId>("child")},
+      domain::ChildRunCreated{make_id<domain::RunId>("child"),
+                              child_run_descriptor()},
+      domain::SessionTaskResultRecorded{session_task_result()},
       domain::InterRunMessageSent{make_id<domain::RunId>("target"),
                                   {domain::TextBlock{"message"}}},
       domain::UnknownEvent{"future.event",
@@ -426,6 +460,18 @@ TEST_CASE("all typed payloads and opaque future payloads round trip",
   const auto listed = store->list_sessions(10);
   REQUIRE(listed);
   REQUIRE(*listed == std::vector<storage::SessionInfo>{*info});
+
+  auto malformed_result = session_task_result();
+  malformed_result.error =
+      domain::DomainError{domain::ErrorCode::backend, "invalid", false};
+  auto malformed = event(events.size() + 1,
+                         domain::SessionTaskResultRecorded{malformed_result},
+                         "malformed-task-result");
+  const auto malformed_append =
+      store->append_events(session, std::array{malformed});
+  REQUIRE_FALSE(malformed_append);
+  REQUIRE(malformed_append.error().code ==
+          storage::SessionStoreErrorCode::invalid_argument);
 
   const auto future_session = create(*store, "future-session", 200);
   auto future = event(

@@ -69,6 +69,14 @@ struct ProjectedPlanRevision {
   std::optional<EventId> invalidation_event_id;
   std::vector<PlanInvalidationTrigger> invalidation_triggers;
   std::optional<EventId> materialization_event_id;
+  struct TaskExecution {
+    PlanTaskId task_id;
+    std::optional<RunId> child_run_id;
+    std::optional<ChildRunDescriptor> dispatch;
+    std::optional<SessionTaskResult> result;
+    auto operator==(const TaskExecution&) const -> bool = default;
+  };
+  std::vector<TaskExecution> task_executions;
   auto operator==(const ProjectedPlanRevision &) const -> bool = default;
 };
 
@@ -105,6 +113,10 @@ public:
       -> const ProjectedPlanRevision *;
   [[nodiscard]] auto state() const noexcept -> PlanGraphState;
   [[nodiscard]] auto active_tasks() const noexcept -> std::span<const PlanTask>;
+  [[nodiscard]] auto task_executions() const noexcept
+      -> std::span<const ProjectedPlanRevision::TaskExecution>;
+  [[nodiscard]] auto task_execution(const PlanTaskId& task_id) const noexcept
+      -> const ProjectedPlanRevision::TaskExecution*;
   [[nodiscard]] auto last_sequence() const noexcept -> std::uint64_t {
     return m_last_sequence;
   }

@@ -8,6 +8,7 @@
 #include <variant>
 #include <vector>
 
+#include <aiforge/domain/child_run.hpp>
 #include <aiforge/domain/content.hpp>
 #include <aiforge/domain/money.hpp>
 #include <aiforge/domain/persona.hpp>
@@ -388,7 +389,15 @@ struct SessionTasksMaterialized {
 
 struct ChildRunCreated {
   RunId child_run_id;
+  // Schema version 1 carried only child_run_id. Runtime-created schema-v2
+  // events always carry the complete bounded dispatch descriptor.
+  std::optional<ChildRunDescriptor> descriptor;
   auto operator==(const ChildRunCreated&) const -> bool = default;
+};
+
+struct SessionTaskResultRecorded {
+  SessionTaskResult result;
+  auto operator==(const SessionTaskResultRecorded&) const -> bool = default;
 };
 
 struct InterRunMessageSent {
@@ -425,7 +434,8 @@ using RunEventPayload = std::variant<
     ReviewVerdictRecorded, ReviewVerdictRevoked, ReviewOverrideRecorded,
     ReviewOverrideRevoked, PlanRevisionProposed,
     PlanRevisionDecisionRecorded, PlanRevisionInvalidated,
-    SessionTasksMaterialized, ChildRunCreated, InterRunMessageSent,
+    SessionTasksMaterialized, ChildRunCreated,
+    SessionTaskResultRecorded, InterRunMessageSent,
     UnknownEvent>;
 
 struct EventMetadata {

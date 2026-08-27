@@ -23,8 +23,8 @@
 #include <string_view>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unordered_set>
 #include <unistd.h>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -1007,6 +1007,183 @@ pricing_observation_json(const domain::PricingObservation &observation)
           value.at("value").get<std::string>()};
 }
 
+[[nodiscard]] auto
+session_task_outcome_name(const domain::SessionTaskOutcome outcome)
+    -> std::string_view {
+  using Outcome = domain::SessionTaskOutcome;
+  switch (outcome) {
+  case Outcome::completed:
+    return "completed";
+  case Outcome::failed:
+    return "failed";
+  case Outcome::cancelled:
+    return "cancelled";
+  case Outcome::timed_out:
+    return "timed_out";
+  case Outcome::budget_exhausted:
+    return "budget_exhausted";
+  case Outcome::unavailable:
+    return "unavailable";
+  }
+  throw CodecFailure{"invalid session task outcome"};
+}
+
+[[nodiscard]] auto parse_session_task_outcome(const Json& value)
+    -> domain::SessionTaskOutcome {
+  using Outcome = domain::SessionTaskOutcome;
+  return enum_value<Outcome>(value.get<std::string>(),
+                             {{"completed", Outcome::completed},
+                              {"failed", Outcome::failed},
+                              {"cancelled", Outcome::cancelled},
+                              {"timed_out", Outcome::timed_out},
+                              {"budget_exhausted", Outcome::budget_exhausted},
+                              {"unavailable", Outcome::unavailable}});
+}
+
+template <typename IdType>
+[[nodiscard]] auto id_list_json(const std::vector<IdType>& values) -> Json {
+  auto result = Json::array();
+  for (const auto& value : values)
+    result.push_back(id_text(value));
+  return result;
+}
+
+template <typename IdType>
+[[nodiscard]] auto parse_id_list(const Json& values) -> std::vector<IdType> {
+  if (!values.is_array())
+    throw CodecFailure{"identity list is invalid"};
+  std::vector<IdType> result;
+  result.reserve(values.size());
+  for (const auto& value : values)
+    result.push_back(parse_id<IdType>(value));
+  return result;
+}
+
+[[nodiscard]] auto child_run_budget_json(const domain::ChildRunBudget& budget)
+    -> Json {
+  return {{"maximum_inferences", budget.maximum_inferences},
+          {"maximum_tool_invocations", budget.maximum_tool_invocations},
+          {"maximum_input_tokens", budget.maximum_input_tokens},
+          {"maximum_output_tokens", budget.maximum_output_tokens},
+          {"timeout_ms", budget.timeout.count()}};
+}
+
+[[nodiscard]] auto parse_child_run_budget(const Json& value)
+    -> domain::ChildRunBudget {
+  return {
+      value.at("maximum_inferences").get<std::uint32_t>(),
+      value.at("maximum_tool_invocations").get<std::uint32_t>(),
+      value.at("maximum_input_tokens").get<std::uint64_t>(),
+      value.at("maximum_output_tokens").get<std::uint64_t>(),
+      std::chrono::milliseconds{value.at("timeout_ms").get<std::int64_t>()}};
+}
+
+[[nodiscard]] auto
+child_run_context_json(const domain::ChildRunContextBinding& context) -> Json {
+  return {{"parcel_id", id_text(context.parcel_id)},
+          {"target_snapshot", snapshot_json(context.target_snapshot)},
+          {"evidence_ids", id_list_json(context.evidence_ids)},
+          {"represented_bytes", context.represented_bytes},
+          {"estimated_tokens", context.estimated_tokens}};
+}
+
+[[nodiscard]] auto parse_child_run_context(const Json& value)
+    -> domain::ChildRunContextBinding {
+  return {parse_id<domain::ContextParcelId>(value.at("parcel_id")),
+          parse_snapshot(value.at("target_snapshot")),
+          parse_id_list<domain::EvidenceId>(value.at("evidence_ids")),
+          value.at("represented_bytes").get<std::uint64_t>(),
+          value.at("estimated_tokens").get<std::uint64_t>()};
+}
+
+[[nodiscard]] auto
+child_run_descriptor_json(const domain::ChildRunDescriptor& descriptor)
+    -> Json {
+  if (!domain::validate_child_run_descriptor(descriptor)) {
+    throw CodecFailure{"child-run descriptor is invalid"};
+  }
+  return {{"parent_run_id", id_text(descriptor.parent_run_id)},
+          {"plan_id", id_text(descriptor.plan_id)},
+          {"revision_id", id_text(descriptor.revision_id)},
+          {"task_id", id_text(descriptor.task_id)},
+          {"context", child_run_context_json(descriptor.context)},
+          {"budget", child_run_budget_json(descriptor.budget)},
+          {"effects", effects_json(descriptor.effects)},
+          {"capability_scopes", scopes_json(descriptor.capability_scopes)}};
+}
+
+[[nodiscard]] auto parse_child_run_descriptor(const Json& value)
+    -> domain::ChildRunDescriptor {
+  domain::ChildRunDescriptor result{
+      parse_id<domain::RunId>(value.at("parent_run_id")),
+      parse_id<domain::PlanId>(value.at("plan_id")),
+      parse_id<domain::PlanRevisionId>(value.at("revision_id")),
+      parse_id<domain::PlanTaskId>(value.at("task_id")),
+      parse_child_run_context(value.at("context")),
+      parse_child_run_budget(value.at("budget")),
+      parse_effects(value.at("effects")),
+      parse_scopes(value.at("capability_scopes"))};
+  if (!domain::validate_child_run_descriptor(result)) {
+    throw CodecFailure{"child-run descriptor is invalid"};
+  }
+  return result;
+}
+
+[[nodiscard]] auto
+session_task_result_json(const domain::SessionTaskResult& result) -> Json {
+  const domain::ChildRunBudget shape_budget{
+      std::numeric_limits<std::uint32_t>::max(),
+      std::numeric_limits<std::uint32_t>::max(),
+      std::numeric_limits<std::uint64_t>::max(),
+      std::numeric_limits<std::uint64_t>::max(), std::chrono::milliseconds{1}};
+  if (!domain::validate_session_task_result(result, shape_budget)) {
+    throw CodecFailure{"session task result is invalid"};
+  }
+  return {{"plan_id", id_text(result.plan_id)},
+          {"revision_id", id_text(result.revision_id)},
+          {"task_id", id_text(result.task_id)},
+          {"child_run_id", id_text(result.child_run_id)},
+          {"outcome", session_task_outcome_name(result.outcome)},
+          {"consumption",
+           {{"inference_count", result.consumption.inference_count},
+            {"tool_invocation_count", result.consumption.tool_invocation_count},
+            {"usage", usage_json(result.consumption.usage)}}},
+          {"evidence_ids", id_list_json(result.evidence_ids)},
+          {"artifact_ids", id_list_json(result.artifact_ids)},
+          {"error",
+           result.error ? domain_error_json(*result.error) : Json(nullptr)}};
+}
+
+[[nodiscard]] auto parse_session_task_result(const Json& value)
+    -> domain::SessionTaskResult {
+  const auto& consumption = value.at("consumption");
+  std::optional<domain::DomainError> error;
+  if (!value.at("error").is_null()) {
+    error = parse_domain_error(value.at("error"));
+  }
+  domain::SessionTaskResult result{
+      parse_id<domain::PlanId>(value.at("plan_id")),
+      parse_id<domain::PlanRevisionId>(value.at("revision_id")),
+      parse_id<domain::PlanTaskId>(value.at("task_id")),
+      parse_id<domain::RunId>(value.at("child_run_id")),
+      parse_session_task_outcome(value.at("outcome")),
+      {consumption.at("inference_count").get<std::uint32_t>(),
+       consumption.at("tool_invocation_count").get<std::uint32_t>(),
+       parse_usage(consumption.at("usage"))},
+      parse_id_list<domain::EvidenceId>(value.at("evidence_ids")),
+      parse_id_list<domain::ArtifactId>(value.at("artifact_ids")),
+      std::move(error)};
+  const domain::ChildRunBudget shape_budget{
+      std::numeric_limits<std::uint32_t>::max(),
+      std::numeric_limits<std::uint32_t>::max(),
+      std::numeric_limits<std::uint64_t>::max(),
+      std::numeric_limits<std::uint64_t>::max(), std::chrono::milliseconds{1}};
+  if (!domain::validate_session_task_result(result, shape_budget)) {
+    throw CodecFailure{"session task result is invalid"};
+  }
+  return result;
+}
+
 [[nodiscard]] auto plan_task_json(const domain::PlanTask& task) -> Json {
   auto dependencies = Json::array();
   for (const auto& dependency : task.dependency_task_ids) {
@@ -1954,6 +2131,9 @@ pricing_observation_json(const domain::PricingObservation &observation)
             return std::string{"session.tasks_materialized"};
           },
           [](const domain::ChildRunCreated&) { return std::string{"run.child_created"}; },
+          [](const domain::SessionTaskResultRecorded&) {
+            return std::string{"session.task_result_recorded"};
+          },
           [](const domain::InterRunMessageSent&) { return std::string{"run.inter_message_sent"}; },
           [](const domain::UnknownEvent& value) { return value.type_name; }},
       payload);
@@ -1962,7 +2142,7 @@ pricing_observation_json(const domain::PricingObservation &observation)
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 55,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 56,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started", "run.provenance_recorded", "persona.selection_recorded",
@@ -1989,6 +2169,7 @@ pricing_observation_json(const domain::PricingObservation &observation)
       "plan.revision_proposed", "plan.revision_decision_recorded",
       "plan.revision_invalidated", "session.tasks_materialized",
       "run.child_created",
+      "session.task_result_recorded",
       "run.inter_message_sent"};
   return types.contains(type);
 }
@@ -1997,7 +2178,8 @@ pricing_observation_json(const domain::PricingObservation &observation)
                                         const std::uint32_t schema_version)
     -> bool {
   return (schema_version == 1 && known_payload_type(type)) ||
-         (schema_version == 2 && type == "plan.revision_proposed");
+         (schema_version == 2 &&
+          ( type == "plan.revision_proposed" || type == "run.child_created"));
 }
 
 [[nodiscard]] auto payload_json(const domain::RunEventPayload& payload,
@@ -2227,8 +2409,20 @@ pricing_observation_json(const domain::PricingObservation &observation)
             return {{"plan_id", id_text(value.plan_id)},
                     {"revision_id", id_text(value.revision_id)}};
           },
-          [](const domain::ChildRunCreated& value) -> Json {
-            return {{"child_run_id", id_text(value.child_run_id)}};
+          [schema_version](const domain::ChildRunCreated& value) -> Json {
+            Json result {{"child_run_id", id_text(value.child_run_id)}};
+            if (schema_version >= 2) {
+              if (!value.descriptor) {
+                throw CodecFailure{
+                    "schema-v2 child run lacks a dispatch descriptor"};
+              }
+              result["descriptor"] =
+                  child_run_descriptor_json(*value.descriptor);
+            }
+            return result;
+          },
+          [](const domain::SessionTaskResultRecorded& value) -> Json {
+            return {{"result", session_task_result_json(value.result)}};
           },
           [](const domain::InterRunMessageSent& value) -> Json {
             return {{"target_run_id", id_text(value.target_run_id)},
@@ -2544,7 +2738,14 @@ pricing_observation_json(const domain::PricingObservation &observation)
   }
   if (type == "run.child_created") {
     return domain::ChildRunCreated{
-        parse_id<domain::RunId>(value.at("child_run_id"))};
+        parse_id<domain::RunId>(value.at("child_run_id")),
+        value.contains("descriptor")
+            ? std::optional{parse_child_run_descriptor(value.at("descriptor"))}
+            : std::nullopt};
+  }
+  if (type == "session.task_result_recorded") {
+    return domain::SessionTaskResultRecorded{
+        parse_session_task_result(value.at("result"))};
   }
   if (type == "run.inter_message_sent") {
     return domain::InterRunMessageSent{
@@ -2620,6 +2821,13 @@ struct EncodedPayload {
         return std::unexpected(store_error(
             SessionStoreErrorCode::invalid_argument,
             "plan evidence requires proposal event schema version 2"));
+      }
+      if (const auto* child =
+              std::get_if<domain::ChildRunCreated>(&event.payload);
+          child != nullptr && child->descriptor) {
+        return std::unexpected(store_error(
+            SessionStoreErrorCode::invalid_argument,
+            "child-run dispatch metadata requires event schema version 2"));
       }
     }
     return EncodedPayload{
@@ -3046,7 +3254,8 @@ class Transaction final {
 
 constexpr std::string_view session_info_select{
     "SELECT s.session_id,s.created_at_ms,"
-    "COALESCE((SELECT e.timestamp_ms FROM events e WHERE e.session_id=s.session_id "
+    "COALESCE((SELECT e.timestamp_ms FROM events e WHERE "
+    "e.session_id=s.session_id "
     "ORDER BY e.sequence DESC LIMIT 1),s.created_at_ms),"
     "COALESCE((SELECT e.sequence FROM events e WHERE e.session_id=s.session_id "
     "ORDER BY e.sequence DESC LIMIT 1),0),"
@@ -3341,8 +3550,8 @@ auto SqliteSessionStore::append_events(
     };
 
     auto current = prepare(
-        m_impl->database,
-        "SELECT COALESCE((SELECT MAX(sequence) FROM events WHERE session_id=?1),0) "
+        m_impl->database, "SELECT COALESCE((SELECT MAX(sequence) FROM "
+                                  "events WHERE session_id=?1),0) "
         "FROM sessions WHERE session_id=?1");
     if (!current) return fail(std::move(current.error()));
     auto current_bound = bind_text(current->get(), 1, session_id.value());
@@ -3369,7 +3578,8 @@ auto SqliteSessionStore::append_events(
     auto insert = prepare(
         m_impl->database,
         "INSERT INTO events(session_id,sequence,event_id,run_id,schema_version,"
-        "timestamp_ms,caused_by_event_id,parent_run_id,invocation_id,payload_type,"
+        "timestamp_ms,caused_by_event_id,parent_run_id,invocation_id,payload_"
+        "type,"
         "payload_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)");
     if (!insert) return fail(std::move(insert.error()));
     for (std::size_t index = 0; index < events.size(); ++index) {
@@ -3452,7 +3662,8 @@ auto SqliteSessionStore::replay_events(
     auto statement = prepare(
         m_impl->database,
         "SELECT sequence,event_id,run_id,schema_version,timestamp_ms,"
-        "caused_by_event_id,parent_run_id,invocation_id,payload_type,payload_json "
+                "caused_by_event_id,parent_run_id,invocation_id,payload_type,"
+                "payload_json "
         "FROM events WHERE session_id=?1 ORDER BY sequence ASC");
     if (!statement) return fail(std::move(statement.error()));
     auto bound = bind_text(statement->get(), 1, session_id.value());
