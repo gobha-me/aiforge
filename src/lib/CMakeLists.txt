@@ -46,6 +46,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   scripted_tool_executor.cpp
   slash_commands.cpp
   sqlite_session_store.cpp
+  task_scheduler.cpp
   transcript_projection.cpp
   tool_policy.cpp
   tool_registry.cpp

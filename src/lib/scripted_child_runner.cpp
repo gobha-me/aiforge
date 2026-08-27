@@ -1,8 +1,11 @@
 #include <aiforge/testing/scripted_child_runner.hpp>
 
+#include <algorithm>
+#include <cstddef>
 #include <condition_variable>
 #include <mutex>
 #include <optional>
+#include <ranges>
 #include <utility>
 
 namespace aiforge::testing {
@@ -73,8 +76,14 @@ class ScriptedChildRunStream final : public runtime::ChildRunResultStream {
 }  // namespace
 
 ScriptedChildRunner::ScriptedChildRunner(
-    std::vector<ScriptedChildRunExchange> exchanges)
-    : m_exchanges(std::move(exchanges)) {}
+    std::vector<ScriptedChildRunExchange> exchanges,
+    const std::size_t maximum_concurrency)
+    : m_exchanges(std::move(exchanges)),
+      m_maximum_concurrency(maximum_concurrency) {}
+
+auto ScriptedChildRunner::maximum_concurrency() const noexcept -> std::size_t {
+  return m_maximum_concurrency;
+}
 
 auto ScriptedChildRunner::start(runtime::ChildRunInvocation invocation,
                                 const std::stop_token stop_token)
@@ -82,18 +91,27 @@ auto ScriptedChildRunner::start(runtime::ChildRunInvocation invocation,
                      runtime::ChildRunError> {
   if (stop_token.stop_requested())
     return std::unexpected(cancelled_error());
+  std::lock_guard lock(m_mutex);
   m_recorded_invocations.push_back(invocation);
   if (m_next_exchange >= m_exchanges.size()) {
     return std::unexpected(runtime::ChildRunError{
         runtime::ChildRunErrorCode::unavailable,
         "scripted child runner has no exchange remaining", false});
   }
-  const auto& exchange = m_exchanges[m_next_exchange];
-  if (invocation != exchange.expected_invocation) {
+  const auto found = std::ranges::find(
+      std::ranges::subrange{m_exchanges.begin() +
+                                static_cast<std::ptrdiff_t>(m_next_exchange),
+                            m_exchanges.end()},
+      invocation, &ScriptedChildRunExchange::expected_invocation);
+  if (found == m_exchanges.end()) {
     return std::unexpected(runtime::ChildRunError{
         runtime::ChildRunErrorCode::protocol_failure,
         "child-run invocation did not match the script", false});
   }
+  std::iter_swap(m_exchanges.begin() +
+                     static_cast<std::ptrdiff_t>(m_next_exchange),
+                 found);
+  const auto exchange = m_exchanges[m_next_exchange];
   ++m_next_exchange;
   if (const auto* error =
           std::get_if<runtime::ChildRunError>(&exchange.outcome)) {
@@ -110,6 +128,7 @@ auto ScriptedChildRunner::recorded_invocations() const noexcept
 }
 
 auto ScriptedChildRunner::remaining_exchanges() const noexcept -> std::size_t {
+  std::lock_guard lock(m_mutex);
   return m_exchanges.size() - m_next_exchange;
 }
 

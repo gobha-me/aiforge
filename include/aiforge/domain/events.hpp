@@ -389,8 +389,9 @@ struct SessionTasksMaterialized {
 
 struct ChildRunCreated {
   RunId child_run_id;
-  // Schema version 1 carried only child_run_id. Runtime-created schema-v2
-  // events always carry the complete bounded dispatch descriptor.
+  // Schema version 1 carried only child_run_id. Schema version 2 carries a
+  // complete bounded dispatch descriptor with an implicit first attempt.
+  // Schema version 3 records the explicit attempt number.
   std::optional<ChildRunDescriptor> descriptor;
   auto operator==(const ChildRunCreated&) const -> bool = default;
 };

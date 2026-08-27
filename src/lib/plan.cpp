@@ -644,8 +644,7 @@ auto PlanGraphProjection::apply_in_place(const RunEvent &event,
     current->materialization_event_id = event.metadata.event_id;
     current->task_executions.reserve(current->revision.tasks.size());
     for (const auto& task : current->revision.tasks) {
-      current->task_executions.push_back(
-          {task.task_id, std::nullopt, std::nullopt, std::nullopt});
+      current->task_executions.push_back({task.task_id, {}});
     }
   } else if (const auto* created = std::get_if<ChildRunCreated>(&event.payload);
              created != nullptr && created->descriptor) {
@@ -677,13 +676,20 @@ auto PlanGraphProjection::apply_in_place(const RunEvent &event,
                      "child run targets an unknown task", descriptor.plan_id,
                      descriptor.revision_id, descriptor.task_id);
     }
-    if (execution->child_run_id) {
+    if ((!execution->attempts.empty() &&
+         (!execution->attempts.back().result ||
+          execution->attempts.back().result->outcome !=
+              SessionTaskOutcome::unavailable ||
+          !execution->attempts.back().result->error ||
+          !execution->attempts.back().result->error->retryable)) ||
+        descriptor.attempt != execution->attempts.size() + 1U) {
       return failure(PlanGraphErrorCode::invalid_transition,
-                     "session task already has a child run", descriptor.plan_id,
-                     descriptor.revision_id, descriptor.task_id);
+                     "session task attempt is not the next retryable dispatch",
+                     descriptor.plan_id, descriptor.revision_id,
+                     descriptor.task_id);
     }
-    execution->child_run_id = created->child_run_id;
-    execution->dispatch = descriptor;
+    execution->attempts.push_back(
+        {created->child_run_id, descriptor, std::nullopt});
   } else if (const auto* recorded =
                  std::get_if<SessionTaskResultRecorded>(&event.payload)) {
     const auto& result = recorded->result;
@@ -698,24 +704,29 @@ auto PlanGraphProjection::apply_in_place(const RunEvent &event,
         std::ranges::find(current->task_executions, result.task_id,
                           &ProjectedPlanRevision::TaskExecution::task_id);
     if (execution == current->task_executions.end() ||
-        !execution->child_run_id || !execution->dispatch ||
-        *execution->child_run_id != result.child_run_id ||
-        execution->dispatch->plan_id != result.plan_id ||
-        execution->dispatch->revision_id != result.revision_id ||
-        execution->dispatch->task_id != result.task_id || execution->result) {
+        execution->attempts.empty()) {
       return failure(PlanGraphErrorCode::invalid_transition,
                      "task result has no matching unterminated child run",
                      result.plan_id, result.revision_id, result.task_id);
     }
-    if (!validate_session_task_result(result, execution->dispatch->budget) ||
+    auto& attempt = execution->attempts.back();
+    if (attempt.child_run_id != result.child_run_id ||
+        attempt.dispatch.plan_id != result.plan_id ||
+        attempt.dispatch.revision_id != result.revision_id ||
+        attempt.dispatch.task_id != result.task_id || attempt.result) {
+      return failure(PlanGraphErrorCode::invalid_transition,
+                     "task result has no matching unterminated child run",
+                     result.plan_id, result.revision_id, result.task_id);
+    }
+    if (!validate_session_task_result(result, attempt.dispatch.budget) ||
         result.child_run_id != event.metadata.run_id ||
         !event.metadata.parent_run_id ||
-        *event.metadata.parent_run_id != execution->dispatch->parent_run_id) {
+        *event.metadata.parent_run_id != attempt.dispatch.parent_run_id) {
       return failure(PlanGraphErrorCode::invalid_transition,
                      "session task result is malformed", result.plan_id,
                      result.revision_id, result.task_id);
     }
-    execution->result = result;
+    attempt.result = result;
   }
 
   m_event_ids.insert(event.metadata.event_id);

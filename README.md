@@ -145,8 +145,29 @@ idempotent.
 revision's bound snapshot or evidence changes. Its tasks then disappear from
 the active-task projection. Approval and materialization grant no capabilities
 and replay performs no inference, tool call, or task dispatch. Child-run
-dispatch, conflict scheduling, and plan-review surfaces remain later children
-of issue #50.
+dispatch and conflict scheduling build on this projection; plan-review surfaces
+remain a later child of issue #50.
+
+## Bounded task dispatch and reconciliation
+
+`RunKernel::dispatch_child` starts accepted materialized tasks as child runs
+with explicit parent, plan revision, context, budget, effects, capability
+subset, and attempt identity. The kernel rechecks dependencies, snapshot-bound
+context, declared effects, capability narrowing, runner capacity, and resource
+independence immediately before each dispatch. Every active child owns separate
+worker, deadline, and cancellation state; foreground run state remains separate.
+
+`analyze_task_schedule` derives readiness and a stable dispatch group in plan
+order. Equal or ancestor repository paths and equal repository components
+conflict when either task mutates them. Read/read pairs may overlap; missing,
+malformed, mixed, or future mutating intent kinds serialize because independence
+cannot be proven. Concurrency defaults to one and is bounded at sixteen.
+
+Attempts are append-only child-run facts. Only retryable runner unavailability
+may advance to another attempt, with one attempt by default and an absolute
+bound of eight. The rollup deterministically checks and totals all attempt
+consumption while deduplicating evidence and artifacts in plan/attempt order.
+Replay rebuilds attempt history and readiness without launching a worker.
 
 ## Interactive Chat
 

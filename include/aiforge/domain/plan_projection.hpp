@@ -70,10 +70,15 @@ struct ProjectedPlanRevision {
   std::vector<PlanInvalidationTrigger> invalidation_triggers;
   std::optional<EventId> materialization_event_id;
   struct TaskExecution {
+    struct Attempt {
+      RunId child_run_id;
+      ChildRunDescriptor dispatch;
+      std::optional<SessionTaskResult> result;
+      auto operator==(const Attempt&) const -> bool = default;
+    };
+
     PlanTaskId task_id;
-    std::optional<RunId> child_run_id;
-    std::optional<ChildRunDescriptor> dispatch;
-    std::optional<SessionTaskResult> result;
+    std::vector<Attempt> attempts;
     auto operator==(const TaskExecution&) const -> bool = default;
   };
   std::vector<TaskExecution> task_executions;

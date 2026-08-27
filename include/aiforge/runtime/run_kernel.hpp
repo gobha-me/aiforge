@@ -12,6 +12,7 @@
 #include <aiforge/domain/event_log.hpp>
 #include <aiforge/domain/plan_projection.hpp>
 #include <aiforge/domain/run_projection.hpp>
+#include <aiforge/domain/task_scheduler.hpp>
 #include <aiforge/runtime/child_runner.hpp>
 #include <aiforge/runtime/tool_policy.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
@@ -68,6 +69,7 @@ struct DurableSessionOpen {
 struct RunKernelLimits {
   std::size_t pending_updates{256};
   std::size_t tool_argument_bytes{8U * 1024U * 1024U};
+  domain::TaskSchedulingPolicy task_scheduling{};
   auto operator==(const RunKernelLimits&) const -> bool = default;
 };
 
@@ -171,6 +173,7 @@ struct ChildRunStart {
   std::vector<domain::CapabilityScope> parent_scopes;
   std::vector<domain::Effect> requested_effects;
   std::vector<domain::CapabilityScope> requested_scopes;
+  std::uint32_t attempt{1};
   auto operator==(const ChildRunStart&) const -> bool = default;
 };
 
@@ -287,6 +290,8 @@ class RunKernel final {
       -> const domain::RunProjection*;
   [[nodiscard]] auto active_run_id() const noexcept
       -> std::optional<domain::RunId>;
+  [[nodiscard]] auto active_child_run_ids() const
+      -> std::vector<domain::RunId>;
   [[nodiscard]] auto active_inference_id() const noexcept
       -> std::optional<domain::InferenceId>;
   [[nodiscard]] auto pending_question_input() const
