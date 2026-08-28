@@ -17,8 +17,7 @@ constexpr std::size_t kMaximumIdentityBytes = 256;
 }
 
 [[nodiscard]] auto valid_identity(const std::string_view value) -> bool {
-  if (value.empty() || value.size() > kMaximumIdentityBytes)
-    return false;
+  if (value.empty() || value.size() > kMaximumIdentityBytes) return false;
   return std::ranges::all_of(value, [](const unsigned char character) {
     return (character >= 'a' && character <= 'z') ||
            (character >= 'A' && character <= 'Z') ||
@@ -28,51 +27,49 @@ constexpr std::size_t kMaximumIdentityBytes = 256;
   });
 }
 
-[[nodiscard]] auto valid_rate(const std::optional<PriceRate> &rate) -> bool {
+[[nodiscard]] auto valid_rate(const std::optional<PriceRate>& rate) -> bool {
   return !rate || rate->usd.has_value() || rate->diem.has_value();
 }
 
-[[nodiscard]] auto tier_has_rate(const TextPriceTier &tier) -> bool {
+[[nodiscard]] auto tier_has_rate(const TextPriceTier& tier) -> bool {
   return tier.input.has_value() || tier.output.has_value() ||
          tier.cache_input.has_value() || tier.cache_write.has_value();
 }
 
-[[nodiscard]] auto valid_tier(const TextPriceTier &tier) -> bool {
+[[nodiscard]] auto valid_tier(const TextPriceTier& tier) -> bool {
   return valid_rate(tier.input) && valid_rate(tier.output) &&
          valid_rate(tier.cache_input) && valid_rate(tier.cache_write);
 }
 
-auto append(std::string &canonical, const std::string_view value) -> void {
+auto append(std::string& canonical, const std::string_view value) -> void {
   canonical += std::to_string(value.size());
   canonical.push_back(':');
   canonical.append(value);
 }
 
-auto append_amount(std::string &canonical,
-                   const std::optional<DecimalAmount> &value) -> void {
+auto append_amount(std::string& canonical,
+                   const std::optional<DecimalAmount>& value) -> void {
   append(canonical, value ? "present" : "absent");
-  if (value)
-    append(canonical, value->to_string());
+  if (value) append(canonical, value->to_string());
 }
 
-auto append_rate(std::string &canonical, const std::optional<PriceRate> &value)
+auto append_rate(std::string& canonical, const std::optional<PriceRate>& value)
     -> void {
   append(canonical, value ? "present" : "absent");
-  if (!value)
-    return;
+  if (!value) return;
   append_amount(canonical, value->usd);
   append_amount(canonical, value->diem);
 }
 
-auto append_tier(std::string &canonical, const TextPriceTier &tier) -> void {
+auto append_tier(std::string& canonical, const TextPriceTier& tier) -> void {
   append_rate(canonical, tier.input);
   append_rate(canonical, tier.output);
   append_rate(canonical, tier.cache_input);
   append_rate(canonical, tier.cache_write);
 }
 
-[[nodiscard]] auto pricing_digest(const ModelId &model_id,
-                                  const TextPricing &pricing) -> ContentDigest {
+[[nodiscard]] auto pricing_digest(const ModelId& model_id,
+                                  const TextPricing& pricing) -> ContentDigest {
   std::string canonical;
   append(canonical, model_id.value());
   append(canonical, "per-million-tokens");
@@ -82,8 +79,7 @@ auto append_tier(std::string &canonical, const TextPriceTier &tier) -> void {
     append(canonical, std::to_string(*pricing.extended_threshold_tokens));
   }
   append(canonical, pricing.extended ? "present" : "absent");
-  if (pricing.extended)
-    append_tier(canonical, *pricing.extended);
+  if (pricing.extended) append_tier(canonical, *pricing.extended);
 
   std::uint64_t hash{14695981039346656037ULL};
   for (const unsigned char byte : canonical) {
@@ -95,7 +91,7 @@ auto append_tier(std::string &canonical, const TextPriceTier &tier) -> void {
   return {"fnv1a64", std::move(value).str(), canonical.size()};
 }
 
-[[nodiscard]] auto validate_pricing(const TextPricing &pricing)
+[[nodiscard]] auto validate_pricing(const TextPricing& pricing)
     -> std::expected<void, PricingError> {
   if (!valid_tier(pricing.base) ||
       (pricing.extended && !valid_tier(*pricing.extended)) ||
@@ -143,7 +139,7 @@ auto make_pricing_observation(
   }
 }
 
-auto validate_pricing_observation(const PricingObservation &observation)
+auto validate_pricing_observation(const PricingObservation& observation)
     -> std::expected<void, PricingError> {
   try {
     if (!valid_identity(observation.source_id) ||

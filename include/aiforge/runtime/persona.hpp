@@ -35,4 +35,4 @@ struct PersonaContextError {
     -> std::expected<std::optional<domain::PersonaSelection>,
                      PersonaContextError>;
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

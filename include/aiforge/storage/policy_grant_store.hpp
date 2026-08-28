@@ -36,10 +36,11 @@ class PolicyGrantStore {
 
   [[nodiscard]] virtual auto load_grants(
       const domain::PermissionProfileId& permission_profile_id)
-      -> std::expected<std::vector<SavedPolicyGrant>, PolicyGrantStoreError> = 0;
+      -> std::expected<std::vector<SavedPolicyGrant>,
+                       PolicyGrantStoreError> = 0;
 
   [[nodiscard]] virtual auto save_grant(SavedPolicyGrant grant)
       -> std::expected<void, PolicyGrantStoreError> = 0;
 };
 
-}  // namespace aiforge::storage
+} // namespace aiforge::storage

@@ -177,7 +177,7 @@ auto analysis_error(const repository::LanguageAnalysisErrorCode code)
           code == repository::LanguageAnalysisErrorCode::timed_out};
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE(
     "language-analysis requests fail closed on malformed targets and limits",

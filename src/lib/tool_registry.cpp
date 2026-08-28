@@ -1,5 +1,5 @@
-#include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/runtime/tool_policy.hpp>
+#include <aiforge/runtime/tool_registry.hpp>
 
 #include <algorithm>
 #include <ranges>
@@ -81,8 +81,9 @@ constexpr std::size_t kMaximumScopeBytes{16U * 1024U};
         has_control_character(scope.value) || !normalized) {
       return invalid("tool capability scopes are invalid or duplicated");
     }
-    if (!scopes.emplace(normalized->effect,
-                        std::pair{normalized->kind, normalized->value})
+    if (!scopes
+             .emplace(normalized->effect,
+                      std::pair{normalized->kind, normalized->value})
              .second) {
       return invalid("tool capability scopes are invalid or duplicated");
     }
@@ -90,7 +91,7 @@ constexpr std::size_t kMaximumScopeBytes{16U * 1024U};
   return {};
 }
 
-}  // namespace
+} // namespace
 
 auto ToolRegistrySnapshot::declarations() const noexcept
     -> const std::vector<backend::ToolDeclaration>& {
@@ -140,12 +141,13 @@ auto ToolRegistry::snapshot() const
   try {
     std::vector<backend::ToolDeclaration> declarations;
     declarations.reserve(m_tools.size());
-    for (const auto& tool : m_tools) declarations.push_back(tool.declaration);
+    for (const auto& tool : m_tools)
+      declarations.push_back(tool.declaration);
     return ToolRegistrySnapshot{m_tools, std::move(declarations)};
   } catch (...) {
-    return std::unexpected(ToolRegistryError{
-        ToolRegistryErrorCode::internal_failure,
-        "tool registry snapshot failed internally"});
+    return std::unexpected(
+        ToolRegistryError{ToolRegistryErrorCode::internal_failure,
+                          "tool registry snapshot failed internally"});
   }
 }
 
@@ -196,4 +198,4 @@ auto tool_result_messages(std::span<const domain::RunEvent> events)
   }
 }
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

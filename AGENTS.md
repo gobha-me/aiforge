@@ -44,6 +44,8 @@ with the north star or an accepted ADR, the governing document wins.
 Use `PascalCase` types, `snake_case` functions and members, `m_` private data,
 trailing return types, and `[[nodiscard]]` for values callers must inspect.
 Prefer small value types with explicit invariants over stringly typed state.
+The tree is formatted with clang-format 20.x; run `tools/format.sh --check` and
+keep mechanical formatting changes separate from semantic edits.
 
 ## Tests
 

@@ -13,7 +13,7 @@ namespace {
 
 using namespace aiforge::domain;
 
-template <typename IdType> auto make_id(const std::string &value) -> IdType {
+template <typename IdType> auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
@@ -27,7 +27,7 @@ auto event(const std::uint64_t sequence, Payload payload, std::string event_id,
           std::move(payload)};
 }
 
-auto inference(const std::string &id, const std::string &model)
+auto inference(const std::string& id, const std::string& model)
     -> InferenceStarted {
   return {make_id<InferenceId>(id), make_id<ModelId>(model)};
 }
@@ -165,7 +165,7 @@ TEST_CASE(
 
   UsageLedgerProjection ledger;
   UsageLedgerProjection replayed;
-  for (const auto &item : events) {
+  for (const auto& item : events) {
     REQUIRE(ledger.apply(item));
     REQUIRE(replayed.apply(item));
   }

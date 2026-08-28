@@ -51,8 +51,7 @@ namespace {
     return error(model::CatalogErrorCode::invalid_data,
                  "Venice returned an invalid model price");
   }
-  if (value == 0.0)
-    return domain::DecimalAmount::from("0").value();
+  if (value == 0.0) return domain::DecimalAmount::from("0").value();
   std::array<char, 128> text{};
   const auto [end, conversion_error] =
       std::to_chars(text.data(), text.data() + text.size(), value);
@@ -69,19 +68,17 @@ namespace {
   return *amount;
 }
 
-[[nodiscard]] auto price(const venice::Price &value)
+[[nodiscard]] auto price(const venice::Price& value)
     -> std::expected<model::Price, model::CatalogError> {
   model::Price result;
   if (value.usd) {
     auto converted = decimal(*value.usd);
-    if (!converted)
-      return std::unexpected(std::move(converted.error()));
+    if (!converted) return std::unexpected(std::move(converted.error()));
     result.usd = *converted;
   }
   if (value.diem) {
     auto converted = decimal(*value.diem);
-    if (!converted)
-      return std::unexpected(std::move(converted.error()));
+    if (!converted) return std::unexpected(std::move(converted.error()));
     result.diem = *converted;
   }
   return result;
@@ -89,36 +86,29 @@ namespace {
 
 [[nodiscard]] auto price_tier(const venice::PriceTier& value)
     -> std::expected<model::PriceTier, model::CatalogError> {
-  const auto optional_price = [](const std::optional<venice::Price> &source)
+  const auto optional_price = [](const std::optional<venice::Price>& source)
       -> std::expected<std::optional<model::Price>, model::CatalogError> {
-    if (!source)
-      return std::nullopt;
+    if (!source) return std::nullopt;
     auto converted = price(*source);
-    if (!converted)
-      return std::unexpected(std::move(converted.error()));
+    if (!converted) return std::unexpected(std::move(converted.error()));
     return std::optional<model::Price>{std::move(*converted)};
   };
   auto input = optional_price(value.input);
   auto output = optional_price(value.output);
   auto cache_input = optional_price(value.cache_input);
   auto cache_write = optional_price(value.cache_write);
-  if (!input)
-    return std::unexpected(std::move(input.error()));
-  if (!output)
-    return std::unexpected(std::move(output.error()));
-  if (!cache_input)
-    return std::unexpected(std::move(cache_input.error()));
-  if (!cache_write)
-    return std::unexpected(std::move(cache_write.error()));
+  if (!input) return std::unexpected(std::move(input.error()));
+  if (!output) return std::unexpected(std::move(output.error()));
+  if (!cache_input) return std::unexpected(std::move(cache_input.error()));
+  if (!cache_write) return std::unexpected(std::move(cache_write.error()));
   return model::PriceTier{std::move(*input), std::move(*output),
                           std::move(*cache_input), std::move(*cache_write)};
 }
 
-[[nodiscard]] auto pricing(const venice::Pricing &value)
+[[nodiscard]] auto pricing(const venice::Pricing& value)
     -> std::expected<model::Pricing, model::CatalogError> {
   auto base = price_tier(value.base);
-  if (!base)
-    return std::unexpected(std::move(base.error()));
+  if (!base) return std::unexpected(std::move(base.error()));
   model::Pricing result{std::move(*base)};
   if (value.extended_threshold_tokens &&
       *value.extended_threshold_tokens >= 0) {
@@ -127,14 +117,12 @@ namespace {
   }
   if (value.extended) {
     auto extended = price_tier(*value.extended);
-    if (!extended)
-      return std::unexpected(std::move(extended.error()));
+    if (!extended) return std::unexpected(std::move(extended.error()));
     result.extended = std::move(*extended);
   }
   if (value.generation) {
     auto generation = price(*value.generation);
-    if (!generation)
-      return std::unexpected(std::move(generation.error()));
+    if (!generation) return std::unexpected(std::move(generation.error()));
     result.generation = std::move(*generation);
   }
   return result;
@@ -186,7 +174,7 @@ auto add_capability(std::vector<model::CapabilitySupport>& result,
              : std::nullopt;
 }
 
-}  // namespace
+} // namespace
 
 struct VeniceModelCatalogSource::Impl {
   explicit Impl(VeniceModelCatalogOptions value)
@@ -199,7 +187,8 @@ struct VeniceModelCatalogSource::Impl {
 
 VeniceModelCatalogSource::VeniceModelCatalogSource(
     VeniceModelCatalogOptions options)
-    : m_impl(std::make_unique<Impl>(std::move(options))) {}
+    : m_impl(std::make_unique<Impl>(std::move(options))) {
+}
 VeniceModelCatalogSource::~VeniceModelCatalogSource() = default;
 VeniceModelCatalogSource::VeniceModelCatalogSource(
     VeniceModelCatalogSource&&) noexcept = default;
@@ -224,9 +213,8 @@ auto VeniceModelCatalogSource::fetch(const std::stop_token stop_token)
         "all", {m_impl->options.connect_timeout, m_impl->options.read_timeout,
                 m_impl->options.write_timeout, &cancellation});
     if (!fetched) return std::unexpected(map_error(fetched.error()));
-    model::CatalogSnapshot result{
-        std::chrono::floor<std::chrono::milliseconds>(
-            std::chrono::system_clock::now())};
+    model::CatalogSnapshot result{std::chrono::floor<std::chrono::milliseconds>(
+        std::chrono::system_clock::now())};
     result.source_id = "venice.models";
     result.entries.reserve(fetched->size());
     for (const auto& source : *fetched) {
@@ -246,8 +234,7 @@ auto VeniceModelCatalogSource::fetch(const std::stop_token stop_token)
         entry.capabilities = capabilities(*source.capabilities);
       if (source.pricing) {
         auto mapped = pricing(*source.pricing);
-        if (!mapped)
-          return std::unexpected(std::move(mapped.error()));
+        if (!mapped) return std::unexpected(std::move(mapped.error()));
         entry.pricing = std::move(*mapped);
       }
       result.entries.push_back(std::move(entry));
@@ -262,4 +249,4 @@ auto VeniceModelCatalogSource::fetch(const std::stop_token stop_token)
   }
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

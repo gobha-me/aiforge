@@ -11,11 +11,10 @@ auto ScriptedPolicyGrantStore::load_grants(
   ++m_load_count;
   if (m_load_error) return std::unexpected(*m_load_error);
   std::vector<storage::SavedPolicyGrant> result;
-  std::ranges::copy_if(m_grants, std::back_inserter(result),
-                       [&](const auto& grant) {
-                         return grant.permission_profile_id ==
-                                permission_profile_id;
-                       });
+  std::ranges::copy_if(
+      m_grants, std::back_inserter(result), [&](const auto& grant) {
+        return grant.permission_profile_id == permission_profile_id;
+      });
   return result;
 }
 
@@ -26,4 +25,4 @@ auto ScriptedPolicyGrantStore::save_grant(storage::SavedPolicyGrant grant)
   return {};
 }
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

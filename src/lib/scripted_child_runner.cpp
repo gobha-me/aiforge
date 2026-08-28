@@ -1,8 +1,8 @@
 #include <aiforge/testing/scripted_child_runner.hpp>
 
 #include <algorithm>
-#include <cstddef>
 #include <condition_variable>
+#include <cstddef>
 #include <mutex>
 #include <optional>
 #include <ranges>
@@ -19,8 +19,7 @@ class ScriptedChildRunStream final : public runtime::ChildRunResultStream {
   auto next(const std::stop_token stop_token)
       -> std::expected<std::optional<runtime::ChildRunResult>,
                        runtime::ChildRunError> override {
-    if (m_ended)
-      return std::optional<runtime::ChildRunResult>{};
+    if (m_ended) return std::optional<runtime::ChildRunResult>{};
     if (m_next_step >= m_steps.size()) {
       m_ended = true;
       return std::optional<runtime::ChildRunResult>{};
@@ -73,13 +72,14 @@ class ScriptedChildRunStream final : public runtime::ChildRunResultStream {
           "child runner start was cancelled", false};
 }
 
-}  // namespace
+} // namespace
 
 ScriptedChildRunner::ScriptedChildRunner(
     std::vector<ScriptedChildRunExchange> exchanges,
     const std::size_t maximum_concurrency)
     : m_exchanges(std::move(exchanges)),
-      m_maximum_concurrency(maximum_concurrency) {}
+      m_maximum_concurrency(maximum_concurrency) {
+}
 
 auto ScriptedChildRunner::maximum_concurrency() const noexcept -> std::size_t {
   return m_maximum_concurrency;
@@ -89,8 +89,7 @@ auto ScriptedChildRunner::start(runtime::ChildRunInvocation invocation,
                                 const std::stop_token stop_token)
     -> std::expected<std::unique_ptr<runtime::ChildRunResultStream>,
                      runtime::ChildRunError> {
-  if (stop_token.stop_requested())
-    return std::unexpected(cancelled_error());
+  if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
   std::lock_guard lock(m_mutex);
   m_recorded_invocations.push_back(invocation);
   if (m_next_exchange >= m_exchanges.size()) {
@@ -132,4 +131,4 @@ auto ScriptedChildRunner::remaining_exchanges() const noexcept -> std::size_t {
   return m_exchanges.size() - m_next_exchange;
 }
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

@@ -428,8 +428,14 @@ TEST_CASE("kernel defaults to deterministic serial dispatch",
           testing::ChildRunStreamScript{{testing::ChildRunWaitForStop{}}}}},
       2);
   testing::ScriptedBackend backend{{}};
-  runtime::RunKernel kernel{id<domain::SessionId>("serial-session"), backend,
-                            nullptr, {}, {}, {}, {}, runner};
+  runtime::RunKernel kernel{id<domain::SessionId>("serial-session"),
+                            backend,
+                            nullptr,
+                            {},
+                            {},
+                            {},
+                            {},
+                            runner};
   const auto revision = runtime_revision();
   approve(kernel, revision);
   REQUIRE(kernel.dispatch_child(child_start("first", "child-first")));

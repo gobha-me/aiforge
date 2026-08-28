@@ -34,8 +34,7 @@ extern "C" auto handle_interrupt(int) -> void {
   interrupted.store(1, std::memory_order_relaxed);
 }
 
-template <typename IdType>
-auto make_id(const std::string& value) -> IdType {
+template <typename IdType> auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
@@ -49,7 +48,8 @@ class VectorStream final : public backend::BackendStream {
   auto next(std::stop_token)
       -> std::expected<std::optional<backend::BackendEvent>,
                        backend::BackendError> override {
-    if (m_index >= m_items.size()) return std::optional<backend::BackendEvent>{};
+    if (m_index >= m_items.size())
+      return std::optional<backend::BackendEvent>{};
     auto& item = m_items[m_index++];
     if (auto* event = std::get_if<backend::BackendEvent>(&item)) {
       return std::optional<backend::BackendEvent>{std::move(*event)};
@@ -125,13 +125,13 @@ class FixtureBackend final : public backend::Backend,
       return std::make_unique<CancelStream>(request.assistant_message_id);
     }
     const auto text = prompt == "flood" ? std::string(512U * 1024U, 'x')
-                                         : std::string{"answer"};
+                                        : std::string{"answer"};
     return std::make_unique<VectorStream>(std::vector<Item>{
         backend::BackendEvent{backend::ResponseStarted{"response"}},
         backend::BackendEvent{backend::ContentDelta{
             request.assistant_message_id, domain::TextBlock{text}}},
-        backend::BackendEvent{backend::CitationObserved{
-            {"https://example.test", "fixture"}}},
+        backend::BackendEvent{
+            backend::CitationObserved{{"https://example.test", "fixture"}}},
         backend::BackendEvent{backend::UsageObserved{{2, 1, 0, 0}}},
         backend::BackendEvent{
             backend::ResponseFinished{domain::FinishReason::stop}},
@@ -141,9 +141,8 @@ class FixtureBackend final : public backend::Backend,
 
 class FixtureCommand final : public cli::OneShotCommand {
  public:
-  auto execute(Request request,
-               cli::CommandEnvironment& environment, std::ostream& output,
-               std::ostream& error)
+  auto execute(Request request, cli::CommandEnvironment& environment,
+               std::ostream& output, std::ostream& error)
       -> std::expected<void, cli::CommandFailure> override {
     std::optional<std::string> evidence;
     if (!environment.input_is_terminal) {
@@ -152,11 +151,11 @@ class FixtureCommand final : public cli::OneShotCommand {
     }
     FixtureBackend backend;
     surfaces::OneShotSurface surface{backend, backend};
-    auto result = surface.run(
-        {std::string{request.prompt}, std::move(evidence),
-         make_id<domain::ModelId>("fixture-model"),
-         surfaces::OneShotRequest::SessionMode::ephemeral},
-        output, error, environment.stop_token);
+    auto result =
+        surface.run({std::string{request.prompt}, std::move(evidence),
+                     make_id<domain::ModelId>("fixture-model"),
+                     surfaces::OneShotRequest::SessionMode::ephemeral},
+                    output, error, environment.stop_token);
     if (result) return {};
     switch (result.error().code) {
       case surfaces::OneShotErrorCode::invalid_input:
@@ -182,11 +181,12 @@ class FixtureCommand final : public cli::OneShotCommand {
 #endif
 }
 
-}  // namespace
+} // namespace
 
 auto main(const int argc, char* argv[]) -> int {
   std::vector<std::string_view> arguments;
-  for (int index = 1; index < argc; ++index) arguments.emplace_back(argv[index]);
+  for (int index = 1; index < argc; ++index)
+    arguments.emplace_back(argv[index]);
   std::signal(SIGINT, handle_interrupt);
 #ifndef _WIN32
   std::signal(SIGPIPE, SIG_IGN);
@@ -202,21 +202,20 @@ auto main(const int argc, char* argv[]) -> int {
     }
   }};
   FixtureCommand command;
-  aiforge::cli::CommandEnvironment environment{
-      std::cin,
+  aiforge::cli::CommandEnvironment environment{std::cin,
 #ifdef _WIN32
-      true,
-      true,
-      true,
+                                               true,
+                                               true,
+                                               true,
 #else
-      terminal(STDIN_FILENO),
-      terminal(STDOUT_FILENO),
-      terminal(STDERR_FILENO),
+                                               terminal(STDIN_FILENO),
+                                               terminal(STDOUT_FILENO),
+                                               terminal(STDERR_FILENO),
 #endif
-      cancellation.get_token(),
-      &command};
-  const auto result = aiforge::cli::run_cli(arguments, environment, std::cout,
-                                            std::cerr);
+                                               cancellation.get_token(),
+                                               &command};
+  const auto result =
+      aiforge::cli::run_cli(arguments, environment, std::cout, std::cerr);
   watcher.request_stop();
   return result;
 }

@@ -111,7 +111,8 @@ struct ContextSelectionDecisionRecord {
   std::optional<domain::EvidenceId> evidence_id;
   ContextSelectionDecision decision{ContextSelectionDecision::admitted};
   std::uint64_t estimated_tokens{};
-  auto operator==(const ContextSelectionDecisionRecord&) const -> bool = default;
+  auto operator==(const ContextSelectionDecisionRecord&) const
+      -> bool = default;
 };
 
 struct ContextClassUsage {
@@ -152,4 +153,4 @@ struct ContextSelectionError {
   auto operator==(const ContextSelectionError&) const -> bool = default;
 };
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

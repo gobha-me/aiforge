@@ -6,7 +6,8 @@ namespace aiforge::testing {
 
 ScriptedRepositorySnapshotSource::ScriptedRepositorySnapshotSource(
     std::vector<RepositorySnapshotExchange> exchanges)
-    : m_exchanges(std::move(exchanges)) {}
+    : m_exchanges(std::move(exchanges)) {
+}
 
 auto ScriptedRepositorySnapshotSource::observe(
     repository::RepositorySnapshotRequest request,
@@ -32,8 +33,8 @@ auto ScriptedRepositorySnapshotSource::observe(
           "repository observation did not match the script", false});
     }
     ++m_next_exchange;
-    if (const auto* error =
-            std::get_if<repository::RepositorySnapshotError>(&exchange.outcome)) {
+    if (const auto* error = std::get_if<repository::RepositorySnapshotError>(
+            &exchange.outcome)) {
       return std::unexpected(*error);
     }
     return std::get<domain::RepositorySnapshot>(exchange.outcome);
@@ -54,4 +55,4 @@ auto ScriptedRepositorySnapshotSource::remaining_exchanges() const noexcept
   return m_exchanges.size() - m_next_exchange;
 }
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

@@ -30,7 +30,7 @@ struct InferenceUsageRecord {
   bool usage_observed{};
   std::optional<ReportedCost> reported_cost;
   std::optional<PricingObservation> pricing_observation;
-  auto operator==(const InferenceUsageRecord &) const -> bool = default;
+  auto operator==(const InferenceUsageRecord&) const -> bool = default;
 };
 
 enum class CostEstimateUnit {
@@ -58,20 +58,20 @@ struct InferenceCostEstimate {
   MonetaryAmount amount;
   PricingTierSelection tier{PricingTierSelection::base};
   ContentDigest rate_card_digest;
-  auto operator==(const InferenceCostEstimate &) const -> bool = default;
+  auto operator==(const InferenceCostEstimate&) const -> bool = default;
 };
 
 struct CostEstimateUnavailable {
   CostEstimateUnavailableReason reason{
       CostEstimateUnavailableReason::pricing_unobserved};
-  auto operator==(const CostEstimateUnavailable &) const -> bool = default;
+  auto operator==(const CostEstimateUnavailable&) const -> bool = default;
 };
 
 struct CostEstimateFailureCount {
   CostEstimateUnavailableReason reason{
       CostEstimateUnavailableReason::pricing_unobserved};
   std::size_t count{};
-  auto operator==(const CostEstimateFailureCount &) const -> bool = default;
+  auto operator==(const CostEstimateFailureCount&) const -> bool = default;
 };
 
 struct SessionCostEstimate {
@@ -81,7 +81,7 @@ struct SessionCostEstimate {
   std::size_t total_inferences{};
   std::vector<CostEstimateFailureCount> unavailable;
   std::optional<CostEstimateUnavailableReason> aggregation_failure;
-  auto operator==(const SessionCostEstimate &) const -> bool = default;
+  auto operator==(const SessionCostEstimate&) const -> bool = default;
 };
 
 struct SessionSpendSummary {
@@ -94,10 +94,10 @@ struct SessionSpendSummary {
   std::vector<CostEstimateFailureCount> unavailable;
   std::optional<CostEstimateUnavailableReason> aggregation_failure;
   bool reached{};
-  auto operator==(const SessionSpendSummary &) const -> bool = default;
+  auto operator==(const SessionSpendSummary&) const -> bool = default;
 };
 
-[[nodiscard]] auto estimate_inference_cost(const InferenceUsageRecord &record,
+[[nodiscard]] auto estimate_inference_cost(const InferenceUsageRecord& record,
                                            CostEstimateUnit unit)
     -> std::expected<InferenceCostEstimate, CostEstimateUnavailable>;
 
@@ -107,7 +107,7 @@ struct SessionSpendSummary {
 
 [[nodiscard]] auto summarize_session_spend(
     std::span<const InferenceUsageRecord> records,
-    const SessionSpendCeiling &ceiling) -> SessionSpendSummary;
+    const SessionSpendCeiling& ceiling) -> SessionSpendSummary;
 
 [[nodiscard]] auto cost_estimate_unit_name(CostEstimateUnit unit) noexcept
     -> std::string_view;
@@ -133,33 +133,33 @@ enum class UsageLedgerErrorCode {
 struct UsageLedgerError {
   UsageLedgerErrorCode code;
   std::string message;
-  auto operator==(const UsageLedgerError &) const -> bool = default;
+  auto operator==(const UsageLedgerError&) const -> bool = default;
 };
 
 class UsageLedgerProjection final {
-public:
+ public:
   // Callers apply exactly one session's stream in session-sequence order.
-  [[nodiscard]] auto apply(const RunEvent &event)
+  [[nodiscard]] auto apply(const RunEvent& event)
       -> std::expected<void, UsageLedgerError>;
 
   [[nodiscard]] auto records() const noexcept
-      -> const std::vector<InferenceUsageRecord> & {
+      -> const std::vector<InferenceUsageRecord>& {
     return m_records;
   }
-  [[nodiscard]] auto total_usage() const noexcept -> const Usage & {
+  [[nodiscard]] auto total_usage() const noexcept -> const Usage& {
     return m_total_usage;
   }
   [[nodiscard]] auto total_reported_cost() const noexcept
-      -> const std::optional<ReportedCost> & {
+      -> const std::optional<ReportedCost>& {
     return m_total_reported_cost;
   }
   [[nodiscard]] auto last_sequence() const noexcept -> std::uint64_t {
     return m_last_sequence;
   }
 
-private:
-  [[nodiscard]] auto find_record(const InferenceId &inference_id)
-      -> InferenceUsageRecord *;
+ private:
+  [[nodiscard]] auto find_record(const InferenceId& inference_id)
+      -> InferenceUsageRecord*;
 
   std::vector<InferenceUsageRecord> m_records;
   Usage m_total_usage;
@@ -169,19 +169,19 @@ private:
 };
 
 class SessionSpendCeilingProjection final {
-public:
-  [[nodiscard]] auto apply(const RunEvent &event)
+ public:
+  [[nodiscard]] auto apply(const RunEvent& event)
       -> std::expected<void, UsageLedgerError>;
 
   [[nodiscard]] auto ceiling() const noexcept
-      -> const std::optional<SessionSpendCeiling> & {
+      -> const std::optional<SessionSpendCeiling>& {
     return m_ceiling;
   }
   [[nodiscard]] auto last_sequence() const noexcept -> std::uint64_t {
     return m_last_sequence;
   }
 
-private:
+ private:
   std::optional<SessionSpendCeiling> m_ceiling;
   std::set<EventId> m_event_ids;
   std::uint64_t m_last_sequence{};

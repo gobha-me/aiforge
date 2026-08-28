@@ -50,11 +50,15 @@ struct ProjectionError {
 
 class RunProjection final {
  public:
-  [[nodiscard]] auto apply(const RunEvent& event) -> std::expected<void, ProjectionError>;
+  [[nodiscard]] auto apply(const RunEvent& event)
+      -> std::expected<void, ProjectionError>;
 
-  [[nodiscard]] auto run_id() const noexcept -> const std::optional<RunId>& { return m_run_id; }
+  [[nodiscard]] auto run_id() const noexcept -> const std::optional<RunId>& {
+    return m_run_id;
+  }
   [[nodiscard]] auto status() const noexcept -> RunStatus { return m_status; }
-  [[nodiscard]] auto messages() const noexcept -> const std::vector<ProjectedMessage>& {
+  [[nodiscard]] auto messages() const noexcept
+      -> const std::vector<ProjectedMessage>& {
     return m_messages;
   }
   [[nodiscard]] auto usage() const noexcept -> const Usage& { return m_usage; }
@@ -63,25 +67,30 @@ class RunProjection final {
     return m_reported_cost;
   }
   [[nodiscard]] auto pricing_observations() const noexcept
-      -> const std::vector<PricingObservation> & {
+      -> const std::vector<PricingObservation>& {
     return m_pricing_observations;
   }
   [[nodiscard]] auto active_inference_id() const noexcept
-      -> const std::optional<InferenceId> & {
+      -> const std::optional<InferenceId>& {
     return m_active_inference_id;
   }
-  [[nodiscard]] auto provenance() const noexcept -> const std::optional<RunProvenance>& {
+  [[nodiscard]] auto provenance() const noexcept
+      -> const std::optional<RunProvenance>& {
     return m_provenance;
   }
   [[nodiscard]] auto persona_selection() const noexcept
       -> const std::optional<PersonaSelection>& {
     return m_persona_selection;
   }
-  [[nodiscard]] auto last_sequence() const noexcept -> std::uint64_t { return m_last_sequence; }
+  [[nodiscard]] auto last_sequence() const noexcept -> std::uint64_t {
+    return m_last_sequence;
+  }
 
  private:
-  [[nodiscard]] auto find_message(const MessageId& message_id) -> ProjectedMessage*;
-  [[nodiscard]] auto require_running() const -> std::expected<void, ProjectionError>;
+  [[nodiscard]] auto find_message(const MessageId& message_id)
+      -> ProjectedMessage*;
+  [[nodiscard]] auto require_running() const
+      -> std::expected<void, ProjectionError>;
 
   std::optional<RunId> m_run_id;
   RunStatus m_status{RunStatus::not_started};
@@ -99,4 +108,4 @@ class RunProjection final {
   std::uint64_t m_last_sequence{};
 };
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

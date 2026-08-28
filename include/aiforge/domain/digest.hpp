@@ -12,4 +12,4 @@ struct ContentDigest {
   auto operator==(const ContentDigest&) const -> bool = default;
 };
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

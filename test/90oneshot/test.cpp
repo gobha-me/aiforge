@@ -4,8 +4,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <expected>
-#include <memory>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -24,34 +24,33 @@ namespace {
 using namespace std::chrono_literals;
 using namespace aiforge;
 
-template <typename IdType>
-auto make_id(const std::string& value) -> IdType {
+template <typename IdType> auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
-auto reported_cost(const std::string& usd_value = "0")
-    -> domain::ReportedCost {
+auto reported_cost(const std::string& usd_value = "0") -> domain::ReportedCost {
   auto usd = domain::MonetaryAmount::create(
-      "USD", domain::DecimalAmount::from(usd_value).value()).value();
-  auto diem = domain::MonetaryAmount::create(
-      "venice.diem", domain::DecimalAmount::from("0.0645375").value())
-                  .value();
-  return domain::ReportedCost::create(
-             {std::move(usd), std::move(diem)})
+                 "USD", domain::DecimalAmount::from(usd_value).value())
+                 .value();
+  auto diem =
+      domain::MonetaryAmount::create(
+          "venice.diem", domain::DecimalAmount::from("0.0645375").value())
+          .value();
+  return domain::ReportedCost::create({std::move(usd), std::move(diem)})
       .value();
 }
 
 auto pricing_observation() -> domain::PricingObservation {
   domain::TextPricing pricing;
-  pricing.base.input = domain::PriceRate{
-      domain::DecimalAmount::from("1").value(),
-      domain::DecimalAmount::from("1").value()};
-  pricing.base.output = domain::PriceRate{
-      domain::DecimalAmount::from("2").value(),
-      domain::DecimalAmount::from("2").value()};
-  pricing.base.cache_input = domain::PriceRate{
-      domain::DecimalAmount::from("0.5").value(),
-      domain::DecimalAmount::from("0.5").value()};
+  pricing.base.input =
+      domain::PriceRate{domain::DecimalAmount::from("1").value(),
+                        domain::DecimalAmount::from("1").value()};
+  pricing.base.output =
+      domain::PriceRate{domain::DecimalAmount::from("2").value(),
+                        domain::DecimalAmount::from("2").value()};
+  pricing.base.cache_input =
+      domain::PriceRate{domain::DecimalAmount::from("0.5").value(),
+                        domain::DecimalAmount::from("0.5").value()};
   return domain::make_pricing_observation(
              make_id<domain::ModelId>("model"), "test.models", std::nullopt,
              domain::EventTimestamp{std::chrono::milliseconds{123}},
@@ -66,11 +65,17 @@ auto run_provenance() -> domain::RunProvenance {
           make_id<domain::ModelId>("model"),
           domain::CredentialSourceReference{
               domain::CredentialSourceKind::environment, "VENICE_API_KEY"},
-          {{"model", std::string{"venice-model"}, true,
-            domain::ProvenanceSource::environment, false,
+          {{"model",
+            std::string{"venice-model"},
+            true,
+            domain::ProvenanceSource::environment,
+            false,
             {{domain::ProvenanceSource::environment,
               domain::ProvenanceDisposition::selected, std::nullopt}}},
-           {"credential", std::nullopt, true, domain::ProvenanceSource::environment,
+           {"credential",
+            std::nullopt,
+            true,
+            domain::ProvenanceSource::environment,
             true,
             {{domain::ProvenanceSource::environment,
               domain::ProvenanceDisposition::selected, std::nullopt}}}},
@@ -88,7 +93,8 @@ class VectorStream final : public backend::BackendStream {
   auto next(std::stop_token)
       -> std::expected<std::optional<backend::BackendEvent>,
                        backend::BackendError> override {
-    if (m_index >= m_items.size()) return std::optional<backend::BackendEvent>{};
+    if (m_index >= m_items.size())
+      return std::optional<backend::BackendEvent>{};
     auto& item = m_items[m_index++];
     if (auto* event = std::get_if<backend::BackendEvent>(&item)) {
       return std::optional<backend::BackendEvent>{std::move(*event)};
@@ -140,8 +146,7 @@ class FakeModels final : public backend::ModelContextProvider {
     return result;
   }
 
-  backend::ModelContextInfo info{make_id<domain::ModelId>("model"), 8192,
-                                 1024};
+  backend::ModelContextInfo info{make_id<domain::ModelId>("model"), 8192, 1024};
   std::optional<backend::BackendError> failure;
   std::size_t lookups{};
 };
@@ -165,14 +170,13 @@ class MemoryStore final : public storage::SessionStore {
     ++calls;
     if (sessions.contains(session.session_id)) {
       return std::unexpected(storage::SessionStoreError{
-          storage::SessionStoreErrorCode::already_exists,
-          "session exists", false});
+          storage::SessionStoreErrorCode::already_exists, "session exists",
+          false});
     }
     sessions.emplace(session.session_id,
                      storage::SessionInfo{session.session_id,
                                           session.created_at,
-                                          session.created_at,
-                                          0});
+                                          session.created_at, 0});
     return {};
   }
 
@@ -183,8 +187,7 @@ class MemoryStore final : public storage::SessionStore {
     const auto found = sessions.find(session_id);
     if (found == sessions.end()) {
       return std::unexpected(storage::SessionStoreError{
-          storage::SessionStoreErrorCode::not_found,
-          "session missing", false});
+          storage::SessionStoreErrorCode::not_found, "session missing", false});
     }
     return found->second;
   }
@@ -212,8 +215,7 @@ class MemoryStore final : public storage::SessionStore {
   }
 
   auto append_events(const domain::SessionId& session_id,
-                     std::span<const domain::RunEvent> events,
-                     std::stop_token)
+                     std::span<const domain::RunEvent> events, std::stop_token)
       -> std::expected<void, storage::SessionStoreError> override {
     ++calls;
     ++append_calls;
@@ -224,16 +226,15 @@ class MemoryStore final : public storage::SessionStore {
     const auto found = sessions.find(session_id);
     if (found == sessions.end()) {
       return std::unexpected(storage::SessionStoreError{
-          storage::SessionStoreErrorCode::not_found,
-          "session missing", false});
+          storage::SessionStoreErrorCode::not_found, "session missing", false});
     }
     auto& stored = histories[session_id];
     auto sequence = found->second.last_sequence;
     for (const auto& event : events) {
       if (event.metadata.sequence <= sequence) {
-        return std::unexpected(storage::SessionStoreError{
-            storage::SessionStoreErrorCode::conflict,
-            "sequence conflict", false});
+        return std::unexpected(
+            storage::SessionStoreError{storage::SessionStoreErrorCode::conflict,
+                                       "sequence conflict", false});
       }
       sequence = event.metadata.sequence;
     }
@@ -252,8 +253,7 @@ class MemoryStore final : public storage::SessionStore {
     ++calls;
     if (!sessions.contains(session_id)) {
       return std::unexpected(storage::SessionStoreError{
-          storage::SessionStoreErrorCode::not_found,
-          "session missing", false});
+          storage::SessionStoreErrorCode::not_found, "session missing", false});
     }
     return histories[session_id];
   }
@@ -336,7 +336,7 @@ class CancelBackend final : public backend::Backend {
   }
 };
 
-}  // namespace
+} // namespace
 
 TEST_CASE("one-shot streams only sanitized text and builds neutral evidence",
           "[one-shot]") {
@@ -350,7 +350,8 @@ TEST_CASE("one-shot streams only sanitized text and builds neutral evidence",
         -> std::expected<std::unique_ptr<backend::BackendStream>,
                          backend::BackendError> override {
       captured = request;
-      return std::make_unique<VectorStream>(success_items(request.assistant_message_id));
+      return std::make_unique<VectorStream>(
+          success_items(request.assistant_message_id));
     }
     std::optional<backend::BackendRequest> captured;
   } rewriting;
@@ -358,10 +359,9 @@ TEST_CASE("one-shot streams only sanitized text and builds neutral evidence",
   surfaces::OneShotSurface surface{rewriting, models};
   std::ostringstream output;
   std::ostringstream error;
-  const auto result = surface.run(
-      {"explain", std::string{"file contents"},
-       make_id<domain::ModelId>("model")},
-      output, error);
+  const auto result = surface.run({"explain", std::string{"file contents"},
+                                   make_id<domain::ModelId>("model")},
+                                  output, error);
 
   REQUIRE(result);
   REQUIRE(result->usage == domain::Usage{3, 2, 1, 0});
@@ -380,9 +380,10 @@ TEST_CASE("one-shot streams only sanitized text and builds neutral evidence",
   REQUIRE(error.str().find(
               "cost: USD=0 venice.diem=0.0645375 (provider-reported)") !=
           std::string::npos);
-  REQUIRE(error.str().find(
-              "estimate: USD=0.0000065 venice.diem=0.0000065 (catalog-derived)") !=
-          std::string::npos);
+  REQUIRE(
+      error.str().find(
+          "estimate: USD=0.0000065 venice.diem=0.0000065 (catalog-derived)") !=
+      std::string::npos);
   REQUIRE(rewriting.captured);
   REQUIRE(rewriting.captured->tools.empty());
   REQUIRE(rewriting.captured->context.entries.size() == 3);
@@ -390,8 +391,9 @@ TEST_CASE("one-shot streams only sanitized text and builds neutral evidence",
           domain::ContextEntryKind::evidence);
   REQUIRE(rewriting.captured->context.entries.back().message.role ==
           domain::Role::evidence);
-  REQUIRE(rewriting.captured->context.entries.back().provenance.source_location ==
-          "stdin");
+  REQUIRE(
+      rewriting.captured->context.entries.back().provenance.source_location ==
+      "stdin");
 }
 
 TEST_CASE("invalid and oversized one-shot input never reaches a backend",
@@ -433,9 +435,9 @@ TEST_CASE("model and context failures are typed before inference",
   surfaces::OneShotSurface surface{backend, models};
   std::ostringstream output;
   std::ostringstream error;
-  auto result = surface.run(
-      {"hello", std::nullopt, make_id<domain::ModelId>("model")}, output,
-      error);
+  auto result =
+      surface.run({"hello", std::nullopt, make_id<domain::ModelId>("model")},
+                  output, error);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code ==
           surfaces::OneShotErrorCode::model_lookup_failed);
@@ -446,8 +448,7 @@ TEST_CASE("model and context failures are typed before inference",
   models.info.maximum_output_tokens = 50;
   surfaces::OneShotSurface small{backend, models, {1024, 50}};
   result = small.run(
-      {std::string(60, 'x'), std::nullopt,
-       make_id<domain::ModelId>("model")},
+      {std::string(60, 'x'), std::nullopt, make_id<domain::ModelId>("model")},
       output, error);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code == surfaces::OneShotErrorCode::context_failed);
@@ -475,9 +476,9 @@ TEST_CASE("backend failure preserves partial output and redacts diagnostics",
   surfaces::OneShotSurface surface{backend, models};
   std::ostringstream output;
   std::ostringstream error;
-  const auto result = surface.run(
-      {"hello", std::nullopt, make_id<domain::ModelId>("model")}, output,
-      error);
+  const auto result =
+      surface.run({"hello", std::nullopt, make_id<domain::ModelId>("model")},
+                  output, error);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code == surfaces::OneShotErrorCode::run_failed);
   REQUIRE(result.error().message == "backend authentication failed");
@@ -497,9 +498,9 @@ TEST_CASE("one-shot cancellation keeps streamed partial content",
     std::this_thread::sleep_for(20ms);
     cancellation.request_stop();
   }};
-  const auto result = surface.run(
-      {"hello", std::nullopt, make_id<domain::ModelId>("model")}, output,
-      error, cancellation.get_token());
+  const auto result =
+      surface.run({"hello", std::nullopt, make_id<domain::ModelId>("model")},
+                  output, error, cancellation.get_token());
   REQUIRE_FALSE(result);
   INFO(result.error().message);
   REQUIRE(result.error().code == surfaces::OneShotErrorCode::cancelled);
@@ -527,9 +528,9 @@ TEST_CASE("broken output cancels the one-shot operation",
   std::ostringstream output;
   output.setstate(std::ios::badbit);
   std::ostringstream error;
-  const auto result = surface.run(
-      {"hello", std::nullopt, make_id<domain::ModelId>("model")}, output,
-      error);
+  const auto result =
+      surface.run({"hello", std::nullopt, make_id<domain::ModelId>("model")},
+                  output, error);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code == surfaces::OneShotErrorCode::output_failed);
 }
@@ -550,18 +551,18 @@ TEST_CASE("durable one-shot sessions resume completed conversation in order",
   REQUIRE(store.sessions.contains(first->session_id));
   REQUIRE(store.append_batch_sizes.front() == 4);
   REQUIRE(store.append_batch_sizes.back() == 3);
-  REQUIRE(error.str().find("session: " +
-                           std::string{first->session_id.value()}) !=
-          std::string::npos);
+  REQUIRE(
+      error.str().find("session: " + std::string{first->session_id.value()}) !=
+      std::string::npos);
   const auto first_event_count = store.histories[first->session_id].size();
   REQUIRE(first_event_count > 4);
 
   output.str({});
   error.str({});
-  auto resumed = surface.run(
-      {"second", std::nullopt, model,
-       surfaces::OneShotRequest::SessionMode::resume, first->session_id},
-      output, error);
+  auto resumed = surface.run({"second", std::nullopt, model,
+                              surfaces::OneShotRequest::SessionMode::resume,
+                              first->session_id},
+                             output, error);
   REQUIRE(resumed);
   REQUIRE(resumed->session_id == first->session_id);
   REQUIRE(backend.captured.size() == 2);
@@ -571,9 +572,9 @@ TEST_CASE("durable one-shot sessions resume completed conversation in order",
       conversation_roles.push_back(entry.message.role);
     }
   }
-  REQUIRE(conversation_roles ==
-          std::vector{domain::Role::user, domain::Role::assistant,
-                      domain::Role::user});
+  REQUIRE(conversation_roles == std::vector{domain::Role::user,
+                                            domain::Role::assistant,
+                                            domain::Role::user});
   const auto history_source = std::ranges::find_if(
       backend.captured.back().context.entries, [](const auto& entry) {
         return entry.provenance.source_location &&
@@ -590,10 +591,10 @@ TEST_CASE("durable one-shot sessions resume completed conversation in order",
 
   output.str({});
   error.str({});
-  auto continued = surface.run(
-      {"third", std::nullopt, model,
-       surfaces::OneShotRequest::SessionMode::continue_latest},
-      output, error);
+  auto continued =
+      surface.run({"third", std::nullopt, model,
+                   surfaces::OneShotRequest::SessionMode::continue_latest},
+                  output, error);
   REQUIRE(continued);
   REQUIRE(continued->session_id == first->session_id);
 }
@@ -660,20 +661,23 @@ TEST_CASE("one-shot personas are injected recorded and identity-checked",
   const auto original = persona_document();
   const auto changed = persona_document("Changed instructions.");
   testing::ScriptedPersonaSource personas{
-      {}, {{"reviewer", original}, {"reviewer", original},
-           {"reviewer", changed}}};
+      {},
+      {{"reviewer", original}, {"reviewer", original}, {"reviewer", changed}}};
   surfaces::OneShotSurface surface{backend, models, store, {}, &personas};
   std::ostringstream output;
   std::ostringstream error;
   const auto model = make_id<domain::ModelId>("model");
 
-  const auto first = surface.run(
-      {"first", std::nullopt, model,
-       surfaces::OneShotRequest::SessionMode::create, std::nullopt,
-       std::nullopt,
-       {persona::PersonaDirectiveKind::select, "reviewer",
-        domain::PersonaSelectionSource::command_line}},
-      output, error);
+  const auto first =
+      surface.run({"first",
+                   std::nullopt,
+                   model,
+                   surfaces::OneShotRequest::SessionMode::create,
+                   std::nullopt,
+                   std::nullopt,
+                   {persona::PersonaDirectiveKind::select, "reviewer",
+                    domain::PersonaSelectionSource::command_line}},
+                  output, error);
   REQUIRE(first);
   REQUIRE(backend.captured.size() == 1);
   const auto persona_entry = std::ranges::find_if(
@@ -739,11 +743,11 @@ TEST_CASE("one-shot runs persist provenance and refuse a sensitive value",
 
   output.str({});
   error.str({});
-  const auto result = surface.run(
-      {"first", std::nullopt, model,
-       surfaces::OneShotRequest::SessionMode::create, std::nullopt,
-       run_provenance()},
-      output, error);
+  const auto result =
+      surface.run({"first", std::nullopt, model,
+                   surfaces::OneShotRequest::SessionMode::create, std::nullopt,
+                   run_provenance()},
+                  output, error);
   REQUIRE(result);
   const auto& persisted = store.histories[result->session_id];
   REQUIRE(persisted.size() > 1);
@@ -752,8 +756,7 @@ TEST_CASE("one-shot runs persist provenance and refuse a sensitive value",
       std::get_if<domain::RunProvenanceRecorded>(&persisted[1].payload);
   REQUIRE(recorded != nullptr);
   REQUIRE(recorded->provenance.backend_id == "venice");
-  REQUIRE(recorded->provenance.credential_source->identity ==
-          "VENICE_API_KEY");
+  REQUIRE(recorded->provenance.credential_source->identity == "VENICE_API_KEY");
   // Only the locator is durable; a sensitive key keeps presence without value.
   REQUIRE(recorded->provenance.configuration.back().sensitive);
   REQUIRE_FALSE(recorded->provenance.configuration.back().value.has_value());
@@ -768,10 +771,10 @@ TEST_CASE("ephemeral one-shot bypasses an available durable store",
   std::ostringstream output;
   std::ostringstream error;
 
-  const auto result = surface.run(
-      {"temporary", std::nullopt, make_id<domain::ModelId>("model"),
-       surfaces::OneShotRequest::SessionMode::ephemeral},
-      output, error);
+  const auto result =
+      surface.run({"temporary", std::nullopt, make_id<domain::ModelId>("model"),
+                   surfaces::OneShotRequest::SessionMode::ephemeral},
+                  output, error);
   REQUIRE(result);
   REQUIRE_FALSE(result->durable);
   REQUIRE(store.calls == 0);
@@ -783,16 +786,16 @@ TEST_CASE("session failures occur before provider start and retain prior truth",
   FakeModels models;
   ConversationBackend backend;
   MemoryStore store;
-  store.append_failure = storage::SessionStoreError{
-      storage::SessionStoreErrorCode::io_failure,
-      "sensitive filesystem detail", true};
+  store.append_failure =
+      storage::SessionStoreError{storage::SessionStoreErrorCode::io_failure,
+                                 "sensitive filesystem detail", true};
   surfaces::OneShotSurface surface{backend, models, store};
   std::ostringstream output;
   std::ostringstream error;
 
   auto result = surface.run(
-      {"never sent", std::nullopt, make_id<domain::ModelId>("model")},
-      output, error);
+      {"never sent", std::nullopt, make_id<domain::ModelId>("model")}, output,
+      error);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code == surfaces::OneShotErrorCode::run_failed);
   REQUIRE(result.error().message.find("sensitive") == std::string::npos);
@@ -816,17 +819,16 @@ TEST_CASE("terminal persistence failure publishes none of its event batch",
   FakeModels models;
   ConversationBackend backend;
   MemoryStore store;
-  store.append_failure = storage::SessionStoreError{
-      storage::SessionStoreErrorCode::io_failure,
-      "sensitive filesystem detail", true};
+  store.append_failure =
+      storage::SessionStoreError{storage::SessionStoreErrorCode::io_failure,
+                                 "sensitive filesystem detail", true};
   store.fail_on_append = 6;
   surfaces::OneShotSurface surface{backend, models, store};
   std::ostringstream output;
   std::ostringstream error;
 
   const auto result = surface.run(
-      {"persist atomically", std::nullopt,
-       make_id<domain::ModelId>("model")},
+      {"persist atomically", std::nullopt, make_id<domain::ModelId>("model")},
       output, error);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code == surfaces::OneShotErrorCode::run_failed);
@@ -853,11 +855,16 @@ TEST_CASE("spend ceiling persistence fails atomically before provider start",
   std::ostringstream output;
   std::ostringstream error;
 
-  const auto result = surface.run(
-      {"bounded", std::nullopt, make_id<domain::ModelId>("model"),
-       surfaces::OneShotRequest::SessionMode::create, std::nullopt,
-       std::nullopt, {}, domain::SessionSpendCeiling::from("1").value()},
-      output, error);
+  const auto result =
+      surface.run({"bounded",
+                   std::nullopt,
+                   make_id<domain::ModelId>("model"),
+                   surfaces::OneShotRequest::SessionMode::create,
+                   std::nullopt,
+                   std::nullopt,
+                   {},
+                   domain::SessionSpendCeiling::from("1").value()},
+                  output, error);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code == surfaces::OneShotErrorCode::run_failed);
   REQUIRE(result.error().message.find("sensitive") == std::string::npos);
@@ -872,15 +879,12 @@ TEST_CASE("semantically corrupt replay is rejected without provider work",
   ConversationBackend backend;
   MemoryStore store;
   const auto session_id = make_id<domain::SessionId>("corrupt-session");
-  const auto timestamp =
-      domain::EventTimestamp{std::chrono::milliseconds{100}};
+  const auto timestamp = domain::EventTimestamp{std::chrono::milliseconds{100}};
   store.sessions.emplace(
-      session_id,
-      storage::SessionInfo{session_id, timestamp, timestamp, 1});
+      session_id, storage::SessionInfo{session_id, timestamp, timestamp, 1});
   store.histories[session_id] = {domain::RunEvent{
-      {make_id<domain::EventId>("bad-event"),
-       make_id<domain::RunId>("bad-run"), 1, 1, timestamp, std::nullopt,
-       std::nullopt, std::nullopt},
+      {make_id<domain::EventId>("bad-event"), make_id<domain::RunId>("bad-run"),
+       1, 1, timestamp, std::nullopt, std::nullopt, std::nullopt},
       domain::RunCompleted{}}};
   surfaces::OneShotSurface surface{backend, models, store};
   std::ostringstream output;
@@ -905,8 +909,7 @@ TEST_CASE("cancelled partial assistant content stays out of resumed context",
   const auto inference_id = make_id<domain::InferenceId>("cancelled-inference");
   const auto user_id = make_id<domain::MessageId>("cancelled-user");
   const auto assistant_id = make_id<domain::MessageId>("cancelled-assistant");
-  const auto timestamp =
-      domain::EventTimestamp{std::chrono::milliseconds{100}};
+  const auto timestamp = domain::EventTimestamp{std::chrono::milliseconds{100}};
   const auto event = [&](const std::uint64_t sequence,
                          domain::RunEventPayload payload) {
     return domain::RunEvent{
@@ -918,22 +921,24 @@ TEST_CASE("cancelled partial assistant content stays out of resumed context",
         std::move(payload)};
   };
   store.sessions.emplace(
-      session_id,
-      storage::SessionInfo{session_id, timestamp, timestamp, 8});
+      session_id, storage::SessionInfo{session_id, timestamp, timestamp, 8});
   store.histories[session_id] = {
-      event(1, domain::RunStarted{make_id<domain::SurfaceId>("one-shot"),
-                                  make_id<domain::WorkspaceId>("chat"),
-                                  make_id<domain::PermissionProfileId>("observe"),
-                                  std::nullopt}),
-      event(2, domain::UserContentAdded{{user_id, domain::Role::user,
+      event(1,
+            domain::RunStarted{make_id<domain::SurfaceId>("one-shot"),
+                               make_id<domain::WorkspaceId>("chat"),
+                               make_id<domain::PermissionProfileId>("observe"),
+                               std::nullopt}),
+      event(2, domain::UserContentAdded{{user_id,
+                                         domain::Role::user,
                                          {domain::TextBlock{"old prompt"}},
                                          std::nullopt}}),
       event(3, domain::RunCompletionRequested{}),
-      event(4, domain::InferenceStarted{
-                   inference_id, make_id<domain::ModelId>("old-model")}),
+      event(4, domain::InferenceStarted{inference_id,
+                                        make_id<domain::ModelId>("old-model")}),
       event(5, domain::AssistantContentStarted{assistant_id, inference_id}),
-      event(6, domain::AssistantContentDeltaAdded{
-                   assistant_id, inference_id, domain::TextBlock{"partial"}}),
+      event(6,
+            domain::AssistantContentDeltaAdded{assistant_id, inference_id,
+                                               domain::TextBlock{"partial"}}),
       event(7, domain::InferenceCancelled{inference_id, "cancelled"}),
       event(8, domain::RunCancelled{"cancelled"})};
   surfaces::OneShotSurface surface{backend, models, store};
@@ -954,9 +959,10 @@ TEST_CASE("cancelled partial assistant content stays out of resumed context",
   REQUIRE(roles == std::vector{domain::Role::user, domain::Role::user});
   REQUIRE(std::ranges::none_of(
       backend.captured.back().context.entries, [](const auto& entry) {
-        return std::ranges::any_of(entry.message.content, [](const auto& block) {
-          const auto* text = std::get_if<domain::TextBlock>(&block);
-          return text != nullptr && text->text == "partial";
-        });
+        return std::ranges::any_of(
+            entry.message.content, [](const auto& block) {
+              const auto* text = std::get_if<domain::TextBlock>(&block);
+              return text != nullptr && text->text == "partial";
+            });
       }));
 }

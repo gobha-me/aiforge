@@ -99,7 +99,9 @@ auto parcel() -> domain::ContextParcel {
             4}}};
 }
 
-auto budget() -> domain::ChildRunBudget { return {2, 3, 100, 50, 5s}; }
+auto budget() -> domain::ChildRunBudget {
+  return {2, 3, 100, 50, 5s};
+}
 
 auto scope() -> domain::CapabilityScope {
   return {domain::Effect::read, "filesystem.root", "/config/Projects/aiforge"};
@@ -293,6 +295,7 @@ class MemorySessionStore final : public storage::SessionStore {
                        storage::SessionStoreError> override {
     return m_events;
   }
+
  private:
   [[nodiscard]] static auto error() -> storage::SessionStoreError {
     return {storage::SessionStoreErrorCode::not_found, "not found", false};
@@ -301,7 +304,7 @@ class MemorySessionStore final : public storage::SessionStore {
   std::vector<domain::RunEvent> m_events;
 };
 
-}  // namespace
+} // namespace
 
 TEST_CASE("child-run contracts reject invalid limits and results",
           "[child-run][contract][failure]") {
@@ -451,16 +454,16 @@ TEST_CASE("review child records one replayable receipt and verdict",
   REQUIRE(kernel.active_session_tasks().front().state ==
           runtime::SessionTaskState::completed);
 
-  const auto &events = kernel.event_log().events();
-  REQUIRE(std::ranges::count_if(events, [](const auto &event) {
+  const auto& events = kernel.event_log().events();
+  REQUIRE(std::ranges::count_if(events, [](const auto& event) {
             return std::holds_alternative<domain::ReviewReceiptDrafted>(
                 event.payload);
           }) == 1);
-  REQUIRE(std::ranges::count_if(events, [](const auto &event) {
+  REQUIRE(std::ranges::count_if(events, [](const auto& event) {
             return std::holds_alternative<domain::ReviewVerdictRecorded>(
                 event.payload);
           }) == 1);
-  const auto created = std::ranges::find_if(events, [](const auto &event) {
+  const auto created = std::ranges::find_if(events, [](const auto& event) {
     return std::holds_alternative<domain::ChildRunCreated>(event.payload);
   });
   REQUIRE(created != events.end());
@@ -504,8 +507,8 @@ TEST_CASE("malformed review output records no partial receipt facts",
   REQUIRE(kernel.active_session_tasks().front().state ==
           runtime::SessionTaskState::failed);
 
-  const auto &events = kernel.event_log().events();
-  REQUIRE(std::ranges::none_of(events, [](const auto &event) {
+  const auto& events = kernel.event_log().events();
+  REQUIRE(std::ranges::none_of(events, [](const auto& event) {
     return std::holds_alternative<domain::ReviewFindingOpened>(event.payload) ||
            std::holds_alternative<domain::ReviewVerdictRecorded>(event.payload);
   }));
@@ -548,16 +551,16 @@ TEST_CASE("review retry reuses one receipt",
   REQUIRE(kernel.active_session_tasks().front().state ==
           runtime::SessionTaskState::completed);
 
-  const auto &events = kernel.event_log().events();
-  REQUIRE(std::ranges::count_if(events, [](const auto &event) {
+  const auto& events = kernel.event_log().events();
+  REQUIRE(std::ranges::count_if(events, [](const auto& event) {
             return std::holds_alternative<domain::ReviewReceiptDrafted>(
                 event.payload);
           }) == 1);
-  REQUIRE(std::ranges::count_if(events, [](const auto &event) {
+  REQUIRE(std::ranges::count_if(events, [](const auto& event) {
             return std::holds_alternative<domain::ReviewRequested>(
                 event.payload);
           }) == 1);
-  REQUIRE(std::ranges::count_if(events, [](const auto &event) {
+  REQUIRE(std::ranges::count_if(events, [](const auto& event) {
             return std::holds_alternative<domain::ReviewVerdictRecorded>(
                 event.payload);
           }) == 1);

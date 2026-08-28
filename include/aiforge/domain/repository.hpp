@@ -106,4 +106,4 @@ struct RepositorySourceIdentity {
     const RepositorySnapshotIdentity& left,
     const RepositorySnapshotIdentity& right) noexcept -> bool;
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

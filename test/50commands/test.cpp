@@ -116,17 +116,16 @@ class FakeLogin final : public LoginCommand {
 };
 
 class FakePlan final : public PlanCommand {
-public:
-  auto execute(Request request, CommandEnvironment &, std::ostream &output,
-               std::ostream &error)
+ public:
+  auto execute(Request request, CommandEnvironment&, std::ostream& output,
+               std::ostream& error)
       -> std::expected<void, CommandFailure> override {
     ++calls;
     seen_mode = request.session_mode;
     seen_session_id = std::move(request.session_id);
     output << "jsonl\n";
     error << "diagnostic\n";
-    if (failure)
-      return std::unexpected(*failure);
+    if (failure) return std::unexpected(*failure);
     return {};
   }
 
@@ -161,7 +160,7 @@ public:
   return result;
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("invalid command registries fail before parser construction",
           "[commands][failure]") {
@@ -337,7 +336,7 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
 
 TEST_CASE("plan command requires explicit noninteractive JSONL session mode",
           "[commands][plan]") {
-  const auto &registry = builtin_command_registry();
+  const auto& registry = builtin_command_registry();
   FakePlan plan;
   std::istringstream input;
   CommandEnvironment environment{input, false, false, false, {}};
@@ -367,7 +366,7 @@ TEST_CASE("plan command requires explicit noninteractive JSONL session mode",
   REQUIRE(plan.seen_mode == PlanCommand::SessionMode::continue_latest);
   REQUIRE_FALSE(plan.seen_session_id);
 
-  for (const auto &arguments :
+  for (const auto& arguments :
        {std::vector<std::string_view>{"plan", "--continue"},
         std::vector<std::string_view>{"plan", "--jsonl"},
         std::vector<std::string_view>{"plan", "--jsonl", "--continue",
@@ -533,8 +532,7 @@ TEST_CASE("one-shot session options are explicit and mutually exclusive",
   output.str({});
   error.str({});
   REQUIRE(CommandDispatcher{}.dispatch(
-              registry,
-              std::vector<std::string_view>{"--persona", "reviewer"},
+              registry, std::vector<std::string_view>{"--persona", "reviewer"},
               environment, output, error) == 0);
   REQUIRE(interactive.seen_persona.kind ==
           aiforge::persona::PersonaDirectiveKind::select);
@@ -562,13 +560,13 @@ TEST_CASE("models command uses its dedicated service and preserves streams",
   const auto& registry = builtin_command_registry();
   FakeModels models;
   std::istringstream input;
-  CommandEnvironment environment{input, false, false, false, {}, nullptr,
-                                 nullptr, &models};
+  CommandEnvironment environment{input, false,   false,   false,
+                                 {},    nullptr, nullptr, &models};
   std::ostringstream output;
   std::ostringstream error;
-  REQUIRE(CommandDispatcher{}.dispatch(
-              registry, std::vector<std::string_view>{"models"}, environment,
-              output, error) == 0);
+  REQUIRE(CommandDispatcher{}.dispatch(registry,
+                                       std::vector<std::string_view>{"models"},
+                                       environment, output, error) == 0);
   REQUIRE(models.calls == 1);
   REQUIRE(output.str() == "models\n");
   REQUIRE(error.str() == "warning\n");
@@ -576,9 +574,9 @@ TEST_CASE("models command uses its dedicated service and preserves streams",
   output.str({});
   error.str({});
   models.failure = CommandFailure{CommandFailureKind::runtime, "offline"};
-  REQUIRE(CommandDispatcher{}.dispatch(
-              registry, std::vector<std::string_view>{"models"}, environment,
-              output, error) == 1);
+  REQUIRE(CommandDispatcher{}.dispatch(registry,
+                                       std::vector<std::string_view>{"models"},
+                                       environment, output, error) == 1);
   REQUIRE(error.str().find("offline") != std::string::npos);
 }
 
@@ -587,14 +585,14 @@ TEST_CASE("login command uses its dedicated terminal service",
   const auto& registry = builtin_command_registry();
   FakeLogin login;
   std::istringstream input;
-  CommandEnvironment environment{input, true, true, true, {}, nullptr,
-                                 nullptr, nullptr, &login, 42};
+  CommandEnvironment environment{input,   true,    true,    true,   {},
+                                 nullptr, nullptr, nullptr, &login, 42};
   std::ostringstream output;
   std::ostringstream error;
 
-  REQUIRE(CommandDispatcher{}.dispatch(
-              registry, std::vector<std::string_view>{"login"}, environment,
-              output, error) == 0);
+  REQUIRE(CommandDispatcher{}.dispatch(registry,
+                                       std::vector<std::string_view>{"login"},
+                                       environment, output, error) == 0);
   REQUIRE(login.calls == 1);
   REQUIRE(login.saw_terminal_input);
   REQUIRE(login.input_descriptor == 42);
@@ -604,9 +602,9 @@ TEST_CASE("login command uses its dedicated terminal service",
   output.str({});
   error.str({});
   login.failure = CommandFailure{CommandFailureKind::cancelled, "stopped"};
-  REQUIRE(CommandDispatcher{}.dispatch(
-              registry, std::vector<std::string_view>{"login"}, environment,
-              output, error) == 130);
+  REQUIRE(CommandDispatcher{}.dispatch(registry,
+                                       std::vector<std::string_view>{"login"},
+                                       environment, output, error) == 130);
   REQUIRE(error.str().find("stopped") != std::string::npos);
 }
 

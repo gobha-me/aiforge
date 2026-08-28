@@ -36,4 +36,4 @@ class VeniceModelCatalogSource final : public model::CatalogSource {
   std::unique_ptr<Impl> m_impl;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

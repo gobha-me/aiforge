@@ -13,8 +13,7 @@ namespace {
 
 using namespace aiforge;
 
-template <typename IdType>
-auto make_id(const std::string& value) -> IdType {
+template <typename IdType> auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
@@ -43,7 +42,7 @@ auto event(const std::uint64_t sequence, domain::RunEventPayload payload)
           std::move(payload)};
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("persona values reject ambiguous identity and malformed content",
           "[persona][domain][failure]") {
@@ -75,15 +74,15 @@ TEST_CASE("persona values reject ambiguous identity and malformed content",
 TEST_CASE("persona context is a stable attributed system instruction",
           "[persona][context]") {
   const auto document = persona_document();
-  const auto instruction =
-      runtime::persona_instruction_input(document, 17, 4);
+  const auto instruction = runtime::persona_instruction_input(document, 17, 4);
   REQUIRE(instruction);
   REQUIRE(instruction->layer == domain::InstructionLayer::persona);
   REQUIRE(instruction->operation == domain::InstructionOperation::add);
   REQUIRE(instruction->message);
   REQUIRE(instruction->message->role == domain::Role::system);
-  REQUIRE(std::get<domain::TextBlock>(instruction->message->content.front())
-              .text == document.text);
+  REQUIRE(
+      std::get<domain::TextBlock>(instruction->message->content.front()).text ==
+      document.text);
   REQUIRE(instruction->provenance.source_location == "personas/Reviewer.md");
   REQUIRE(instruction->provenance.digest ==
           "sha256:" + document.reference.content_digest.value);
@@ -97,13 +96,12 @@ TEST_CASE("latest persona selection is derived from append-only history",
           "[persona][events]") {
   const auto document = persona_document();
   domain::SessionEventLog log{make_id<domain::SessionId>("session")};
-  REQUIRE(log.append(event(
-      1, domain::PersonaSelectionRecorded{selection(document)})));
-  REQUIRE(log.append(event(
-      2, domain::PersonaSelectionRecorded{{
-             domain::PersonaSelectionAction::disabled,
-             domain::PersonaSelectionSource::interactive, std::nullopt,
-             document.reference}})));
+  REQUIRE(log.append(
+      event(1, domain::PersonaSelectionRecorded{selection(document)})));
+  REQUIRE(log.append(event(2, domain::PersonaSelectionRecorded{
+                                  {domain::PersonaSelectionAction::disabled,
+                                   domain::PersonaSelectionSource::interactive,
+                                   std::nullopt, document.reference}})));
 
   const auto latest = runtime::latest_persona_selection(log);
   REQUIRE(latest);
@@ -128,7 +126,8 @@ TEST_CASE("scripted persona source is bounded deterministic and cancellable",
 
   const auto exhausted = source.load("Reviewer");
   REQUIRE_FALSE(exhausted);
-  REQUIRE(exhausted.error().code == persona::PersonaErrorCode::internal_failure);
+  REQUIRE(exhausted.error().code ==
+          persona::PersonaErrorCode::internal_failure);
 
   std::stop_source cancelled;
   cancelled.request_stop();

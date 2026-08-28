@@ -177,7 +177,7 @@ struct ChildRunStart {
   struct ReviewRequest {
     domain::ReviewReceiptDraft draft;
     domain::ReviewActor requested_by;
-    auto operator==(const ReviewRequest &) const -> bool = default;
+    auto operator==(const ReviewRequest&) const -> bool = default;
   };
   std::optional<ReviewRequest> review;
   auto operator==(const ChildRunStart&) const -> bool = default;
@@ -208,14 +208,14 @@ struct ProjectTaskPromotion {
   domain::RunId run_id;
   domain::RunStarted attributes;
   domain::ProjectBacklogItem item;
-  auto operator==(const ProjectTaskPromotion &) const -> bool = default;
+  auto operator==(const ProjectTaskPromotion&) const -> bool = default;
 };
 
 struct ProjectTaskStatusUpdate {
   domain::RunId run_id;
   domain::RunStarted attributes;
   domain::ProjectBacklogStatusChange change;
-  auto operator==(const ProjectTaskStatusUpdate &) const -> bool = default;
+  auto operator==(const ProjectTaskStatusUpdate&) const -> bool = default;
 };
 
 // Implementations may be called from a backend worker. They must not mutate
@@ -255,15 +255,15 @@ class RunKernel final {
   [[nodiscard]] auto start(RunStart start)
       -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto record_session_spend_ceiling(
-      SessionSpendCeilingChange change)
-      -> std::expected<void, RunKernelError>;
+      SessionSpendCeilingChange change) -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto start_plan(PlanStart start)
       -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto revise_plan(const domain::RunId& run_id,
                                  domain::PlanRevision revision)
       -> std::expected<void, RunKernelError>;
-  [[nodiscard]] auto decide_plan(const domain::RunId &run_id, domain::PlanRevisionDecision decision,
-      PlanApprovalEnvironment environment = {})
+  [[nodiscard]] auto decide_plan(const domain::RunId& run_id,
+                                 domain::PlanRevisionDecision decision,
+                                 PlanApprovalEnvironment environment = {})
       -> std::expected<PlanDecisionOutcome, RunKernelError>;
   [[nodiscard]] auto revalidate_plan_approval(
       PlanApprovalRevalidation revalidation)
@@ -282,24 +282,22 @@ class RunKernel final {
       const domain::RunId& run_id,
       std::optional<std::string> reason = std::nullopt)
       -> std::expected<void, RunKernelError>;
-  [[nodiscard]] auto decide_approval(const domain::RunId &run_id,
-      const domain::InvocationId& invocation_id,
-      ToolApprovalResolution resolution)
+  [[nodiscard]] auto decide_approval(const domain::RunId& run_id,
+                                     const domain::InvocationId& invocation_id,
+                                     ToolApprovalResolution resolution)
       -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto answer_questions(
-      const domain::RunId &run_id,
-      const domain::InvocationId &invocation_id,
+      const domain::RunId& run_id, const domain::InvocationId& invocation_id,
       std::vector<domain::QuestionAnswer> answers)
       -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto cancel_questions(
-      const domain::RunId &run_id,
-      const domain::InvocationId &invocation_id,
+      const domain::RunId& run_id, const domain::InvocationId& invocation_id,
       std::optional<std::string> reason = std::nullopt)
       -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto continue_run(
-      const domain::RunId &run_id, backend::BackendRequest request,
-               std::optional<domain::PricingObservation> pricing_observation =
-                   std::nullopt) -> std::expected<void, RunKernelError>;
+      const domain::RunId& run_id, backend::BackendRequest request,
+      std::optional<domain::PricingObservation> pricing_observation =
+          std::nullopt) -> std::expected<void, RunKernelError>;
 
   // Drain worker observations and apply their run events on the calling
   // thread. The returned events are exactly those committed by this call.
@@ -312,25 +310,23 @@ class RunKernel final {
       -> const domain::RunProjection*;
   [[nodiscard]] auto active_run_id() const noexcept
       -> std::optional<domain::RunId>;
-  [[nodiscard]] auto active_child_run_ids() const
-      -> std::vector<domain::RunId>;
+  [[nodiscard]] auto active_child_run_ids() const -> std::vector<domain::RunId>;
   [[nodiscard]] auto active_inference_id() const noexcept
       -> std::optional<domain::InferenceId>;
   [[nodiscard]] auto pending_question_input() const
       -> std::optional<PendingQuestionInput>;
   [[nodiscard]] auto pending_plan_decision() const
       -> std::optional<PendingPlanDecision>;
-  [[nodiscard]] auto plan_projection(const domain::PlanId &plan_id) const noexcept
-      -> const domain::PlanGraphProjection *;
+  [[nodiscard]] auto plan_projection(const domain::PlanId& plan_id)
+      const noexcept -> const domain::PlanGraphProjection*;
   [[nodiscard]] auto active_session_tasks() const
       -> std::vector<ActiveSessionTask>;
-  [[nodiscard]] auto
-  project_backlog(const domain::RepositoryId &repository_id) const
-      -> std::expected<domain::ProjectBacklogProjection, RunKernelError>;
+  [[nodiscard]] auto project_backlog(const domain::RepositoryId& repository_id)
+      const -> std::expected<domain::ProjectBacklogProjection, RunKernelError>;
 
  private:
   struct Impl;
   std::unique_ptr<Impl> m_impl;
 };
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

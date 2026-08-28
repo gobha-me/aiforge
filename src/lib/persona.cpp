@@ -7,8 +7,7 @@
 namespace aiforge::domain {
 namespace {
 
-[[nodiscard]] auto failure(PersonaValidationErrorCode code,
-                           std::string message)
+[[nodiscard]] auto failure(PersonaValidationErrorCode code, std::string message)
     -> std::unexpected<PersonaValidationError> {
   return std::unexpected(PersonaValidationError{code, std::move(message)});
 }
@@ -21,12 +20,13 @@ namespace {
            (character >= 'a' && character <= 'z');
   };
   if (!is_ascii_alnum(static_cast<unsigned char>(value.front()))) return false;
-  return std::ranges::all_of(value.substr(1), [](const unsigned char character) {
-    return (character >= '0' && character <= '9') ||
-           (character >= 'A' && character <= 'Z') ||
-           (character >= 'a' && character <= 'z') || character == '-' ||
-           character == '_';
-  });
+  return std::ranges::all_of(value.substr(1),
+                             [](const unsigned char character) {
+                               return (character >= '0' && character <= '9') ||
+                                      (character >= 'A' && character <= 'Z') ||
+                                      (character >= 'a' && character <= 'z') ||
+                                      character == '-' || character == '_';
+                             });
 }
 
 [[nodiscard]] auto canonical_name(const std::string_view value) -> std::string {
@@ -81,7 +81,7 @@ namespace {
   return true;
 }
 
-}  // namespace
+} // namespace
 
 auto validate_persona_reference(const PersonaReference& reference)
     -> std::expected<void, PersonaValidationError> {
@@ -152,4 +152,4 @@ auto validate_persona_document(const PersonaDocument& document)
   return {};
 }
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

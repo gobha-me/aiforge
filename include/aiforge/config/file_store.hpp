@@ -46,8 +46,7 @@ class ConfigFileStore {
   [[nodiscard]] virtual auto load(const ConfigRegistry& registry) const
       -> std::expected<ConfigLayer, ConfigFileError> = 0;
   [[nodiscard]] virtual auto set(const ConfigRegistry& registry,
-                                 std::string_view key,
-                                 const ConfigValue& value)
+                                 std::string_view key, const ConfigValue& value)
       -> std::expected<void, ConfigFileError> = 0;
   [[nodiscard]] virtual auto unset(const ConfigRegistry& registry,
                                    std::string_view key)
@@ -64,8 +63,7 @@ class JsonConfigFileStore final : public ConfigFileStore {
   [[nodiscard]] auto set(const ConfigRegistry& registry, std::string_view key,
                          const ConfigValue& value)
       -> std::expected<void, ConfigFileError> override;
-  [[nodiscard]] auto unset(const ConfigRegistry& registry,
-                           std::string_view key)
+  [[nodiscard]] auto unset(const ConfigRegistry& registry, std::string_view key)
       -> std::expected<void, ConfigFileError> override;
 
  private:
@@ -75,4 +73,4 @@ class JsonConfigFileStore final : public ConfigFileStore {
 [[nodiscard]] auto process_config_path()
     -> std::expected<std::filesystem::path, ConfigFileError>;
 
-}  // namespace aiforge::config
+} // namespace aiforge::config

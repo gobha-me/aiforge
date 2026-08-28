@@ -47,7 +47,8 @@ class FakeSource final : public model::CatalogSource {
     return value;
   }
 
-  model::CatalogSnapshot value{std::chrono::sys_time<std::chrono::milliseconds>{}};
+  model::CatalogSnapshot value{
+      std::chrono::sys_time<std::chrono::milliseconds>{}};
   std::optional<model::CatalogError> failure;
   int calls{};
 };
@@ -86,7 +87,7 @@ class FakeCache final : public model::CatalogCache {
   int stores{};
 };
 
-}  // namespace
+} // namespace
 
 TEST_CASE("catalog validation rejects malformed, duplicate, and bounded data",
           "[models][failure]") {

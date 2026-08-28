@@ -34,10 +34,10 @@ struct CommandBinding {
   std::vector<std::unique_ptr<CommandBinding>> subcommands;
 };
 
-[[nodiscard]] auto diagnostic(const ParseDiagnosticCode code, std::string message,
-                              std::optional<std::string> schema_id = std::nullopt,
-                              std::optional<std::size_t> token_index = std::nullopt)
-    -> ParseDiagnostic {
+[[nodiscard]] auto diagnostic(
+    const ParseDiagnosticCode code, std::string message,
+    std::optional<std::string> schema_id = std::nullopt,
+    std::optional<std::size_t> token_index = std::nullopt) -> ParseDiagnostic {
   return {code, token_index, std::move(schema_id), std::move(message)};
 }
 
@@ -66,8 +66,7 @@ struct CommandBinding {
     case ArgumentValueKind::boolean:
     case ArgumentValueKind::signed_integer:
     case ArgumentValueKind::unsigned_integer:
-    case ArgumentValueKind::text:
-      return true;
+    case ArgumentValueKind::text: return true;
   }
   return false;
 }
@@ -79,19 +78,22 @@ auto validate_command(const CommandSchema& command, const bool root,
   if (command.id.empty() || !identities.insert(command.id).second) {
     return diagnostic(ParseDiagnosticCode::invalid_schema,
                       "command and argument IDs must be nonempty and unique",
-                      command.id.empty() ? std::nullopt
-                                         : std::optional<std::string>{command.id});
+                      command.id.empty()
+                          ? std::nullopt
+                          : std::optional<std::string>{command.id});
   }
   if ((root && !command.name.empty()) ||
       (!root && !valid_command_name(command.name))) {
-    return diagnostic(ParseDiagnosticCode::invalid_schema,
-                      "the root name must be empty and nested command names must be valid",
-                      command.id);
+    return diagnostic(
+        ParseDiagnosticCode::invalid_schema,
+        "the root name must be empty and nested command names must be valid",
+        command.id);
   }
   if (command.subcommand_required && command.subcommands.empty()) {
-    return diagnostic(ParseDiagnosticCode::invalid_schema,
-                      "a command cannot require a subcommand when none are declared",
-                      command.id);
+    return diagnostic(
+        ParseDiagnosticCode::invalid_schema,
+        "a command cannot require a subcommand when none are declared",
+        command.id);
   }
   if (!command.subcommands.empty() &&
       std::ranges::any_of(command.positionals, [](const auto& positional) {
@@ -105,27 +107,30 @@ auto validate_command(const CommandSchema& command, const bool root,
 
   std::unordered_set<std::string> local_names;
   for (const auto& control : controls) {
-    for (const auto& name : control.names) local_names.insert(name);
+    for (const auto& name : control.names)
+      local_names.insert(name);
   }
 
   for (const auto& option : command.options) {
     if (option.id.empty() || !identities.insert(option.id).second) {
       return diagnostic(ParseDiagnosticCode::invalid_schema,
                         "command and argument IDs must be nonempty and unique",
-                        option.id.empty() ? std::nullopt
-                                          : std::optional<std::string>{option.id});
+                        option.id.empty()
+                            ? std::nullopt
+                            : std::optional<std::string>{option.id});
     }
     if (!known_value_kind(option.value_kind) || option.names.empty() ||
         !validate_cardinality(option.minimum_occurrences,
                               option.maximum_occurrences)) {
-      return diagnostic(ParseDiagnosticCode::invalid_schema,
-                        "option names and cardinality must be explicit and valid",
-                        option.id);
+      return diagnostic(
+          ParseDiagnosticCode::invalid_schema,
+          "option names and cardinality must be explicit and valid", option.id);
     }
     for (const auto& name : option.names) {
       if (!valid_option_name(name) || !local_names.insert(name).second) {
         return diagnostic(ParseDiagnosticCode::invalid_schema,
-                          "option and control names must be valid and unique within a command",
+                          "option and control names must be valid and unique "
+                          "within a command",
                           option.id);
       }
     }
@@ -145,9 +150,10 @@ auto validate_command(const CommandSchema& command, const bool root,
         positional.value_kind == ArgumentValueKind::flag ||
         !validate_cardinality(positional.minimum_values,
                               positional.maximum_values)) {
-      return diagnostic(ParseDiagnosticCode::invalid_schema,
-                        "positional names, value kinds, and cardinality must be valid",
-                        positional.id);
+      return diagnostic(
+          ParseDiagnosticCode::invalid_schema,
+          "positional names, value kinds, and cardinality must be valid",
+          positional.id);
     }
     if (index + 1 < command.positionals.size() &&
         (positional.minimum_values != 1 || positional.maximum_values != 1)) {
@@ -180,8 +186,9 @@ auto validate_command(const CommandSchema& command, const bool root,
     if ((control.kind != ControlRequestKind::help &&
          control.kind != ControlRequestKind::version) ||
         control.names.empty() || !control_kinds.insert(control.kind).second) {
-      return diagnostic(ParseDiagnosticCode::invalid_schema,
-                        "control kinds must be unique and have at least one name");
+      return diagnostic(
+          ParseDiagnosticCode::invalid_schema,
+          "control kinds must be unique and have at least one name");
     }
     for (const auto& name : control.names) {
       if (!valid_option_name(name) || !control_names.insert(name).second) {
@@ -238,7 +245,8 @@ auto validate_command(const CommandSchema& command, const bool root,
 }
 
 auto configure_controls(CLI::App& app,
-                        const std::vector<ControlOptionSchema>& controls) -> void {
+                        const std::vector<ControlOptionSchema>& controls)
+    -> void {
   app.set_help_flag("");
   app.set_version_flag("");
   for (const auto& control : controls) {
@@ -276,8 +284,7 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
       binding->option->disable_flag_override();
     } else {
       binding->option = app.add_option(names, binding->raw_values);
-      binding->option
-          ->type_size(1)
+      binding->option->type_size(1)
           ->allow_extra_args(false)
           ->multi_option_policy(CLI::MultiOptionPolicy::TakeAll);
     }
@@ -291,9 +298,11 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
     binding->value_kind = positional_schema.value_kind;
     binding->minimum = positional_schema.minimum_values;
     binding->maximum = positional_schema.maximum_values;
-    binding->option = app.add_option(positional_schema.name, binding->raw_values);
-    binding->option->expected(static_cast<int>(positional_schema.minimum_values),
-                              static_cast<int>(positional_schema.maximum_values));
+    binding->option =
+        app.add_option(positional_schema.name, binding->raw_values);
+    binding->option->expected(
+        static_cast<int>(positional_schema.minimum_values),
+        static_cast<int>(positional_schema.maximum_values));
     if (positional_schema.minimum_values != 0) binding->option->required();
     command->positionals.push_back(std::move(binding));
   }
@@ -314,9 +323,10 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
   std::vector<CommandBinding*> path{&root};
   auto* current = &root;
   while (true) {
-    const auto found = std::ranges::find_if(
-        current->subcommands,
-        [](const auto& child) { return child->app->parsed() != 0; });
+    const auto found =
+        std::ranges::find_if(current->subcommands, [](const auto& child) {
+          return child->app->parsed() != 0;
+        });
     if (found == current->subcommands.end()) break;
     current = found->get();
     path.push_back(current);
@@ -329,18 +339,20 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
   auto path = active_path(root);
   std::vector<std::string> result;
   result.reserve(path.size());
-  for (const auto* command : path) result.push_back(command->schema->id);
+  for (const auto* command : path)
+    result.push_back(command->schema->id);
   return result;
 }
 
 [[nodiscard]] auto lowercase_ascii(std::string_view value) -> std::string {
   std::string result{value};
-  std::ranges::transform(result, result.begin(), [](const unsigned char character) {
-    if (character >= 'A' && character <= 'Z') {
-      return static_cast<char>(character - 'A' + 'a');
-    }
-    return static_cast<char>(character);
-  });
+  std::ranges::transform(result, result.begin(),
+                         [](const unsigned char character) {
+                           if (character >= 'A' && character <= 'Z') {
+                             return static_cast<char>(character - 'A' + 'a');
+                           }
+                           return static_cast<char>(character);
+                         });
   return result;
 }
 
@@ -348,8 +360,7 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
                                  const std::string_view raw)
     -> std::optional<ParsedValue> {
   switch (binding.value_kind) {
-    case ArgumentValueKind::flag:
-      return ParsedValue{true};
+    case ArgumentValueKind::flag: return ParsedValue{true};
     case ArgumentValueKind::boolean: {
       const auto normalized = lowercase_ascii(raw);
       if (normalized == "true" || normalized == "1" || normalized == "on" ||
@@ -380,8 +391,7 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
       }
       return ParsedValue{value};
     }
-    case ArgumentValueKind::text:
-      return ParsedValue{std::string{raw}};
+    case ArgumentValueKind::text: return ParsedValue{std::string{raw}};
   }
   return std::nullopt;
 }
@@ -389,8 +399,8 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
 [[nodiscard]] auto append_arguments(CommandBinding& command,
                                     std::vector<ParsedArgument>& arguments)
     -> std::optional<ParseDiagnostic> {
-  const auto append = [&](const ArgumentBinding& binding)
-      -> std::optional<ParseDiagnostic> {
+  const auto append =
+      [&](const ArgumentBinding& binding) -> std::optional<ParseDiagnostic> {
     const auto count = binding.value_kind == ArgumentValueKind::flag
                            ? binding.option->count()
                            : binding.raw_values.size();
@@ -411,9 +421,9 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
       for (const auto& raw : binding.raw_values) {
         auto value = convert_value(binding, raw);
         if (!value) {
-          return diagnostic(ParseDiagnosticCode::invalid_value,
-                            "an argument value does not match its declared type",
-                            binding.id);
+          return diagnostic(
+              ParseDiagnosticCode::invalid_value,
+              "an argument value does not match its declared type", binding.id);
         }
         parsed.values.push_back(std::move(*value));
       }
@@ -453,7 +463,8 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
   return static_cast<std::size_t>(found - arguments.begin());
 }
 
-[[nodiscard]] auto option_name(const std::string_view token) -> std::string_view {
+[[nodiscard]] auto option_name(const std::string_view token)
+    -> std::string_view {
   const auto separator = token.find('=');
   return token.substr(0, separator);
 }
@@ -491,10 +502,12 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
       }
     };
     for (const auto& option : command->schema->options) {
-      for (const auto& candidate : option.names) inspect(candidate);
+      for (const auto& candidate : option.names)
+        inspect(candidate);
     }
     for (const auto& control : controls) {
-      for (const auto& candidate : control.names) inspect(candidate);
+      for (const auto& candidate : control.names)
+        inspect(candidate);
     }
     if (exact) {
       return diagnostic(ParseDiagnosticCode::cardinality_violation,
@@ -502,18 +515,20 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
                         std::nullopt, index);
     }
     if (prefix_matches > 1) {
-      return diagnostic(ParseDiagnosticCode::ambiguous_option,
-                        "an option prefix matches more than one declared option",
-                        std::nullopt, index);
+      return diagnostic(
+          ParseDiagnosticCode::ambiguous_option,
+          "an option prefix matches more than one declared option",
+          std::nullopt, index);
     }
     return diagnostic(ParseDiagnosticCode::unknown_option,
-                      "the command line contains an unknown option", std::nullopt,
-                      index);
+                      "the command line contains an unknown option",
+                      std::nullopt, index);
   }
 
-  const bool has_selected_child = std::ranges::any_of(
-      command->subcommands,
-      [](const auto& child) { return child->app->parsed() != 0; });
+  const bool has_selected_child =
+      std::ranges::any_of(command->subcommands, [](const auto& child) {
+        return child->app->parsed() != 0;
+      });
   if (!has_selected_child && !command->subcommands.empty()) {
     std::size_t prefix_matches{};
     bool exact{};
@@ -530,9 +545,10 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
                         command->schema->id, index);
     }
     if (prefix_matches > 1) {
-      return diagnostic(ParseDiagnosticCode::ambiguous_command,
-                        "a command prefix matches more than one declared command",
-                        command->schema->id, index);
+      return diagnostic(
+          ParseDiagnosticCode::ambiguous_command,
+          "a command prefix matches more than one declared command",
+          command->schema->id, index);
     }
     return diagnostic(ParseDiagnosticCode::unknown_command,
                       "the command line contains an unknown command",
@@ -546,9 +562,10 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
 [[nodiscard]] auto missing_required(CommandBinding& root) -> ParseDiagnostic {
   auto path = active_path(root);
   auto* command = path.back();
-  const bool has_selected_child = std::ranges::any_of(
-      command->subcommands,
-      [](const auto& child) { return child->app->parsed() != 0; });
+  const bool has_selected_child =
+      std::ranges::any_of(command->subcommands, [](const auto& child) {
+        return child->app->parsed() != 0;
+      });
   if (command->schema->subcommand_required && !has_selected_child) {
     return diagnostic(ParseDiagnosticCode::missing_command,
                       "the selected command requires a subcommand",
@@ -645,16 +662,15 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
       continue;
     }
 
-    const bool missing = index + 1 == arguments.size() ||
-                         arguments[index + 1] == "--" ||
-                         find_local_option(
-                             *command, option_name(arguments[index + 1])) != nullptr ||
-                         is_control_name(schema.controls,
-                                         option_name(arguments[index + 1]));
+    const bool missing =
+        index + 1 == arguments.size() || arguments[index + 1] == "--" ||
+        find_local_option(*command, option_name(arguments[index + 1])) !=
+            nullptr ||
+        is_control_name(schema.controls, option_name(arguments[index + 1]));
     if (missing) {
       return std::unexpected(diagnostic(ParseDiagnosticCode::missing_value,
-                                        "an option requires a value", option->id,
-                                        index));
+                                        "an option requires a value",
+                                        option->id, index));
     }
     result.emplace_back(token);
     result.emplace_back(arguments[index + 1]);
@@ -663,7 +679,7 @@ auto build_command(const CommandSchema& schema, CLI::App& app,
   return result;
 }
 
-}  // namespace
+} // namespace
 
 auto ArgumentParser::parse(const ParserSchema& schema,
                            const std::span<const std::string_view> arguments,
@@ -701,34 +717,35 @@ auto ArgumentParser::parse(const ParserSchema& schema,
                                        root ? command_path(*root)
                                             : std::vector<std::string>{}}};
   } catch (const CLI::ConstructionError&) {
-    return std::unexpected(diagnostic(
-        ParseDiagnosticCode::invalid_schema,
-        "the parser rejected the declarative command schema"));
+    return std::unexpected(
+        diagnostic(ParseDiagnosticCode::invalid_schema,
+                   "the parser rejected the declarative command schema"));
   } catch (const CLI::RequiredError&) {
-    return std::unexpected(root ? missing_required(*root)
-                                : diagnostic(ParseDiagnosticCode::adapter_failure,
-                                             "the parser adapter failed safely"));
+    return std::unexpected(
+        root ? missing_required(*root)
+             : diagnostic(ParseDiagnosticCode::adapter_failure,
+                          "the parser adapter failed safely"));
   } catch (const CLI::ArgumentMismatch&) {
     return std::unexpected(diagnostic(
         ParseDiagnosticCode::cardinality_violation,
         "an argument value count violates its declared cardinality"));
   } catch (const CLI::ConversionError&) {
-    return std::unexpected(diagnostic(
-        ParseDiagnosticCode::invalid_value,
-        "an argument value does not match its declared type"));
+    return std::unexpected(
+        diagnostic(ParseDiagnosticCode::invalid_value,
+                   "an argument value does not match its declared type"));
   } catch (const CLI::ValidationError&) {
     return std::unexpected(diagnostic(
         ParseDiagnosticCode::invalid_value,
         "an argument value does not match its declared constraints"));
   } catch (const CLI::ExtrasError&) {
-    return std::unexpected(root
-                               ? classify_extra(*root, schema.controls, arguments)
-                               : diagnostic(ParseDiagnosticCode::adapter_failure,
-                                            "the parser adapter failed safely"));
+    return std::unexpected(
+        root ? classify_extra(*root, schema.controls, arguments)
+             : diagnostic(ParseDiagnosticCode::adapter_failure,
+                          "the parser adapter failed safely"));
   } catch (const CLI::InvalidError&) {
-    return std::unexpected(diagnostic(
-        ParseDiagnosticCode::invalid_schema,
-        "the parser rejected the declarative command schema"));
+    return std::unexpected(
+        diagnostic(ParseDiagnosticCode::invalid_schema,
+                   "the parser rejected the declarative command schema"));
   } catch (const CLI::ParseError&) {
     return std::unexpected(diagnostic(ParseDiagnosticCode::adapter_failure,
                                       "the parser adapter failed safely"));
@@ -741,4 +758,4 @@ auto ArgumentParser::parse(const ParserSchema& schema,
   }
 }
 
-}  // namespace aiforge::cli
+} // namespace aiforge::cli

@@ -152,9 +152,8 @@ class TranscriptProjection final {
   [[nodiscard]] auto inference_message(const InferenceId& id)
       -> TranscriptMessage*;
   [[nodiscard]] auto tool(const InvocationId& id) -> TranscriptToolSummary*;
-  [[nodiscard]] auto question(
-      const QuestionId& id,
-      const std::optional<InvocationId>& invocation_id)
+  [[nodiscard]] auto question(const QuestionId& id,
+                              const std::optional<InvocationId>& invocation_id)
       -> TranscriptQuestionSummary*;
 
   RunProjection m_run;
@@ -175,8 +174,7 @@ class SessionTranscriptProjection final {
       -> std::expected<void, TranscriptProjectionError>;
 
   [[nodiscard]] static auto rebuild(std::span<const RunEvent> events)
-      -> std::expected<SessionTranscriptProjection,
-                       TranscriptProjectionError>;
+      -> std::expected<SessionTranscriptProjection, TranscriptProjectionError>;
 
   [[nodiscard]] auto runs() const noexcept
       -> std::span<const TranscriptProjection> {
@@ -196,4 +194,4 @@ class SessionTranscriptProjection final {
   std::uint64_t m_last_sequence{};
 };
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

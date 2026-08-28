@@ -84,14 +84,13 @@ struct ProjectBacklogError {
   auto operator==(const ProjectBacklogError&) const -> bool = default;
 };
 
-[[nodiscard]] auto
-validate_project_backlog_item(const ProjectBacklogItem& item,
-                              const ProjectBacklogLimits& limits = {})
+[[nodiscard]] auto validate_project_backlog_item(
+    const ProjectBacklogItem& item, const ProjectBacklogLimits& limits = {})
     -> std::expected<void, ProjectBacklogError>;
 
-[[nodiscard]] auto
-validate_project_backlog_status_change(const ProjectBacklogStatusChange& change,
-                                       const ProjectBacklogLimits& limits = {})
+[[nodiscard]] auto validate_project_backlog_status_change(
+    const ProjectBacklogStatusChange& change,
+    const ProjectBacklogLimits& limits = {})
     -> std::expected<void, ProjectBacklogError>;
 
 } // namespace aiforge::domain

@@ -64,8 +64,7 @@ using AdapterItem =
                            "Venice network request failed", true, error.status);
     case venice::ErrorKind::InvalidArg:
       return request_error("Venice request was invalid");
-    case venice::ErrorKind::Parse:
-      return protocol_error();
+    case venice::ErrorKind::Parse: return protocol_error();
     case venice::ErrorKind::Http:
       return adapter_error(backend::BackendErrorKind::unavailable,
                            "Venice request failed", error.status >= 500,
@@ -78,16 +77,11 @@ using AdapterItem =
 
 [[nodiscard]] auto role_name(const domain::Role role) -> std::string_view {
   switch (role) {
-    case domain::Role::system:
-      return "system";
-    case domain::Role::user:
-      return "user";
-    case domain::Role::assistant:
-      return "assistant";
-    case domain::Role::tool:
-      return "tool";
-    case domain::Role::evidence:
-      return "user";
+    case domain::Role::system: return "system";
+    case domain::Role::user: return "user";
+    case domain::Role::assistant: return "assistant";
+    case domain::Role::tool: return "tool";
+    case domain::Role::evidence: return "user";
   }
   return "user";
 }
@@ -207,11 +201,11 @@ using AdapterItem =
       cumulative.reasoning_tokens < previous.reasoning_tokens) {
     return std::unexpected(protocol_error());
   }
-  return domain::Usage{
-      cumulative.input_tokens - previous.input_tokens,
-      cumulative.output_tokens - previous.output_tokens,
-      cumulative.cached_input_tokens - previous.cached_input_tokens,
-      cumulative.reasoning_tokens - previous.reasoning_tokens};
+  return domain::Usage{cumulative.input_tokens - previous.input_tokens,
+                       cumulative.output_tokens - previous.output_tokens,
+                       cumulative.cached_input_tokens -
+                           previous.cached_input_tokens,
+                       cumulative.reasoning_tokens - previous.reasoning_tokens};
 }
 
 [[nodiscard]] auto decimal_amount(const double value)
@@ -224,8 +218,7 @@ using AdapterItem =
       std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
   if (converted.ec != std::errc{}) return std::unexpected(protocol_error());
   auto amount = domain::DecimalAmount::from(std::string_view{
-      buffer.data(),
-      static_cast<std::size_t>(converted.ptr - buffer.data())});
+      buffer.data(), static_cast<std::size_t>(converted.ptr - buffer.data())});
   if (!amount) return std::unexpected(protocol_error());
   return *amount;
 }
@@ -265,8 +258,7 @@ class VeniceStream final : public backend::BackendStream {
   VeniceStream(venice::Client& client, venice::ChatRequest request,
                domain::MessageId assistant_message_id,
                const VeniceBackendOptions& options)
-      : m_client(client),
-        m_request(std::move(request)),
+      : m_client(client), m_request(std::move(request)),
         m_assistant_message_id(std::move(assistant_message_id)),
         m_capacity(options.pending_events),
         m_options{options.connect_timeout, options.read_timeout,
@@ -486,7 +478,7 @@ class VeniceStream final : public backend::BackendStream {
   bool m_closed{};
 };
 
-}  // namespace
+} // namespace
 
 struct VeniceBackend::Impl {
   explicit Impl(credentials::Secret credential,
@@ -500,8 +492,9 @@ struct VeniceBackend::Impl {
 
 VeniceBackend::VeniceBackend(credentials::Secret credential,
                              VeniceBackendOptions options)
-    : m_impl(std::make_unique<Impl>(std::move(credential),
-                                    std::move(options))) {}
+    : m_impl(
+          std::make_unique<Impl>(std::move(credential), std::move(options))) {
+}
 
 VeniceBackend::~VeniceBackend() = default;
 VeniceBackend::VeniceBackend(VeniceBackend&&) noexcept = default;
@@ -546,23 +539,23 @@ auto VeniceBackend::lookup(const domain::ModelId& model_id,
     }
 
     venice::CancelToken cancellation;
-    std::stop_callback cancel_callback{stop_token,
-                                       [&cancellation] { cancellation.cancel(); }};
+    std::stop_callback cancel_callback{
+        stop_token, [&cancellation] { cancellation.cancel(); }};
     const auto models = m_impl->client.models(
         "text", {m_impl->options.connect_timeout, m_impl->options.read_timeout,
                  m_impl->options.write_timeout, &cancellation});
     if (!models) return std::unexpected(map_error(models.error()));
 
-    const auto found = std::ranges::find(*models, model_id.value(),
-                                         &venice::Model::id);
+    const auto found =
+        std::ranges::find(*models, model_id.value(), &venice::Model::id);
     if (found == models->end()) {
       return std::unexpected(
           request_error("configured Venice model was not found"));
     }
     if (found->offline.value_or(false)) {
-      return std::unexpected(adapter_error(
-          backend::BackendErrorKind::unavailable,
-          "configured Venice model is unavailable", true));
+      return std::unexpected(
+          adapter_error(backend::BackendErrorKind::unavailable,
+                        "configured Venice model is unavailable", true));
     }
 
     auto context_tokens = found->available_context_tokens
@@ -588,4 +581,4 @@ auto VeniceBackend::lookup(const domain::ModelId& model_id,
   }
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

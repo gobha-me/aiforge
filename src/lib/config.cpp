@@ -30,7 +30,8 @@ namespace {
       continue;
     }
     if (component_start) {
-      if ((character < 'a' || character > 'z') && character != '_') return false;
+      if ((character < 'a' || character > 'z') && character != '_')
+        return false;
       component_start = false;
       continue;
     }
@@ -45,8 +46,7 @@ namespace {
 [[nodiscard]] auto kind_matches(const ConfigValueKind kind,
                                 const ConfigValue& value) -> bool {
   switch (kind) {
-    case ConfigValueKind::boolean:
-      return std::holds_alternative<bool>(value);
+    case ConfigValueKind::boolean: return std::holds_alternative<bool>(value);
     case ConfigValueKind::signed_integer:
       return std::holds_alternative<std::int64_t>(value);
     case ConfigValueKind::unsigned_integer:
@@ -103,9 +103,9 @@ namespace {
                                   const ConfigSource source)
     -> std::expected<void, ConfigDiagnostic> {
   if (!kind_matches(spec.value_kind, value)) {
-    return std::unexpected(diagnostic(
-        ConfigDiagnosticCode::invalid_value, source, spec.id,
-        "the value type does not match the configuration key"));
+    return std::unexpected(
+        diagnostic(ConfigDiagnosticCode::invalid_value, source, spec.id,
+                   "the value type does not match the configuration key"));
   }
   if (const auto* text = std::get_if<std::string>(&value);
       text != nullptr && text->size() > spec.maximum_text_bytes) {
@@ -121,19 +121,19 @@ namespace {
   }
   if (const auto* list = std::get_if<std::vector<std::string>>(&value)) {
     if (list->size() > spec.maximum_list_items) {
-      return std::unexpected(diagnostic(
-          ConfigDiagnosticCode::too_many_values, source, spec.id,
-          "the list exceeds its item limit"));
+      return std::unexpected(diagnostic(ConfigDiagnosticCode::too_many_values,
+                                        source, spec.id,
+                                        "the list exceeds its item limit"));
     }
     if (std::ranges::any_of(*list, [&](const auto& item) {
           return item.size() > spec.maximum_text_bytes;
         })) {
-      return std::unexpected(diagnostic(
-          ConfigDiagnosticCode::value_too_large, source, spec.id,
-          "a list item exceeds its byte limit"));
+      return std::unexpected(diagnostic(ConfigDiagnosticCode::value_too_large,
+                                        source, spec.id,
+                                        "a list item exceeds its byte limit"));
     }
-    if (std::ranges::any_of(*list,
-                            [](const auto& item) { return !valid_utf8(item); })) {
+    if (std::ranges::any_of(
+            *list, [](const auto& item) { return !valid_utf8(item); })) {
       return std::unexpected(diagnostic(ConfigDiagnosticCode::invalid_value,
                                         source, spec.id,
                                         "a list item is not valid UTF-8"));
@@ -143,7 +143,8 @@ namespace {
 }
 
 template <typename Integer>
-[[nodiscard]] auto parse_integer(const std::string_view value) -> std::optional<Integer> {
+[[nodiscard]] auto parse_integer(const std::string_view value)
+    -> std::optional<Integer> {
   Integer result{};
   const auto [end, error] =
       std::from_chars(value.data(), value.data() + value.size(), result, 10);
@@ -155,14 +156,10 @@ template <typename Integer>
 
 [[nodiscard]] auto rank(const ConfigSource source) -> int {
   switch (source) {
-    case ConfigSource::command_line:
-      return 4;
-    case ConfigSource::environment:
-      return 3;
-    case ConfigSource::file:
-      return 2;
-    case ConfigSource::compiled_default:
-      return 1;
+    case ConfigSource::command_line: return 4;
+    case ConfigSource::environment: return 3;
+    case ConfigSource::file: return 2;
+    case ConfigSource::compiled_default: return 1;
   }
   return 0;
 }
@@ -174,7 +171,7 @@ template <typename Integer>
   return found == registry.keys.end() ? nullptr : &*found;
 }
 
-}  // namespace
+} // namespace
 
 auto ResolvedConfig::find(const std::string_view key) const
     -> const ResolvedConfigEntry* {
@@ -189,10 +186,10 @@ auto validate_registry(const ConfigRegistry& registry)
   for (const auto& spec : registry.keys) {
     if (!valid_key_id(spec.id) || spec.maximum_text_bytes == 0 ||
         spec.maximum_list_items == 0) {
-      return std::unexpected(diagnostic(
-          ConfigDiagnosticCode::invalid_registry,
-          ConfigSource::compiled_default, spec.id,
-          "a configuration key specification is invalid"));
+      return std::unexpected(
+          diagnostic(ConfigDiagnosticCode::invalid_registry,
+                     ConfigSource::compiled_default, spec.id,
+                     "a configuration key specification is invalid"));
     }
     if (!ids.insert(spec.id).second) {
       return std::unexpected(diagnostic(
@@ -202,10 +199,10 @@ auto validate_registry(const ConfigRegistry& registry)
     if (spec.environment_name &&
         (spec.environment_name->empty() ||
          !environment_names.insert(*spec.environment_name).second)) {
-      return std::unexpected(diagnostic(
-          ConfigDiagnosticCode::duplicate_environment_binding,
-          ConfigSource::compiled_default, spec.id,
-          "environment bindings must be nonempty and unique"));
+      return std::unexpected(
+          diagnostic(ConfigDiagnosticCode::duplicate_environment_binding,
+                     ConfigSource::compiled_default, spec.id,
+                     "environment bindings must be nonempty and unique"));
     }
     if (spec.compiled_default) {
       if (auto valid = validate_value(spec, *spec.compiled_default,
@@ -229,9 +226,9 @@ auto parse_config_value(const ConfigKeySpec& spec,
                         const ConfigSource source)
     -> std::expected<ConfigValue, ConfigDiagnostic> {
   const auto invalid = [&]() {
-    return std::unexpected(diagnostic(
-        ConfigDiagnosticCode::invalid_value, source, spec.id,
-        "the value is invalid for the configuration key"));
+    return std::unexpected(
+        diagnostic(ConfigDiagnosticCode::invalid_value, source, spec.id,
+                   "the value is invalid for the configuration key"));
   };
   if (spec.value_kind != ConfigValueKind::text_list && values.size() != 1) {
     return invalid();
@@ -241,9 +238,10 @@ auto parse_config_value(const ConfigKeySpec& spec,
   switch (spec.value_kind) {
     case ConfigValueKind::boolean: {
       std::string normalized{values.front()};
-      std::ranges::transform(normalized, normalized.begin(), [](const unsigned char value) {
-        return static_cast<char>(std::tolower(value));
-      });
+      std::ranges::transform(normalized, normalized.begin(),
+                             [](const unsigned char value) {
+                               return static_cast<char>(std::tolower(value));
+                             });
       if (normalized == "true" || normalized == "1" || normalized == "on" ||
           normalized == "yes") {
         parsed = true;
@@ -267,13 +265,12 @@ auto parse_config_value(const ConfigKeySpec& spec,
       parsed = *integer;
       break;
     }
-    case ConfigValueKind::text:
-      parsed = std::string{values.front()};
-      break;
+    case ConfigValueKind::text: parsed = std::string{values.front()}; break;
     case ConfigValueKind::text_list: {
       std::vector<std::string> list;
       list.reserve(values.size());
-      for (const auto value : values) list.emplace_back(value);
+      for (const auto value : values)
+        list.emplace_back(value);
       parsed = std::move(list);
       break;
     }
@@ -307,14 +304,10 @@ auto format_config_value(const ConfigValue& value) -> std::string {
 
 auto config_source_name(const ConfigSource source) -> std::string_view {
   switch (source) {
-    case ConfigSource::command_line:
-      return "command line";
-    case ConfigSource::environment:
-      return "environment";
-    case ConfigSource::file:
-      return "file";
-    case ConfigSource::compiled_default:
-      return "default";
+    case ConfigSource::command_line: return "command line";
+    case ConfigSource::environment: return "environment";
+    case ConfigSource::file: return "file";
+    case ConfigSource::compiled_default: return "default";
   }
   return "unknown";
 }
@@ -329,7 +322,8 @@ auto resolve_config(const ConfigRegistry& registry,
   ResolvedConfig result;
   result.entries.reserve(registry.keys.size());
   for (const auto& spec : registry.keys) {
-    result.entries.push_back({spec.id, std::nullopt, std::nullopt, spec.sensitive, {}});
+    result.entries.push_back(
+        {spec.id, std::nullopt, std::nullopt, spec.sensitive, {}});
   }
 
   struct RankedCandidate {
@@ -340,21 +334,23 @@ auto resolve_config(const ConfigRegistry& registry,
   std::unordered_set<std::string> source_keys;
 
   for (const auto& layer : layers) {
-    result.diagnostics.insert(result.diagnostics.end(), layer.diagnostics.begin(),
+    result.diagnostics.insert(result.diagnostics.end(),
+                              layer.diagnostics.begin(),
                               layer.diagnostics.end());
     for (const auto& candidate : layer.candidates) {
       const auto* spec = find_spec(registry, candidate.key);
       if (spec == nullptr) {
-        auto error = diagnostic(ConfigDiagnosticCode::unknown_key, layer.source,
-                                candidate.key,
-                                "the source contains an unknown configuration key");
+        auto error = diagnostic(
+            ConfigDiagnosticCode::unknown_key, layer.source, candidate.key,
+            "the source contains an unknown configuration key");
         if (layer.source == ConfigSource::command_line) {
           return std::unexpected(std::move(error));
         }
         result.diagnostics.push_back(std::move(error));
         continue;
       }
-      const auto identity = std::to_string(rank(layer.source)) + "\n" + candidate.key;
+      const auto identity =
+          std::to_string(rank(layer.source)) + "\n" + candidate.key;
       if (!source_keys.insert(identity).second) {
         auto error = diagnostic(
             ConfigDiagnosticCode::duplicate_source_value, layer.source,
@@ -411,9 +407,9 @@ auto resolve_config(const ConfigRegistry& registry,
         continue;
       }
       if (!candidate.value) {
-        auto error = diagnostic(ConfigDiagnosticCode::invalid_value,
-                                ranked.source, spec.id,
-                                "the source candidate has no value");
+        auto error =
+            diagnostic(ConfigDiagnosticCode::invalid_value, ranked.source,
+                       spec.id, "the source candidate has no value");
         if (ranked.source == ConfigSource::command_line) {
           return std::unexpected(std::move(error));
         }
@@ -423,9 +419,9 @@ auto resolve_config(const ConfigRegistry& registry,
         continue;
       }
       if (spec.sensitive && ranked.source == ConfigSource::file) {
-        auto error = diagnostic(ConfigDiagnosticCode::sensitive_value,
-                                ranked.source, spec.id,
-                                "sensitive values are excluded from configuration files");
+        auto error = diagnostic(
+            ConfigDiagnosticCode::sensitive_value, ranked.source, spec.id,
+            "sensitive values are excluded from configuration files");
         result.diagnostics.push_back(error);
         entry.decisions.push_back(
             {ranked.source, CandidateDisposition::rejected, error.code});
@@ -481,7 +477,8 @@ auto environment_config_layer(const ConfigRegistry& registry)
         }
       }
       values.reserve(list_storage.size());
-      for (const auto& value : list_storage) values.push_back(value);
+      for (const auto& value : list_storage)
+        values.push_back(value);
     } else {
       values.push_back(storage);
     }
@@ -504,4 +501,4 @@ auto builtin_config_registry() -> const ConfigRegistry& {
   return registry;
 }
 
-}  // namespace aiforge::config
+} // namespace aiforge::config

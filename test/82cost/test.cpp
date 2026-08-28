@@ -16,7 +16,7 @@ namespace {
 
 using namespace aiforge::domain;
 
-template <typename IdType> auto make_id(const std::string &value) -> IdType {
+template <typename IdType> auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
@@ -42,7 +42,7 @@ auto event(const std::uint64_t sequence, Payload payload, std::string event_id,
           std::move(payload)};
 }
 
-auto inference(const std::string &id, const std::string &model)
+auto inference(const std::string& id, const std::string& model)
     -> InferenceStarted {
   return {make_id<InferenceId>(id), make_id<ModelId>(model)};
 }
@@ -56,7 +56,7 @@ auto started() -> RunStarted {
 
 TEST_CASE("decimal money rejects malformed and overflowing values",
           "[cost][failure]") {
-  for (const auto *value : {"", "-1", "+1", ".", "1.", "1e", "1x", "nan", "inf",
+  for (const auto* value : {"", "-1", "+1", ".", "1.", "1e", "1x", "nan", "inf",
                             "1e-19", "18446744073709551616"}) {
     CAPTURE(value);
     REQUIRE_FALSE(DecimalAmount::from(value));
@@ -191,7 +191,7 @@ TEST_CASE("run and session projections replay reported costs deterministically",
   RunProjection replayed_run;
   UsageLedgerProjection ledger;
   UsageLedgerProjection replayed_ledger;
-  for (const auto &item : events) {
+  for (const auto& item : events) {
     REQUIRE(run.apply(item));
     REQUIRE(replayed_run.apply(item));
     REQUIRE(ledger.apply(item));

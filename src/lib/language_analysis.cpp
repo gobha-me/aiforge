@@ -321,7 +321,7 @@ using namespace domain;
                  std::nullopt, error.record_id);
 }
 
-}  // namespace
+} // namespace
 
 auto requested_language_analysis_feature(
     const LanguageAnalysisQuery& query) noexcept -> LanguageAnalysisFeature {
@@ -552,4 +552,4 @@ auto validate_language_analysis_result(const LanguageAnalysisRequest& request,
   }
 }
 
-}  // namespace aiforge::repository
+} // namespace aiforge::repository

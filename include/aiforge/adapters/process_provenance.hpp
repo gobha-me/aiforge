@@ -19,4 +19,4 @@ namespace aiforge::adapters {
     std::optional<domain::CredentialSourceReference> credential_source)
     -> domain::RunProvenance;
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

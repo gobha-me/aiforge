@@ -37,11 +37,13 @@ auto request(std::string tool, std::vector<domain::Effect> effects,
   return {make_id<domain::SessionId>(session),
           make_id<domain::RunId>("run"),
           make_id<domain::InvocationId>("call"),
-          make_id<domain::PermissionProfileId>("observe"), std::move(tool),
-          std::move(effects), std::move(scopes)};
+          make_id<domain::PermissionProfileId>("observe"),
+          std::move(tool),
+          std::move(effects),
+          std::move(scopes)};
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("capability scopes reject ambiguity and preserve containment",
           "[policy][scope][failure]") {
@@ -65,8 +67,7 @@ TEST_CASE("capability scopes reject ambiguity and preserve containment",
       {domain::Effect::network, "network.host", "api.example.com"},
       {domain::Effect::network, "network.host", "attacker.example.com"}));
   REQUIRE_FALSE(runtime::normalize_capability_scope(
-      {domain::Effect::spend, "spend.microunits",
-       "18446744073709551616"}));
+      {domain::Effect::spend, "spend.microunits", "18446744073709551616"}));
 
   const auto intersection = runtime::intersect_capability_scopes(
       {root()}, {root("/repo/src"), root("/outside")});
@@ -79,12 +80,11 @@ TEST_CASE("permission profile allows, asks, and denies without scope widening",
           "[policy][profile][failure]") {
   runtime::CapabilityPolicy policy{profile()};
 
-  auto allowed = policy.evaluate(request(
-      "read_file", {domain::Effect::read}, {root("/repo/public/file")}));
+  auto allowed = policy.evaluate(request("read_file", {domain::Effect::read},
+                                         {root("/repo/public/file")}));
   REQUIRE(allowed);
   REQUIRE(allowed->decision == domain::PolicyDecision::allow);
-  REQUIRE(allowed->source ==
-          domain::PolicyDecisionSource::permission_profile);
+  REQUIRE(allowed->source == domain::PolicyDecisionSource::permission_profile);
 
   auto approval = policy.evaluate(
       request("read_file", {domain::Effect::read}, {root("/repo/private")}));
@@ -96,8 +96,9 @@ TEST_CASE("permission profile allows, asks, and denies without scope widening",
   REQUIRE(denied);
   REQUIRE(denied->decision == domain::PolicyDecision::deny);
 
-  auto malformed = request("read_file", {domain::Effect::read},
-                           {{domain::Effect::write, "filesystem.root", "/repo"}});
+  auto malformed =
+      request("read_file", {domain::Effect::read},
+              {{domain::Effect::write, "filesystem.root", "/repo"}});
   REQUIRE_FALSE(policy.evaluate(malformed));
 
   auto invalid_profile = profile();
@@ -117,8 +118,8 @@ TEST_CASE("default policy allows no-effect interaction and denies authority",
   REQUIRE(interaction);
   REQUIRE(interaction->decision == domain::PolicyDecision::allow);
 
-  auto effectful = policy->evaluate(
-      request("read_file", {domain::Effect::read}, {root()}));
+  auto effectful =
+      policy->evaluate(request("read_file", {domain::Effect::read}, {root()}));
   REQUIRE(effectful);
   REQUIRE(effectful->decision == domain::PolicyDecision::deny);
 }
@@ -130,29 +131,30 @@ TEST_CASE("approval lifetimes are invocation, session, or explicitly saved",
   const auto pending =
       request("read_file", {domain::Effect::read}, {root("/repo/private")});
 
-  auto once = policy.approve(
-      pending, {{root("/repo/private")},
-                domain::ApprovalGrantLifetime::invocation});
+  auto once =
+      policy.approve(pending, {{root("/repo/private")},
+                               domain::ApprovalGrantLifetime::invocation});
   REQUIRE(once);
   REQUIRE(policy.evaluate(pending)->decision ==
           domain::PolicyDecision::require_approval);
 
-  auto session = policy.approve(
-      pending,
-      {{root("/repo/private")}, domain::ApprovalGrantLifetime::session});
+  auto session =
+      policy.approve(pending, {{root("/repo/private")},
+                               domain::ApprovalGrantLifetime::session});
   REQUIRE(session);
   auto reused = policy.evaluate(pending);
   REQUIRE(reused);
   REQUIRE(reused->decision == domain::PolicyDecision::allow);
   REQUIRE(reused->source == domain::PolicyDecisionSource::session_grant);
-  REQUIRE(policy.evaluate(request("read_file", {domain::Effect::read},
-                                  {root("/repo/private")}, "other-session"))
+  REQUIRE(policy
+              .evaluate(request("read_file", {domain::Effect::read},
+                                {root("/repo/private")}, "other-session"))
               ->decision == domain::PolicyDecision::require_approval);
 
   auto saved = policy.approve(
-      request("network", {domain::Effect::network},
-              {{domain::Effect::network, "network.host",
-                "API.EXAMPLE.COM:443"}}),
+      request(
+          "network", {domain::Effect::network},
+          {{domain::Effect::network, "network.host", "API.EXAMPLE.COM:443"}}),
       {{{domain::Effect::network, "network.host", "api.example.com:443"}},
        domain::ApprovalGrantLifetime::saved});
   REQUIRE(saved);
@@ -176,16 +178,15 @@ TEST_CASE("approval lifetimes are invocation, session, or explicitly saved",
   REQUIRE(stale);
   REQUIRE(stale->decision == domain::PolicyDecision::deny);
 
-  auto escalated = restored.evaluate(request(
-      "network", {domain::Effect::network, domain::Effect::write},
-      {{domain::Effect::network, "network.host", "api.example.com:443"},
-       {domain::Effect::write, "filesystem.root", "/repo/private"}}));
+  auto escalated = restored.evaluate(
+      request("network", {domain::Effect::network, domain::Effect::write},
+              {{domain::Effect::network, "network.host", "api.example.com:443"},
+               {domain::Effect::write, "filesystem.root", "/repo/private"}}));
   REQUIRE(escalated);
   REQUIRE(escalated->decision == domain::PolicyDecision::deny);
 
   auto widened = policy.approve(
-      pending,
-      {{root()}, domain::ApprovalGrantLifetime::invocation});
+      pending, {{root()}, domain::ApprovalGrantLifetime::invocation});
   REQUIRE_FALSE(widened);
   REQUIRE(widened.error().code == runtime::ToolPolicyErrorCode::scope_widening);
 }
@@ -199,8 +200,7 @@ TEST_CASE("saved policy failures are typed and never become grants",
   const auto pending =
       request("read_file", {domain::Effect::read}, {root("/repo/private")});
   auto result = policy.approve(
-      pending, {{root("/repo/private")},
-                domain::ApprovalGrantLifetime::saved});
+      pending, {{root("/repo/private")}, domain::ApprovalGrantLifetime::saved});
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code ==
           runtime::ToolPolicyErrorCode::persistence_failure);

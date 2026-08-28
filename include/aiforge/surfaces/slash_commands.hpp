@@ -112,20 +112,19 @@ class SlashCommandRegistry final {
   [[nodiscard]] static auto create(std::vector<SlashCommandSpec> commands)
       -> std::expected<SlashCommandRegistry, SlashCommandRegistryError>;
 
-  [[nodiscard]] auto dispatch(
-      std::string_view input, const SlashCommandContext& context = {},
-      SlashCommandLimits limits = {}) const noexcept
+  [[nodiscard]] auto dispatch(std::string_view input,
+                              const SlashCommandContext& context = {},
+                              SlashCommandLimits limits = {}) const noexcept
       -> std::expected<std::optional<SlashCommandResult>, SlashCommandError>;
 
   [[nodiscard]] auto describe(
       std::optional<std::string_view> name = std::nullopt,
       const SlashCommandContext& context = {}) const noexcept
-      -> std::expected<std::vector<SlashCommandDescription>,
-                       SlashCommandError>;
+      -> std::expected<std::vector<SlashCommandDescription>, SlashCommandError>;
 
-  [[nodiscard]] auto complete(
-      std::string_view prefix, const SlashCommandContext& context = {},
-      SlashCommandLimits limits = {}) const noexcept
+  [[nodiscard]] auto complete(std::string_view prefix,
+                              const SlashCommandContext& context = {},
+                              SlashCommandLimits limits = {}) const noexcept
       -> std::expected<std::vector<std::string>, SlashCommandError>;
 
   [[nodiscard]] auto commands() const noexcept
@@ -143,4 +142,4 @@ class SlashCommandRegistry final {
 [[nodiscard]] auto builtin_slash_command_registry()
     -> const SlashCommandRegistry&;
 
-}  // namespace aiforge::surfaces
+} // namespace aiforge::surfaces

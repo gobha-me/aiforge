@@ -10,10 +10,10 @@
 #include <variant>
 #include <vector>
 
-#include <aiforge/adapters/process_provenance.hpp>
-#include <aiforge/adapters/process_model_catalog.hpp>
-#include <aiforge/adapters/process_credentials.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
+#include <aiforge/adapters/process_credentials.hpp>
+#include <aiforge/adapters/process_model_catalog.hpp>
+#include <aiforge/adapters/process_provenance.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
 #include <aiforge/config/config.hpp>
@@ -46,7 +46,8 @@ auto warning(std::ostream& error, const std::string_view message) -> bool {
   if (requested_model) {
     layers.push_back(config::ConfigLayer{
         config::ConfigSource::command_line,
-        {{"model", config::ConfigValue{*requested_model}, std::nullopt}}, {}});
+        {{"model", config::ConfigValue{*requested_model}, std::nullopt}},
+        {}});
   }
   auto environment = config::environment_config_layer(registry);
   if (!environment) {
@@ -89,8 +90,9 @@ auto warning(std::ostream& error, const std::string_view message) -> bool {
     -> std::expected<domain::ModelId, cli::CommandFailure> {
   const auto* entry = resolved.find("model");
   if (entry == nullptr || !entry->value) {
-    return failure(cli::CommandFailureKind::runtime,
-                   "model is not configured; set AIFORGE_MODEL or config model");
+    return failure(
+        cli::CommandFailureKind::runtime,
+        "model is not configured; set AIFORGE_MODEL or config model");
   }
   const auto* text = std::get_if<std::string>(&*entry->value);
   if (text == nullptr || text->empty()) {
@@ -105,9 +107,9 @@ auto warning(std::ostream& error, const std::string_view message) -> bool {
   return std::move(*model);
 }
 
-[[nodiscard]] auto validate_requested_model(
-    model::CatalogService& catalog, const domain::ModelId& requested,
-    const std::stop_token stop_token)
+[[nodiscard]] auto validate_requested_model(model::CatalogService& catalog,
+                                            const domain::ModelId& requested,
+                                            const std::stop_token stop_token)
     -> std::expected<void, cli::CommandFailure> {
   auto snapshot = catalog.snapshot(stop_token);
   if (!snapshot) {
@@ -116,13 +118,16 @@ auto warning(std::ostream& error, const std::string_view message) -> bool {
                        : cli::CommandFailureKind::runtime,
                    snapshot.error().message);
   }
-  if (model::find_model(snapshot->get(), requested, "text") != nullptr) return {};
+  if (model::find_model(snapshot->get(), requested, "text") != nullptr)
+    return {};
   auto suggestions = model::suggest_models(snapshot->get(), requested.value());
-  std::string message = "unknown text model '" + std::string{requested.value()} + "'";
+  std::string message =
+      "unknown text model '" + std::string{requested.value()} + "'";
   if (!suggestions.empty()) {
     message += "; did you mean ";
     for (std::size_t index{}; index < suggestions.size(); ++index) {
-      if (index != 0) message += index + 1 == suggestions.size() ? " or " : ", ";
+      if (index != 0)
+        message += index + 1 == suggestions.size() ? " or " : ", ";
       message += "'" + suggestions[index] + "'";
     }
     message.push_back('?');
@@ -182,12 +187,11 @@ auto warning(std::ostream& error, const std::string_view message) -> bool {
           "one-shot execution failed internally"};
 }
 
-}  // namespace
+} // namespace
 
 auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
                                     cli::CommandEnvironment& environment,
-                                    std::ostream& output,
-                                    std::ostream& error)
+                                    std::ostream& output, std::ostream& error)
     -> std::expected<void, cli::CommandFailure> {
   try {
     if (m_maximum_input_bytes == 0) {
@@ -211,8 +215,8 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
     if (!catalog)
       return failure(cli::CommandFailureKind::runtime, catalog.error().message);
     if (request.model) {
-      auto validated = validate_requested_model(
-          (*catalog)->service(), *model, environment.stop_token);
+      auto validated = validate_requested_model((*catalog)->service(), *model,
+                                                environment.stop_token);
       if (!validated) return std::unexpected(std::move(validated.error()));
     }
 
@@ -220,7 +224,8 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
     if (!credential) return std::unexpected(std::move(credential.error()));
     if (!credential->credential) {
       return failure(cli::CommandFailureKind::runtime,
-                     "Venice credential is not configured; run 'aiforge login' or set VENICE_API_KEY");
+                     "Venice credential is not configured; run 'aiforge login' "
+                     "or set VENICE_API_KEY");
     }
     auto resolved_credential = std::move(*credential->credential);
     auto credential_source = resolved_credential.source;
@@ -245,18 +250,24 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
     if (persona_root) personas.emplace(std::move(*persona_root));
     auto* persona_source = personas ? &*personas : nullptr;
     surfaces::OneShotRequest one_shot_request{
-        std::string{request.prompt}, std::move(*input), std::move(*model),
-        session_mode, std::move(request.session_id), std::move(provenance),
-        std::move(request.persona), std::move(request.session_spend_ceiling)};
+        std::string{request.prompt},
+        std::move(*input),
+        std::move(*model),
+        session_mode,
+        std::move(request.session_id),
+        std::move(provenance),
+        std::move(request.persona),
+        std::move(request.session_spend_ceiling)};
 
     std::expected<surfaces::OneShotResult, surfaces::OneShotError> result =
-        std::unexpected(surfaces::OneShotError{
-            surfaces::OneShotErrorCode::internal_failure,
-            "one-shot session setup failed"});
+        std::unexpected(
+            surfaces::OneShotError{surfaces::OneShotErrorCode::internal_failure,
+                                   "one-shot session setup failed"});
     if (session_mode == surfaces::OneShotRequest::SessionMode::ephemeral) {
-      surfaces::OneShotSurface surface{
-          backend, (*catalog)->service(), {m_maximum_input_bytes, 4096},
-          persona_source};
+      surfaces::OneShotSurface surface{backend,
+                                       (*catalog)->service(),
+                                       {m_maximum_input_bytes, 4096},
+                                       persona_source};
       result = surface.run(std::move(one_shot_request), output, error,
                            environment.stop_token);
     } else {
@@ -270,10 +281,11 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
         return failure(cli::CommandFailureKind::runtime,
                        "session storage could not be opened");
       }
-      surfaces::OneShotSurface surface{
-          backend, (*catalog)->service(), **store,
-          {m_maximum_input_bytes, 4096},
-          persona_source};
+      surfaces::OneShotSurface surface{backend,
+                                       (*catalog)->service(),
+                                       **store,
+                                       {m_maximum_input_bytes, 4096},
+                                       persona_source};
       result = surface.run(std::move(one_shot_request), output, error,
                            environment.stop_token);
     }
@@ -285,4 +297,4 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
   }
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

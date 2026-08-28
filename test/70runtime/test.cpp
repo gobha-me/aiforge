@@ -27,15 +27,15 @@ namespace {
 using namespace std::chrono_literals;
 using namespace aiforge;
 
-template <typename IdType>
-auto make_id(const std::string& value) -> IdType {
+template <typename IdType> auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
 auto reported_cost(const std::string_view value = "0.0645375")
     -> domain::ReportedCost {
   auto amount = domain::MonetaryAmount::create(
-      "venice.diem", domain::DecimalAmount::from(value).value()).value();
+                    "venice.diem", domain::DecimalAmount::from(value).value())
+                    .value();
   return domain::ReportedCost::create({std::move(amount)}).value();
 }
 
@@ -92,8 +92,11 @@ auto provenance() -> domain::RunProvenance {
           make_id<domain::ModelId>("model"),
           domain::CredentialSourceReference{
               domain::CredentialSourceKind::environment, "VENICE_API_KEY"},
-          {{"model", std::string{"venice-model"}, true,
-            domain::ProvenanceSource::environment, false,
+          {{"model",
+            std::string{"venice-model"},
+            true,
+            domain::ProvenanceSource::environment,
+            false,
             {{domain::ProvenanceSource::environment,
               domain::ProvenanceDisposition::selected, std::nullopt}}}},
           {{"aiforge", "0.10.0"}},
@@ -103,15 +106,10 @@ auto provenance() -> domain::RunProvenance {
 template <typename Payload>
 auto durable_event(const domain::RunId& run, const std::uint64_t sequence,
                    std::string event_id, Payload payload) -> domain::RunEvent {
-  return {domain::EventMetadata{make_id<domain::EventId>(std::move(event_id)),
-                                run,
-                                sequence,
-                                1,
-                                domain::EventTimestamp{
-                                    std::chrono::milliseconds{100 + sequence}},
-                                std::nullopt,
-                                std::nullopt,
-                                std::nullopt},
+  return {domain::EventMetadata{
+              make_id<domain::EventId>(std::move(event_id)), run, sequence, 1,
+              domain::EventTimestamp{std::chrono::milliseconds{100 + sequence}},
+              std::nullopt, std::nullopt, std::nullopt},
           std::move(payload)};
 }
 
@@ -251,12 +249,12 @@ class PassiveToolExecutor final : public runtime::ToolExecutor {
       -> std::expected<std::unique_ptr<runtime::ToolExecutionStream>,
                        runtime::ToolExecutionError> override {
     return std::unexpected(runtime::ToolExecutionError{
-        runtime::ToolExecutionErrorCode::unavailable,
-        "passive test executor", false});
+        runtime::ToolExecutionErrorCode::unavailable, "passive test executor",
+        false});
   }
 };
 
-}  // namespace
+} // namespace
 
 TEST_CASE("run kernel rejects invalid limits before starting a worker",
           "[runtime][failure]") {
@@ -275,8 +273,10 @@ TEST_CASE("run kernel rejects persona provenance that does not match context",
   runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake};
   auto start = run_start();
   const domain::PersonaReference reference{
-      make_id<domain::PersonaId>("persona:reviewer"), "reviewer",
-      "personas/reviewer.md", {"sha256", std::string(64, 'a'), 7}};
+      make_id<domain::PersonaId>("persona:reviewer"),
+      "reviewer",
+      "personas/reviewer.md",
+      {"sha256", std::string(64, 'a'), 7}};
   start.attributes.persona_id = reference.persona_id;
   start.persona_selection = domain::PersonaSelection{
       domain::PersonaSelectionAction::selected,
@@ -293,7 +293,8 @@ TEST_CASE("run kernel rejects persona provenance that does not match context",
       domain::ContextEntryKind::instruction,
       domain::InstructionLayer::persona,
       domain::Message{make_id<domain::MessageId>("persona-message"),
-                      domain::Role::system, {domain::TextBlock{"review"}},
+                      domain::Role::system,
+                      {domain::TextBlock{"review"}},
                       std::nullopt},
       {make_id<domain::ContextSourceId>("persona-source"),
        reference.source_location,
@@ -442,11 +443,10 @@ TEST_CASE("cost observations require a started response and occur once",
   SECTION("before response start") {
     auto backend_request = request();
     testing::ScriptedBackend fake{{testing::ScriptedExchange{
-        backend_request,
-        testing::StreamScript{{
-            step(backend::CostObserved{reported_cost()}),
-            testing::EndOfStream{},
-        }}}}};
+        backend_request, testing::StreamScript{{
+                             step(backend::CostObserved{reported_cost()}),
+                             testing::EndOfStream{},
+                         }}}}};
     WakeCounter wake;
     runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake,
                               &wake};
@@ -459,13 +459,12 @@ TEST_CASE("cost observations require a started response and occur once",
   SECTION("duplicate for one inference") {
     auto backend_request = request();
     testing::ScriptedBackend fake{{testing::ScriptedExchange{
-        backend_request,
-        testing::StreamScript{{
-            step(backend::ResponseStarted{"response"}),
-            step(backend::CostObserved{reported_cost("0.01")}),
-            step(backend::CostObserved{reported_cost("0.02")}),
-            testing::EndOfStream{},
-        }}}}};
+        backend_request, testing::StreamScript{{
+                             step(backend::ResponseStarted{"response"}),
+                             step(backend::CostObserved{reported_cost("0.01")}),
+                             step(backend::CostObserved{reported_cost("0.02")}),
+                             testing::EndOfStream{},
+                         }}}}};
     WakeCounter wake;
     runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake,
                               &wake};
@@ -510,8 +509,8 @@ TEST_CASE("tool fragments assemble once and undeclared tools fail",
       {domain::Effect::network},
       {}};
   runtime::ToolRegistry registry;
-  REQUIRE(registry.register_tool(
-      declaration, std::make_shared<PassiveToolExecutor>()));
+  REQUIRE(registry.register_tool(declaration,
+                                 std::make_shared<PassiveToolExecutor>()));
   auto backend_request = request({declaration});
   const auto invocation = make_id<domain::InvocationId>("call");
   testing::ScriptedBackend fake{{testing::ScriptedExchange{
@@ -526,8 +525,12 @@ TEST_CASE("tool fragments assemble once and undeclared tools fail",
   WakeCounter wake;
   auto snapshot = registry.snapshot();
   REQUIRE(snapshot);
-  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake, &wake,
-                            {}, {}, std::move(*snapshot)};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            fake,
+                            &wake,
+                            {},
+                            {},
+                            std::move(*snapshot)};
 
   REQUIRE(kernel.start(run_start(backend_request)));
   std::size_t observed_wakes{};
@@ -796,8 +799,12 @@ TEST_CASE("run provenance is validated and completed before it is recorded",
           testing::EndOfStream{},
       }}}}};
   WakeCounter wake;
-  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake, &wake,
-                            {}, {}, std::move(*snapshot)};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            fake,
+                            &wake,
+                            {},
+                            {},
+                            std::move(*snapshot)};
 
   // The tool section is kernel-owned, so a caller may not assert it.
   auto claimed_tools = run_start(backend_request);
@@ -871,7 +878,7 @@ TEST_CASE("run kernel records spend ceiling changes without backend work",
           "[runtime][spend][failure]") {
   testing::ScriptedBackend fake{{}};
   runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake};
-  const auto change = [](const std::string &run, const std::string &value) {
+  const auto change = [](const std::string& run, const std::string& value) {
     return runtime::SessionSpendCeilingChange{
         make_id<domain::RunId>(run),
         {make_id<domain::SurfaceId>("session-policy"),
@@ -910,12 +917,12 @@ TEST_CASE("resume restores recorded provenance and rejects a duplicate record",
   const auto run = make_id<domain::RunId>("run");
   const auto history = [&](const bool duplicate) {
     std::vector<domain::RunEvent> events{
-        durable_event(run, 1, "e1",
-                      domain::RunStarted{
-                          make_id<domain::SurfaceId>("test"),
-                          make_id<domain::WorkspaceId>("chat"),
-                          make_id<domain::PermissionProfileId>("observe"),
-                          std::nullopt}),
+        durable_event(
+            run, 1, "e1",
+            domain::RunStarted{make_id<domain::SurfaceId>("test"),
+                               make_id<domain::WorkspaceId>("chat"),
+                               make_id<domain::PermissionProfileId>("observe"),
+                               std::nullopt}),
         durable_event(run, 2, "e2",
                       domain::RunProvenanceRecorded{provenance()}),
         durable_event(run, 3, "e3", domain::RunCompleted{})};

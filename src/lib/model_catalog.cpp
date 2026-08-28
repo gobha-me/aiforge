@@ -1,8 +1,8 @@
 #include <aiforge/model/catalog.hpp>
 
 #include <algorithm>
-#include <chrono>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <ranges>
@@ -69,23 +69,23 @@ namespace {
   std::string result;
   result.reserve(value.size());
   for (const auto character : value) {
-    result.push_back(static_cast<char>(
-        std::tolower(static_cast<unsigned char>(character))));
+    result.push_back(
+        static_cast<char>(std::tolower(static_cast<unsigned char>(character))));
   }
   return result;
 }
 
 [[nodiscard]] auto edit_distance(const std::string_view left,
-                                 const std::string_view right)
-    -> std::size_t {
+                                 const std::string_view right) -> std::size_t {
   std::vector<std::size_t> previous(right.size() + 1);
   std::vector<std::size_t> current(right.size() + 1);
-  for (std::size_t index{}; index <= right.size(); ++index) previous[index] = index;
+  for (std::size_t index{}; index <= right.size(); ++index)
+    previous[index] = index;
   for (std::size_t row = 1; row <= left.size(); ++row) {
     current[0] = row;
     for (std::size_t column = 1; column <= right.size(); ++column) {
-      const auto substitution = previous[column - 1] +
-                                (left[row - 1] == right[column - 1] ? 0U : 1U);
+      const auto substitution =
+          previous[column - 1] + (left[row - 1] == right[column - 1] ? 0U : 1U);
       current[column] = std::min(
           {previous[column] + 1, current[column - 1] + 1, substitution});
     }
@@ -133,12 +133,11 @@ namespace {
 [[nodiscard]] auto pricing_origin(const CatalogOrigin origin)
     -> domain::PricingCatalogOrigin {
   switch (origin) {
-  case CatalogOrigin::live:
-    return domain::PricingCatalogOrigin::live;
-  case CatalogOrigin::fresh_cache:
-    return domain::PricingCatalogOrigin::fresh_cache;
-  case CatalogOrigin::stale_cache:
-    return domain::PricingCatalogOrigin::stale_cache;
+    case CatalogOrigin::live: return domain::PricingCatalogOrigin::live;
+    case CatalogOrigin::fresh_cache:
+      return domain::PricingCatalogOrigin::fresh_cache;
+    case CatalogOrigin::stale_cache:
+      return domain::PricingCatalogOrigin::stale_cache;
   }
   return domain::PricingCatalogOrigin::live;
 }
@@ -162,21 +161,17 @@ namespace {
     -> domain::TextPricing {
   domain::TextPricing result{observed_tier(pricing.base)};
   result.extended_threshold_tokens = pricing.extended_threshold_tokens;
-  if (pricing.extended)
-    result.extended = observed_tier(*pricing.extended);
+  if (pricing.extended) result.extended = observed_tier(*pricing.extended);
   return result;
 }
 
-}  // namespace
+} // namespace
 
 CatalogService::CatalogService(CatalogSource& source, CatalogCache* cache,
                                const std::chrono::hours time_to_live,
                                CatalogClock clock, CatalogLimits limits)
-    : m_source(source),
-      m_cache(cache),
-      m_time_to_live(time_to_live),
-      m_clock(std::move(clock)),
-      m_limits(limits) {
+    : m_source(source), m_cache(cache), m_time_to_live(time_to_live),
+      m_clock(std::move(clock)), m_limits(limits) {
   if (!m_clock) {
     m_clock = [] {
       return std::chrono::floor<std::chrono::milliseconds>(
@@ -217,8 +212,7 @@ auto CatalogService::snapshot(const std::stop_token stop_token)
           m_snapshot = std::move(cached);
           return std::cref(*m_snapshot);
         } else if (cached->fetched_at > now) {
-          warnings.push_back(
-              "model catalog cache timestamp is in the future");
+          warnings.push_back("model catalog cache timestamp is in the future");
           cached.reset();
         }
       }
@@ -306,9 +300,12 @@ auto CatalogService::lookup(const domain::ModelId& model_id,
                                    std::move(observation)};
 }
 
-auto CatalogService::clear_memory_cache() noexcept -> void { m_snapshot.reset(); }
+auto CatalogService::clear_memory_cache() noexcept -> void {
+  m_snapshot.reset();
+}
 
-auto validate_catalog(const CatalogSnapshot& snapshot, const CatalogLimits limits)
+auto validate_catalog(const CatalogSnapshot& snapshot,
+                      const CatalogLimits limits)
     -> std::expected<void, CatalogError> {
   if (limits.maximum_entries == 0 || limits.maximum_text_bytes == 0 ||
       limits.maximum_traits_per_entry == 0 ||
@@ -329,8 +326,7 @@ auto validate_catalog(const CatalogSnapshot& snapshot, const CatalogLimits limit
       return catalog_error(CatalogErrorCode::invalid_data,
                            "model catalog contains invalid text or metadata");
     }
-    if (entry.context_window_tokens == 0 ||
-        entry.maximum_output_tokens == 0 ||
+    if (entry.context_window_tokens == 0 || entry.maximum_output_tokens == 0 ||
         (entry.pricing &&
          (!valid_tier(entry.pricing->base) ||
           (entry.pricing->extended && !valid_tier(*entry.pricing->extended)) ||
@@ -351,11 +347,13 @@ auto validate_catalog(const CatalogSnapshot& snapshot, const CatalogLimits limit
   return {};
 }
 
-auto find_model(const CatalogSnapshot& snapshot, const domain::ModelId& model_id,
+auto find_model(const CatalogSnapshot& snapshot,
+                const domain::ModelId& model_id,
                 const std::string_view type) noexcept -> const CatalogEntry* {
-  const auto found = std::ranges::find_if(snapshot.entries, [&](const auto& entry) {
-    return entry.id == model_id && (type.empty() || entry.type == type);
-  });
+  const auto found =
+      std::ranges::find_if(snapshot.entries, [&](const auto& entry) {
+        return entry.id == model_id && (type.empty() || entry.type == type);
+      });
   return found == snapshot.entries.end() ? nullptr : &*found;
 }
 
@@ -380,7 +378,8 @@ auto suggest_models(const CatalogSnapshot& snapshot,
   });
   std::vector<std::string> result;
   result.reserve(std::min(limit, candidates.size()));
-  for (std::size_t index{}; index < std::min(limit, candidates.size()); ++index) {
+  for (std::size_t index{}; index < std::min(limit, candidates.size());
+       ++index) {
     result.push_back(std::move(candidates[index].id));
   }
   return result;
@@ -406,4 +405,4 @@ auto capability_name(const Capability capability) noexcept -> std::string_view {
   return "unknown";
 }
 
-}  // namespace aiforge::model
+} // namespace aiforge::model

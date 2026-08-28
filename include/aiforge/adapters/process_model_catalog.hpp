@@ -27,4 +27,4 @@ class ProcessModelCatalog final {
   model::CatalogService m_service;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

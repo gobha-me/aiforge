@@ -19,8 +19,8 @@ using namespace domain;
     const VerificationEvidenceErrorCode code, std::string message,
     std::optional<VerificationEvidenceId> evidence_id = std::nullopt)
     -> std::unexpected<VerificationEvidenceError> {
-  return std::unexpected(VerificationEvidenceError{
-      code, std::move(message), std::move(evidence_id)});
+  return std::unexpected(VerificationEvidenceError{code, std::move(message),
+                                                   std::move(evidence_id)});
 }
 
 [[nodiscard]] auto valid_utf8_text(const std::string_view value,
@@ -77,10 +77,12 @@ using namespace domain;
 [[nodiscard]] auto valid_digest(const ContentDigest& digest) -> bool {
   return bounded_text(digest.algorithm, 128) &&
          bounded_text(digest.value, 512) &&
-         std::ranges::all_of(digest.algorithm, [](const unsigned char value) {
-           return std::isalnum(value) != 0 || value == '-' || value == '_' ||
-                  value == '.';
-         }) &&
+         std::ranges::all_of(digest.algorithm,
+                             [](const unsigned char value) {
+                               return std::isalnum(value) != 0 ||
+                                      value == '-' || value == '_' ||
+                                      value == '.';
+                             }) &&
          std::ranges::all_of(digest.value, [](const unsigned char value) {
            return std::isxdigit(value) != 0;
          });
@@ -104,8 +106,8 @@ using namespace domain;
   return path.generic_string() == value;
 }
 
-[[nodiscard]] auto add_checked(std::uint64_t& total,
-                               const std::uint64_t value) -> bool {
+[[nodiscard]] auto add_checked(std::uint64_t& total, const std::uint64_t value)
+    -> bool {
   if (value > std::numeric_limits<std::uint64_t>::max() - total) return false;
   total += value;
   return true;
@@ -185,8 +187,7 @@ using namespace domain;
          limits.maximum_excerpt_bytes > 0 &&
          limits.maximum_total_inline_bytes > 0 &&
          limits.maximum_diagnostics > 0 &&
-         limits.maximum_diagnostic_bytes > 0 &&
-         limits.maximum_artifacts > 0 &&
+         limits.maximum_diagnostic_bytes > 0 && limits.maximum_artifacts > 0 &&
          limits.maximum_metadata_bytes > 0 &&
          limits.maximum_excerpt_bytes <= limits.maximum_total_inline_bytes &&
          limits.maximum_diagnostic_bytes <= limits.maximum_total_inline_bytes;
@@ -204,13 +205,15 @@ using namespace domain;
   if (!known_kind(evidence.kind) ||
       unknown_kind != evidence.extension_name.has_value() ||
       (evidence.extension_name &&
-       !bounded_text(*evidence.extension_name, limits.maximum_metadata_bytes)) ||
+       !bounded_text(*evidence.extension_name,
+                     limits.maximum_metadata_bytes)) ||
       !known_outcome(evidence.outcome) ||
       !valid_snapshot(evidence.source_snapshot) ||
       !bounded_text(evidence.summary, limits.maximum_summary_bytes)) {
-    return failure(VerificationEvidenceErrorCode::invalid_evidence,
-                   "verification evidence identity, kind, outcome, or summary is invalid",
-                   evidence_id);
+    return failure(
+        VerificationEvidenceErrorCode::invalid_evidence,
+        "verification evidence identity, kind, outcome, or summary is invalid",
+        evidence_id);
   }
   if ((evidence.kind == VerificationKind::diff) !=
       evidence.baseline_snapshot.has_value()) {
@@ -251,8 +254,7 @@ using namespace domain;
   std::uint64_t inline_bytes = evidence.summary.size();
   for (const auto& output : evidence.output) {
     const bool omits_bytes = output.represented_bytes > output.text.size();
-    if (!known_stream(output.stream) ||
-        !streams.insert(output.stream).second ||
+    if (!known_stream(output.stream) || !streams.insert(output.stream).second ||
         !bounded_text(output.text, limits.maximum_excerpt_bytes, true) ||
         (output.text.empty() && !output.complete_artifact_id) ||
         output.represented_bytes < output.text.size() ||
@@ -301,21 +303,23 @@ using namespace domain;
   }
 
   const auto artifacts = artifact_ids(evidence);
-  const std::set<ArtifactId> unique_artifacts{artifacts.begin(), artifacts.end()};
+  const std::set<ArtifactId> unique_artifacts{artifacts.begin(),
+                                              artifacts.end()};
   if (artifacts.size() > limits.maximum_artifacts) {
     return failure(VerificationEvidenceErrorCode::resource_exhausted,
                    "verification evidence references too many artifacts",
                    evidence_id);
   }
   if (artifacts.size() != unique_artifacts.size()) {
-    return failure(VerificationEvidenceErrorCode::duplicate_artifact,
-                   "verification evidence contains a duplicate artifact reference",
-                   evidence_id);
+    return failure(
+        VerificationEvidenceErrorCode::duplicate_artifact,
+        "verification evidence contains a duplicate artifact reference",
+        evidence_id);
   }
   return {};
 }
 
-}  // namespace
+} // namespace
 
 auto validate_verification_evidence(
     const domain::VerificationEvidence& evidence,
@@ -356,8 +360,8 @@ auto assess_verification_evidence(
                      "verification artifact observations are duplicated",
                      evidence.evidence_id);
     }
-    VerificationEvidenceAssessment result{
-        domain::EvidenceFreshness::current, {}};
+    VerificationEvidenceAssessment result{domain::EvidenceFreshness::current,
+                                          {}};
     if (!environment.source_snapshot ||
         environment.source_snapshot->repository_id !=
             evidence.source_snapshot.repository_id) {
@@ -385,9 +389,9 @@ auto assess_verification_evidence(
       }
     }
     const auto artifacts = artifact_ids(evidence);
-    const bool missing = std::ranges::any_of(
-        artifacts,
-        [&](const auto& id) { return !unique_available.contains(id); });
+    const bool missing = std::ranges::any_of(artifacts, [&](const auto& id) {
+      return !unique_available.contains(id);
+    });
     if (missing) {
       result.affected_triggers.push_back(
           VerificationInvalidationTrigger::artifact_unavailable);
@@ -420,12 +424,12 @@ auto make_verification_context_item(
     std::size_t content_blocks{1 + evidence.diagnostics.size() +
                                artifact_ids(evidence).size()};
     content_blocks += std::ranges::count_if(
-        evidence.output,
-        [](const VerificationOutputExcerpt& output) {
+        evidence.output, [](const VerificationOutputExcerpt& output) {
           return !output.text.empty();
         });
     if (!known_freshness(freshness) ||
-        (freshness != EvidenceFreshness::unavailable && estimated_tokens == 0)) {
+        (freshness != EvidenceFreshness::unavailable &&
+         estimated_tokens == 0)) {
       return failure(VerificationEvidenceErrorCode::invalid_evidence,
                      "verification context parameters are invalid",
                      evidence.evidence_id);
@@ -450,9 +454,8 @@ auto make_verification_context_item(
          evidence.producer.invocation_id},
         {},
         0,
-        freshness == domain::EvidenceFreshness::unavailable
-            ? std::uint64_t{}
-            : estimated_tokens};
+        freshness == domain::EvidenceFreshness::unavailable ? std::uint64_t{}
+                                                            : estimated_tokens};
     if (freshness == domain::EvidenceFreshness::unavailable) return result;
 
     result.content.emplace_back(domain::TextBlock{evidence.summary});
@@ -468,8 +471,9 @@ auto make_verification_context_item(
       }
     }
     for (const auto& diagnostic : evidence.diagnostics) {
-      auto text = diagnostic.code.empty() ? diagnostic.message
-                                          : diagnostic.code + ": " + diagnostic.message;
+      auto text = diagnostic.code.empty()
+                      ? diagnostic.message
+                      : diagnostic.code + ": " + diagnostic.message;
       result.content.emplace_back(domain::TextBlock{std::move(text)});
       if (!add_checked(result.estimated_bytes, diagnostic.code.size()) ||
           !add_checked(result.estimated_bytes, diagnostic.message.size()) ||
@@ -499,4 +503,4 @@ auto make_verification_context_item(
   }
 }
 
-}  // namespace aiforge::repository
+} // namespace aiforge::repository

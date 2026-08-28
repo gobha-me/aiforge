@@ -57,19 +57,19 @@ auto reported_cost() -> domain::ReportedCost {
 
 auto pricing_observation() -> domain::PricingObservation {
   domain::TextPricing pricing;
-  pricing.base.input = domain::PriceRate{
-      domain::DecimalAmount::from("1").value(),
-      domain::DecimalAmount::from("1").value()};
-  pricing.base.output = domain::PriceRate{
-      domain::DecimalAmount::from("2").value(),
-      domain::DecimalAmount::from("2").value()};
-  pricing.base.cache_input = domain::PriceRate{
-      domain::DecimalAmount::from("0.5").value(),
-      domain::DecimalAmount::from("0.5").value()};
+  pricing.base.input =
+      domain::PriceRate{domain::DecimalAmount::from("1").value(),
+                        domain::DecimalAmount::from("1").value()};
+  pricing.base.output =
+      domain::PriceRate{domain::DecimalAmount::from("2").value(),
+                        domain::DecimalAmount::from("2").value()};
+  pricing.base.cache_input =
+      domain::PriceRate{domain::DecimalAmount::from("0.5").value(),
+                        domain::DecimalAmount::from("0.5").value()};
   return domain::make_pricing_observation(
              make_id<domain::ModelId>("model"), "test.models", std::nullopt,
-             domain::EventTimestamp{123ms},
-             domain::PricingCatalogOrigin::live, std::move(pricing))
+             domain::EventTimestamp{123ms}, domain::PricingCatalogOrigin::live,
+             std::move(pricing))
       .value();
 }
 
@@ -205,9 +205,8 @@ class SessionScenarioStore final : public storage::SessionStore {
       : m_fail_listing(fail_listing) {
     const auto target = make_id<domain::SessionId>("target-session");
     m_sessions.emplace(
-        target,
-        storage::SessionInfo{target, domain::EventTimestamp{500ms},
-                             domain::EventTimestamp{3000ms}, 11, 7});
+        target, storage::SessionInfo{target, domain::EventTimestamp{500ms},
+                                     domain::EventTimestamp{3000ms}, 11, 7});
     const auto surface = make_id<domain::SurfaceId>("interactive");
     const auto workspace = make_id<domain::WorkspaceId>("chat");
     const auto profile = make_id<domain::PermissionProfileId>("observe");
@@ -217,24 +216,26 @@ class SessionScenarioStore final : public storage::SessionStore {
         make_id<domain::InferenceId>("cancelled-inference");
     const auto model = make_id<domain::ModelId>("model");
     m_histories[target] = {
-        run_event(1, "target-start-1", "target-run-1",
-                  domain::RunStarted{surface, workspace, profile, std::nullopt}),
+        run_event(
+            1, "target-start-1", "target-run-1",
+            domain::RunStarted{surface, workspace, profile, std::nullopt}),
         run_event(2, "target-inference-1", "target-run-1",
                   domain::InferenceStarted{first_inference, model}),
         run_event(3, "target-usage-1", "target-run-1",
                   domain::UsageRecorded{first_inference, {5, 3, 2, 1}}),
-        run_event(4, "target-cost-1", "target-run-1",
-                  domain::InferenceCostRecorded{first_inference,
-                                                reported_cost()}),
+        run_event(
+            4, "target-cost-1", "target-run-1",
+            domain::InferenceCostRecorded{first_inference, reported_cost()}),
         run_event(5, "target-inference-failed", "target-run-1",
                   domain::InferenceFailed{
                       first_inference,
                       {domain::ErrorCode::backend, "failed", false}}),
-        run_event(6, "target-run-failed", "target-run-1",
-                  domain::RunFailed{
-                      {domain::ErrorCode::backend, "failed", false}}),
-        run_event(7, "target-start-2", "target-run-2",
-                  domain::RunStarted{surface, workspace, profile, std::nullopt}),
+        run_event(
+            6, "target-run-failed", "target-run-1",
+            domain::RunFailed{{domain::ErrorCode::backend, "failed", false}}),
+        run_event(
+            7, "target-start-2", "target-run-2",
+            domain::RunStarted{surface, workspace, profile, std::nullopt}),
         run_event(8, "target-inference-2", "target-run-2",
                   domain::InferenceStarted{second_inference, model}),
         run_event(9, "target-usage-2", "target-run-2",
@@ -246,16 +247,16 @@ class SessionScenarioStore final : public storage::SessionStore {
     };
     const auto overflow = make_id<domain::SessionId>("usage-overflow-session");
     m_sessions.emplace(
-        overflow,
-        storage::SessionInfo{overflow, domain::EventTimestamp{450ms},
-                             domain::EventTimestamp{2750ms}, 10, 2});
+        overflow, storage::SessionInfo{overflow, domain::EventTimestamp{450ms},
+                                       domain::EventTimestamp{2750ms}, 10, 2});
     const auto maximum = std::numeric_limits<std::uint64_t>::max();
     const auto overflow_first = make_id<domain::InferenceId>("overflow-first");
     const auto overflow_second =
         make_id<domain::InferenceId>("overflow-second");
     m_histories[overflow] = {
-        run_event(1, "overflow-start-1", "overflow-run-1",
-                  domain::RunStarted{surface, workspace, profile, std::nullopt}),
+        run_event(
+            1, "overflow-start-1", "overflow-run-1",
+            domain::RunStarted{surface, workspace, profile, std::nullopt}),
         run_event(2, "overflow-inference-1", "overflow-run-1",
                   domain::InferenceStarted{overflow_first, model}),
         run_event(3, "overflow-usage-1", "overflow-run-1",
@@ -265,8 +266,9 @@ class SessionScenarioStore final : public storage::SessionStore {
                                             domain::FinishReason::stop}),
         run_event(5, "overflow-complete-1", "overflow-run-1",
                   domain::RunCompleted{}),
-        run_event(6, "overflow-start-2", "overflow-run-2",
-                  domain::RunStarted{surface, workspace, profile, std::nullopt}),
+        run_event(
+            6, "overflow-start-2", "overflow-run-2",
+            domain::RunStarted{surface, workspace, profile, std::nullopt}),
         run_event(7, "overflow-inference-2", "overflow-run-2",
                   domain::InferenceStarted{overflow_second, model}),
         run_event(8, "overflow-usage-2", "overflow-run-2",
@@ -279,15 +281,14 @@ class SessionScenarioStore final : public storage::SessionStore {
     };
     const auto corrupt = make_id<domain::SessionId>("corrupt-session");
     m_sessions.emplace(
-        corrupt,
-        storage::SessionInfo{corrupt, domain::EventTimestamp{400ms},
-                             domain::EventTimestamp{2500ms}, 1, 1});
-    m_histories[corrupt] = {domain::RunEvent{
-        {make_id<domain::EventId>("corrupt-event"),
-         make_id<domain::RunId>("corrupt-run"), 1, 1,
-         domain::EventTimestamp{2500ms}, std::nullopt, std::nullopt,
-         std::nullopt},
-        domain::RunCompleted{}}};
+        corrupt, storage::SessionInfo{corrupt, domain::EventTimestamp{400ms},
+                                      domain::EventTimestamp{2500ms}, 1, 1});
+    m_histories[corrupt] = {
+        domain::RunEvent{{make_id<domain::EventId>("corrupt-event"),
+                          make_id<domain::RunId>("corrupt-run"), 1, 1,
+                          domain::EventTimestamp{2500ms}, std::nullopt,
+                          std::nullopt, std::nullopt},
+                         domain::RunCompleted{}}};
   }
 
   auto create_session(storage::SessionCreate session, std::stop_token token)
@@ -298,13 +299,11 @@ class SessionScenarioStore final : public storage::SessionStore {
           storage::SessionStoreErrorCode::already_exists, "session exists",
           false});
     }
-    const auto timestamp = domain::EventTimestamp{
-        std::chrono::milliseconds{1000 *
-                                  static_cast<std::int64_t>(m_sessions.size() +
-                                                            1)}};
-    m_sessions.emplace(session.session_id,
-                       storage::SessionInfo{session.session_id, timestamp,
-                                            timestamp, 0, 0});
+    const auto timestamp = domain::EventTimestamp{std::chrono::milliseconds{
+        1000 * static_cast<std::int64_t>(m_sessions.size() + 1)}};
+    m_sessions.emplace(
+        session.session_id,
+        storage::SessionInfo{session.session_id, timestamp, timestamp, 0, 0});
     return {};
   }
 
@@ -314,9 +313,9 @@ class SessionScenarioStore final : public storage::SessionStore {
     if (token.stop_requested()) return std::unexpected(cancelled());
     const auto found = m_sessions.find(session_id);
     if (found == m_sessions.end()) {
-      return std::unexpected(storage::SessionStoreError{
-          storage::SessionStoreErrorCode::not_found, "session disappeared",
-          false});
+      return std::unexpected(
+          storage::SessionStoreError{storage::SessionStoreErrorCode::not_found,
+                                     "session disappeared", false});
     }
     return found->second;
   }
@@ -326,9 +325,9 @@ class SessionScenarioStore final : public storage::SessionStore {
                        storage::SessionStoreError> override {
     if (token.stop_requested()) return std::unexpected(cancelled());
     if (m_fail_listing) {
-      return std::unexpected(storage::SessionStoreError{
-          storage::SessionStoreErrorCode::contention,
-          "session catalog is contended", true});
+      return std::unexpected(
+          storage::SessionStoreError{storage::SessionStoreErrorCode::contention,
+                                     "session catalog is contended", true});
     }
     std::vector<storage::SessionInfo> result;
     for (const auto& [id, info] : m_sessions) {
@@ -355,9 +354,9 @@ class SessionScenarioStore final : public storage::SessionStore {
     if (token.stop_requested()) return std::unexpected(cancelled());
     const auto found = m_sessions.find(session_id);
     if (found == m_sessions.end()) {
-      return std::unexpected(storage::SessionStoreError{
-          storage::SessionStoreErrorCode::not_found, "session disappeared",
-          false});
+      return std::unexpected(
+          storage::SessionStoreError{storage::SessionStoreErrorCode::not_found,
+                                     "session disappeared", false});
     }
     auto& history = m_histories[session_id];
     history.insert(history.end(), events.begin(), events.end());
@@ -365,21 +364,21 @@ class SessionScenarioStore final : public storage::SessionStore {
       found->second.last_sequence = history.back().metadata.sequence;
       found->second.last_activity_at = history.back().metadata.timestamp;
       std::set<domain::RunId> runs;
-      for (const auto& event : history) runs.insert(event.metadata.run_id);
+      for (const auto& event : history)
+        runs.insert(event.metadata.run_id);
       found->second.run_count = runs.size();
     }
     return {};
   }
 
-  auto replay_events(const domain::SessionId& session_id,
-                     std::stop_token token)
+  auto replay_events(const domain::SessionId& session_id, std::stop_token token)
       -> std::expected<std::vector<domain::RunEvent>,
                        storage::SessionStoreError> override {
     if (token.stop_requested()) return std::unexpected(cancelled());
     if (!m_sessions.contains(session_id)) {
-      return std::unexpected(storage::SessionStoreError{
-          storage::SessionStoreErrorCode::not_found, "session disappeared",
-          false});
+      return std::unexpected(
+          storage::SessionStoreError{storage::SessionStoreErrorCode::not_found,
+                                     "session disappeared", false});
     }
     return m_histories[session_id];
   }
@@ -445,7 +444,7 @@ class GatedBackendState final {
   auto release(const std::string_view description)
       -> std::expected<void, std::string> {
     static const std::vector<std::string_view> expected{
-        "response-started", "delta:hello", "usage", "cost",
+        "response-started",  "delta:hello", "usage", "cost",
         "response-finished", "end"};
     std::unique_lock lock{m_mutex};
     if (!m_condition.wait_for(lock, 1s, [&] {
@@ -478,8 +477,8 @@ class GatedBackendState final {
   auto wait_for_wake(const std::size_t count)
       -> std::expected<void, std::string> {
     std::unique_lock lock{m_mutex};
-    if (!m_condition.wait_for(
-            lock, 1s, [&] { return m_observed_wakes >= count; })) {
+    if (!m_condition.wait_for(lock, 1s,
+                              [&] { return m_observed_wakes >= count; })) {
       return std::unexpected("backend update was not posted to the UI loop");
     }
     return {};
@@ -487,8 +486,7 @@ class GatedBackendState final {
 
   auto release_cancel_end() -> std::expected<void, std::string> {
     std::unique_lock lock{m_mutex};
-    if (!m_condition.wait_for(lock, 1s,
-                              [&] { return m_cancel_end_waiting; })) {
+    if (!m_condition.wait_for(lock, 1s, [&] { return m_cancel_end_waiting; })) {
       return std::unexpected("cancelled backend did not request stream end");
     }
     m_cancel_end_released = true;
@@ -737,7 +735,7 @@ auto chat_scenario() -> testing::TuiScenario {
   value.corpus_version = "1";
   value.application_revision = "test-revision";
   value.initial_size = {240, 10, 2400, 200};
-  value.backend_script = {"response-started", "delta:hello", "usage", "cost",
+  value.backend_script = {"response-started",  "delta:hello", "usage", "cost",
                           "response-finished", "end"};
   const auto enter = testing::TuiScenarioPost{
       termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
@@ -793,16 +791,16 @@ auto idle_control_scenario() -> testing::TuiScenario {
   value.application_revision = "test-revision";
   value.initial_size = {120, 8, 1200, 160};
   const auto control = [](const char32_t ch) {
-    return testing::TuiScenarioPost{termforge::KeyEvent{
-        termforge::Key::Char, ch, true, false, false,
-        termforge::KeyAction::Press}};
+    return testing::TuiScenarioPost{
+        termforge::KeyEvent{termforge::Key::Char, ch, true, false, false,
+                            termforge::KeyAction::Press}};
   };
   value.steps = {
       {0, testing::TuiScenarioPost{termforge::PasteEvent{"single-line draft"}}},
       {1, control(U'c')},
       {2, testing::TuiScenarioResize{{48, 5, 480, 100}}},
-      {3, testing::TuiScenarioPost{
-              termforge::PasteEvent{"alpha\nbeta\ngamma\ndelta\nepsilon"}}},
+      {3, testing::TuiScenarioPost{termforge::PasteEvent{
+              "alpha\nbeta\ngamma\ndelta\nepsilon"}}},
       {4, control(U'c')},
       {5, testing::TuiScenarioResize{{120, 8, 1200, 160}}},
       {6, control(U'c')},
@@ -890,12 +888,12 @@ auto active_control_d_scenario() -> testing::TuiScenario {
   auto value = chat_scenario();
   value.scenario_id = "interactive-active-control-d";
   value.initial_size = {120, 8, 1200, 160};
-  const auto enter = testing::TuiScenarioPost{termforge::KeyEvent{
-      termforge::Key::Enter, 0, false, false, false,
-      termforge::KeyAction::Press}};
-  const auto control_d = testing::TuiScenarioPost{termforge::KeyEvent{
-      termforge::Key::Char, U'd', true, false, false,
-      termforge::KeyAction::Press}};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  const auto control_d = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Char, U'd', true, false, false,
+                          termforge::KeyAction::Press}};
   value.steps = {
       {0, testing::TuiScenarioPost{termforge::PasteEvent{"question"}}},
       {0, enter},
@@ -931,9 +929,7 @@ auto chat_factory() -> testing::TuiScenarioTargetFactory {
     adapters::InteractiveChatAppOptions options;
     options.live_wake_enabled = pass == testing::TuiScenarioPass::record;
     options.poll_worker_updates = false;
-    options.wake_observer = [backend_state] {
-      backend_state->observe_wake();
-    };
+    options.wake_observer = [backend_state] { backend_state->observe_wake(); };
     options.rendered_output = output;
     options.rendered_frame = [frame](const termforge::Screen& screen) {
       *frame = normalized_screen(screen);
@@ -976,7 +972,7 @@ auto chat_factory() -> testing::TuiScenarioTargetFactory {
           auto released = backend_state->release(step);
           if (!released) return released;
           static const std::vector<std::string_view> expected{
-              "response-started", "delta:hello", "usage", "cost",
+              "response-started",  "delta:hello", "usage", "cost",
               "response-finished", "end"};
           const auto found = std::ranges::find(expected, step);
           if (found == expected.end()) {
@@ -1024,11 +1020,11 @@ auto session_success_scenario() -> testing::TuiScenario {
       {0, testing::TuiScenarioPost{termforge::PasteEvent{"/session list"}}},
       {0, enter},
       {1, escape},
-      {2, testing::TuiScenarioPost{
-              termforge::PasteEvent{"/session resume session-1"}}},
+      {2, testing::TuiScenarioPost{termforge::PasteEvent{
+              "/session resume session-1"}}},
       {2, enter},
-      {3, testing::TuiScenarioPost{
-              termforge::PasteEvent{"/session resume target-session"}}},
+      {3, testing::TuiScenarioPost{termforge::PasteEvent{
+              "/session resume target-session"}}},
       {3, enter},
       {4, testing::TuiScenarioPost{termforge::PasteEvent{"/session new"}}},
       {4, enter},
@@ -1207,7 +1203,7 @@ auto modal_factory() -> testing::TuiScenarioTargetFactory {
   };
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE(
     "TUI scenarios reject malformed specifications before creating an app",
@@ -1417,17 +1413,17 @@ TEST_CASE("interactive plan and task views remain bounded without state",
   REQUIRE(result);
   REQUIRE(result->recorded == result->replayed);
   REQUIRE(std::ranges::any_of(
-      result->recorded.normalized_frames, [](const std::string &frame) {
+      result->recorded.normalized_frames, [](const std::string& frame) {
         return frame.find("This session has no plan") != std::string::npos;
       }));
   REQUIRE(std::ranges::any_of(
-      result->recorded.normalized_frames, [](const std::string &frame) {
+      result->recorded.normalized_frames, [](const std::string& frame) {
         return frame.find("Active session tasks") != std::string::npos &&
                frame.find("Project backlog") != std::string::npos;
       }));
   REQUIRE(std::ranges::any_of(
       result->recorded.normalized_frames,
-      [](const std::string &frame) { return frame.starts_with("24x5:"); }));
+      [](const std::string& frame) { return frame.starts_with("24x5:"); }));
 }
 
 TEST_CASE("active Ctrl+D neither exits nor cancels the run",
@@ -1495,9 +1491,8 @@ TEST_CASE("failed session operations preserve the current interactive app",
   const std::vector<FailureCase> cases{
       {"interactive-session-missing-failure", "/session resume missing", false,
        "durable session could not be opened"},
-      {"interactive-session-replay-failure",
-       "/session resume corrupt-session", false,
-       "durable session could not be opened"},
+      {"interactive-session-replay-failure", "/session resume corrupt-session",
+       false, "durable session could not be opened"},
       {"interactive-session-usage-overflow",
        "/session resume usage-overflow-session", false,
        "Interactive usage replay failed: usage ledger total overflow"},
@@ -1521,16 +1516,15 @@ TEST_CASE("failed session operations preserve the current interactive app",
 
 TEST_CASE("ephemeral session actions explain and preserve ephemerality",
           "[scenario][session][ephemeral]") {
-  const auto result = testing::run_tui_scenario(
-      ephemeral_session_scenario(), session_factory(false));
+  const auto result = testing::run_tui_scenario(ephemeral_session_scenario(),
+                                                session_factory(false));
   INFO((result ? std::string{} : result.error().message));
   REQUIRE(result);
   REQUIRE(result->recorded == result->replayed);
   REQUIRE(result->recorded.semantic_state == "Started session session-2");
   REQUIRE(std::ranges::any_of(
       result->recorded.normalized_frames, [](const std::string& frame) {
-        return frame.find("Current session is ephemeral") !=
-               std::string::npos;
+        return frame.find("Current session is ephemeral") != std::string::npos;
       }));
   REQUIRE(std::ranges::any_of(
       result->recorded.normalized_frames, [](const std::string& frame) {

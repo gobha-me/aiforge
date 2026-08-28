@@ -12,8 +12,7 @@ namespace {
 
 using namespace aiforge;
 
-template <typename Id>
-auto id(std::string value) -> Id {
+template <typename Id> auto id(std::string value) -> Id {
   auto parsed = Id::from(std::move(value));
   REQUIRE(parsed);
   return std::move(*parsed);
@@ -28,8 +27,8 @@ auto snapshot(std::string fingerprint = "aaaaaaaaaaaaaaaa")
     -> domain::RepositorySnapshot {
   return {
       {id<domain::RepositoryId>("repository-1"), "/work/repository"},
-      domain::VcsState{"git", "sha256", domain::VcsHeadKind::branch,
-                       "main", "bbbbbbbbbbbbbbbb"},
+      domain::VcsState{"git", "sha256", domain::VcsHeadKind::branch, "main",
+                       "bbbbbbbbbbbbbbbb"},
       {},
       digest(std::move(fingerprint), 64),
       std::chrono::sys_time<std::chrono::milliseconds>{
@@ -37,15 +36,15 @@ auto snapshot(std::string fingerprint = "aaaaaaaaaaaaaaaa")
   };
 }
 
-}  // namespace
+} // namespace
 
-TEST_CASE("repository snapshot validates clean branch detached and non-VCS states") {
+TEST_CASE(
+    "repository snapshot validates clean branch detached and non-VCS states") {
   auto clean = snapshot();
   REQUIRE(repository::validate_repository_snapshot(clean));
 
-  clean.vcs = domain::VcsState{"git", "sha1",
-                               domain::VcsHeadKind::detached, std::nullopt,
-                               "cccccccccccccccc"};
+  clean.vcs = domain::VcsState{"git", "sha1", domain::VcsHeadKind::detached,
+                               std::nullopt, "cccccccccccccccc"};
   REQUIRE(repository::validate_repository_snapshot(clean));
 
   clean.vcs = domain::VcsState{"git", "sha1", domain::VcsHeadKind::unborn,
@@ -85,61 +84,66 @@ TEST_CASE("repository snapshot rejects malformed identities and entries") {
   REQUIRE_FALSE(repository::validate_repository_snapshot(value));
 
   value = snapshot();
-  value.changes = {{
-      "../escape", std::nullopt, domain::RepositoryEntryKind::regular_file,
-      domain::RepositoryChangeKind::modified,
-      domain::RepositoryChangeStage::worktree, std::nullopt, digest()}};
+  value.changes = {
+      {"../escape", std::nullopt, domain::RepositoryEntryKind::regular_file,
+       domain::RepositoryChangeKind::modified,
+       domain::RepositoryChangeStage::worktree, std::nullopt, digest()}};
   REQUIRE_FALSE(repository::validate_repository_snapshot(value));
 
   value = snapshot();
-  value.changes = {{
-      "old.cpp", std::nullopt, domain::RepositoryEntryKind::regular_file,
-      domain::RepositoryChangeKind::renamed,
-      domain::RepositoryChangeStage::index, std::nullopt, digest()}};
+  value.changes = {
+      {"old.cpp", std::nullopt, domain::RepositoryEntryKind::regular_file,
+       domain::RepositoryChangeKind::renamed,
+       domain::RepositoryChangeStage::index, std::nullopt, digest()}};
   REQUIRE_FALSE(repository::validate_repository_snapshot(value));
 
   value = snapshot();
-  value.changes = {{
-      "gone.cpp", std::nullopt, domain::RepositoryEntryKind::regular_file,
-      domain::RepositoryChangeKind::deleted,
-      domain::RepositoryChangeStage::worktree, std::nullopt, digest()}};
+  value.changes = {
+      {"gone.cpp", std::nullopt, domain::RepositoryEntryKind::regular_file,
+       domain::RepositoryChangeKind::deleted,
+       domain::RepositoryChangeStage::worktree, std::nullopt, digest()}};
   REQUIRE_FALSE(repository::validate_repository_snapshot(value));
 
   value = snapshot();
-  value.changes = {{
-      "new.cpp", std::nullopt, domain::RepositoryEntryKind::regular_file,
-      domain::RepositoryChangeKind::untracked,
-      domain::RepositoryChangeStage::index, std::nullopt, digest()}};
+  value.changes = {
+      {"new.cpp", std::nullopt, domain::RepositoryEntryKind::regular_file,
+       domain::RepositoryChangeKind::untracked,
+       domain::RepositoryChangeStage::index, std::nullopt, digest()}};
   REQUIRE_FALSE(repository::validate_repository_snapshot(value));
 }
 
 TEST_CASE("repository snapshot enforces entry path and byte limits") {
   auto value = snapshot();
-  value.changes = {{
-      "source.cpp", std::nullopt, domain::RepositoryEntryKind::regular_file,
-      domain::RepositoryChangeKind::modified,
-      domain::RepositoryChangeStage::worktree, std::nullopt, digest("abcd", 9)}};
+  value.changes = {{"source.cpp", std::nullopt,
+                    domain::RepositoryEntryKind::regular_file,
+                    domain::RepositoryChangeKind::modified,
+                    domain::RepositoryChangeStage::worktree, std::nullopt,
+                    digest("abcd", 9)}};
 
   repository::RepositorySnapshotLimits limits;
   limits.maximum_entries = 0;
-  REQUIRE(repository::validate_repository_snapshot(value, limits).error().code ==
-          repository::RepositorySnapshotErrorCode::invalid_request);
+  REQUIRE(
+      repository::validate_repository_snapshot(value, limits).error().code ==
+      repository::RepositorySnapshotErrorCode::invalid_request);
 
   limits = {};
   limits.maximum_entries = 1;
   limits.maximum_path_bytes = 4;
-  REQUIRE(repository::validate_repository_snapshot(value, limits).error().code ==
-          repository::RepositorySnapshotErrorCode::invalid_request);
+  REQUIRE(
+      repository::validate_repository_snapshot(value, limits).error().code ==
+      repository::RepositorySnapshotErrorCode::invalid_request);
 
   limits = {};
   limits.maximum_file_bytes = 8;
-  REQUIRE(repository::validate_repository_snapshot(value, limits).error().code ==
-          repository::RepositorySnapshotErrorCode::resource_exhausted);
+  REQUIRE(
+      repository::validate_repository_snapshot(value, limits).error().code ==
+      repository::RepositorySnapshotErrorCode::resource_exhausted);
 
   limits = {};
   limits.maximum_total_bytes = 8;
-  REQUIRE(repository::validate_repository_snapshot(value, limits).error().code ==
-          repository::RepositorySnapshotErrorCode::invalid_request);
+  REQUIRE(
+      repository::validate_repository_snapshot(value, limits).error().code ==
+      repository::RepositorySnapshotErrorCode::invalid_request);
 }
 
 TEST_CASE("same source state uses repository identity and fingerprint only") {
@@ -156,7 +160,8 @@ TEST_CASE("same source state uses repository identity and fingerprint only") {
   REQUIRE_FALSE(domain::same_source_state(left, right));
 }
 
-TEST_CASE("scripted repository source records outcomes errors and cancellation") {
+TEST_CASE(
+    "scripted repository source records outcomes errors and cancellation") {
   repository::RepositorySnapshotRequest request{"/work/repository", {}};
   const auto expected = snapshot();
   testing::ScriptedRepositorySnapshotSource source{{

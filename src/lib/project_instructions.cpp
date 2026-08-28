@@ -13,7 +13,8 @@ namespace {
 [[nodiscard]] auto failure(const ProjectInstructionContextErrorCode code,
                            std::string message)
     -> std::unexpected<ProjectInstructionContextError> {
-  return std::unexpected(ProjectInstructionContextError{code, std::move(message)});
+  return std::unexpected(
+      ProjectInstructionContextError{code, std::move(message)});
 }
 
 [[nodiscard]] auto valid_relative_directory(const std::string& value) -> bool {
@@ -83,10 +84,12 @@ namespace {
       digest.byte_size != expected_size) {
     return false;
   }
-  return std::ranges::all_of(digest.algorithm, [](const unsigned char value) {
-           return std::isalnum(value) != 0 || value == '-' || value == '_' ||
-                  value == '.';
-         }) &&
+  return std::ranges::all_of(digest.algorithm,
+                             [](const unsigned char value) {
+                               return std::isalnum(value) != 0 ||
+                                      value == '-' || value == '_' ||
+                                      value == '.';
+                             }) &&
          std::ranges::all_of(digest.value, [](const unsigned char value) {
            return std::isxdigit(value) != 0;
          });
@@ -94,10 +97,9 @@ namespace {
 
 [[nodiscard]] auto subtree_specificity(const std::string& subtree)
     -> std::uint32_t {
-  return subtree.empty()
-             ? 0
-             : static_cast<std::uint32_t>(std::ranges::distance(
-                   std::filesystem::path{subtree}));
+  return subtree.empty() ? 0
+                         : static_cast<std::uint32_t>(std::ranges::distance(
+                               std::filesystem::path{subtree}));
 }
 
 [[nodiscard]] auto applies_to_target(const std::string& scope,
@@ -123,8 +125,7 @@ namespace {
 }
 
 [[nodiscard]] auto entry_id(const domain::ProjectInstructionId& id)
-    -> std::expected<domain::ContextEntryId,
-                     ProjectInstructionContextError> {
+    -> std::expected<domain::ContextEntryId, ProjectInstructionContextError> {
   auto value = domain::ContextEntryId::from(std::string{id.value()});
   if (!value) {
     return failure(ProjectInstructionContextErrorCode::invalid_identity,
@@ -134,8 +135,7 @@ namespace {
 }
 
 [[nodiscard]] auto source_id(const domain::ProjectInstructionId& id)
-    -> std::expected<domain::ContextSourceId,
-                     ProjectInstructionContextError> {
+    -> std::expected<domain::ContextSourceId, ProjectInstructionContextError> {
   auto value = domain::ContextSourceId::from(std::string{id.value()});
   if (!value) {
     return failure(ProjectInstructionContextErrorCode::invalid_identity,
@@ -144,7 +144,7 @@ namespace {
   return std::move(*value);
 }
 
-}  // namespace
+} // namespace
 
 auto project_instruction_inputs(
     const domain::ProjectInstructionDiscovery& discovery,
@@ -169,8 +169,8 @@ auto project_instruction_inputs(
         return failure(ProjectInstructionContextErrorCode::invalid_estimate,
                        "project instruction token estimates must be positive");
       }
-      if (!estimates_by_id.emplace(estimate.instruction_id,
-                                   estimate.estimated_tokens)
+      if (!estimates_by_id
+               .emplace(estimate.instruction_id, estimate.estimated_tokens)
                .second) {
         return failure(ProjectInstructionContextErrorCode::duplicate_estimate,
                        "project instruction token estimate is duplicated");
@@ -198,8 +198,7 @@ auto project_instruction_inputs(
           !domain::same_source_state(document.source.snapshot,
                                      discovery.source_snapshot) ||
           document.source.range || !valid_utf8_text(document.text) ||
-          !valid_digest(document.source.content_digest,
-                        document.text.size()) ||
+          !valid_digest(document.source.content_digest, document.text.size()) ||
           document.specificity !=
               subtree_specificity(document.applicable_subtree) ||
           document.discovery_order != result.size() + 1U ||
@@ -219,23 +218,22 @@ auto project_instruction_inputs(
       auto context_message_id = message_id(document.instruction_id);
       auto context_source_id = source_id(document.instruction_id);
       if (!context_entry_id) return std::unexpected(context_entry_id.error());
-      if (!context_message_id) return std::unexpected(context_message_id.error());
+      if (!context_message_id)
+        return std::unexpected(context_message_id.error());
       if (!context_source_id) return std::unexpected(context_source_id.error());
 
       result.push_back(domain::InstructionInput{
-          std::move(*context_entry_id),
-          domain::InstructionLayer::project,
-          domain::InstructionOperation::add,
-          std::nullopt,
-          domain::Message{std::move(*context_message_id), domain::Role::system,
-                          {domain::TextBlock{document.text}}, std::nullopt},
+          std::move(*context_entry_id), domain::InstructionLayer::project,
+          domain::InstructionOperation::add, std::nullopt,
+          domain::Message{std::move(*context_message_id),
+                          domain::Role::system,
+                          {domain::TextBlock{document.text}},
+                          std::nullopt},
           domain::ContextProvenance{
               std::move(*context_source_id), document.source.relative_path,
               document.source.content_digest.algorithm + ":" +
                   document.source.content_digest.value},
-          document.specificity,
-          document.discovery_order,
-          estimate->second});
+          document.specificity, document.discovery_order, estimate->second});
     }
     return result;
   } catch (...) {
@@ -244,4 +242,4 @@ auto project_instruction_inputs(
   }
 }
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

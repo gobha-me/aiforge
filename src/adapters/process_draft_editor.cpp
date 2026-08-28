@@ -219,9 +219,9 @@ struct TemporaryDraft {
   storage.push_back('\0');
   char* made = ::mkdtemp(storage.data());
   if (made == nullptr) {
-    return error(
-        errno == EACCES ? Code::permission_denied : Code::resource_exhausted,
-        "secure editor temporary directory could not be created");
+    return error(errno == EACCES ? Code::permission_denied
+                                 : Code::resource_exhausted,
+                 "secure editor temporary directory could not be created");
   }
   TemporaryDraft result{std::filesystem::path{made}, {}};
   if (::chmod(result.directory.c_str(), S_IRWXU) != 0) {
@@ -307,7 +307,8 @@ auto cleanup(const TemporaryDraft& temporary) -> bool {
   auto environment = selected_environment();
   std::vector<char*> environment_pointers;
   environment_pointers.reserve(environment.size() + 1);
-  for (auto& value : environment) environment_pointers.push_back(value.data());
+  for (auto& value : environment)
+    environment_pointers.push_back(value.data());
   environment_pointers.push_back(nullptr);
   std::array<char*, 3> arguments{const_cast<char*>(executable.c_str()),
                                  const_cast<char*>(temporary.file.c_str()),
@@ -383,7 +384,7 @@ auto cleanup(const TemporaryDraft& temporary) -> bool {
 }
 #endif
 
-}  // namespace
+} // namespace
 
 auto ProcessDraftEditor::edit(const std::string_view draft,
                               const std::stop_token stop_token)
@@ -431,4 +432,4 @@ auto ProcessDraftEditor::edit(const std::string_view draft,
   }
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

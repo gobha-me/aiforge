@@ -2,9 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
-#include <cctype>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
@@ -50,15 +50,16 @@ using Json = nlohmann::json;
 constexpr std::size_t maximum_path_bytes{4096};
 constexpr std::size_t result_excerpt_bytes{4096};
 
-[[nodiscard]] auto registry_error(
-    const runtime::ToolRegistryErrorCode code, std::string message)
+[[nodiscard]] auto registry_error(const runtime::ToolRegistryErrorCode code,
+                                  std::string message)
     -> runtime::ToolRegistryError {
   return {code, std::move(message)};
 }
 
-[[nodiscard]] auto execution_error(
-    const runtime::ToolExecutionErrorCode code, std::string message,
-    const bool retryable = false) -> runtime::ToolExecutionError {
+[[nodiscard]] auto execution_error(const runtime::ToolExecutionErrorCode code,
+                                   std::string message,
+                                   const bool retryable = false)
+    -> runtime::ToolExecutionError {
   return {code, std::move(message), retryable};
 }
 
@@ -118,8 +119,8 @@ template <typename Value>
 [[nodiscard]] auto valid_limits(const ProcessToolLimits& limits) -> bool {
   constexpr ProcessToolLimits maximums;
   return limits.executables != 0 && limits.arguments != 0 &&
-         limits.argument_bytes != 0 &&
-         limits.roots != 0 && limits.environment_variables != 0 &&
+         limits.argument_bytes != 0 && limits.roots != 0 &&
+         limits.environment_variables != 0 &&
          limits.timeout > std::chrono::milliseconds::zero() &&
          limits.output_bytes != 0 && limits.inline_output_bytes != 0 &&
          limits.inline_output_bytes <= limits.output_bytes &&
@@ -158,9 +159,9 @@ struct NormalizedConfiguration {
       configuration.writable_roots.size() > configuration.limits.roots ||
       configuration.environment_allowlist.size() >
           configuration.limits.environment_variables) {
-    return std::unexpected(registry_error(
-        runtime::ToolRegistryErrorCode::invalid_declaration,
-        "process tool configuration exceeds its bounds"));
+    return std::unexpected(
+        registry_error(runtime::ToolRegistryErrorCode::invalid_declaration,
+                       "process tool configuration exceeds its bounds"));
   }
 
   NormalizedConfiguration normalized{configuration, {}, {}, {}, {}};
@@ -174,10 +175,8 @@ struct NormalizedConfiguration {
   };
   if (!append_paths(configuration.executable_allowlist,
                     normalized.executables) ||
-      !append_paths(configuration.readable_roots,
-                    normalized.readable_roots) ||
-      !append_paths(configuration.writable_roots,
-                    normalized.writable_roots)) {
+      !append_paths(configuration.readable_roots, normalized.readable_roots) ||
+      !append_paths(configuration.writable_roots, normalized.writable_roots)) {
     return std::unexpected(registry_error(
         runtime::ToolRegistryErrorCode::invalid_declaration,
         "process tool paths must be unique normalized absolute paths"));
@@ -201,17 +200,16 @@ struct NormalizedConfiguration {
                     variable.name.size() + variable.value.size() + 2U,
                     configuration.limits.argument_bytes) ||
         !normalized.environment.emplace(variable.name, variable.value).second) {
-      return std::unexpected(registry_error(
-          runtime::ToolRegistryErrorCode::invalid_declaration,
-          "process environment allowlist is malformed"));
+      return std::unexpected(
+          registry_error(runtime::ToolRegistryErrorCode::invalid_declaration,
+                         "process environment allowlist is malformed"));
     }
   }
   return normalized;
 }
 
 [[nodiscard]] auto declaration_from(
-    const NormalizedConfiguration& configuration)
-    -> backend::ToolDeclaration {
+    const NormalizedConfiguration& configuration) -> backend::ToolDeclaration {
   Json executable_values = Json::array();
   for (const auto& path : configuration.executables) {
     executable_values.push_back(path);
@@ -222,8 +220,8 @@ struct NormalizedConfiguration {
     environment_values.push_back(name);
   }
 
-  const auto path_schema = Json{{"type", "string"},
-                                {"maxLength", maximum_path_bytes}};
+  const auto path_schema =
+      Json{{"type", "string"}, {"maxLength", maximum_path_bytes}};
   const auto root_schema = Json{{"type", "array"},
                                 {"maxItems", configuration.source.limits.roots},
                                 {"uniqueItems", true},
@@ -232,8 +230,8 @@ struct NormalizedConfiguration {
       Json{{"type", "array"},
            {"maxItems", configuration.source.limits.environment_variables},
            {"uniqueItems", true},
-           {"items", Json{{"type", "string"},
-                           {"enum", std::move(environment_values)}}}};
+           {"items",
+            Json{{"type", "string"}, {"enum", std::move(environment_values)}}}};
   Json properties = {
       {"executable",
        {{"type", "string"}, {"enum", std::move(executable_values)}}},
@@ -259,8 +257,8 @@ struct NormalizedConfiguration {
       {"additionalProperties", false},
       {"required",
        Json::array({"executable", "arguments", "working_directory",
-                    "readable_roots", "writable_roots", "environment",
-                    "stdin", "timeout_ms", "output_bytes"})},
+                    "readable_roots", "writable_roots", "environment", "stdin",
+                    "timeout_ms", "output_bytes"})},
       {"properties", std::move(properties)}};
 
   std::vector<domain::Effect> effects{domain::Effect::execute,
@@ -273,8 +271,7 @@ struct NormalizedConfiguration {
                  configuration.readable_roots.size() +
                  configuration.writable_roots.size());
   for (const auto& executable : configuration.executables) {
-    scopes.push_back(
-        {domain::Effect::execute, "process.command", executable});
+    scopes.push_back({domain::Effect::execute, "process.command", executable});
   }
   for (const auto& root : configuration.readable_roots) {
     scopes.push_back({domain::Effect::read, "filesystem.root", root});
@@ -285,7 +282,8 @@ struct NormalizedConfiguration {
   return {"run_process",
           "Run one executable with an argument vector under explicit process, "
           "filesystem, environment, time, and output bounds. No shell is used.",
-          {"application/schema+json", schema.dump()}, std::move(effects),
+          {"application/schema+json", schema.dump()},
+          std::move(effects),
           std::move(scopes)};
 }
 
@@ -321,8 +319,8 @@ class DuplicateJsonKey final : public std::exception {
     auto text = item.get<std::string>();
     if (text.find('\0') != std::string::npos ||
         (reject_controls && has_control(text)) ||
-        text.size() > maximum_total_bytes -
-                          std::min(total, maximum_total_bytes)) {
+        text.size() >
+            maximum_total_bytes - std::min(total, maximum_total_bytes)) {
       return std::nullopt;
     }
     total += text.size();
@@ -331,9 +329,8 @@ class DuplicateJsonKey final : public std::exception {
   return result;
 }
 
-[[nodiscard]] auto parse_request(
-    const domain::StructuredDataBlock& arguments,
-    const NormalizedConfiguration& configuration)
+[[nodiscard]] auto parse_request(const domain::StructuredDataBlock& arguments,
+                                 const NormalizedConfiguration& configuration)
     -> std::expected<ProcessRequest, runtime::ToolExecutionError> {
   try {
     if (arguments.media_type != "application/json" || arguments.data.empty() ||
@@ -361,25 +358,25 @@ class DuplicateJsonKey final : public std::exception {
     };
     auto value = Json::parse(arguments.data, callback, true, false);
     static const std::set<std::string> fields{
-        "executable",       "arguments",      "working_directory",
-        "readable_roots",  "writable_roots", "environment",
-        "stdin",            "timeout_ms",     "output_bytes"};
-    if (!value.is_object() ||
-        value.size() != fields.size() ||
-        std::ranges::any_of(value.items(), [&](const auto& item) {
-          return !fields.contains(item.key());
-        }) ||
-        std::ranges::any_of(fields,
-                            [&](const auto& field) { return !value.contains(field); }) ||
+        "executable",     "arguments",      "working_directory",
+        "readable_roots", "writable_roots", "environment",
+        "stdin",          "timeout_ms",     "output_bytes"};
+    if (!value.is_object() || value.size() != fields.size() ||
+        std::ranges::any_of(
+            value.items(),
+            [&](const auto& item) { return !fields.contains(item.key()); }) ||
+        std::ranges::any_of(
+            fields,
+            [&](const auto& field) { return !value.contains(field); }) ||
         !value.at("executable").is_string() ||
         !value.at("working_directory").is_string() ||
         !value.at("stdin").is_string() ||
         value.at("stdin").get<std::string>() != "closed" ||
         !value.at("timeout_ms").is_number_unsigned() ||
         !value.at("output_bytes").is_number_unsigned()) {
-      return std::unexpected(execution_error(
-          runtime::ToolExecutionErrorCode::invalid_arguments,
-          "process arguments are malformed"));
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::invalid_arguments,
+                          "process arguments are malformed"));
     }
 
     ProcessRequest request;
@@ -389,16 +386,12 @@ class DuplicateJsonKey final : public std::exception {
     auto arguments_array = string_array(
         value.at("arguments"), configuration.source.limits.arguments,
         configuration.source.limits.argument_bytes, false);
-    auto readable = string_array(value.at("readable_roots"),
-                                 configuration.source.limits.roots,
-                                 maximum_path_bytes *
-                                     configuration.source.limits.roots,
-                                 true);
-    auto writable = string_array(value.at("writable_roots"),
-                                 configuration.source.limits.roots,
-                                 maximum_path_bytes *
-                                     configuration.source.limits.roots,
-                                 true);
+    auto readable = string_array(
+        value.at("readable_roots"), configuration.source.limits.roots,
+        maximum_path_bytes * configuration.source.limits.roots, true);
+    auto writable = string_array(
+        value.at("writable_roots"), configuration.source.limits.roots,
+        maximum_path_bytes * configuration.source.limits.roots, true);
     auto environment = string_array(
         value.at("environment"),
         configuration.source.limits.environment_variables,
@@ -411,9 +404,9 @@ class DuplicateJsonKey final : public std::exception {
                       configuration.source.limits.timeout.count()) ||
         output == 0 || output > configuration.source.limits.output_bytes ||
         output > std::numeric_limits<std::size_t>::max()) {
-      return std::unexpected(execution_error(
-          runtime::ToolExecutionErrorCode::invalid_arguments,
-          "process arguments exceed configured limits"));
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::invalid_arguments,
+                          "process arguments exceed configured limits"));
     }
     request.arguments = std::move(*arguments_array);
     request.readable_roots = std::move(*readable);
@@ -424,10 +417,10 @@ class DuplicateJsonKey final : public std::exception {
 
     auto executable = normalized_path(request.executable);
     auto working_directory = normalized_path(request.working_directory);
-    if (!executable || !working_directory || *executable != request.executable ||
+    if (!executable || !working_directory ||
+        *executable != request.executable ||
         *working_directory != request.working_directory ||
-        !std::ranges::contains(configuration.executables,
-                               request.executable) ||
+        !std::ranges::contains(configuration.executables, request.executable) ||
         request.readable_roots.empty() || !unique(request.readable_roots) ||
         !unique(request.writable_roots) || !unique(request.environment)) {
       return std::unexpected(execution_error(
@@ -441,9 +434,9 @@ class DuplicateJsonKey final : public std::exception {
                                [&](const auto& ceiling) {
                                  return path_is_within(ceiling, root);
                                })) {
-        return std::unexpected(execution_error(
-            runtime::ToolExecutionErrorCode::invalid_arguments,
-            "readable root exceeds the configured ceiling"));
+        return std::unexpected(
+            execution_error(runtime::ToolExecutionErrorCode::invalid_arguments,
+                            "readable root exceeds the configured ceiling"));
       }
     }
     for (const auto& root : request.writable_roots) {
@@ -462,9 +455,11 @@ class DuplicateJsonKey final : public std::exception {
             "writable root exceeds the requested or configured ceiling"));
       }
     }
-    if (std::ranges::none_of(request.readable_roots, [&](const auto& root) {
-          return path_is_within(root, request.working_directory);
-        }) ||
+    if (std::ranges::none_of(request.readable_roots,
+                             [&](const auto& root) {
+                               return path_is_within(root,
+                                                     request.working_directory);
+                             }) ||
         std::ranges::any_of(request.environment, [&](const auto& name) {
           return !configuration.environment.contains(name);
         })) {
@@ -475,15 +470,17 @@ class DuplicateJsonKey final : public std::exception {
     std::size_t process_bytes{};
     if (!add_within(process_bytes, request.executable.size() + 1U,
                     configuration.source.limits.argument_bytes) ||
-        std::ranges::any_of(request.arguments, [&](const auto& argument) {
-          return !add_within(process_bytes, argument.size() + 1U,
-                             configuration.source.limits.argument_bytes);
-        }) ||
+        std::ranges::any_of(request.arguments,
+                            [&](const auto& argument) {
+                              return !add_within(
+                                  process_bytes, argument.size() + 1U,
+                                  configuration.source.limits.argument_bytes);
+                            }) ||
         std::ranges::any_of(request.environment, [&](const auto& name) {
           const auto& environment_value = configuration.environment.at(name);
-          return !add_within(
-              process_bytes, name.size() + environment_value.size() + 2U,
-              configuration.source.limits.argument_bytes);
+          return !add_within(process_bytes,
+                             name.size() + environment_value.size() + 2U,
+                             configuration.source.limits.argument_bytes);
         })) {
       return std::unexpected(execution_error(
           runtime::ToolExecutionErrorCode::invalid_arguments,
@@ -491,9 +488,9 @@ class DuplicateJsonKey final : public std::exception {
     }
     return request;
   } catch (...) {
-    return std::unexpected(execution_error(
-        runtime::ToolExecutionErrorCode::invalid_arguments,
-        "process arguments are malformed"));
+    return std::unexpected(
+        execution_error(runtime::ToolExecutionErrorCode::invalid_arguments,
+                        "process arguments are malformed"));
   }
 }
 
@@ -536,9 +533,8 @@ class DuplicateJsonKey final : public std::exception {
                         static_cast<std::uint32_t>(third);
     result.push_back(alphabet[(packed >> 18U) & 0x3FU]);
     result.push_back(alphabet[(packed >> 12U) & 0x3FU]);
-    result.push_back(index + 1U < bytes.size()
-                         ? alphabet[(packed >> 6U) & 0x3FU]
-                         : '=');
+    result.push_back(
+        index + 1U < bytes.size() ? alphabet[(packed >> 6U) & 0x3FU] : '=');
     result.push_back(index + 2U < bytes.size() ? alphabet[packed & 0x3FU]
                                                : '=');
   }
@@ -579,9 +575,8 @@ class DuplicateJsonKey final : public std::exception {
       if ((continuation & 0xC0U) != 0x80U) return false;
       point = (point << 6U) | (continuation & 0x3FU);
     }
-    if ((length == 3 && point < 0x800U) ||
-        (length == 4 && point < 0x10000U) || point > 0x10FFFFU ||
-        (point >= 0xD800U && point <= 0xDFFFU)) {
+    if ((length == 3 && point < 0x800U) || (length == 4 && point < 0x10000U) ||
+        point > 0x10FFFFU || (point >= 0xD800U && point <= 0xDFFFU)) {
       return false;
     }
     index += length;
@@ -663,8 +658,9 @@ struct FileIdentity {
   auto operator==(const FileIdentity&) const -> bool = default;
 };
 
-[[nodiscard]] auto identity(const int descriptor) -> std::optional<FileIdentity> {
-  struct stat status {};
+[[nodiscard]] auto identity(const int descriptor)
+    -> std::optional<FileIdentity> {
+  struct stat status{};
   if (::fstat(descriptor, &status) != 0) return std::nullopt;
   return FileIdentity{static_cast<std::uint64_t>(status.st_dev),
                       static_cast<std::uint64_t>(status.st_ino),
@@ -676,9 +672,9 @@ struct FileIdentity {
     -> std::expected<UniqueFd, runtime::ToolExecutionError> {
   UniqueFd current{::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)};
   if (current.get() < 0) {
-    return std::unexpected(execution_error(
-        runtime::ToolExecutionErrorCode::unavailable,
-        "process path resolution is unavailable", true));
+    return std::unexpected(
+        execution_error(runtime::ToolExecutionErrorCode::unavailable,
+                        "process path resolution is unavailable", true));
   }
   std::size_t position{1};
   while (position < path.size()) {
@@ -686,9 +682,9 @@ struct FileIdentity {
     const auto end = slash == std::string_view::npos ? path.size() : slash;
     const auto component = path.substr(position, end - position);
     if (component.empty() || component == "." || component == "..") {
-      return std::unexpected(execution_error(
-          runtime::ToolExecutionErrorCode::invalid_arguments,
-          "process path is ambiguous"));
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::invalid_arguments,
+                          "process path is ambiguous"));
     }
     const bool last = end == path.size();
     const int flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
@@ -696,9 +692,9 @@ struct FileIdentity {
     const std::string component_text{component};
     UniqueFd next{::openat(current.get(), component_text.c_str(), flags)};
     if (next.get() < 0) {
-      return std::unexpected(execution_error(
-          runtime::ToolExecutionErrorCode::unavailable,
-          "process path could not be opened securely", false));
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::unavailable,
+                          "process path could not be opened securely", false));
     }
     current = std::move(next);
     if (last) break;
@@ -755,8 +751,8 @@ struct PreparedConfiguration {
 }
 
 [[nodiscard]] auto matches_pinned(const PreparedConfiguration& configuration,
-                                  const std::string& path,
-                                  const bool directory) -> bool {
+                                  const std::string& path, const bool directory)
+    -> bool {
   const auto expected = configuration.identities.find(path);
   if (expected == configuration.identities.end()) return false;
   auto opened = open_without_symlinks(path, directory);
@@ -818,20 +814,17 @@ struct PendingProgress {
 
 class ProcessStream final : public runtime::ToolExecutionStream {
  public:
-  ProcessStream(pid_t process, UniqueFd standard_output, UniqueFd standard_error,
-                UniqueFd exec_error, ProcessRequest request,
-                domain::InvocationId invocation_id,
+  ProcessStream(pid_t process, UniqueFd standard_output,
+                UniqueFd standard_error, UniqueFd exec_error,
+                ProcessRequest request, domain::InvocationId invocation_id,
                 storage::ArtifactStore& artifact_store,
                 ProcessToolLimits limits,
                 std::vector<std::string> environment_values)
-      : m_process(process),
-        m_standard_output(std::move(standard_output)),
+      : m_process(process), m_standard_output(std::move(standard_output)),
         m_standard_error(std::move(standard_error)),
-        m_exec_error(std::move(exec_error)),
-        m_request(std::move(request)),
+        m_exec_error(std::move(exec_error)), m_request(std::move(request)),
         m_invocation_id(std::move(invocation_id)),
-        m_artifact_store(artifact_store),
-        m_limits(limits),
+        m_artifact_store(artifact_store), m_limits(limits),
         m_buffer(limits.progress_chunk_bytes),
         m_environment_values(std::move(environment_values)),
         m_started(std::chrono::steady_clock::now()) {}
@@ -854,9 +847,9 @@ class ProcessStream final : public runtime::ToolExecutionStream {
       for (;;) {
         if (stop_token.stop_requested()) {
           terminate_tree();
-          return std::unexpected(execution_error(
-              runtime::ToolExecutionErrorCode::cancelled,
-              "process execution cancelled"));
+          return std::unexpected(
+              execution_error(runtime::ToolExecutionErrorCode::cancelled,
+                              "process execution cancelled"));
         }
         if (!m_forced_status &&
             std::chrono::steady_clock::now() - m_started >= m_request.timeout) {
@@ -869,9 +862,9 @@ class ProcessStream final : public runtime::ToolExecutionStream {
         }
         if (m_io_failure) {
           terminate_tree();
-          return std::unexpected(execution_error(
-              runtime::ToolExecutionErrorCode::unavailable,
-              "process output could not be collected", true));
+          return std::unexpected(
+              execution_error(runtime::ToolExecutionErrorCode::unavailable,
+                              "process output could not be collected", true));
         }
         if (!m_progress.empty()) {
           auto progress = std::move(m_progress.front());
@@ -891,9 +884,9 @@ class ProcessStream final : public runtime::ToolExecutionStream {
       m_discard_output = true;
       m_discard_progress = true;
       terminate_tree();
-      return std::unexpected(execution_error(
-          runtime::ToolExecutionErrorCode::internal_failure,
-          "process execution failed internally"));
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::internal_failure,
+                          "process execution failed internally"));
     }
   }
 
@@ -909,18 +902,17 @@ class ProcessStream final : public runtime::ToolExecutionStream {
         m_progress_events >= m_limits.progress_events || bytes.empty()) {
       return;
     }
-    m_progress.push_back(PendingProgress{std::string{stream},
-                                         std::string{bytes}});
+    m_progress.push_back(
+        PendingProgress{std::string{stream}, std::string{bytes}});
     ++m_progress_events;
   }
 
   auto collect(const std::string_view stream, const char* data,
                const std::size_t size, std::string& destination) -> void {
     if (m_discard_output) return;
-    const auto remaining =
-        m_observed_output < m_request.output_bytes
-            ? m_request.output_bytes - m_observed_output
-            : 0U;
+    const auto remaining = m_observed_output < m_request.output_bytes
+                               ? m_request.output_bytes - m_observed_output
+                               : 0U;
     const auto accepted = std::min(size, remaining);
     if (accepted != 0) {
       destination.append(data, accepted);
@@ -1043,7 +1035,8 @@ class ProcessStream final : public runtime::ToolExecutionStream {
         if (!m_reaped && errno == EINTR) continue;
         if (!m_reaped) break;
       }
-      for (int attempt = 0; attempt < 4; ++attempt) pump(0);
+      for (int attempt = 0; attempt < 4; ++attempt)
+        pump(0);
     } catch (...) {
       m_discard_output = true;
       m_discard_progress = true;
@@ -1059,9 +1052,10 @@ class ProcessStream final : public runtime::ToolExecutionStream {
     m_exec_error.reset();
   }
 
-  [[nodiscard]] auto store_output(
-      const std::string_view stream, const std::string& output,
-      const bool force_artifact, const std::stop_token& stop_token)
+  [[nodiscard]] auto store_output(const std::string_view stream,
+                                  const std::string& output,
+                                  const bool force_artifact,
+                                  const std::stop_token& stop_token)
       -> std::expected<std::optional<domain::ArtifactMetadata>,
                        runtime::ToolExecutionError> {
     if (output.empty() ||
@@ -1071,8 +1065,8 @@ class ProcessStream final : public runtime::ToolExecutionStream {
     }
     const auto artifact_id = artifact_id_for(m_invocation_id, stream);
     const auto bytes = std::as_bytes(std::span{output.data(), output.size()});
-    std::expected<domain::ArtifactMetadata, storage::ArtifactStoreError> stored =
-        std::unexpected(storage::ArtifactStoreError{
+    std::expected<domain::ArtifactMetadata, storage::ArtifactStoreError>
+        stored = std::unexpected(storage::ArtifactStoreError{
             storage::ArtifactStoreErrorCode::internal_failure,
             "artifact write failed internally", false});
     try {
@@ -1080,9 +1074,9 @@ class ProcessStream final : public runtime::ToolExecutionStream {
           {artifact_id, "application/octet-stream", m_invocation_id}, bytes,
           stop_token);
     } catch (...) {
-      return std::unexpected(execution_error(
-          runtime::ToolExecutionErrorCode::internal_failure,
-          "process artifact storage failed internally"));
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::internal_failure,
+                          "process artifact storage failed internally"));
     }
     if (!stored) {
       return std::unexpected(execution_error(
@@ -1100,9 +1094,9 @@ class ProcessStream final : public runtime::ToolExecutionStream {
         !stored->producing_invocation_id ||
         *stored->producing_invocation_id != m_invocation_id || stored->width ||
         stored->height) {
-      return std::unexpected(execution_error(
-          runtime::ToolExecutionErrorCode::protocol_failure,
-          "artifact store returned invalid process metadata"));
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::protocol_failure,
+                          "artifact store returned invalid process metadata"));
     }
     return std::optional<domain::ArtifactMetadata>{std::move(*stored)};
   }
@@ -1153,9 +1147,8 @@ class ProcessStream final : public runtime::ToolExecutionStream {
     const auto stream_json = [&](const std::string& output,
                                  const auto& artifact) {
       Json result{{"bytes", output.size()},
-                  {"artifact_id",
-                   artifact ? Json(artifact->artifact_id.value())
-                            : Json(nullptr)}};
+                  {"artifact_id", artifact ? Json(artifact->artifact_id.value())
+                                           : Json(nullptr)}};
       if (!artifact && safe_utf8(output)) {
         result["text"] = output;
         result["excerpt_encoding"] = nullptr;
@@ -1344,7 +1337,8 @@ class ProcessExecutor final : public runtime::ToolExecutor {
                           request->arguments.end());
       std::vector<char*> argv;
       argv.reserve(argv_storage.size() + 1U);
-      for (auto& value : argv_storage) argv.push_back(value.data());
+      for (auto& value : argv_storage)
+        argv.push_back(value.data());
       argv.push_back(nullptr);
 
       std::vector<std::string> environment_storage;
@@ -1494,9 +1488,9 @@ class ProcessExecutor final : public runtime::ToolExecutor {
             exec_pipe[0], exec_pipe[1]}) {
         if (descriptor >= 0) static_cast<void>(::close(descriptor));
       }
-      return std::unexpected(execution_error(
-          runtime::ToolExecutionErrorCode::internal_failure,
-          "process start failed internally"));
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::internal_failure,
+                          "process start failed internally"));
     }
   }
 
@@ -1507,7 +1501,7 @@ class ProcessExecutor final : public runtime::ToolExecutor {
 
 #endif
 
-}  // namespace
+} // namespace
 
 auto process_tool_declaration(const ProcessToolConfiguration& configuration)
     -> std::expected<backend::ToolDeclaration, runtime::ToolRegistryError> {
@@ -1516,9 +1510,9 @@ auto process_tool_declaration(const ProcessToolConfiguration& configuration)
     if (!normalized) return std::unexpected(std::move(normalized.error()));
     return declaration_from(*normalized);
   } catch (...) {
-    return std::unexpected(registry_error(
-        runtime::ToolRegistryErrorCode::internal_failure,
-        "process tool declaration failed internally"));
+    return std::unexpected(
+        registry_error(runtime::ToolRegistryErrorCode::internal_failure,
+                       "process tool declaration failed internally"));
   }
 }
 
@@ -1545,26 +1539,26 @@ auto register_process_tool(runtime::ToolRegistry& registry,
     if (limits.progress_events >
         (maximum - result_budget - 2U * limits.inline_output_bytes) /
             (2U * limits.progress_chunk_bytes)) {
-      return std::unexpected(registry_error(
-          runtime::ToolRegistryErrorCode::invalid_declaration,
-          "process event budget overflows"));
+      return std::unexpected(
+          registry_error(runtime::ToolRegistryErrorCode::invalid_declaration,
+                         "process event budget overflows"));
     }
-    const auto event_bytes = result_budget + 2U * limits.inline_output_bytes +
-                             limits.progress_events *
-                                 (2U * limits.progress_chunk_bytes);
+    const auto event_bytes =
+        result_budget + 2U * limits.inline_output_bytes +
+        limits.progress_events * (2U * limits.progress_chunk_bytes);
     return registry.register_tool(
         std::move(declaration),
         std::make_shared<ProcessExecutor>(std::move(*prepared), artifact_store),
-        runtime::ToolExecutionLimits{
-            event_bytes, limits.progress_events,
-            limits.timeout + 4 * limits.termination_grace +
-                std::chrono::seconds{1}});
+        runtime::ToolExecutionLimits{event_bytes, limits.progress_events,
+                                     limits.timeout +
+                                         4 * limits.termination_grace +
+                                         std::chrono::seconds{1}});
 #endif
   } catch (...) {
-    return std::unexpected(registry_error(
-        runtime::ToolRegistryErrorCode::internal_failure,
-        "process tool registration failed internally"));
+    return std::unexpected(
+        registry_error(runtime::ToolRegistryErrorCode::internal_failure,
+                       "process tool registration failed internally"));
   }
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

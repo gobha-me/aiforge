@@ -16,7 +16,7 @@ namespace aiforge::domain {
 struct PriceRate {
   std::optional<DecimalAmount> usd;
   std::optional<DecimalAmount> diem;
-  auto operator==(const PriceRate &) const -> bool = default;
+  auto operator==(const PriceRate&) const -> bool = default;
 };
 
 struct TextPriceTier {
@@ -24,7 +24,7 @@ struct TextPriceTier {
   std::optional<PriceRate> output;
   std::optional<PriceRate> cache_input;
   std::optional<PriceRate> cache_write;
-  auto operator==(const TextPriceTier &) const -> bool = default;
+  auto operator==(const TextPriceTier&) const -> bool = default;
 };
 
 struct TextPricing {
@@ -34,7 +34,7 @@ struct TextPricing {
   TextPriceTier base;
   std::optional<std::uint64_t> extended_threshold_tokens;
   std::optional<TextPriceTier> extended;
-  auto operator==(const TextPricing &) const -> bool = default;
+  auto operator==(const TextPricing&) const -> bool = default;
 };
 
 enum class PricingCatalogOrigin {
@@ -56,7 +56,7 @@ struct PricingObservation {
   PricingRateBasis basis{PricingRateBasis::per_million_tokens};
   TextPricing pricing;
   ContentDigest rate_card_digest;
-  auto operator==(const PricingObservation &) const -> bool = default;
+  auto operator==(const PricingObservation&) const -> bool = default;
 };
 
 enum class PricingErrorCode {
@@ -69,7 +69,7 @@ enum class PricingErrorCode {
 struct PricingError {
   PricingErrorCode code{PricingErrorCode::invalid_pricing};
   std::string message;
-  auto operator==(const PricingError &) const -> bool = default;
+  auto operator==(const PricingError&) const -> bool = default;
 };
 
 [[nodiscard]] auto make_pricing_observation(
@@ -79,8 +79,7 @@ struct PricingError {
     PricingCatalogOrigin origin, TextPricing pricing)
     -> std::expected<PricingObservation, PricingError>;
 
-[[nodiscard]] auto
-validate_pricing_observation(const PricingObservation &observation)
-    -> std::expected<void, PricingError>;
+[[nodiscard]] auto validate_pricing_observation(
+    const PricingObservation& observation) -> std::expected<void, PricingError>;
 
 } // namespace aiforge::domain

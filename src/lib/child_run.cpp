@@ -43,13 +43,12 @@ template <typename Value>
 
 [[nodiscard]] auto known_outcome(const SessionTaskOutcome outcome) -> bool {
   switch (outcome) {
-  case SessionTaskOutcome::completed:
-  case SessionTaskOutcome::failed:
-  case SessionTaskOutcome::cancelled:
-  case SessionTaskOutcome::timed_out:
-  case SessionTaskOutcome::budget_exhausted:
-  case SessionTaskOutcome::unavailable:
-    return true;
+    case SessionTaskOutcome::completed:
+    case SessionTaskOutcome::failed:
+    case SessionTaskOutcome::cancelled:
+    case SessionTaskOutcome::timed_out:
+    case SessionTaskOutcome::budget_exhausted:
+    case SessionTaskOutcome::unavailable: return true;
   }
   return false;
 }
@@ -61,7 +60,7 @@ template <typename Value>
          });
 }
 
-}  // namespace
+} // namespace
 
 auto validate_child_run_descriptor(const ChildRunDescriptor& descriptor)
     -> std::expected<void, ChildRunContractError> {
@@ -152,4 +151,4 @@ auto validate_session_task_result(const SessionTaskResult& result,
   }
 }
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

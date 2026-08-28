@@ -45,4 +45,4 @@ class VeniceBackend final : public backend::Backend,
   std::unique_ptr<Impl> m_impl;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

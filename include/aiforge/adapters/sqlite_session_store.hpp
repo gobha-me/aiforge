@@ -28,9 +28,8 @@ struct SessionStorePathEnvironment {
 
 class SqliteSessionStore final : public storage::SessionStore {
  public:
-  [[nodiscard]] static auto open(
-      std::filesystem::path path,
-      storage::SessionStoreLimits limits = {})
+  [[nodiscard]] static auto open(std::filesystem::path path,
+                                 storage::SessionStoreLimits limits = {})
       -> std::expected<std::unique_ptr<SqliteSessionStore>,
                        storage::SessionStoreError>;
 
@@ -42,30 +41,28 @@ class SqliteSessionStore final : public storage::SessionStore {
 
   [[nodiscard]] auto path() const noexcept -> const std::filesystem::path&;
 
-  [[nodiscard]] auto create_session(
-      storage::SessionCreate session, std::stop_token stop_token = {})
+  [[nodiscard]] auto create_session(storage::SessionCreate session,
+                                    std::stop_token stop_token = {})
       -> std::expected<void, storage::SessionStoreError> override;
-  [[nodiscard]] auto open_session(
-      const domain::SessionId& session_id, std::stop_token stop_token = {})
+  [[nodiscard]] auto open_session(const domain::SessionId& session_id,
+                                  std::stop_token stop_token = {})
       -> std::expected<storage::SessionInfo,
                        storage::SessionStoreError> override;
-  [[nodiscard]] auto list_sessions(
-      std::size_t limit, std::stop_token stop_token = {})
+  [[nodiscard]] auto list_sessions(std::size_t limit,
+                                   std::stop_token stop_token = {})
       -> std::expected<std::vector<storage::SessionInfo>,
                        storage::SessionStoreError> override;
-  [[nodiscard]] auto append_events(
-      const domain::SessionId& session_id,
-      std::span<const domain::RunEvent> events,
-      std::stop_token stop_token = {})
+  [[nodiscard]] auto append_events(const domain::SessionId& session_id,
+                                   std::span<const domain::RunEvent> events,
+                                   std::stop_token stop_token = {})
       -> std::expected<void, storage::SessionStoreError> override;
-  [[nodiscard]] auto replay_events(
-      const domain::SessionId& session_id, std::stop_token stop_token = {})
+  [[nodiscard]] auto replay_events(const domain::SessionId& session_id,
+                                   std::stop_token stop_token = {})
       -> std::expected<std::vector<domain::RunEvent>,
                        storage::SessionStoreError> override;
-  [[nodiscard]] auto
-  replay_project_backlog(const domain::RepositoryId &repository_id,
-                         std::size_t maximum_sessions,
-                         std::stop_token stop_token = {})
+  [[nodiscard]] auto replay_project_backlog(
+      const domain::RepositoryId& repository_id, std::size_t maximum_sessions,
+      std::stop_token stop_token = {})
       -> std::expected<std::vector<domain::ProjectBacklogSessionEvents>,
                        storage::SessionStoreError> override;
 
@@ -76,4 +73,4 @@ class SqliteSessionStore final : public storage::SessionStore {
   std::unique_ptr<Impl> m_impl;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

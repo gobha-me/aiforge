@@ -15,8 +15,7 @@ namespace {
 
 using namespace aiforge::domain;
 
-template <typename IdType>
-auto make_id(const std::string& value) -> IdType {
+template <typename IdType> auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
@@ -33,9 +32,10 @@ auto metadata(const std::uint64_t sequence, std::string event = "event",
 }
 
 template <typename Payload>
-auto event(const std::uint64_t sequence, Payload payload, std::string id = "event",
-           std::string run = "run") -> RunEvent {
-  return RunEvent{metadata(sequence, std::move(id), std::move(run)), std::move(payload)};
+auto event(const std::uint64_t sequence, Payload payload,
+           std::string id = "event", std::string run = "run") -> RunEvent {
+  return RunEvent{metadata(sequence, std::move(id), std::move(run)),
+                  std::move(payload)};
 }
 
 auto started() -> RunStarted {
@@ -61,9 +61,10 @@ auto provenance() -> RunProvenance {
                        {}};
 }
 
-}  // namespace
+} // namespace
 
-TEST_CASE("opaque IDs reject invalid input before it reaches an event", "[domain][failure]") {
+TEST_CASE("opaque IDs reject invalid input before it reaches an event",
+          "[domain][failure]") {
   REQUIRE_FALSE(EventId::from(""));
   REQUIRE(EventId::from("").error() == IdError::empty);
   REQUIRE_FALSE(EventId::from(std::string(Id<EventIdTag>::max_size + 1, 'x')));
@@ -101,40 +102,42 @@ TEST_CASE("run projection rejects events without a start and from another run",
 
   REQUIRE(projection.apply(event(1, UnknownEvent{"future.event"}, "unknown")));
   REQUIRE(projection.apply(event(2, started(), "start")));
-  REQUIRE_FALSE(projection.apply(event(3, RunCompleted{}, "wrong", "other-run")));
+  REQUIRE_FALSE(
+      projection.apply(event(3, RunCompleted{}, "wrong", "other-run")));
   REQUIRE(projection.status() == RunStatus::running);
 }
 
 TEST_CASE("run projection requires persona provenance before run content",
           "[domain][persona][failure]") {
-  const PersonaReference persona{
-      make_id<PersonaId>("persona:reviewer"), "reviewer",
-      "personas/reviewer.md", {"sha256", std::string(64, 'a'), 7}};
-  const auto user = UserContentAdded{Message{
-      make_id<MessageId>("user"), Role::user, {TextBlock{"prompt"}},
-      std::nullopt}};
+  const PersonaReference persona{make_id<PersonaId>("persona:reviewer"),
+                                 "reviewer",
+                                 "personas/reviewer.md",
+                                 {"sha256", std::string(64, 'a'), 7}};
+  const auto user = UserContentAdded{Message{make_id<MessageId>("user"),
+                                             Role::user,
+                                             {TextBlock{"prompt"}},
+                                             std::nullopt}};
 
   RunProjection missing;
   REQUIRE(missing.apply(event(
-      1, RunStarted{make_id<SurfaceId>("surface"),
-                    make_id<WorkspaceId>("chat"),
-                    make_id<PermissionProfileId>("observe"),
-                    persona.persona_id},
+      1,
+      RunStarted{make_id<SurfaceId>("surface"), make_id<WorkspaceId>("chat"),
+                 make_id<PermissionProfileId>("observe"), persona.persona_id},
       "start")));
   REQUIRE_FALSE(missing.apply(event(2, user, "user")));
 
   RunProjection ordered;
   REQUIRE(ordered.apply(event(
-      1, RunStarted{make_id<SurfaceId>("surface"),
-                    make_id<WorkspaceId>("chat"),
-                    make_id<PermissionProfileId>("observe"),
-                    persona.persona_id},
+      1,
+      RunStarted{make_id<SurfaceId>("surface"), make_id<WorkspaceId>("chat"),
+                 make_id<PermissionProfileId>("observe"), persona.persona_id},
       "ordered-start")));
-  REQUIRE(ordered.apply(event(
-      2, PersonaSelectionRecorded{{PersonaSelectionAction::selected,
-                                   PersonaSelectionSource::command_line,
-                                   persona, std::nullopt}},
-      "persona")));
+  REQUIRE(ordered.apply(
+      event(2,
+            PersonaSelectionRecorded{{PersonaSelectionAction::selected,
+                                      PersonaSelectionSource::command_line,
+                                      persona, std::nullopt}},
+            "persona")));
   REQUIRE(ordered.apply(event(3, user, "ordered-user")));
 }
 
@@ -145,44 +148,51 @@ TEST_CASE("run projection rejects illegal inference and terminal ordering",
   const auto message = make_id<MessageId>("assistant");
 
   REQUIRE(projection.apply(event(1, started(), "e1")));
-  REQUIRE_FALSE(projection.apply(event(
-      2, AssistantContentStarted{message, inference}, "e2")));
+  REQUIRE_FALSE(projection.apply(
+      event(2, AssistantContentStarted{message, inference}, "e2")));
+  REQUIRE(projection.apply(
+      event(2, InferenceStarted{inference, make_id<ModelId>("model")}, "e2")));
+  REQUIRE(projection.apply(
+      event(3, AssistantContentStarted{message, inference}, "e3")));
+  REQUIRE_FALSE(projection.apply(
+      event(4, InferenceFinished{inference, FinishReason::stop}, "e4")));
   REQUIRE(projection.apply(event(
-      2, InferenceStarted{inference, make_id<ModelId>("model")}, "e2")));
-  REQUIRE(projection.apply(event(3, AssistantContentStarted{message, inference}, "e3")));
-  REQUIRE_FALSE(projection.apply(event(
-      4, InferenceFinished{inference, FinishReason::stop}, "e4")));
-  REQUIRE(projection.apply(event(
-      4, AssistantContentDeltaAdded{message, inference, TextBlock{"partial"}}, "e4")));
-  REQUIRE(projection.apply(event(5, AssistantContentFinished{message, inference}, "e5")));
-  REQUIRE(projection.apply(event(6, InferenceFinished{inference, FinishReason::stop}, "e6")));
+      4, AssistantContentDeltaAdded{message, inference, TextBlock{"partial"}},
+      "e4")));
+  REQUIRE(projection.apply(
+      event(5, AssistantContentFinished{message, inference}, "e5")));
+  REQUIRE(projection.apply(
+      event(6, InferenceFinished{inference, FinishReason::stop}, "e6")));
   REQUIRE(projection.apply(event(7, RunCompleted{}, "e7")));
   REQUIRE_FALSE(projection.apply(event(8, RunCancelRequested{}, "e8")));
-  REQUIRE(projection.apply(event(8, UnknownEvent{"future.after-terminal"}, "e8")));
+  REQUIRE(
+      projection.apply(event(8, UnknownEvent{"future.after-terminal"}, "e8")));
 }
 
 TEST_CASE("run provenance is recorded once, after a start, on a live run",
           "[domain][failure][provenance]") {
   RunProjection projection;
 
-  REQUIRE_FALSE(projection.apply(event(1, RunProvenanceRecorded{provenance()},
-                                       "orphan")));
+  REQUIRE_FALSE(projection.apply(
+      event(1, RunProvenanceRecorded{provenance()}, "orphan")));
   REQUIRE(projection.last_sequence() == 0);
   REQUIRE_FALSE(projection.provenance());
 
   REQUIRE(projection.apply(event(1, started(), "e1")));
-  REQUIRE(projection.apply(event(2, RunProvenanceRecorded{provenance()}, "e2")));
+  REQUIRE(
+      projection.apply(event(2, RunProvenanceRecorded{provenance()}, "e2")));
   REQUIRE(projection.provenance() == provenance());
 
   auto second = provenance();
   second.backend_id = "other";
-  REQUIRE_FALSE(projection.apply(event(3, RunProvenanceRecorded{second}, "e3")));
+  REQUIRE_FALSE(
+      projection.apply(event(3, RunProvenanceRecorded{second}, "e3")));
   REQUIRE(projection.provenance() == provenance());
   REQUIRE(projection.last_sequence() == 2);
 
   REQUIRE(projection.apply(event(3, RunCompleted{}, "e3")));
-  REQUIRE_FALSE(projection.apply(event(4, RunProvenanceRecorded{provenance()},
-                                       "e4")));
+  REQUIRE_FALSE(
+      projection.apply(event(4, RunProvenanceRecorded{provenance()}, "e4")));
 }
 
 TEST_CASE("run provenance validation refuses secrets and malformed identity",
@@ -236,9 +246,12 @@ TEST_CASE("run provenance validation refuses secrets and malformed identity",
   auto many_entries = provenance();
   many_entries.configuration.clear();
   for (std::size_t index = 0; index <= 256; ++index) {
-    many_entries.configuration.push_back(
-        {"key-" + std::to_string(index), std::nullopt, false, std::nullopt,
-         false, {}});
+    many_entries.configuration.push_back({"key-" + std::to_string(index),
+                                          std::nullopt,
+                                          false,
+                                          std::nullopt,
+                                          false,
+                                          {}});
   }
   REQUIRE(validate_run_provenance(many_entries).error().code ==
           RunProvenanceErrorCode::too_many_entries);
@@ -294,31 +307,37 @@ TEST_CASE("run provenance validation bounds identity, credentials, and tools",
   exhausted.configuration.clear();
   for (std::size_t index = 0; index < 32; ++index) {
     exhausted.configuration.push_back({"key-" + std::to_string(index),
-                                       std::string(4000, 'x'), true,
-                                       std::nullopt, false, {}});
+                                       std::string(4000, 'x'),
+                                       true,
+                                       std::nullopt,
+                                       false,
+                                       {}});
   }
   REQUIRE(validate_run_provenance(exhausted).error().code ==
           RunProvenanceErrorCode::resource_exhausted);
 }
 
-TEST_CASE("usage aggregation detects overflow without partially applying the event",
-          "[domain][failure]") {
+TEST_CASE(
+    "usage aggregation detects overflow without partially applying the event",
+    "[domain][failure]") {
   RunProjection projection;
   const auto inference = make_id<InferenceId>("inference");
 
   REQUIRE(projection.apply(event(1, started(), "e1")));
+  REQUIRE(projection.apply(
+      event(2, InferenceStarted{inference, make_id<ModelId>("model")}, "e2")));
   REQUIRE(projection.apply(event(
-      2, InferenceStarted{inference, make_id<ModelId>("model")}, "e2")));
-  REQUIRE(projection.apply(event(
-      3, UsageRecorded{inference,
-                       Usage{std::numeric_limits<std::uint64_t>::max(), 1, 2, 3}},
+      3,
+      UsageRecorded{inference,
+                    Usage{std::numeric_limits<std::uint64_t>::max(), 1, 2, 3}},
       "e3")));
-  const auto failed = projection.apply(event(
-      4, UsageRecorded{inference, Usage{1, 0, 0, 0}}, "e4"));
+  const auto failed = projection.apply(
+      event(4, UsageRecorded{inference, Usage{1, 0, 0, 0}}, "e4"));
   REQUIRE_FALSE(failed);
   REQUIRE(failed.error().code == ProjectionErrorCode::usage_overflow);
   REQUIRE(projection.last_sequence() == 3);
-  REQUIRE(projection.usage().input_tokens == std::numeric_limits<std::uint64_t>::max());
+  REQUIRE(projection.usage().input_tokens ==
+          std::numeric_limits<std::uint64_t>::max());
 }
 
 TEST_CASE("cancelled inference keeps partial assistant evidence", "[domain]") {
@@ -327,15 +346,20 @@ TEST_CASE("cancelled inference keeps partial assistant evidence", "[domain]") {
   const auto message = make_id<MessageId>("assistant");
 
   REQUIRE(projection.apply(event(1, started(), "e1")));
+  REQUIRE(projection.apply(
+      event(2,
+            UserContentAdded{Message{make_id<MessageId>("user"),
+                                     Role::user,
+                                     {TextBlock{"hello"}},
+                                     std::nullopt}},
+            "e2")));
+  REQUIRE(projection.apply(
+      event(3, InferenceStarted{inference, make_id<ModelId>("model")}, "e3")));
+  REQUIRE(projection.apply(
+      event(4, AssistantContentStarted{message, inference}, "e4")));
   REQUIRE(projection.apply(event(
-      2, UserContentAdded{Message{make_id<MessageId>("user"), Role::user,
-                                  {TextBlock{"hello"}}, std::nullopt}},
-      "e2")));
-  REQUIRE(projection.apply(event(
-      3, InferenceStarted{inference, make_id<ModelId>("model")}, "e3")));
-  REQUIRE(projection.apply(event(4, AssistantContentStarted{message, inference}, "e4")));
-  REQUIRE(projection.apply(event(
-      5, AssistantContentDeltaAdded{message, inference, TextBlock{"partial"}}, "e5")));
+      5, AssistantContentDeltaAdded{message, inference, TextBlock{"partial"}},
+      "e5")));
   REQUIRE(projection.apply(event(
       6, InferenceCancelled{inference, std::string{"user request"}}, "e6")));
   REQUIRE(projection.messages().back().complete);
@@ -352,13 +376,18 @@ TEST_CASE("all north-star event families have typed payloads", "[domain]") {
   const auto message = make_id<MessageId>("message");
   const DomainError error{ErrorCode::backend, "redacted", true};
   const CapabilityScope scope{Effect::read, "root", "/workspace"};
-  const QuestionDefinition definition{question, "Choose", QuestionSelection::one,
-                                      {{"yes", "Yes", std::nullopt}}, true, 1,
-                                      1,
-                                      QuestionOtherInput{"Other", std::nullopt,
-                                                         4096}};
-  const ArtifactMetadata artifact_metadata{artifact, "text/plain", 3, "sha256:abc",
-                                           invocation, std::nullopt, std::nullopt};
+  const QuestionDefinition definition{
+      question,
+      "Choose",
+      QuestionSelection::one,
+      {{"yes", "Yes", std::nullopt}},
+      true,
+      1,
+      1,
+      QuestionOtherInput{"Other", std::nullopt, 4096}};
+  const ArtifactMetadata artifact_metadata{
+      artifact,   "text/plain", 3,           "sha256:abc",
+      invocation, std::nullopt, std::nullopt};
 
   const std::vector<RunEventPayload> payloads{
       started(),
@@ -370,18 +399,22 @@ TEST_CASE("all north-star event families have typed payloads", "[domain]") {
       RunFailed{error},
       RunCancelRequested{std::nullopt},
       RunCancelled{std::nullopt},
-      UserContentAdded{Message{message, Role::user, {TextBlock{"text"}}, std::nullopt}},
+      UserContentAdded{
+          Message{message, Role::user, {TextBlock{"text"}}, std::nullopt}},
       AssistantContentStarted{message, inference},
       AssistantContentDeltaAdded{message, inference, TextBlock{"delta"}},
       AssistantContentFinished{message, inference},
       InferenceStarted{inference, make_id<ModelId>("model")},
-      ReasoningMetadataAdded{inference, std::nullopt, {{"visibility", "summary"}}},
+      ReasoningMetadataAdded{
+          inference, std::nullopt, {{"visibility", "summary"}}},
       UsageRecorded{inference, Usage{1, 2, 3, 4}},
       InferenceFinished{inference, FinishReason::stop},
       InferenceFailed{inference, error},
       InferenceCancelled{inference, std::nullopt},
-      ToolProposed{invocation, "read", {"application/json", "{}"}, {Effect::read}},
-      ToolPolicyDecided{invocation, PolicyDecision::allow, {scope}, std::nullopt},
+      ToolProposed{
+          invocation, "read", {"application/json", "{}"}, {Effect::read}},
+      ToolPolicyDecided{
+          invocation, PolicyDecision::allow, {scope}, std::nullopt},
       ToolApprovalRequested{invocation, {scope}},
       ToolApprovalDecided{invocation, ApprovalDecision::approved, {scope}},
       ToolStarted{invocation},

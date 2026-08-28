@@ -14,11 +14,11 @@
 namespace aiforge::domain {
 namespace {
 
-[[nodiscard]] auto
-failure(const PlanGraphErrorCode code, std::string message,
-        std::optional<PlanId> plan_id = std::nullopt,
-        std::optional<PlanRevisionId> revision_id = std::nullopt,
-        std::optional<PlanTaskId> task_id = std::nullopt)
+[[nodiscard]] auto failure(
+    const PlanGraphErrorCode code, std::string message,
+    std::optional<PlanId> plan_id = std::nullopt,
+    std::optional<PlanRevisionId> revision_id = std::nullopt,
+    std::optional<PlanTaskId> task_id = std::nullopt)
     -> std::unexpected<PlanGraphError> {
   return std::unexpected(
       PlanGraphError{code, std::move(message), std::move(plan_id),
@@ -27,8 +27,7 @@ failure(const PlanGraphErrorCode code, std::string message,
 
 [[nodiscard]] auto valid_utf8_text(const std::string_view value,
                                    const bool allow_empty = false) -> bool {
-  if (!allow_empty && value.empty())
-    return false;
+  if (!allow_empty && value.empty()) return false;
   std::size_t index{};
   while (index < value.size()) {
     const auto first = static_cast<unsigned char>(value[index]);
@@ -44,8 +43,7 @@ failure(const PlanGraphErrorCode code, std::string message,
     } else if ((first & 0xE0U) == 0xC0U) {
       length = 2;
       codepoint = first & 0x1FU;
-      if (codepoint < 2)
-        return false;
+      if (codepoint < 2) return false;
     } else if ((first & 0xF0U) == 0xE0U) {
       length = 3;
       codepoint = first & 0x0FU;
@@ -55,12 +53,10 @@ failure(const PlanGraphErrorCode code, std::string message,
     } else {
       return false;
     }
-    if (length > value.size() - index)
-      return false;
+    if (length > value.size() - index) return false;
     for (std::size_t offset = 1; offset < length; ++offset) {
       const auto next = static_cast<unsigned char>(value[index + offset]);
-      if ((next & 0xC0U) != 0x80U)
-        return false;
+      if ((next & 0xC0U) != 0x80U) return false;
       codepoint = (codepoint << 6U) | (next & 0x3FU);
     }
     if ((length == 3 && codepoint < 0x800U) ||
@@ -88,7 +84,7 @@ failure(const PlanGraphErrorCode code, std::string message,
          });
 }
 
-[[nodiscard]] auto valid_limits(const PlanGraphLimits &limits) -> bool {
+[[nodiscard]] auto valid_limits(const PlanGraphLimits& limits) -> bool {
   constexpr PlanGraphLimits maximums;
   return limits.maximum_tasks > 0 &&
          limits.maximum_tasks <= maximums.maximum_tasks &&
@@ -115,16 +111,15 @@ failure(const PlanGraphErrorCode code, std::string message,
 
 [[nodiscard]] auto known_effect(const Effect effect) -> bool {
   switch (effect) {
-  case Effect::read:
-  case Effect::write:
-  case Effect::remove:
-  case Effect::execute:
-  case Effect::network:
-  case Effect::communicate:
-  case Effect::spend:
-  case Effect::change_infrastructure:
-  case Effect::change_privileges:
-    return true;
+    case Effect::read:
+    case Effect::write:
+    case Effect::remove:
+    case Effect::execute:
+    case Effect::network:
+    case Effect::communicate:
+    case Effect::spend:
+    case Effect::change_infrastructure:
+    case Effect::change_privileges: return true;
   }
   return false;
 }
@@ -146,7 +141,7 @@ failure(const PlanGraphErrorCode code, std::string message,
          trigger == PlanInvalidationTrigger::evidence_changed;
 }
 
-[[nodiscard]] auto valid_digest(const ContentDigest &digest) -> bool {
+[[nodiscard]] auto valid_digest(const ContentDigest& digest) -> bool {
   return bounded_identity(digest.algorithm, 128) &&
          bounded_identity(digest.value, 512) &&
          std::ranges::all_of(digest.algorithm,
@@ -160,7 +155,7 @@ failure(const PlanGraphErrorCode code, std::string message,
          });
 }
 
-[[nodiscard]] auto add_text_bytes(std::size_t &total,
+[[nodiscard]] auto add_text_bytes(std::size_t& total,
                                   const std::string_view value,
                                   const std::size_t maximum) -> bool {
   if (value.size() > std::numeric_limits<std::size_t>::max() - total) {
@@ -171,46 +166,42 @@ failure(const PlanGraphErrorCode code, std::string message,
 }
 
 template <typename Edges>
-[[nodiscard]] auto has_cycle(const std::vector<PlanTask> &tasks,
-                             const std::map<PlanTaskId, std::size_t> &indices,
+[[nodiscard]] auto has_cycle(const std::vector<PlanTask>& tasks,
+                             const std::map<PlanTaskId, std::size_t>& indices,
                              Edges edges) -> bool {
   enum class Visit { unseen, active, complete };
   std::vector<Visit> visits(tasks.size(), Visit::unseen);
   std::function<bool(std::size_t)> visit = [&](const std::size_t index) {
-    if (visits[index] == Visit::active)
-      return true;
-    if (visits[index] == Visit::complete)
-      return false;
+    if (visits[index] == Visit::active) return true;
+    if (visits[index] == Visit::complete) return false;
     visits[index] = Visit::active;
-    for (const auto &target : edges(tasks[index])) {
+    for (const auto& target : edges(tasks[index])) {
       const auto found = indices.find(target);
-      if (found != indices.end() && visit(found->second))
-        return true;
+      if (found != indices.end() && visit(found->second)) return true;
     }
     visits[index] = Visit::complete;
     return false;
   };
   for (std::size_t index = 0; index < tasks.size(); ++index) {
-    if (visit(index))
-      return true;
+    if (visit(index)) return true;
   }
   return false;
 }
 
-[[nodiscard]] auto plan_id_from(const RunEventPayload &payload)
-    -> const PlanId * {
-  if (const auto *proposed = std::get_if<PlanRevisionProposed>(&payload)) {
+[[nodiscard]] auto plan_id_from(const RunEventPayload& payload)
+    -> const PlanId* {
+  if (const auto* proposed = std::get_if<PlanRevisionProposed>(&payload)) {
     return &proposed->revision.plan_id;
   }
-  if (const auto *recorded =
+  if (const auto* recorded =
           std::get_if<PlanRevisionDecisionRecorded>(&payload)) {
     return &recorded->decision.plan_id;
   }
-  if (const auto *invalidated =
+  if (const auto* invalidated =
           std::get_if<PlanRevisionInvalidated>(&payload)) {
     return &invalidated->invalidation.plan_id;
   }
-  if (const auto *materialized =
+  if (const auto* materialized =
           std::get_if<SessionTasksMaterialized>(&payload)) {
     return &materialized->plan_id;
   }
@@ -226,8 +217,8 @@ template <typename Edges>
 
 } // namespace
 
-auto validate_plan_revision(const PlanRevision &revision,
-                            const PlanGraphLimits &limits)
+auto validate_plan_revision(const PlanRevision& revision,
+                            const PlanGraphLimits& limits)
     -> std::expected<void, PlanGraphError> {
   try {
     if (!valid_limits(limits)) {
@@ -246,10 +237,11 @@ auto validate_plan_revision(const PlanRevision &revision,
     }
     if (revision.evidence.size() > limits.maximum_evidence_bindings) {
       return failure(PlanGraphErrorCode::resource_exhausted,
-                     "plan evidence count exceeds its bound",
-                     revision.plan_id, revision.revision_id);
+                     "plan evidence count exceeds its bound", revision.plan_id,
+                     revision.revision_id);
     }
-    if (revision.tasks.empty() || revision.tasks.size() > limits.maximum_tasks) {
+    if (revision.tasks.empty() ||
+        revision.tasks.size() > limits.maximum_tasks) {
       return failure(PlanGraphErrorCode::resource_exhausted,
                      "plan task count is outside its bounds", revision.plan_id,
                      revision.revision_id);
@@ -264,7 +256,7 @@ auto validate_plan_revision(const PlanRevision &revision,
     }
 
     std::set<EvidenceId> evidence_ids;
-    for (const auto &binding : revision.evidence) {
+    for (const auto& binding : revision.evidence) {
       if (!valid_digest(binding.digest) ||
           !evidence_ids.insert(binding.evidence_id).second ||
           !add_text_bytes(total_text_bytes, binding.digest.algorithm,
@@ -279,7 +271,7 @@ auto validate_plan_revision(const PlanRevision &revision,
 
     std::map<PlanTaskId, std::size_t> indices;
     for (std::size_t index = 0; index < revision.tasks.size(); ++index) {
-      const auto &task = revision.tasks[index];
+      const auto& task = revision.tasks[index];
       if (!indices.emplace(task.task_id, index).second) {
         return failure(PlanGraphErrorCode::duplicate_identity,
                        "plan task identity is duplicated", revision.plan_id,
@@ -287,7 +279,7 @@ auto validate_plan_revision(const PlanRevision &revision,
       }
     }
 
-    for (const auto &task : revision.tasks) {
+    for (const auto& task : revision.tasks) {
       if (!bounded_text(task.title, limits.maximum_text_bytes) ||
           task.acceptance_criteria.empty() ||
           task.acceptance_criteria.size() >
@@ -308,7 +300,7 @@ auto validate_plan_revision(const PlanRevision &revision,
       }
 
       std::set<PlanTaskId> dependencies;
-      for (const auto &dependency : task.dependency_task_ids) {
+      for (const auto& dependency : task.dependency_task_ids) {
         if (dependency == task.task_id || !indices.contains(dependency)) {
           return failure(PlanGraphErrorCode::unknown_reference,
                          "plan task dependency is missing or self-referential",
@@ -337,7 +329,7 @@ auto validate_plan_revision(const PlanRevision &revision,
       }
 
       std::set<std::tuple<Effect, std::string, std::string>> intents;
-      for (const auto &intent : task.resource_intents) {
+      for (const auto& intent : task.resource_intents) {
         if (!known_effect(intent.effect) ||
             !intended_effects.contains(intent.effect) ||
             !bounded_identity(intent.kind, limits.maximum_metadata_bytes) ||
@@ -357,7 +349,7 @@ auto validate_plan_revision(const PlanRevision &revision,
         }
       }
 
-      for (const auto &criterion : task.acceptance_criteria) {
+      for (const auto& criterion : task.acceptance_criteria) {
         if (!bounded_text(criterion, limits.maximum_text_bytes)) {
           return failure(PlanGraphErrorCode::invalid_task,
                          "plan acceptance criterion is invalid",
@@ -372,12 +364,12 @@ auto validate_plan_revision(const PlanRevision &revision,
       }
     }
 
-    const auto parent_edges = [](const PlanTask &task) {
+    const auto parent_edges = [](const PlanTask& task) {
       return task.parent_task_id ? std::vector<PlanTaskId>{*task.parent_task_id}
                                  : std::vector<PlanTaskId>{};
     };
     if (has_cycle(revision.tasks, indices, parent_edges) ||
-        has_cycle(revision.tasks, indices, [](const PlanTask &task) {
+        has_cycle(revision.tasks, indices, [](const PlanTask& task) {
           return task.dependency_task_ids;
         })) {
       return failure(PlanGraphErrorCode::cyclic_graph,
@@ -392,8 +384,8 @@ auto validate_plan_revision(const PlanRevision &revision,
   }
 }
 
-auto validate_plan_decision(const PlanRevisionDecision &decision,
-                            const PlanGraphLimits &limits)
+auto validate_plan_decision(const PlanRevisionDecision& decision,
+                            const PlanGraphLimits& limits)
     -> std::expected<void, PlanGraphError> {
   try {
     if (!valid_limits(limits)) {
@@ -416,7 +408,7 @@ auto validate_plan_decision(const PlanRevisionDecision &decision,
   }
 }
 
-auto validate_plan_invalidation(const PlanRevisionInvalidation &invalidation)
+auto validate_plan_invalidation(const PlanRevisionInvalidation& invalidation)
     -> std::expected<void, PlanGraphError> {
   try {
     std::set<PlanInvalidationTrigger> triggers;
@@ -438,32 +430,27 @@ auto validate_plan_invalidation(const PlanRevisionInvalidation &invalidation)
 }
 
 auto PlanGraphProjection::current_revision() const noexcept
-    -> const ProjectedPlanRevision * {
+    -> const ProjectedPlanRevision* {
   return m_revisions.empty() ? nullptr : &m_revisions.back();
 }
 
 auto PlanGraphProjection::state() const noexcept -> PlanGraphState {
-  const auto *current = current_revision();
-  if (current == nullptr)
-    return PlanGraphState::not_started;
-  if (current->invalidation_event_id)
-    return PlanGraphState::invalidated;
-  if (!current->decision)
-    return PlanGraphState::proposed;
+  const auto* current = current_revision();
+  if (current == nullptr) return PlanGraphState::not_started;
+  if (current->invalidation_event_id) return PlanGraphState::invalidated;
+  if (!current->decision) return PlanGraphState::proposed;
   switch (current->decision->decision) {
-  case PlanDecision::approved:
-    return PlanGraphState::approved;
-  case PlanDecision::revision_requested:
-    return PlanGraphState::revision_requested;
-  case PlanDecision::rejected:
-    return PlanGraphState::rejected;
+    case PlanDecision::approved: return PlanGraphState::approved;
+    case PlanDecision::revision_requested:
+      return PlanGraphState::revision_requested;
+    case PlanDecision::rejected: return PlanGraphState::rejected;
   }
   return PlanGraphState::proposed;
 }
 
 auto PlanGraphProjection::active_tasks() const noexcept
     -> std::span<const PlanTask> {
-  const auto *current = current_revision();
+  const auto* current = current_revision();
   if (current == nullptr || state() != PlanGraphState::approved ||
       !current->materialization_event_id) {
     return {};
@@ -489,8 +476,8 @@ auto PlanGraphProjection::task_execution(const PlanTaskId& task_id)
   return found == executions.end() ? nullptr : &*found;
 }
 
-auto PlanGraphProjection::apply(const RunEvent &event,
-                                const PlanGraphLimits &limits)
+auto PlanGraphProjection::apply(const RunEvent& event,
+                                const PlanGraphLimits& limits)
     -> std::expected<void, PlanGraphError> {
   try {
     auto candidate = *this;
@@ -506,10 +493,10 @@ auto PlanGraphProjection::apply(const RunEvent &event,
 }
 
 auto PlanGraphProjection::rebuild(std::span<const RunEvent> events,
-                                  const PlanGraphLimits &limits)
+                                  const PlanGraphLimits& limits)
     -> std::expected<PlanGraphProjection, PlanGraphError> {
   PlanGraphProjection result;
-  for (const auto &event : events) {
+  for (const auto& event : events) {
     if (auto applied = result.apply(event, limits); !applied) {
       return std::unexpected(std::move(applied.error()));
     }
@@ -517,8 +504,8 @@ auto PlanGraphProjection::rebuild(std::span<const RunEvent> events,
   return result;
 }
 
-auto PlanGraphProjection::apply_in_place(const RunEvent &event,
-                                         const PlanGraphLimits &limits)
+auto PlanGraphProjection::apply_in_place(const RunEvent& event,
+                                         const PlanGraphLimits& limits)
     -> std::expected<void, PlanGraphError> {
   if (!valid_limits(limits)) {
     return failure(PlanGraphErrorCode::invalid_limits,
@@ -537,19 +524,19 @@ auto PlanGraphProjection::apply_in_place(const RunEvent &event,
                    "plan event identity is duplicated", m_plan_id);
   }
 
-  const auto *payload_plan_id = plan_id_from(event.payload);
+  const auto* payload_plan_id = plan_id_from(event.payload);
   if (payload_plan_id && m_plan_id && *payload_plan_id != *m_plan_id) {
     return failure(PlanGraphErrorCode::wrong_plan,
                    "plan event belongs to another plan", m_plan_id);
   }
 
-  if (const auto *proposed =
+  if (const auto* proposed =
           std::get_if<PlanRevisionProposed>(&event.payload)) {
     if (auto valid = validate_plan_revision(proposed->revision, limits);
         !valid) {
       return std::unexpected(std::move(valid.error()));
     }
-    const auto *current = current_revision();
+    const auto* current = current_revision();
     if ((current == nullptr && proposed->revision.supersedes_revision_id) ||
         (current != nullptr &&
          proposed->revision.supersedes_revision_id !=
@@ -559,7 +546,7 @@ auto PlanGraphProjection::apply_in_place(const RunEvent &event,
                      proposed->revision.plan_id,
                      proposed->revision.revision_id);
     }
-    if (std::ranges::any_of(m_revisions, [&](const auto &revision) {
+    if (std::ranges::any_of(m_revisions, [&](const auto& revision) {
           return revision.revision.revision_id ==
                  proposed->revision.revision_id;
         })) {
@@ -568,18 +555,22 @@ auto PlanGraphProjection::apply_in_place(const RunEvent &event,
                      proposed->revision.plan_id,
                      proposed->revision.revision_id);
     }
-    if (!m_plan_id)
-      m_plan_id = proposed->revision.plan_id;
-    m_revisions.push_back({proposed->revision, event.metadata.event_id,
-                           std::nullopt, std::nullopt, std::nullopt, {},
-                           std::nullopt, {}});
-  } else if (const auto *recorded =
+    if (!m_plan_id) m_plan_id = proposed->revision.plan_id;
+    m_revisions.push_back({proposed->revision,
+                           event.metadata.event_id,
+                           std::nullopt,
+                           std::nullopt,
+                           std::nullopt,
+                           {},
+                           std::nullopt,
+                           {}});
+  } else if (const auto* recorded =
                  std::get_if<PlanRevisionDecisionRecorded>(&event.payload)) {
     if (auto valid = validate_plan_decision(recorded->decision, limits);
         !valid) {
       return std::unexpected(std::move(valid.error()));
     }
-    auto *current = m_revisions.empty() ? nullptr : &m_revisions.back();
+    auto* current = m_revisions.empty() ? nullptr : &m_revisions.back();
     if (current == nullptr) {
       return failure(PlanGraphErrorCode::invalid_transition,
                      "plan decision requires a proposed revision",
@@ -600,16 +591,15 @@ auto PlanGraphProjection::apply_in_place(const RunEvent &event,
     }
     current->decision_event_id = event.metadata.event_id;
     current->decision = recorded->decision;
-  } else if (const auto *invalidated =
+  } else if (const auto* invalidated =
                  std::get_if<PlanRevisionInvalidated>(&event.payload)) {
     if (auto valid = validate_plan_invalidation(invalidated->invalidation);
         !valid) {
       return std::unexpected(std::move(valid.error()));
     }
-    auto *current = m_revisions.empty() ? nullptr : &m_revisions.back();
-    if (current == nullptr ||
-        invalidated->invalidation.revision_id !=
-            current->revision.revision_id) {
+    auto* current = m_revisions.empty() ? nullptr : &m_revisions.back();
+    if (current == nullptr || invalidated->invalidation.revision_id !=
+                                  current->revision.revision_id) {
       return failure(PlanGraphErrorCode::wrong_revision,
                      "plan invalidation does not target the current revision",
                      invalidated->invalidation.plan_id,
@@ -625,14 +615,15 @@ auto PlanGraphProjection::apply_in_place(const RunEvent &event,
     }
     current->invalidation_event_id = event.metadata.event_id;
     current->invalidation_triggers = invalidated->invalidation.triggers;
-  } else if (const auto *materialized =
+  } else if (const auto* materialized =
                  std::get_if<SessionTasksMaterialized>(&event.payload)) {
-    auto *current = m_revisions.empty() ? nullptr : &m_revisions.back();
+    auto* current = m_revisions.empty() ? nullptr : &m_revisions.back();
     if (current == nullptr ||
         materialized->revision_id != current->revision.revision_id) {
-      return failure(PlanGraphErrorCode::wrong_revision,
-                     "task materialization does not target the current revision",
-                     materialized->plan_id, materialized->revision_id);
+      return failure(
+          PlanGraphErrorCode::wrong_revision,
+          "task materialization does not target the current revision",
+          materialized->plan_id, materialized->revision_id);
     }
     if (current->invalidation_event_id || !current->decision ||
         current->decision->decision != PlanDecision::approved ||

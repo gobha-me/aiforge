@@ -85,14 +85,14 @@ class RecordingArtifactStore final : public storage::ArtifactStore {
     }
     m_calls.push_back({write, value});
     if (m_failure) return std::unexpected(*m_failure);
-    return domain::ArtifactMetadata{
-        write.artifact_id,
-        write.media_type,
-        static_cast<std::uint64_t>(content.size()),
-        "test-digest-" + std::to_string(content.size()),
-        write.producing_invocation_id,
-        std::nullopt,
-        std::nullopt};
+    return domain::ArtifactMetadata{write.artifact_id,
+                                    write.media_type,
+                                    static_cast<std::uint64_t>(content.size()),
+                                    "test-digest-" +
+                                        std::to_string(content.size()),
+                                    write.producing_invocation_id,
+                                    std::nullopt,
+                                    std::nullopt};
   }
 
   [[nodiscard]] auto calls() const -> const std::vector<StoredCall>& {
@@ -105,8 +105,8 @@ class RecordingArtifactStore final : public storage::ArtifactStore {
 };
 
 auto limits() -> adapters::ProcessToolLimits {
-  return {8, 32, 16U * 1024U, 8, 8, 2s, 256U * 1024U, 32U * 1024U,
-          1024, 32, 50ms};
+  return {8,           32,   16U * 1024U, 8,   8, 2s, 256U * 1024U,
+          32U * 1024U, 1024, 32,          50ms};
 }
 
 auto configuration(const std::filesystem::path& executable,
@@ -121,8 +121,7 @@ auto configuration(const std::filesystem::path& executable,
 }
 
 auto arguments(const std::filesystem::path& executable,
-               const std::filesystem::path& root,
-               std::vector<std::string> argv,
+               const std::filesystem::path& root, std::vector<std::string> argv,
                std::vector<std::string> environment = {},
                const std::uint64_t timeout_ms = 1000,
                const std::uint64_t output_bytes = 128U * 1024U,
@@ -190,7 +189,7 @@ auto fixture() -> std::filesystem::path {
   return std::filesystem::path{PROCESS_TEST_FIXTURE};
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("process declaration and validation fail closed",
           "[process][validation][failure]") {
@@ -215,8 +214,8 @@ TEST_CASE("process declaration and validation fail closed",
 
   for (auto malformed :
        std::vector<domain::StructuredDataBlock>{{"text/plain", "{}"},
-                                                 {"application/json", "{"},
-                                                 {"application/json", "{}"}}) {
+                                                {"application/json", "{"},
+                                                {"application/json", "{}"}}) {
     INFO(malformed.data);
     REQUIRE_FALSE(executor->validate(malformed));
   }
@@ -253,47 +252,48 @@ TEST_CASE("process declaration and validation fail closed",
   auto at_boundary = std::vector<std::string>(32, "argument");
   REQUIRE(
       executor->validate(arguments(fixture(), temporary.path(), at_boundary)));
-  REQUIRE_FALSE(executor->validate(arguments(
-      fixture(), temporary.path(), {std::string(16U * 1024U, 'x')})));
+  REQUIRE_FALSE(executor->validate(
+      arguments(fixture(), temporary.path(), {std::string(16U * 1024U, 'x')})));
 
   auto missing_directory =
       Json::parse(arguments(fixture(), temporary.path(), {}).data);
   missing_directory["working_directory"] =
       (temporary.path() / "missing").generic_string();
-  auto validated = executor->validate(
-      {"application/json", missing_directory.dump()});
+  auto validated =
+      executor->validate({"application/json", missing_directory.dump()});
   REQUIRE(validated);
-  auto missing = executor->start(
-      {make_id<domain::InvocationId>("missing-directory"), std::nullopt,
-       "run_process", *validated, validated->required_scopes,
-       registration->limits},
-      {});
+  auto missing =
+      executor->start({make_id<domain::InvocationId>("missing-directory"),
+                       std::nullopt, "run_process", *validated,
+                       validated->required_scopes, registration->limits},
+                      {});
   REQUIRE_FALSE(missing);
-  REQUIRE(missing.error().code ==
-          runtime::ToolExecutionErrorCode::unavailable);
+  REQUIRE(missing.error().code == runtime::ToolExecutionErrorCode::unavailable);
 
   validated = executor->validate(arguments(fixture(), temporary.path(), {}));
   REQUIRE(validated);
-  auto ungranted = executor->start(
-      {make_id<domain::InvocationId>("ungranted"), std::nullopt,
-       "run_process", *validated, {}, registration->limits},
-      {});
+  auto ungranted = executor->start({make_id<domain::InvocationId>("ungranted"),
+                                    std::nullopt,
+                                    "run_process",
+                                    *validated,
+                                    {},
+                                    registration->limits},
+                                   {});
   REQUIRE_FALSE(ungranted);
   REQUIRE(ungranted.error().code ==
           runtime::ToolExecutionErrorCode::unavailable);
 
-  validated = executor->validate(arguments(
-      fixture(), temporary.path(), {}, {}, 1000, 1024,
-      {temporary.path().generic_string()}));
+  validated =
+      executor->validate(arguments(fixture(), temporary.path(), {}, {}, 1000,
+                                   1024, {temporary.path().generic_string()}));
   REQUIRE(validated);
   auto read_only_grants = validated->required_scopes;
   std::erase_if(read_only_grants, [](const auto& capability) {
     return capability.effect == domain::Effect::write;
   });
   auto unwritable = executor->start(
-      {make_id<domain::InvocationId>("unwritable"), std::nullopt,
-       "run_process", *validated, std::move(read_only_grants),
-       registration->limits},
+      {make_id<domain::InvocationId>("unwritable"), std::nullopt, "run_process",
+       *validated, std::move(read_only_grants), registration->limits},
       {});
   REQUIRE_FALSE(unwritable);
   REQUIRE(unwritable.error().code ==
@@ -318,9 +318,9 @@ TEST_CASE("process declaration and validation fail closed",
   REQUIRE(combined_snapshot);
   const auto* combined = combined_snapshot->find("run_process");
   REQUIRE(combined != nullptr);
-  REQUIRE_FALSE(combined->executor->validate(arguments(
-      fixture(), temporary.path(), {std::string(7U * 1024U, 'a')},
-      {"SAFE_VALUE"})));
+  REQUIRE_FALSE(combined->executor->validate(
+      arguments(fixture(), temporary.path(), {std::string(7U * 1024U, 'a')},
+                {"SAFE_VALUE"})));
 }
 
 TEST_CASE("process execution preserves argv and isolates its environment",
@@ -331,12 +331,11 @@ TEST_CASE("process execution preserves argv and isolates its environment",
   REQUIRE(adapters::register_process_tool(
       registry, artifacts, configuration(fixture(), temporary.path())));
   REQUIRE(::setenv("UNLISTED_VALUE", "ambient-secret", 1) == 0);
-  const auto result = execute(
-      registry,
-      arguments(fixture(), temporary.path(),
-                {"inspect", "literal;still-one", "$(not-a-shell)",
-                 "line\nbreak"},
-                {"SAFE_VALUE"}));
+  const auto result =
+      execute(registry, arguments(fixture(), temporary.path(),
+                                  {"inspect", "literal;still-one",
+                                   "$(not-a-shell)", "line\nbreak"},
+                                  {"SAFE_VALUE"}));
   REQUIRE(::unsetenv("UNLISTED_VALUE") == 0);
   REQUIRE(result);
   REQUIRE(result->validated.required_effects ==
@@ -364,10 +363,9 @@ TEST_CASE("process execution preserves argv and isolates its environment",
   REQUIRE(ambient >= 32);
   static_cast<void>(::close(descriptors[0]));
   static_cast<void>(::close(descriptors[1]));
-  auto isolated = execute(
-      registry,
-      arguments(fixture(), temporary.path(),
-                {"descriptor", std::to_string(ambient)}));
+  auto isolated =
+      execute(registry, arguments(fixture(), temporary.path(),
+                                  {"descriptor", std::to_string(ambient)}));
   static_cast<void>(::close(ambient));
   REQUIRE(isolated);
   REQUIRE(result_json(isolated->result).at("stdout").at("text") ==
@@ -382,8 +380,8 @@ TEST_CASE("signals and malformed executables are structured outcomes",
   runtime::ToolRegistry registry;
   REQUIRE(adapters::register_process_tool(
       registry, artifacts, configuration(fixture(), temporary.path())));
-  auto signaled = execute(
-      registry, arguments(fixture(), temporary.path(), {"signal"}));
+  auto signaled =
+      execute(registry, arguments(fixture(), temporary.path(), {"signal"}));
   REQUIRE(signaled);
   REQUIRE(result_json(signaled->result).at("status") == "signaled");
   REQUIRE(result_json(signaled->result).at("signal") == SIGTERM);
@@ -393,15 +391,15 @@ TEST_CASE("signals and malformed executables are structured outcomes",
     std::ofstream output{malformed};
     output << "this is not an executable format\n";
   }
-  std::filesystem::permissions(
-      malformed, std::filesystem::perms::owner_read |
-                     std::filesystem::perms::owner_exec);
+  std::filesystem::permissions(malformed,
+                               std::filesystem::perms::owner_read |
+                                   std::filesystem::perms::owner_exec);
   runtime::ToolRegistry malformed_registry;
   REQUIRE(adapters::register_process_tool(
       malformed_registry, artifacts,
       configuration(malformed, temporary.path())));
-  auto failed = execute(
-      malformed_registry, arguments(malformed, temporary.path(), {}));
+  auto failed =
+      execute(malformed_registry, arguments(malformed, temporary.path(), {}));
   REQUIRE(failed);
   const auto failed_json = result_json(failed->result);
   REQUIRE(failed_json.at("status") == "spawn_failed");
@@ -419,9 +417,9 @@ TEST_CASE("large and binary output spill to bounded artifacts",
       registry, artifacts,
       configuration(fixture(), temporary.path(), process_limits)));
 
-  auto spilled = execute(
-      registry, arguments(fixture(), temporary.path(), {"emit", "100", "x"},
-                          {}, 1000, 1024));
+  auto spilled =
+      execute(registry, arguments(fixture(), temporary.path(),
+                                  {"emit", "100", "x"}, {}, 1000, 1024));
   REQUIRE(spilled);
   const auto value = result_json(spilled->result);
   REQUIRE(value.at("status") == "exited");
@@ -448,9 +446,9 @@ TEST_CASE("large and binary output spill to bounded artifacts",
   REQUIRE(adapters::register_process_tool(
       secret_registry, secret_artifacts,
       configuration(fixture(), temporary.path(), process_limits)));
-  auto secret = execute(
-      secret_registry,
-      arguments(fixture(), temporary.path(), {"inspect"}, {"SAFE_VALUE"}));
+  auto secret =
+      execute(secret_registry, arguments(fixture(), temporary.path(),
+                                         {"inspect"}, {"SAFE_VALUE"}));
   REQUIRE(secret);
   REQUIRE(secret->progress.empty());
   REQUIRE(secret_artifacts.calls().size() == 2);
@@ -473,10 +471,9 @@ TEST_CASE("stdout and stderr are drained independently under backpressure",
   REQUIRE(adapters::register_process_tool(
       registry, artifacts,
       configuration(fixture(), temporary.path(), process_limits)));
-  auto duplex = execute(
-      registry,
-      arguments(fixture(), temporary.path(), {"duplex", "131072"}, {},
-                1000, 256U * 1024U));
+  auto duplex = execute(registry, arguments(fixture(), temporary.path(),
+                                            {"duplex", "131072"}, {}, 1000,
+                                            256U * 1024U));
   REQUIRE(duplex);
   const auto value = result_json(duplex->result);
   REQUIRE(value.at("status") == "exited");
@@ -505,10 +502,9 @@ TEST_CASE("output limits and timeouts terminate the process group",
   REQUIRE(adapters::register_process_tool(
       registry, artifacts,
       configuration(fixture(), temporary.path(), process_limits)));
-  auto limited = execute(
-      registry,
-      arguments(fixture(), temporary.path(), {"emit", "100000", "z"}, {},
-                1000, 50));
+  auto limited =
+      execute(registry, arguments(fixture(), temporary.path(),
+                                  {"emit", "100000", "z"}, {}, 1000, 50));
   REQUIRE(limited);
   REQUIRE(result_json(limited->result).at("status") == "output_limit");
   REQUIRE(artifacts.calls().front().content.size() == 50);
@@ -519,10 +515,10 @@ TEST_CASE("output limits and timeouts terminate the process group",
       timeout_registry, timeout_artifacts,
       configuration(fixture(), temporary.path(), process_limits)));
   const auto marker = temporary.path() / "descendant.marker";
-  auto timed_out = execute(
-      timeout_registry,
-      arguments(fixture(), temporary.path(), {"hang", marker.string()}, {},
-                50, 1024, {temporary.path().generic_string()}));
+  auto timed_out =
+      execute(timeout_registry,
+              arguments(fixture(), temporary.path(), {"hang", marker.string()},
+                        {}, 50, 1024, {temporary.path().generic_string()}));
   REQUIRE(timed_out);
   REQUIRE(result_json(timed_out->result).at("status") == "timed_out");
   REQUIRE(std::filesystem::exists(marker));
@@ -543,9 +539,9 @@ TEST_CASE("cancellation cleans up and artifact failures stay redacted",
       configuration(fixture(), temporary.path(), process_limits)));
   std::stop_source cancelled_before_start;
   cancelled_before_start.request_stop();
-  auto pre_cancelled = execute(
-      registry, arguments(fixture(), temporary.path(), {"hang"}),
-      cancelled_before_start.get_token());
+  auto pre_cancelled =
+      execute(registry, arguments(fixture(), temporary.path(), {"hang"}),
+              cancelled_before_start.get_token());
   REQUIRE_FALSE(pre_cancelled);
   REQUIRE(pre_cancelled.error().code ==
           runtime::ToolExecutionErrorCode::cancelled);
@@ -555,24 +551,22 @@ TEST_CASE("cancellation cleans up and artifact failures stay redacted",
     std::this_thread::sleep_for(40ms);
     cancellation.request_stop();
   }};
-  auto cancelled = execute(
-      registry, arguments(fixture(), temporary.path(), {"hang"}, {}, 1000,
-                          1024),
-      cancellation.get_token());
+  auto cancelled =
+      execute(registry,
+              arguments(fixture(), temporary.path(), {"hang"}, {}, 1000, 1024),
+              cancellation.get_token());
   REQUIRE_FALSE(cancelled);
-  REQUIRE(cancelled.error().code ==
-          runtime::ToolExecutionErrorCode::cancelled);
+  REQUIRE(cancelled.error().code == runtime::ToolExecutionErrorCode::cancelled);
 
-  RecordingArtifactStore failing_artifacts{storage::ArtifactStoreError{
-      storage::ArtifactStoreErrorCode::io_failure,
-      "secret-bearing filesystem detail", true}};
+  RecordingArtifactStore failing_artifacts{
+      storage::ArtifactStoreError{storage::ArtifactStoreErrorCode::io_failure,
+                                  "secret-bearing filesystem detail", true}};
   runtime::ToolRegistry failing_registry;
   REQUIRE(adapters::register_process_tool(
       failing_registry, failing_artifacts,
       configuration(fixture(), temporary.path(), process_limits)));
-  auto failed = execute(
-      failing_registry,
-      arguments(fixture(), temporary.path(), {"emit", "100", "x"}));
+  auto failed = execute(failing_registry, arguments(fixture(), temporary.path(),
+                                                    {"emit", "100", "x"}));
   REQUIRE_FALSE(failed);
   REQUIRE(failed.error().retryable);
   REQUIRE(failed.error().message.find("secret-bearing") == std::string::npos);
@@ -583,9 +577,8 @@ TEST_CASE("a replaced executable fails at the effect boundary",
   TemporaryDirectory temporary;
   const auto executable = temporary.path() / "pinned-executable";
   REQUIRE(std::filesystem::copy_file(fixture(), executable));
-  std::filesystem::permissions(
-      executable, std::filesystem::perms::owner_all,
-      std::filesystem::perm_options::replace);
+  std::filesystem::permissions(executable, std::filesystem::perms::owner_all,
+                               std::filesystem::perm_options::replace);
   RecordingArtifactStore artifacts;
   runtime::ToolRegistry registry;
   REQUIRE(adapters::register_process_tool(
@@ -594,11 +587,10 @@ TEST_CASE("a replaced executable fails at the effect boundary",
   const auto old = temporary.path() / "old-executable";
   std::filesystem::rename(executable, old);
   REQUIRE(std::filesystem::copy_file(fixture(), executable));
-  std::filesystem::permissions(
-      executable, std::filesystem::perms::owner_all,
-      std::filesystem::perm_options::replace);
-  auto replaced = execute(
-      registry, arguments(executable, temporary.path(), {"inspect"}));
+  std::filesystem::permissions(executable, std::filesystem::perms::owner_all,
+                               std::filesystem::perm_options::replace);
+  auto replaced =
+      execute(registry, arguments(executable, temporary.path(), {"inspect"}));
   REQUIRE_FALSE(replaced);
   REQUIRE(replaced.error().code ==
           runtime::ToolExecutionErrorCode::unavailable);
@@ -620,14 +612,13 @@ TEST_CASE("a replaced executable fails at the effect boundary",
 TEST_CASE("the artifact store fake is strict and deterministic",
           "[process][artifact][fake]") {
   const auto invocation = make_id<domain::InvocationId>("artifact-call");
-  const storage::ArtifactWrite write{
-      make_id<domain::ArtifactId>("artifact"), "application/octet-stream",
-      invocation};
-  const testing::ArtifactStoreCall expected{
-      write, {std::byte{0x01}, std::byte{0x02}}};
+  const storage::ArtifactWrite write{make_id<domain::ArtifactId>("artifact"),
+                                     "application/octet-stream", invocation};
+  const testing::ArtifactStoreCall expected{write,
+                                            {std::byte{0x01}, std::byte{0x02}}};
   const domain::ArtifactMetadata metadata{
-      write.artifact_id, write.media_type, 2, "digest", invocation,
-      std::nullopt, std::nullopt};
+      write.artifact_id, write.media_type, 2,           "digest",
+      invocation,        std::nullopt,     std::nullopt};
   testing::ScriptedArtifactStore artifacts{{{expected, metadata}}};
   const std::array content{std::byte{0x01}, std::byte{0x02}};
   auto stored = artifacts.put(write, content);

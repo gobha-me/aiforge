@@ -14,8 +14,7 @@ namespace {
 
 using namespace aiforge;
 
-template <typename Id>
-auto id(std::string value) -> Id {
+template <typename Id> auto id(std::string value) -> Id {
   auto parsed = Id::from(std::move(value));
   REQUIRE(parsed);
   return std::move(*parsed);
@@ -38,8 +37,8 @@ auto source(std::string path = "src/main.cpp")
           domain::SourceByteRange{0, 13}};
 }
 
-auto provenance(
-    domain::EvidenceDerivation derivation = domain::EvidenceDerivation::observed)
+auto provenance(domain::EvidenceDerivation derivation =
+                    domain::EvidenceDerivation::observed)
     -> domain::EvidenceProvenance {
   return {
       derivation,
@@ -83,7 +82,7 @@ auto artifact_block(const domain::ArtifactId& artifact_id)
   return {artifact_id, std::string{"evidence"}};
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("context parcel limits and metadata fail before item validation",
           "[evidence][parcel][failure]") {
@@ -160,9 +159,9 @@ TEST_CASE("context parcels reject malformed snapshot and source identities",
 TEST_CASE("source ranges are nonempty half-open bounds within the content",
           "[evidence][parcel][range][failure]") {
   auto value = parcel();
-  auto& range = *std::get<domain::ExactSourceEvidence>(
-                     value.items.front().reference)
-                     .source.range;
+  auto& range =
+      *std::get<domain::ExactSourceEvidence>(value.items.front().reference)
+           .source.range;
   range.end = range.begin;
   auto result = repository::validate_context_parcel(value);
   REQUIRE_FALSE(result);
@@ -225,8 +224,7 @@ TEST_CASE("parcel item identities and estimates are bounded and checked",
   result = repository::validate_context_parcel(value, limits);
   REQUIRE_FALSE(result);
   INFO(result.error().message);
-  REQUIRE(result.error().code ==
-          repository::ContextParcelErrorCode::overflow);
+  REQUIRE(result.error().code == repository::ContextParcelErrorCode::overflow);
 
   value = parcel();
   limits = {};
@@ -335,8 +333,8 @@ TEST_CASE("derived provenance has stable unique non-self inputs",
   auto base = exact_item("source-evidence");
   auto derived = exact_item("derived-evidence");
   const auto artifact = id<domain::ArtifactId>("derived-artifact");
-  derived.reference = domain::DerivedRecordEvidence{
-      "symbol-summary", "record-1", artifact};
+  derived.reference =
+      domain::DerivedRecordEvidence{"symbol-summary", "record-1", artifact};
   derived.provenance = provenance(domain::EvidenceDerivation::derived);
   derived.provenance.derivation_inputs = {base.evidence_id};
   derived.content = {artifact_block(artifact)};
@@ -345,8 +343,7 @@ TEST_CASE("derived provenance has stable unique non-self inputs",
   REQUIRE(repository::validate_context_parcel(parcel({base, derived})));
 
   derived.provenance.derivation_inputs = {derived.evidence_id};
-  auto result =
-      repository::validate_context_parcel(parcel({base, derived}));
+  auto result = repository::validate_context_parcel(parcel({base, derived}));
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code ==
           repository::ContextParcelErrorCode::invalid_provenance);
@@ -367,8 +364,8 @@ TEST_CASE("derived provenance has stable unique non-self inputs",
 TEST_CASE("unknown evidence kinds remain opaque and bounded",
           "[evidence][parcel][unknown]") {
   auto item = exact_item();
-  item.reference = domain::UnknownRepositoryEvidence{
-      "future.semantic-record", std::nullopt};
+  item.reference =
+      domain::UnknownRepositoryEvidence{"future.semantic-record", std::nullopt};
   item.provenance.derivation = domain::EvidenceDerivation::unknown;
   REQUIRE(repository::validate_context_parcel(parcel({item})));
 
@@ -393,8 +390,8 @@ TEST_CASE("mixed context parcels report deterministic aggregate estimates",
 
   const auto diff_artifact = id<domain::ArtifactId>("diff");
   auto diff = exact_item("diff-item");
-  diff.reference = domain::DiffEvidence{
-      snapshot("dddddddddddddddd"), snapshot(), diff_artifact};
+  diff.reference = domain::DiffEvidence{snapshot("dddddddddddddddd"),
+                                        snapshot(), diff_artifact};
   diff.content = {artifact_block(diff_artifact)};
   diff.estimated_bytes = 30;
   diff.estimated_tokens = 6;

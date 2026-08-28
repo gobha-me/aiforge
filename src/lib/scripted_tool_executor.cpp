@@ -49,7 +49,7 @@ class ScriptedToolStream final : public runtime::ToolExecutionStream {
           false};
 }
 
-}  // namespace
+} // namespace
 
 ScriptedToolExecutor::ScriptedToolExecutor(
     std::vector<ScriptedToolExchange> exchanges)
@@ -103,4 +103,4 @@ auto ScriptedToolExecutor::remaining_exchanges() const noexcept -> std::size_t {
   return m_exchanges.size() - m_next_exchange;
 }
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

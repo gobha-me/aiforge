@@ -138,8 +138,7 @@ class ToolRegistrySnapshot final {
   friend class ToolRegistry;
   ToolRegistrySnapshot(std::vector<RegisteredTool> tools,
                        std::vector<backend::ToolDeclaration> declarations)
-      : m_tools(std::move(tools)),
-        m_declarations(std::move(declarations)) {}
+      : m_tools(std::move(tools)), m_declarations(std::move(declarations)) {}
 
   std::vector<RegisteredTool> m_tools;
   std::vector<backend::ToolDeclaration> m_declarations;
@@ -163,4 +162,4 @@ class ToolRegistry final {
     std::span<const domain::RunEvent> events)
     -> std::expected<std::vector<domain::Message>, ToolExecutionError>;
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

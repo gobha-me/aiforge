@@ -31,4 +31,4 @@ class JsonModelCatalogCache final : public model::CatalogCache {
 [[nodiscard]] auto process_model_catalog_cache_path()
     -> std::expected<std::filesystem::path, model::CatalogError>;
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

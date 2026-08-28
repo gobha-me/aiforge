@@ -27,8 +27,8 @@ enum class TextSemantic : std::uint8_t {
 
 [[nodiscard]] constexpr auto has_semantic(const TextSemantic value,
                                           const TextSemantic flag) -> bool {
-  return (static_cast<std::uint8_t>(value) &
-          static_cast<std::uint8_t>(flag)) != 0;
+  return (static_cast<std::uint8_t>(value) & static_cast<std::uint8_t>(flag)) !=
+         0;
 }
 
 struct StyledSpan {
@@ -55,11 +55,10 @@ struct TextError {
     -> std::expected<std::string, TextError>;
 
 [[nodiscard]] auto tokenize_markdown_lite(
-    std::string_view text,
-    std::size_t maximum_bytes = 16U * 1024U * 1024U)
+    std::string_view text, std::size_t maximum_bytes = 16U * 1024U * 1024U)
     -> std::expected<StyledDocument, TextError>;
 
 [[nodiscard]] auto flatten(const StyledDocument& document)
     -> std::expected<std::string, TextError>;
 
-}  // namespace aiforge::presentation
+} // namespace aiforge::presentation

@@ -17,17 +17,17 @@ struct ProjectBacklogSessionEvents {
 };
 
 class ProjectBacklogProjection final {
-public:
+ public:
   explicit ProjectBacklogProjection(RepositoryId repository_id)
       : m_repository_id(std::move(repository_id)) {}
 
   [[nodiscard]] auto apply(const SessionId& session_id, const RunEvent& event,
                            const ProjectBacklogLimits& limits = {})
       -> std::expected<void, ProjectBacklogError>;
-  [[nodiscard]] static auto
-  rebuild(RepositoryId repository_id,
-          std::span<const ProjectBacklogSessionEvents> histories,
-          const ProjectBacklogLimits& limits = {})
+  [[nodiscard]] static auto rebuild(
+      RepositoryId repository_id,
+      std::span<const ProjectBacklogSessionEvents> histories,
+      const ProjectBacklogLimits& limits = {})
       -> std::expected<ProjectBacklogProjection, ProjectBacklogError>;
 
   [[nodiscard]] auto repository_id() const noexcept -> const RepositoryId& {
@@ -40,7 +40,7 @@ public:
   [[nodiscard]] auto find(const ProjectBacklogItemId& item_id) const noexcept
       -> const ProjectedBacklogItem*;
 
-private:
+ private:
   RepositoryId m_repository_id;
   std::vector<ProjectedBacklogItem> m_items;
   std::set<std::pair<SessionId, EventId>> m_event_ids;

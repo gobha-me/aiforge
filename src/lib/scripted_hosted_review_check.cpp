@@ -6,7 +6,8 @@ namespace aiforge::testing {
 
 ScriptedHostedReviewCheck::ScriptedHostedReviewCheck(
     std::vector<ScriptedHostedReviewCheckExchange> exchanges)
-    : m_exchanges(std::move(exchanges)) {}
+    : m_exchanges(std::move(exchanges)) {
+}
 
 auto ScriptedHostedReviewCheck::publish(
     const runtime::HostedReviewCheckUpdate& update)
@@ -37,4 +38,4 @@ auto ScriptedHostedReviewCheck::remaining_exchanges() const noexcept
   return m_exchanges.size() - m_next;
 }
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

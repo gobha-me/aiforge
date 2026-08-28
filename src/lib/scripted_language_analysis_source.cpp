@@ -16,7 +16,7 @@ namespace {
           std::move(message), std::nullopt, std::nullopt, false};
 }
 
-}  // namespace
+} // namespace
 
 ScriptedLanguageAnalysisSource::ScriptedLanguageAnalysisSource(
     std::vector<LanguageAnalysisCapabilityExchange> capability_exchanges,
@@ -103,4 +103,4 @@ auto ScriptedLanguageAnalysisSource::remaining_analysis_exchanges()
   return m_analysis_exchanges.size() - m_next_analysis_exchange;
 }
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

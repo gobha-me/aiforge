@@ -12,11 +12,10 @@ namespace {
   return {cli::CommandFailureKind::runtime, std::move(message)};
 }
 
-}  // namespace
+} // namespace
 
 auto resolve_process_credential(std::ostream& diagnostics)
-    -> std::expected<credentials::CredentialResolution,
-                     cli::CommandFailure> {
+    -> std::expected<credentials::CredentialResolution, cli::CommandFailure> {
   try {
     if (const auto* value = std::getenv("VENICE_API_KEY")) {
       auto secret = credentials::make_secret(std::string{value});
@@ -49,4 +48,4 @@ auto resolve_process_credential(std::ostream& diagnostics)
   }
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

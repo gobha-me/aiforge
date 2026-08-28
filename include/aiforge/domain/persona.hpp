@@ -1,7 +1,7 @@
 #pragma once
 
-#include <optional>
 #include <expected>
+#include <optional>
 #include <string>
 
 #include <aiforge/domain/digest.hpp>
@@ -62,7 +62,8 @@ enum class PersonaValidationErrorCode {
 };
 
 struct PersonaValidationError {
-  PersonaValidationErrorCode code{PersonaValidationErrorCode::invalid_selection};
+  PersonaValidationErrorCode code{
+      PersonaValidationErrorCode::invalid_selection};
   std::string message;
   auto operator==(const PersonaValidationError&) const -> bool = default;
 };
@@ -74,4 +75,4 @@ struct PersonaValidationError {
 [[nodiscard]] auto validate_persona_document(const PersonaDocument& document)
     -> std::expected<void, PersonaValidationError>;
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

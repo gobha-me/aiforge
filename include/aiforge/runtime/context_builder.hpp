@@ -41,4 +41,4 @@ class ContextBuilder final {
       -> std::expected<ContextSelectionResult, ContextSelectionError>;
 };
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

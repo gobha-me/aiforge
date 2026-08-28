@@ -26,13 +26,21 @@ struct EventLogError {
 
 class SessionEventLog final {
  public:
-  explicit SessionEventLog(SessionId session_id) : m_session_id(std::move(session_id)) {}
+  explicit SessionEventLog(SessionId session_id)
+      : m_session_id(std::move(session_id)) {}
 
-  [[nodiscard]] auto append(RunEvent event) -> std::expected<void, EventLogError>;
+  [[nodiscard]] auto append(RunEvent event)
+      -> std::expected<void, EventLogError>;
 
-  [[nodiscard]] auto session_id() const noexcept -> const SessionId& { return m_session_id; }
-  [[nodiscard]] auto events() const noexcept -> const std::vector<RunEvent>& { return m_events; }
-  [[nodiscard]] auto last_sequence() const noexcept -> std::uint64_t { return m_last_sequence; }
+  [[nodiscard]] auto session_id() const noexcept -> const SessionId& {
+    return m_session_id;
+  }
+  [[nodiscard]] auto events() const noexcept -> const std::vector<RunEvent>& {
+    return m_events;
+  }
+  [[nodiscard]] auto last_sequence() const noexcept -> std::uint64_t {
+    return m_last_sequence;
+  }
 
  private:
   SessionId m_session_id;
@@ -41,4 +49,4 @@ class SessionEventLog final {
   std::uint64_t m_last_sequence{};
 };
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

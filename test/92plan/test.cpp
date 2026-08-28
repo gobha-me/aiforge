@@ -47,7 +47,7 @@ auto revision(std::string revision_id = "revision-1",
       {}};
 }
 
-auto decision(const domain::PlanRevision &value,
+auto decision(const domain::PlanRevision& value,
               const domain::PlanDecision result,
               std::optional<std::string> reason = std::nullopt)
     -> domain::PlanRevisionDecision {
@@ -58,8 +58,7 @@ auto decision(const domain::PlanRevision &value,
 template <typename Payload>
 auto event(const std::uint64_t sequence, Payload payload,
            std::string event_id = {}) -> domain::RunEvent {
-  if (event_id.empty())
-    event_id = "event-" + std::to_string(sequence);
+  if (event_id.empty()) event_id = "event-" + std::to_string(sequence);
   return {{id<domain::EventId>(std::move(event_id)),
            id<domain::RunId>("planning-run"), sequence, 1,
            domain::EventTimestamp{std::chrono::milliseconds{1000 + sequence}},
@@ -119,10 +118,8 @@ TEST_CASE("plan validation rejects malformed and unbounded task graphs",
 
   value = revision();
   value.evidence = {
-      {id<domain::EvidenceId>("evidence"),
-       {"sha256", "aaaaaaaaaaaaaaaa", 16}},
-      {id<domain::EvidenceId>("evidence"),
-       {"sha256", "bbbbbbbbbbbbbbbb", 16}}};
+      {id<domain::EvidenceId>("evidence"), {"sha256", "aaaaaaaaaaaaaaaa", 16}},
+      {id<domain::EvidenceId>("evidence"), {"sha256", "bbbbbbbbbbbbbbbb", 16}}};
   result = domain::validate_plan_revision(value);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code == domain::PlanGraphErrorCode::invalid_plan);
@@ -163,7 +160,7 @@ TEST_CASE(
   REQUIRE(projection->last_sequence() == 5);
 
   domain::PlanGraphProjection replayed;
-  for (const auto &item : events)
+  for (const auto& item : events)
     REQUIRE(replayed.apply(item));
   REQUIRE(replayed.revisions() == projection->revisions());
   REQUIRE(replayed.state() == projection->state());

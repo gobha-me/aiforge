@@ -106,4 +106,4 @@ class CapabilityPolicy final : public ToolPolicy {
 
 [[nodiscard]] auto default_tool_policy() -> std::shared_ptr<ToolPolicy>;
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

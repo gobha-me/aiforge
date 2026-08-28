@@ -29,7 +29,7 @@ class EnvironmentGuard final {
   std::optional<std::string> m_prior;
 };
 
-}  // namespace
+} // namespace
 
 TEST_CASE("editor configuration is one executable and never shell text",
           "[editor][failure]") {

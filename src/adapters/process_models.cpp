@@ -30,12 +30,13 @@ namespace {
   return result.empty() ? "-" : result;
 }
 
-[[nodiscard]] auto usd(const std::optional<model::Price>& value) -> std::string {
+[[nodiscard]] auto usd(const std::optional<model::Price>& value)
+    -> std::string {
   if (!value || !value->usd) return "-";
   return "$" + value->usd->to_string();
 }
 
-}  // namespace
+} // namespace
 
 auto ProcessModelsCommand::execute(cli::CommandEnvironment& environment,
                                    std::ostream& output, std::ostream& error)
@@ -76,4 +77,4 @@ auto ProcessModelsCommand::execute(cli::CommandEnvironment& environment,
   return {};
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

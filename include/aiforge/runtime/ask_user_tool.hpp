@@ -20,8 +20,9 @@ struct AskUserLimits {
 [[nodiscard]] auto ask_user_declaration(const AskUserLimits& limits = {})
     -> backend::ToolDeclaration;
 
-[[nodiscard]] auto register_ask_user_tool(
-    ToolRegistry& registry, bool interactive_input_available,
-    AskUserLimits limits = {}) -> std::expected<void, ToolRegistryError>;
+[[nodiscard]] auto register_ask_user_tool(ToolRegistry& registry,
+                                          bool interactive_input_available,
+                                          AskUserLimits limits = {})
+    -> std::expected<void, ToolRegistryError>;
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

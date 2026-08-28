@@ -1,5 +1,5 @@
-#include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
+#include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
 #include <aiforge/adapters/process_credentials.hpp>
 #include <aiforge/adapters/process_draft_editor.hpp>
@@ -41,8 +41,7 @@ namespace {
 
 class CredentialUnavailableBackend final : public backend::Backend {
  public:
-  [[nodiscard]] auto start(backend::BackendRequest,
-                           std::stop_token stop_token)
+  [[nodiscard]] auto start(backend::BackendRequest, std::stop_token stop_token)
       -> std::expected<std::unique_ptr<backend::BackendStream>,
                        backend::BackendError> override {
     if (stop_token.stop_requested()) {
@@ -50,11 +49,11 @@ class CredentialUnavailableBackend final : public backend::Backend {
           backend::BackendErrorKind::cancelled, "Venice request cancelled",
           false, std::nullopt});
     }
-    return std::unexpected(backend::BackendError{
-        backend::BackendErrorKind::credential_unavailable,
+    return std::unexpected(
+        backend::BackendError{backend::BackendErrorKind::credential_unavailable,
                               "Venice credential is not configured; run "
                               "'aiforge login' or set VENICE_API_KEY",
-        false, std::nullopt});
+                              false, std::nullopt});
   }
 };
 
@@ -80,10 +79,10 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
   if (values.empty()) return {};
   auto result = values.front();
   for (const auto& value : values) {
-    const auto length = std::mismatch(result.begin(), result.end(),
-                                      value.begin(), value.end())
-                            .first -
-                        result.begin();
+    const auto length =
+        std::mismatch(result.begin(), result.end(), value.begin(), value.end())
+            .first -
+        result.begin();
     result.resize(static_cast<std::size_t>(length));
   }
   return result;
@@ -125,7 +124,8 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
   if (requested_model) {
     layers.push_back(config::ConfigLayer{
         config::ConfigSource::command_line,
-        {{"model", config::ConfigValue{*requested_model}, std::nullopt}}, {}});
+        {{"model", config::ConfigValue{*requested_model}, std::nullopt}},
+        {}});
   }
   auto environment = config::environment_config_layer(registry);
   if (!environment) {
@@ -191,8 +191,7 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
       return {cli::CommandFailureKind::usage, value.message};
     case surfaces::ChatSessionErrorCode::cancelled:
       return {cli::CommandFailureKind::cancelled, value.message};
-    default:
-      return {cli::CommandFailureKind::runtime, value.message};
+    default: return {cli::CommandFailureKind::runtime, value.message};
   }
 }
 
@@ -238,8 +237,8 @@ struct InferenceCounts {
   std::size_t costs_reported{};
 };
 
-[[nodiscard]] auto inference_counts(
-    const domain::UsageLedgerProjection& ledger) -> InferenceCounts {
+[[nodiscard]] auto inference_counts(const domain::UsageLedgerProjection& ledger)
+    -> InferenceCounts {
   InferenceCounts result;
   for (const auto& record : ledger.records()) {
     if (record.reported_cost) ++result.costs_reported;
@@ -256,18 +255,13 @@ struct InferenceCounts {
 [[nodiscard]] auto plan_state_text(const domain::PlanGraphState state)
     -> std::string_view {
   switch (state) {
-  case domain::PlanGraphState::not_started:
-    return "not started";
-  case domain::PlanGraphState::proposed:
-    return "proposed";
-  case domain::PlanGraphState::revision_requested:
-    return "revision requested";
-  case domain::PlanGraphState::approved:
-    return "approved";
-  case domain::PlanGraphState::rejected:
-    return "rejected";
-  case domain::PlanGraphState::invalidated:
-    return "invalidated";
+    case domain::PlanGraphState::not_started: return "not started";
+    case domain::PlanGraphState::proposed: return "proposed";
+    case domain::PlanGraphState::revision_requested:
+      return "revision requested";
+    case domain::PlanGraphState::approved: return "approved";
+    case domain::PlanGraphState::rejected: return "rejected";
+    case domain::PlanGraphState::invalidated: return "invalidated";
   }
   return "unknown";
 }
@@ -275,46 +269,33 @@ struct InferenceCounts {
 [[nodiscard]] auto readiness_text(const domain::TaskReadinessState state)
     -> std::string_view {
   switch (state) {
-  case domain::TaskReadinessState::ready:
-    return "ready";
-  case domain::TaskReadinessState::waiting_for_dependencies:
-    return "waiting for dependencies";
-  case domain::TaskReadinessState::blocked_by_dependency:
-    return "blocked by dependency";
-  case domain::TaskReadinessState::blocked_by_resource:
-    return "blocked by resource";
-  case domain::TaskReadinessState::waiting_for_capacity:
-    return "waiting for capacity";
-  case domain::TaskReadinessState::running:
-    return "running";
-  case domain::TaskReadinessState::completed:
-    return "completed";
-  case domain::TaskReadinessState::failed:
-    return "failed";
+    case domain::TaskReadinessState::ready: return "ready";
+    case domain::TaskReadinessState::waiting_for_dependencies:
+      return "waiting for dependencies";
+    case domain::TaskReadinessState::blocked_by_dependency:
+      return "blocked by dependency";
+    case domain::TaskReadinessState::blocked_by_resource:
+      return "blocked by resource";
+    case domain::TaskReadinessState::waiting_for_capacity:
+      return "waiting for capacity";
+    case domain::TaskReadinessState::running: return "running";
+    case domain::TaskReadinessState::completed: return "completed";
+    case domain::TaskReadinessState::failed: return "failed";
   }
   return "unknown";
 }
 
-[[nodiscard]] auto
-session_task_state_text(const runtime::SessionTaskState state)
-    -> std::string_view {
+[[nodiscard]] auto session_task_state_text(
+    const runtime::SessionTaskState state) -> std::string_view {
   switch (state) {
-  case runtime::SessionTaskState::pending:
-    return "pending";
-  case runtime::SessionTaskState::dispatched:
-    return "dispatched";
-  case runtime::SessionTaskState::completed:
-    return "completed";
-  case runtime::SessionTaskState::failed:
-    return "failed";
-  case runtime::SessionTaskState::cancelled:
-    return "cancelled";
-  case runtime::SessionTaskState::timed_out:
-    return "timed out";
-  case runtime::SessionTaskState::budget_exhausted:
-    return "budget exhausted";
-  case runtime::SessionTaskState::unavailable:
-    return "unavailable";
+    case runtime::SessionTaskState::pending: return "pending";
+    case runtime::SessionTaskState::dispatched: return "dispatched";
+    case runtime::SessionTaskState::completed: return "completed";
+    case runtime::SessionTaskState::failed: return "failed";
+    case runtime::SessionTaskState::cancelled: return "cancelled";
+    case runtime::SessionTaskState::timed_out: return "timed out";
+    case runtime::SessionTaskState::budget_exhausted: return "budget exhausted";
+    case runtime::SessionTaskState::unavailable: return "unavailable";
   }
   return "unknown";
 }
@@ -322,24 +303,15 @@ session_task_state_text(const runtime::SessionTaskState state)
 [[nodiscard]] auto effect_text(const domain::Effect effect)
     -> std::string_view {
   switch (effect) {
-  case domain::Effect::read:
-    return "read";
-  case domain::Effect::write:
-    return "write";
-  case domain::Effect::remove:
-    return "remove";
-  case domain::Effect::execute:
-    return "execute";
-  case domain::Effect::network:
-    return "network";
-  case domain::Effect::communicate:
-    return "communicate";
-  case domain::Effect::spend:
-    return "spend";
-  case domain::Effect::change_infrastructure:
-    return "change infrastructure";
-  case domain::Effect::change_privileges:
-    return "change privileges";
+    case domain::Effect::read: return "read";
+    case domain::Effect::write: return "write";
+    case domain::Effect::remove: return "remove";
+    case domain::Effect::execute: return "execute";
+    case domain::Effect::network: return "network";
+    case domain::Effect::communicate: return "communicate";
+    case domain::Effect::spend: return "spend";
+    case domain::Effect::change_infrastructure: return "change infrastructure";
+    case domain::Effect::change_privileges: return "change privileges";
   }
   return "unknown";
 }
@@ -366,8 +338,8 @@ session_task_state_text(const runtime::SessionTaskState state)
   }
   if (estimate.aggregation_failure) {
     if (!result.empty()) result += ", ";
-    result += std::string{domain::cost_estimate_reason_name(
-        *estimate.aggregation_failure)};
+    result += std::string{
+        domain::cost_estimate_reason_name(*estimate.aggregation_failure)};
   }
   return result;
 }
@@ -388,7 +360,8 @@ session_task_state_text(const runtime::SessionTaskState state)
     const auto counts = inference_counts(ledger);
     result += " | reported ";
     result += reported_cost_text(*ledger.total_reported_cost());
-    if (counts.costs_reported != ledger.records().size()) result += " (partial)";
+    if (counts.costs_reported != ledger.records().size())
+      result += " (partial)";
   }
   const auto usd = domain::summarize_cost_estimates(
       ledger.records(), domain::CostEstimateUnit::usd);
@@ -428,12 +401,12 @@ session_task_state_text(const runtime::SessionTaskState state)
       std::format("Reasoning tokens: {}", usage.reasoning_tokens),
       std::format("Inferences: {} total | {} completed | {} failed | {} "
                   "cancelled | {} active",
-          total, counts.completed, counts.failed, counts.cancelled,
-          counts.active),
+                  total, counts.completed, counts.failed, counts.cancelled,
+                  counts.active),
   };
   if (ledger.total_reported_cost()) {
-    auto cost = "Reported cost: " +
-                reported_cost_text(*ledger.total_reported_cost());
+    auto cost =
+        "Reported cost: " + reported_cost_text(*ledger.total_reported_cost());
     cost += std::format(" ({} of {} inferences reported)",
                         counts.costs_reported, total);
     lines.push_back(std::move(cost));
@@ -443,16 +416,16 @@ session_task_state_text(const runtime::SessionTaskState state)
     lines.push_back(std::format(
         "Reported cost: unavailable (0 of {} inferences reported)", total));
   }
-  for (const auto unit : {domain::CostEstimateUnit::usd,
-                          domain::CostEstimateUnit::venice_diem}) {
+  for (const auto unit :
+       {domain::CostEstimateUnit::usd, domain::CostEstimateUnit::venice_diem}) {
     const auto estimate =
         domain::summarize_cost_estimates(ledger.records(), unit);
     auto line = "Catalog estimate (" +
-                std::string{domain::cost_estimate_unit_name(unit)} + "): " +
-                estimate_summary_text(estimate);
-    line += std::format(" ({} of {} inferences estimated)",
-                        estimate.estimated_inferences,
-                        estimate.total_inferences);
+                std::string{domain::cost_estimate_unit_name(unit)} +
+                "): " + estimate_summary_text(estimate);
+    line +=
+        std::format(" ({} of {} inferences estimated)",
+                    estimate.estimated_inferences, estimate.total_inferences);
     const auto failures = estimate_failures_text(estimate);
     if (!failures.empty()) line += "; unavailable: " + failures;
     lines.push_back(std::move(line));
@@ -471,8 +444,9 @@ session_task_state_text(const runtime::SessionTaskState state)
                       (spend.reached ? "reached" : "open"));
       lines.push_back(std::format("Spend coverage: {} provider-reported + {} "
                                   "catalog-derived of {} inferences",
-          spend.reported_inferences, spend.estimated_inferences,
-          spend.total_inferences));
+                                  spend.reported_inferences,
+                                  spend.estimated_inferences,
+                                  spend.total_inferences));
     } else {
       lines.push_back("Accounted spend (USD): unavailable");
       for (const auto& failure : spend.unavailable) {
@@ -482,10 +456,9 @@ session_task_state_text(const runtime::SessionTaskState state)
             "=" + std::to_string(failure.count));
       }
       if (spend.aggregation_failure) {
-        lines.push_back(
-            "Spend unavailable: " +
-            std::string{domain::cost_estimate_reason_name(
-                *spend.aggregation_failure)});
+        lines.push_back("Spend unavailable: " +
+                        std::string{domain::cost_estimate_reason_name(
+                            *spend.aggregation_failure)});
       }
     }
   } else {
@@ -504,16 +477,14 @@ class ChatAppImpl final : public InteractiveChatApp {
               surfaces::ChatSessionOpen open, surfaces::DraftEditor& editor,
               const std::stop_token stop_token,
               InteractiveChatAppOptions options)
-      : m_backend(backend),
-        m_model_context(model_context),
-        m_session_store(session_store),
-        m_model_catalog(options.model_catalog),
+      : m_backend(backend), m_model_context(model_context),
+        m_session_store(session_store), m_model_catalog(options.model_catalog),
         m_open_template(std::move(open)),
         m_session_dependencies(std::move(options.session_dependencies)),
         m_bridge(*this, options.live_wake_enabled,
                  std::move(options.wake_observer)),
-        m_editor(editor),
-        m_stop_token(stop_token), m_rendered_output(options.rendered_output),
+        m_editor(editor), m_stop_token(stop_token),
+        m_rendered_output(options.rendered_output),
         m_rendered_frame(std::move(options.rendered_frame)),
         m_poll_worker_updates(options.poll_worker_updates) {
     set_frame_ms(33);
@@ -535,9 +506,9 @@ class ChatAppImpl final : public InteractiveChatApp {
     }
     auto usage = rebuild_usage_ledger(m_session->event_log().events());
     if (!usage) {
-      m_setup_error = cli::CommandFailure{
-          cli::CommandFailureKind::runtime,
-          "interactive usage replay failed: " + usage.error()};
+      m_setup_error = cli::CommandFailure{cli::CommandFailureKind::runtime,
+                                          "interactive usage replay failed: " +
+                                              usage.error()};
       m_session.reset();
       return;
     }
@@ -553,11 +524,10 @@ class ChatAppImpl final : public InteractiveChatApp {
     m_spend_ceiling = std::move(*ceiling);
     sync_history();
     const auto persona = m_session->persona_state();
-    m_status = persona.requires_attention
-                   ? persona.message
-                   : persona.selected
-                         ? "Ready with persona " + persona.selected->name
-                         : "Ready";
+    m_status = persona.requires_attention ? persona.message
+               : persona.selected
+                   ? "Ready with persona " + persona.selected->name
+                   : "Ready";
   }
 
   [[nodiscard]] auto ready() const noexcept -> bool override {
@@ -758,8 +728,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     header += " | " + usage_header_text(m_usage_ledger, m_spend_ceiling);
     screen.write_text(0, 0,
                       termforge::detail::truncate_to_width(header, columns),
-                      termforge::theme::kFg,
-                      termforge::Rgb{0x20, 0x20, 0x40});
+                      termforge::theme::kFg, termforge::Rgb{0x20, 0x20, 0x40});
 
     const int usable = std::max(0, rows - 2);
     const int composer_rows =
@@ -776,12 +745,10 @@ class ChatAppImpl final : public InteractiveChatApp {
     m_composer.draw(screen);
 
     std::string footer =
-        m_session->active()
-            ? "Running — Esc/Ctrl+C cancel | Ctrl+D unavailable"
-            : m_help_visible
-                  ? "Slash command help — Esc closes | Ctrl+D exits"
-                  : "Enter submit | Tab | Ctrl+C clear | Ctrl+D exit | "
-                    "^E editor | /help";
+        m_session->active() ? "Running — Esc/Ctrl+C cancel | Ctrl+D unavailable"
+        : m_help_visible    ? "Slash command help — Esc closes | Ctrl+D exits"
+                         : "Enter submit | Tab | Ctrl+C clear | Ctrl+D exit | "
+                           "^E editor | /help";
     if (!m_status.empty()) footer += " | " + m_status;
     screen.write_text(0, rows - 1, footer, termforge::theme::kDim,
                       termforge::theme::kBg);
@@ -810,7 +777,8 @@ class ChatAppImpl final : public InteractiveChatApp {
                   std::string status) -> void {
     m_help.clear();
     m_help.append(std::move(title));
-    for (auto& line : lines) m_help.append(std::move(line));
+    for (auto& line : lines)
+      m_help.append(std::move(line));
     m_help_visible = true;
     m_help.scroll(-1000000);
     m_status = std::move(status);
@@ -847,10 +815,11 @@ class ChatAppImpl final : public InteractiveChatApp {
 
   auto show_sessions() -> bool {
     if (m_session_store == nullptr) {
-      show_panel("Sessions",
-                 {"Current session is ephemeral.",
-                  "There are no durable sessions to list or resume."},
-                 "Ephemeral session; /session new starts another ephemeral session");
+      show_panel(
+          "Sessions",
+          {"Current session is ephemeral.",
+           "There are no durable sessions to list or resume."},
+          "Ephemeral session; /session new starts another ephemeral session");
       return true;
     }
 
@@ -866,15 +835,14 @@ class ChatAppImpl final : public InteractiveChatApp {
     if (sessions->empty()) {
       lines.push_back("No durable sessions were found.");
     } else {
-      lines.push_back("* marks the current session; most recent activity first.");
+      lines.push_back(
+          "* marks the current session; most recent activity first.");
       for (const auto& info : *sessions) {
         const bool current = info.session_id == m_session->session_id();
-        lines.push_back(
-            std::format("{}{} | created {} | active {} | runs {}",
-                        current ? "* " : "  ", info.session_id.value(),
-                        format_timestamp(info.created_at),
-                        format_timestamp(info.last_activity_at),
-                        info.run_count));
+        lines.push_back(std::format(
+            "{}{} | created {} | active {} | runs {}", current ? "* " : "  ",
+            info.session_id.value(), format_timestamp(info.created_at),
+            format_timestamp(info.last_activity_at), info.run_count));
       }
     }
     show_panel("Durable sessions", std::move(lines),
@@ -946,24 +914,24 @@ class ChatAppImpl final : public InteractiveChatApp {
     lines.push_back("Revision: " +
                     std::string{state->plan->revision.revision_id.value()});
     if (state->plan->revision.source_snapshot) {
-      const auto &source = *state->plan->revision.source_snapshot;
+      const auto& source = *state->plan->revision.source_snapshot;
       lines.push_back("Source: " + std::string{source.repository_id.value()} +
                       " " + source.fingerprint.algorithm + ":" +
                       source.fingerprint.value);
     }
-    for (const auto &evidence : state->plan->revision.evidence) {
+    for (const auto& evidence : state->plan->revision.evidence) {
       lines.push_back("Evidence: " + std::string{evidence.evidence_id.value()} +
                       " " + evidence.digest.algorithm + ":" +
                       evidence.digest.value);
     }
-    for (const auto &task : state->plan->revision.tasks) {
+    for (const auto& task : state->plan->revision.tasks) {
       std::string line =
           "[" + std::string{task.task_id.value()} + "] " + task.title;
       if (task.parent_task_id) {
         line += " (parent " + std::string{task.parent_task_id->value()} + ")";
       }
       lines.push_back(std::move(line));
-      for (const auto &criterion : task.acceptance_criteria) {
+      for (const auto& criterion : task.acceptance_criteria) {
         lines.push_back("  criterion: " + criterion);
       }
       std::string effects{"  effects:"};
@@ -973,12 +941,12 @@ class ChatAppImpl final : public InteractiveChatApp {
       lines.push_back(std::move(effects));
       if (!task.dependency_task_ids.empty()) {
         std::string dependencies{"  depends:"};
-        for (const auto &dependency : task.dependency_task_ids) {
+        for (const auto& dependency : task.dependency_task_ids) {
           dependencies += " " + std::string{dependency.value()};
         }
         lines.push_back(std::move(dependencies));
       }
-      for (const auto &intent : task.resource_intents) {
+      for (const auto& intent : task.resource_intents) {
         lines.push_back("  resource: " + intent.kind + ":" + intent.value);
       }
     }
@@ -986,12 +954,12 @@ class ChatAppImpl final : public InteractiveChatApp {
       lines.push_back(
           "Proposed concurrency: " +
           std::to_string(state->schedule->dispatchable_task_ids.size()));
-      for (const auto &task : state->schedule->tasks) {
+      for (const auto& task : state->schedule->tasks) {
         std::string schedule = "Schedule " + std::string{task.task_id.value()} +
                                ": " + std::string{readiness_text(task.state)};
         if (!task.blockers.empty()) {
           schedule += " (blocked by";
-          for (const auto &blocker : task.blockers) {
+          for (const auto& blocker : task.blockers) {
             schedule += " " + std::string{blocker.value()};
           }
           schedule += ")";
@@ -1016,7 +984,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     }
     std::vector<std::string> lines{"Active session tasks"};
     std::vector<std::string> completed;
-    for (const auto &task : state->session_tasks) {
+    for (const auto& task : state->session_tasks) {
       auto line = "[" + std::string{task.task.task_id.value()} + "] " +
                   task.task.title + " — " +
                   std::string{session_task_state_text(task.state)};
@@ -1026,15 +994,14 @@ class ChatAppImpl final : public InteractiveChatApp {
         lines.push_back(std::move(line));
       }
     }
-    if (lines.size() == 1)
-      lines.push_back("  none");
+    if (lines.size() == 1) lines.push_back("  none");
     lines.push_back("Project backlog");
     if (!snapshot) {
       lines.push_back("  unavailable: " + snapshot.error());
     } else if (state->project_backlog.empty()) {
       lines.push_back("  none");
     } else {
-      for (const auto &item : state->project_backlog) {
+      for (const auto& item : state->project_backlog) {
         lines.push_back("[" + std::string{item.item.item_id.value()} + "] " +
                         item.item.task.title + " — " +
                         (item.status == domain::ProjectBacklogItemStatus::open
@@ -1080,15 +1047,15 @@ class ChatAppImpl final : public InteractiveChatApp {
                          domain::PersonaSelectionSource::resumed};
     } else {
       const auto state = m_session->persona_state();
-      request.persona = state.selected
-                            ? persona::PersonaDirective{
-                                  persona::PersonaDirectiveKind::select,
-                                  state.selected->name,
-                                  domain::PersonaSelectionSource::interactive}
-                            : persona::PersonaDirective{
-                                  persona::PersonaDirectiveKind::disable,
-                                  std::nullopt,
-                                  domain::PersonaSelectionSource::interactive};
+      request.persona =
+          state.selected
+              ? persona::PersonaDirective{persona::PersonaDirectiveKind::select,
+                                          state.selected->name,
+                                          domain::PersonaSelectionSource::
+                                              interactive}
+              : persona::PersonaDirective{
+                    persona::PersonaDirectiveKind::disable, std::nullopt,
+                    domain::PersonaSelectionSource::interactive};
     }
     auto candidate = open_chat_session(std::move(request));
     if (!candidate) {
@@ -1150,11 +1117,9 @@ class ChatAppImpl final : public InteractiveChatApp {
       return false;
     }
     const auto matches =
-        m_slash_commands.complete(
-            draft,
-            {.run_active = m_session->active(),
-             .editor_available = true,
-             .stop_token = m_stop_token});
+        m_slash_commands.complete(draft, {.run_active = m_session->active(),
+                                          .editor_available = true,
+                                          .stop_token = m_stop_token});
     if (!matches) {
       m_status = matches.error().message;
       return true;
@@ -1165,10 +1130,9 @@ class ChatAppImpl final : public InteractiveChatApp {
     }
     if (matches->size() == 1) {
       const auto description = m_slash_commands.describe(
-          matches->front(),
-          {.run_active = m_session->active(),
-           .editor_available = true,
-           .stop_token = m_stop_token});
+          matches->front(), {.run_active = m_session->active(),
+                             .editor_available = true,
+                             .stop_token = m_stop_token});
       if (!description) {
         m_status = description.error().message;
         return true;
@@ -1229,7 +1193,7 @@ class ChatAppImpl final : public InteractiveChatApp {
           if (switch_session(surfaces::ChatSessionOpen::Mode::resume,
                              std::move(session_id))) {
             m_composer.clear();
-          ensure_plan_review();
+            ensure_plan_review();
           }
         });
         return true;
@@ -1241,7 +1205,7 @@ class ChatAppImpl final : public InteractiveChatApp {
                                  : surfaces::ChatSessionOpen::Mode::create,
                              std::nullopt)) {
             m_composer.clear();
-          ensure_plan_review();
+            ensure_plan_review();
           }
         });
         return true;
@@ -1301,13 +1265,11 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_composer.clear();
         return true;
       case surfaces::SlashCommandAction::show_plan:
-        if (!show_plan())
-          return false;
+        if (!show_plan()) return false;
         m_composer.clear();
         return true;
       case surfaces::SlashCommandAction::show_tasks:
-        if (!show_tasks())
-          return false;
+        if (!show_tasks()) return false;
         m_composer.clear();
         return true;
     }
@@ -1321,11 +1283,10 @@ class ChatAppImpl final : public InteractiveChatApp {
       m_status = "Draft is empty";
       return;
     }
-    const auto command = m_slash_commands.dispatch(
-        draft,
-        {.run_active = m_session->active(),
-         .editor_available = true,
-         .stop_token = m_stop_token});
+    const auto command =
+        m_slash_commands.dispatch(draft, {.run_active = m_session->active(),
+                                          .editor_available = true,
+                                          .stop_token = m_stop_token});
     if (!command) {
       m_status = command.error().message;
       return;
@@ -1364,8 +1325,7 @@ class ChatAppImpl final : public InteractiveChatApp {
                                 const std::uint64_t suffix)
       -> std::optional<Id> {
     auto value = Id::from(std::string{prefix} + '-' + std::to_string(suffix));
-    if (!value)
-      return std::nullopt;
+    if (!value) return std::nullopt;
     return std::move(*value);
   }
 
@@ -1373,23 +1333,19 @@ class ChatAppImpl final : public InteractiveChatApp {
     auto surface = domain::SurfaceId::from("interactive");
     auto workspace = domain::WorkspaceId::from("chat");
     auto permission = domain::PermissionProfileId::from("plan-control");
-    if (!surface || !workspace || !permission)
-      return std::nullopt;
+    if (!surface || !workspace || !permission) return std::nullopt;
     return domain::RunStarted{*surface, *workspace, *permission, std::nullopt};
   }
 
   auto ensure_plan_review() -> void {
-    if (!m_session || m_plan_review_active || m_close_dialog_active)
-      return;
+    if (!m_session || m_plan_review_active || m_close_dialog_active) return;
     auto state = m_session->plan_task_state();
-    if (!state || !state->pending_decision || !state->plan)
-      return;
+    if (!state || !state->pending_decision || !state->plan) return;
     const auto pending = *state->pending_decision;
     const auto revision = state->plan->revision;
     const auto review_key =
         std::pair{m_session->session_id(), revision.revision_id};
-    if (m_reviewed_plan == review_key)
-      return;
+    if (m_reviewed_plan == review_key) return;
     if (!m_plan_dialog) {
       m_plan_dialog = std::make_unique<termforge::ChoiceWizardDialog>();
     }
@@ -1401,38 +1357,38 @@ class ChatAppImpl final : public InteractiveChatApp {
               " " + revision.source_snapshot->fingerprint.algorithm + ":" +
               revision.source_snapshot->fingerprint.value;
     }
-    for (const auto &evidence : revision.evidence) {
+    for (const auto& evidence : revision.evidence) {
       text += "\nEvidence: " + std::string{evidence.evidence_id.value()} + " " +
               evidence.digest.algorithm + ":" + evidence.digest.value;
     }
-    for (const auto &task : revision.tasks) {
+    for (const auto& task : revision.tasks) {
       text += "\n\n[" + std::string{task.task_id.value()} + "] " + task.title;
       if (!task.dependency_task_ids.empty()) {
         text += "\nDepends on:";
-        for (const auto &dependency : task.dependency_task_ids) {
+        for (const auto& dependency : task.dependency_task_ids) {
           text += " " + std::string{dependency.value()};
         }
       }
-      for (const auto &criterion : task.acceptance_criteria) {
+      for (const auto& criterion : task.acceptance_criteria) {
         text += "\nCriterion: " + criterion;
       }
       text += "\nEffects:";
       for (const auto effect : task.intended_effects) {
         text += " " + std::string{effect_text(effect)};
       }
-      for (const auto &intent : task.resource_intents) {
+      for (const auto& intent : task.resource_intents) {
         text += "\nResource: " + intent.kind + ":" + intent.value;
       }
     }
     if (state->schedule) {
       text += "\n\nProposed concurrency: " +
               std::to_string(state->schedule->dispatchable_task_ids.size());
-      for (const auto &task : state->schedule->tasks) {
+      for (const auto& task : state->schedule->tasks) {
         text += "\nSchedule " + std::string{task.task_id.value()} + ": " +
                 std::string{readiness_text(task.state)};
         if (!task.blockers.empty()) {
           text += " (blocked by";
-          for (const auto &blocker : task.blockers) {
+          for (const auto& blocker : task.blockers) {
             text += " " + std::string{blocker.value()};
           }
           text += ")";
@@ -1521,8 +1477,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   }
 
   auto request_close(std::function<void()> action = {}) -> void {
-    if (!action)
-      action = [this] { quit(); };
+    if (!action) action = [this] { quit(); };
     if (m_close_dialog_active || m_plan_review_active) {
       m_status = "Close is unavailable while another decision is open";
       return;
@@ -1533,9 +1488,8 @@ class ChatAppImpl final : public InteractiveChatApp {
       return;
     }
     std::vector<runtime::ActiveSessionTask> unresolved;
-    for (const auto &task : state->session_tasks) {
-      if (task.state == runtime::SessionTaskState::completed)
-        continue;
+    for (const auto& task : state->session_tasks) {
+      if (task.state == runtime::SessionTaskState::completed) continue;
       unresolved.push_back(task);
     }
     if (unresolved.empty()) {
@@ -1553,9 +1507,9 @@ class ChatAppImpl final : public InteractiveChatApp {
       unresolved.erase(
           std::remove_if(
               unresolved.begin(), unresolved.end(),
-              [&](const auto &task) {
+              [&](const auto& task) {
                 const auto promoted = std::ranges::any_of(
-                    state->project_backlog, [&](const auto &item) {
+                    state->project_backlog, [&](const auto& item) {
                       return item.item.origin.session_id ==
                                  m_session->session_id() &&
                              item.item.origin.plan_id == task.plan_id &&
@@ -1579,7 +1533,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     tasks.mode = termforge::ChoiceMode::Multiple;
     tasks.minimum_selected = 0;
     tasks.maximum_selected = unresolved.size();
-    for (const auto &task : unresolved) {
+    for (const auto& task : unresolved) {
       tasks.choices.push_back(
           {task.task.title, std::string{session_task_state_text(task.state)}});
     }
@@ -1645,7 +1599,7 @@ class ChatAppImpl final : public InteractiveChatApp {
                 m_close_action = {};
                 return;
               }
-              const auto &task = unresolved[index];
+              const auto& task = unresolved[index];
               auto promoted = m_session->promote_project_task(
                   {*run_id,
                    *attributes,
@@ -1668,8 +1622,7 @@ class ChatAppImpl final : public InteractiveChatApp {
           }
           auto next = std::move(m_close_action);
           m_close_action = {};
-          if (next)
-            next();
+          if (next) next();
         });
     push_overlay(*m_close_dialog, {.backdrop = termforge::Backdrop::Dim,
                                    .dismiss_on_click_outside = false});
@@ -1700,14 +1653,13 @@ class ChatAppImpl final : public InteractiveChatApp {
               m_status = changed.error().message;
               return;
             }
-            m_status = "Selected model " +
-                       std::string{m_session->model_id().value()};
+            m_status =
+                "Selected model " + std::string{m_session->model_id().value()};
           });
     }
     m_model_picker->set_models(snapshot->get(), m_session->model_id());
-    push_overlay(*m_model_picker,
-                 {.backdrop = termforge::Backdrop::Dim,
-                  .dismiss_on_click_outside = false});
+    push_overlay(*m_model_picker, {.backdrop = termforge::Backdrop::Dim,
+                                   .dismiss_on_click_outside = false});
     if (!snapshot->get().warnings.empty())
       m_status = snapshot->get().warnings.back();
     else
@@ -1792,7 +1744,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   std::function<void()> m_close_action;
 };
 
-}  // namespace
+} // namespace
 
 auto make_interactive_chat_app(
     backend::Backend& backend, backend::ModelContextProvider& model_context,
@@ -1825,14 +1777,15 @@ auto ProcessInteractiveCommand::execute(Request request,
     if (request.model) {
       auto snapshot = (*catalog)->service().snapshot(environment.stop_token);
       if (!snapshot) {
-        return failure(
-            snapshot.error().code == model::CatalogErrorCode::cancelled
-                ? cli::CommandFailureKind::cancelled
-                : cli::CommandFailureKind::runtime,
-            snapshot.error().message);
+        return failure(snapshot.error().code ==
+                               model::CatalogErrorCode::cancelled
+                           ? cli::CommandFailureKind::cancelled
+                           : cli::CommandFailureKind::runtime,
+                       snapshot.error().message);
       }
       if (model::find_model(snapshot->get(), *model, "text") == nullptr) {
-        auto suggestions = model::suggest_models(snapshot->get(), model->value());
+        auto suggestions =
+            model::suggest_models(snapshot->get(), model->value());
         std::string message =
             "unknown text model '" + std::string{model->value()} + "'";
         if (!suggestions.empty())
@@ -1872,7 +1825,8 @@ auto ProcessInteractiveCommand::execute(Request request,
     auto persona_root = process_persona_root();
     std::optional<FilesystemPersonaSource> personas;
     if (persona_root) personas.emplace(std::move(*persona_root));
-    surfaces::ChatSessionOpen open{std::move(*model), mode,
+    surfaces::ChatSessionOpen open{std::move(*model),
+                                   mode,
                                    std::move(request.session_id),
                                    std::move(provenance),
                                    std::move(request.persona),
@@ -1925,4 +1879,4 @@ auto ProcessInteractiveCommand::execute(Request request,
   }
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

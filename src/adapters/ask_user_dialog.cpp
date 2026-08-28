@@ -12,7 +12,7 @@ namespace {
       AskUserDialogErrorCode::invalid_request, std::move(message)});
 }
 
-}  // namespace
+} // namespace
 
 auto AskUserDialogController::present(runtime::PendingQuestionInput input,
                                       runtime::RunKernel& kernel)
@@ -37,8 +37,8 @@ auto AskUserDialogController::present(runtime::PendingQuestionInput input,
                       : termforge::ChoiceMode::Multiple;
       page.minimum_selected = question.minimum_selections;
       page.maximum_selected = question.maximum_selections;
-      for (std::size_t option_index = 0;
-           option_index < question.options.size(); ++option_index) {
+      for (std::size_t option_index = 0; option_index < question.options.size();
+           ++option_index) {
         const auto& option = question.options[option_index];
         page.choices.push_back(
             {option.label, option.description.value_or(std::string{})});
@@ -77,9 +77,8 @@ auto AskUserDialogController::resolve(
   m_resolved = true;
   std::expected<void, runtime::RunKernelError> resolved;
   if (!result) {
-    resolved = m_kernel->cancel_questions(m_input->run_id,
-                                          m_input->invocation_id,
-                                          "dialog cancelled");
+    resolved = m_kernel->cancel_questions(
+        m_input->run_id, m_input->invocation_id, "dialog cancelled");
   } else if (result->pages.size() != m_input->questions.size()) {
     m_last_error = {AskUserDialogErrorCode::invalid_request,
                     "question dialog returned the wrong page count"};
@@ -101,8 +100,8 @@ auto AskUserDialogController::resolve(
         }
         selected_ids.push_back(question.options[option_index].option_id);
       }
-      answers.push_back({question.question_id, std::move(selected_ids),
-                         page.other});
+      answers.push_back(
+          {question.question_id, std::move(selected_ids), page.other});
     }
     resolved = m_kernel->answer_questions(
         m_input->run_id, m_input->invocation_id, std::move(answers));
@@ -113,4 +112,4 @@ auto AskUserDialogController::resolve(
   }
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

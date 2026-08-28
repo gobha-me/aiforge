@@ -66,6 +66,11 @@ cmake --build build-clang --parallel
 ctest --test-dir build-clang --output-on-failure
 ```
 
+C++ formatting is pinned to clang-format 20.x. Run `tools/format.sh --check`
+to check every tracked `*.cpp` and `*.hpp` file or `tools/format.sh --fix` to
+apply the policy. The selected TermForge-aligned options are documented in
+[`docs/code-style.md`](docs/code-style.md).
+
 Configure a model and either store or export a Venice API key, then run a
 one-shot request:
 

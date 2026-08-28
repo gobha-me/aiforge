@@ -14,7 +14,8 @@ namespace aiforge::runtime {
 struct ProjectInstructionTokenEstimate {
   domain::ProjectInstructionId instruction_id;
   std::uint64_t estimated_tokens{};
-  auto operator==(const ProjectInstructionTokenEstimate&) const -> bool = default;
+  auto operator==(const ProjectInstructionTokenEstimate&) const
+      -> bool = default;
 };
 
 enum class ProjectInstructionContextErrorCode {
@@ -31,7 +32,8 @@ struct ProjectInstructionContextError {
   ProjectInstructionContextErrorCode code{
       ProjectInstructionContextErrorCode::internal_failure};
   std::string message;
-  auto operator==(const ProjectInstructionContextError&) const -> bool = default;
+  auto operator==(const ProjectInstructionContextError&) const
+      -> bool = default;
 };
 
 [[nodiscard]] auto project_instruction_inputs(
@@ -41,4 +43,4 @@ struct ProjectInstructionContextError {
     -> std::expected<std::vector<domain::InstructionInput>,
                      ProjectInstructionContextError>;
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

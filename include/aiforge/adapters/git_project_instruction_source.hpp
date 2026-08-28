@@ -12,9 +12,8 @@ class GitProjectInstructionSource final
       GitRepositorySnapshotSource& snapshot_source) noexcept
       : m_snapshot_source(snapshot_source) {}
 
-  [[nodiscard]] auto discover(
-      repository::ProjectInstructionRequest request,
-      std::stop_token stop_token = {})
+  [[nodiscard]] auto discover(repository::ProjectInstructionRequest request,
+                              std::stop_token stop_token = {})
       -> std::expected<domain::ProjectInstructionDiscovery,
                        repository::ProjectInstructionError> override;
 
@@ -22,4 +21,4 @@ class GitProjectInstructionSource final
   GitRepositorySnapshotSource& m_snapshot_source;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

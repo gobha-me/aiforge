@@ -351,9 +351,10 @@ auto observe_frame(PassState& state, TuiScenarioTarget& target,
   return {};
 }
 
-[[nodiscard]] auto
-finish_observation(PassState& state, const TuiScenarioTarget& target,
-                   const TuiScenario& scenario, BoundedStringSink& wire)
+[[nodiscard]] auto finish_observation(PassState& state,
+                                      const TuiScenarioTarget& target,
+                                      const TuiScenario& scenario,
+                                      BoundedStringSink& wire)
     -> std::expected<TuiScenarioObservation, TuiScenarioError> {
   if (state.error) return std::unexpected(std::move(*state.error));
   if (state.next_action != scenario.steps.size() ||
@@ -381,7 +382,7 @@ finish_observation(PassState& state, const TuiScenarioTarget& target,
   return std::move(state.observation);
 }
 
-}  // namespace
+} // namespace
 
 auto replay_tui_scenario(const TuiScenario& scenario,
                          const std::string_view trace,
@@ -547,4 +548,4 @@ auto run_tui_scenario(const TuiScenario& scenario,
   }
 }
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

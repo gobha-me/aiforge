@@ -26,14 +26,12 @@ class FilesystemPersonaSource final : public persona::PersonaSource {
                           std::stop_token stop_token = {})
       -> std::expected<std::vector<domain::PersonaSummary>,
                        persona::PersonaError> override;
-  [[nodiscard]] auto load(std::string name,
-                          persona::PersonaLimits limits = {},
+  [[nodiscard]] auto load(std::string name, persona::PersonaLimits limits = {},
                           std::stop_token stop_token = {})
-      -> std::expected<domain::PersonaDocument,
-                       persona::PersonaError> override;
+      -> std::expected<domain::PersonaDocument, persona::PersonaError> override;
 
  private:
   std::filesystem::path m_root;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

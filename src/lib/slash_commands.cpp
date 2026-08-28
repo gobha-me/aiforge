@@ -14,9 +14,8 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
                                   std::string message,
                                   std::string command_id = {})
     -> std::unexpected<SlashCommandRegistryError> {
-  return std::unexpected(
-      SlashCommandRegistryError{code, std::move(message),
-                                std::move(command_id)});
+  return std::unexpected(SlashCommandRegistryError{code, std::move(message),
+                                                   std::move(command_id)});
 }
 
 [[nodiscard]] auto command_error(const SlashCommandErrorCode code,
@@ -32,14 +31,14 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
   if (first < 'a' || first > 'z') return false;
   return std::ranges::all_of(value.substr(1), [allow_dot](const char raw) {
     const auto ch = static_cast<unsigned char>(raw);
-    return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
-           ch == '-' || ch == '_' || (allow_dot && ch == '.');
+    return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' ||
+           ch == '_' || (allow_dot && ch == '.');
   });
 }
 
 [[nodiscard]] auto valid_utf8_text(const std::string_view value,
-                                   const bool allow_space,
-                                   const bool allow_tab) -> bool {
+                                   const bool allow_space, const bool allow_tab)
+    -> bool {
   std::size_t index{};
   while (index < value.size()) {
     const auto first = static_cast<unsigned char>(value[index]);
@@ -116,8 +115,7 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
   }
   return SlashCommandResult{
       SlashCommandAction::show_help,
-      arguments.empty() ? std::nullopt
-                        : std::optional<std::string>{arguments}};
+      arguments.empty() ? std::nullopt : std::optional<std::string>{arguments}};
 }
 
 [[nodiscard]] auto quit_handler(std::string_view arguments,
@@ -165,9 +163,8 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
                                 std::string{session_id}};
     }
   }
-  return command_error(
-      SlashCommandErrorCode::invalid_arguments,
-      "session accepts list, resume <session-id>, or new");
+  return command_error(SlashCommandErrorCode::invalid_arguments,
+                       "session accepts list, resume <session-id>, or new");
 }
 
 [[nodiscard]] auto persona_handler(std::string_view arguments,
@@ -178,7 +175,8 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
     return SlashCommandResult{SlashCommandAction::list_personas, std::nullopt};
   }
   if (arguments == "off") {
-    return SlashCommandResult{SlashCommandAction::disable_persona, std::nullopt};
+    return SlashCommandResult{SlashCommandAction::disable_persona,
+                              std::nullopt};
   }
   constexpr std::string_view set{"set"};
   if (arguments.starts_with(set) && arguments.size() > set.size() &&
@@ -189,9 +187,8 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
                                 std::string{name}};
     }
   }
-  return command_error(
-      SlashCommandErrorCode::invalid_arguments,
-      "persona accepts list, set <name>, or off");
+  return command_error(SlashCommandErrorCode::invalid_arguments,
+                       "persona accepts list, set <name>, or off");
 }
 
 [[nodiscard]] auto model_handler(std::string_view arguments,
@@ -215,13 +212,13 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
 }
 
 [[nodiscard]] auto plan_handler(std::string_view arguments,
-                                const SlashCommandContext &)
+                                const SlashCommandContext&)
     -> std::expected<SlashCommandResult, SlashCommandError> {
   return no_arguments(arguments, SlashCommandAction::show_plan);
 }
 
 [[nodiscard]] auto tasks_handler(std::string_view arguments,
-                                 const SlashCommandContext &)
+                                 const SlashCommandContext&)
     -> std::expected<SlashCommandResult, SlashCommandError> {
   return no_arguments(arguments, SlashCommandAction::show_tasks);
 }
@@ -232,8 +229,8 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
        idle_available, help_handler},
       {"quit", "quit", "", "Exit interactive chat.", idle_available,
        quit_handler},
-      {"clear", "clear", "", "Clear the transcript view only.",
-       idle_available, clear_handler},
+      {"clear", "clear", "", "Clear the transcript view only.", idle_available,
+       clear_handler},
       {"edit", "edit", "", "Open an empty draft in the configured editor.",
        editor_available, edit_handler},
       {"session", "session", "[list | resume <session-id> | new]",
@@ -242,8 +239,8 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
       {"persona", "persona", "[list | set <name> | off]",
        "List, select, or disable file-backed personas.", idle_available,
        persona_handler},
-      {"model", "model", "[model-id]",
-       "Choose a text model for future runs.", idle_available, model_handler},
+      {"model", "model", "[model-id]", "Choose a text model for future runs.",
+       idle_available, model_handler},
       {"usage", "usage", "", "Show session usage and reported cost.",
        idle_available, usage_handler},
       {"plan", "plan", "", "Show the current plan and review state.",
@@ -253,7 +250,7 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
   };
 }
 
-}  // namespace
+} // namespace
 
 auto SlashCommandRegistry::create(std::vector<SlashCommandSpec> commands)
     -> std::expected<SlashCommandRegistry, SlashCommandRegistryError> {
@@ -301,10 +298,9 @@ auto SlashCommandRegistry::create(std::vector<SlashCommandSpec> commands)
   }
 }
 
-auto SlashCommandRegistry::dispatch(const std::string_view input,
-                                    const SlashCommandContext& context,
-                                    const SlashCommandLimits limits) const
-    noexcept
+auto SlashCommandRegistry::dispatch(
+    const std::string_view input, const SlashCommandContext& context,
+    const SlashCommandLimits limits) const noexcept
     -> std::expected<std::optional<SlashCommandResult>, SlashCommandError> {
   try {
     if (input.empty() || input.front() != '/') return std::nullopt;
@@ -326,9 +322,9 @@ auto SlashCommandRegistry::dispatch(const std::string_view input,
     }
 
     const auto separator = input.find_first_of(" \t", 1);
-    const auto name = input.substr(
-        1, separator == std::string_view::npos ? input.size() - 1
-                                               : separator - 1);
+    const auto name =
+        input.substr(1, separator == std::string_view::npos ? input.size() - 1
+                                                            : separator - 1);
     if (!valid_identifier(name, false) ||
         name.size() > limits.maximum_name_bytes) {
       return command_error(SlashCommandErrorCode::invalid_input,
@@ -340,8 +336,8 @@ auto SlashCommandRegistry::dispatch(const std::string_view input,
       if (first != std::string_view::npos) arguments = input.substr(first);
     }
 
-    const auto found = std::ranges::find(m_commands, name,
-                                         &SlashCommandSpec::name);
+    const auto found =
+        std::ranges::find(m_commands, name, &SlashCommandSpec::name);
     if (found == m_commands.end()) {
       return command_error(SlashCommandErrorCode::unknown_command,
                            "unknown slash command: /" + std::string{name});
@@ -369,9 +365,8 @@ auto SlashCommandRegistry::describe(
       return command_error(SlashCommandErrorCode::cancelled,
                            "slash command listing cancelled");
     }
-    if (name &&
-        (!valid_identifier(*name, false) ||
-         name->size() > maximum_registered_name_bytes)) {
+    if (name && (!valid_identifier(*name, false) ||
+                 name->size() > maximum_registered_name_bytes)) {
       return command_error(SlashCommandErrorCode::invalid_input,
                            "slash command help target is invalid");
     }
@@ -392,10 +387,10 @@ auto SlashCommandRegistry::describe(
   }
 }
 
-auto SlashCommandRegistry::complete(const std::string_view prefix,
-                                    const SlashCommandContext& context,
-                                    const SlashCommandLimits limits) const
-    noexcept -> std::expected<std::vector<std::string>, SlashCommandError> {
+auto SlashCommandRegistry::complete(
+    const std::string_view prefix, const SlashCommandContext& context,
+    const SlashCommandLimits limits) const noexcept
+    -> std::expected<std::vector<std::string>, SlashCommandError> {
   try {
     if (context.stop_token.stop_requested()) {
       return command_error(SlashCommandErrorCode::cancelled,
@@ -438,4 +433,4 @@ auto builtin_slash_command_registry() -> const SlashCommandRegistry& {
   return registry;
 }
 
-}  // namespace aiforge::surfaces
+} // namespace aiforge::surfaces

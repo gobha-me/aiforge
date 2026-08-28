@@ -13,13 +13,11 @@ namespace {
 using namespace aiforge;
 using namespace std::chrono_literals;
 
-template <typename IdType>
-auto id(std::string value) -> IdType {
+template <typename IdType> auto id(std::string value) -> IdType {
   return IdType::from(std::move(value)).value();
 }
 
-auto digest(std::string value = "aaaaaaaaaaaaaaaa")
-    -> domain::ContentDigest {
+auto digest(std::string value = "aaaaaaaaaaaaaaaa") -> domain::ContentDigest {
   return {"git-sha1", std::move(value), 4};
 }
 
@@ -32,25 +30,26 @@ auto snapshot(std::string fingerprint = "bbbbbbbbbbbbbbbb")
           std::chrono::sys_time<std::chrono::milliseconds>{100ms}};
 }
 
-auto document(std::string instruction_id, std::string path,
-              std::string subtree, std::string text,
-              const std::uint32_t specificity,
-              const std::uint64_t order)
-    -> domain::ProjectInstructionDocument {
+auto document(std::string instruction_id, std::string path, std::string subtree,
+              std::string text, const std::uint32_t specificity,
+              const std::uint64_t order) -> domain::ProjectInstructionDocument {
   auto content_digest = digest();
   content_digest.byte_size = text.size();
   return {id<domain::ProjectInstructionId>(std::move(instruction_id)),
           {domain::snapshot_identity(snapshot()), std::move(path),
            std::move(content_digest), std::nullopt},
-          std::move(subtree), std::move(text), specificity, order};
+          std::move(subtree),
+          std::move(text),
+          specificity,
+          order};
 }
 
 auto discovery() -> domain::ProjectInstructionDiscovery {
-  return {domain::snapshot_identity(snapshot()),
-          "src/lib",
-          {document("root-instruction", "AGENTS.md", "", "root", 0, 1),
-           document("src-instruction", "src/AGENTS.md", "src", "nested", 1,
-                    2)}};
+  return {
+      domain::snapshot_identity(snapshot()),
+      "src/lib",
+      {document("root-instruction", "AGENTS.md", "", "root", 0, 1),
+       document("src-instruction", "src/AGENTS.md", "src", "nested", 1, 2)}};
 }
 
 auto estimates() -> std::vector<runtime::ProjectInstructionTokenEstimate> {
@@ -58,11 +57,12 @@ auto estimates() -> std::vector<runtime::ProjectInstructionTokenEstimate> {
           {id<domain::ProjectInstructionId>("src-instruction"), 4}};
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("scripted project instruction sources are bounded and cancellable",
           "[instructions][fake][failure]") {
-  const repository::ProjectInstructionRequest request{snapshot(), "src/lib", {}};
+  const repository::ProjectInstructionRequest request{
+      snapshot(), "src/lib", {}};
   testing::ScriptedProjectInstructionSource source{{{request, discovery()}}};
   const auto result = source.discover(request);
   REQUIRE(result == discovery());
@@ -90,7 +90,8 @@ TEST_CASE("project instruction context handoff rejects stale and invalid input",
   auto value = discovery();
   auto current = value.source_snapshot;
   current.fingerprint.value = "cccccccccccccccc";
-  auto result = runtime::project_instruction_inputs(value, current, estimates());
+  auto result =
+      runtime::project_instruction_inputs(value, current, estimates());
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code ==
           runtime::ProjectInstructionContextErrorCode::stale_snapshot);
@@ -113,8 +114,8 @@ TEST_CASE("project instruction context handoff rejects stale and invalid input",
 
   auto zero = estimates();
   zero.front().estimated_tokens = 0;
-  result = runtime::project_instruction_inputs(value, value.source_snapshot,
-                                               zero);
+  result =
+      runtime::project_instruction_inputs(value, value.source_snapshot, zero);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code ==
           runtime::ProjectInstructionContextErrorCode::invalid_estimate);
@@ -165,7 +166,8 @@ TEST_CASE("project instructions enter the accepted precedence path",
       std::nullopt,
       domain::Message{id<domain::MessageId>("runtime-message"),
                       domain::Role::system,
-                      {domain::TextBlock{"Runtime safety"}}, std::nullopt},
+                      {domain::TextBlock{"Runtime safety"}},
+                      std::nullopt},
       {id<domain::ContextSourceId>("runtime-source"), std::nullopt,
        std::nullopt},
       0,

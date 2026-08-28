@@ -54,7 +54,7 @@ template <typename IdType>
   return std::move(*id);
 }
 
-}  // namespace
+} // namespace
 
 auto replayed_conversation(const domain::SessionEventLog& log,
                            const std::uint64_t suffix)
@@ -116,4 +116,4 @@ auto replayed_conversation(const domain::SessionEventLog& log,
   return result;
 }
 
-}  // namespace aiforge::surfaces::detail
+} // namespace aiforge::surfaces::detail

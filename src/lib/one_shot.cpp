@@ -99,9 +99,8 @@ auto write(std::ostream& stream, const std::string_view value) -> bool {
     const std::vector<domain::SessionCostEstimate>& estimates) -> std::string {
   std::string result{"estimate:"};
   for (const auto& estimate : estimates) {
-    result += " " +
-              std::string{domain::cost_estimate_unit_name(estimate.unit)} +
-              "=";
+    result +=
+        " " + std::string{domain::cost_estimate_unit_name(estimate.unit)} + "=";
     if (estimate.subtotal) {
       result += estimate.subtotal->amount().to_string();
     } else {
@@ -112,14 +111,14 @@ auto write(std::ostream& stream, const std::string_view value) -> bool {
       result += "[" + std::to_string(estimate.estimated_inferences) + "/" +
                 std::to_string(estimate.total_inferences);
       for (const auto& failure : estimate.unavailable) {
-        result += ";" +
-                  std::string{
-                      domain::cost_estimate_reason_name(failure.reason)} +
-                  "=" + std::to_string(failure.count);
+        result +=
+            ";" +
+            std::string{domain::cost_estimate_reason_name(failure.reason)} +
+            "=" + std::to_string(failure.count);
       }
       if (estimate.aggregation_failure) {
         result += ";" + std::string{domain::cost_estimate_reason_name(
-                             *estimate.aggregation_failure)};
+                            *estimate.aggregation_failure)};
       }
       result += "]";
     }
@@ -129,7 +128,7 @@ auto write(std::ostream& stream, const std::string_view value) -> bool {
   return result;
 }
 
-[[nodiscard]] auto spend_line(const domain::SessionSpendSummary &spend)
+[[nodiscard]] auto spend_line(const domain::SessionSpendSummary& spend)
     -> std::string {
   auto result = std::string{"spend: USD="};
   if (!spend.accounted) {
@@ -201,8 +200,8 @@ struct SpendState {
   if (!ceiling) return std::unexpected(std::move(ceiling.error()));
   if (!requested) return {};
   if (ceiling->ceiling()) {
-    const auto ordering = domain::compare(
-        requested->amount(), ceiling->ceiling()->amount());
+    const auto ordering =
+        domain::compare(requested->amount(), ceiling->ceiling()->amount());
     if (ordering == std::strong_ordering::greater) {
       return one_shot_error(OneShotErrorCode::invalid_input,
                             "session spend ceiling cannot be widened");
@@ -213,8 +212,7 @@ struct SpendState {
   auto run_id = make_id<domain::RunId>("spend-policy", suffix);
   auto surface_id = make_id<domain::SurfaceId>("session-policy", suffix);
   auto workspace_id = make_id<domain::WorkspaceId>("chat", suffix);
-  auto permission_id =
-      make_id<domain::PermissionProfileId>("observe", suffix);
+  auto permission_id = make_id<domain::PermissionProfileId>("observe", suffix);
   if (!run_id || !surface_id || !workspace_id || !permission_id) {
     return one_shot_error(OneShotErrorCode::internal_failure,
                           "session spend identity generation failed");
@@ -265,10 +263,10 @@ struct ResolvedPersona {
   std::optional<domain::PersonaSelection> selection;
 };
 
-[[nodiscard]] auto resolve_persona(
-    persona::PersonaSource* source, const persona::PersonaDirective& directive,
-    const domain::SessionEventLog& event_log,
-    const std::stop_token stop_token)
+[[nodiscard]] auto resolve_persona(persona::PersonaSource* source,
+                                   const persona::PersonaDirective& directive,
+                                   const domain::SessionEventLog& event_log,
+                                   const std::stop_token stop_token)
     -> std::expected<ResolvedPersona, OneShotError> {
   if ((directive.kind == persona::PersonaDirectiveKind::select) !=
           directive.name.has_value() ||
@@ -282,7 +280,8 @@ struct ResolvedPersona {
                           "persona history is invalid");
   }
   std::optional<domain::PersonaReference> previous;
-  if (*latest && (*latest)->action == domain::PersonaSelectionAction::selected) {
+  if (*latest &&
+      (*latest)->action == domain::PersonaSelectionAction::selected) {
     previous = (*latest)->persona;
   }
   if (directive.kind == persona::PersonaDirectiveKind::disable) {
@@ -313,9 +312,9 @@ struct ResolvedPersona {
     return one_shot_error(
         loaded.error().code == persona::PersonaErrorCode::cancelled
             ? OneShotErrorCode::cancelled
-            : loaded.error().code == persona::PersonaErrorCode::invalid_name
-                  ? OneShotErrorCode::invalid_input
-                  : OneShotErrorCode::context_failed,
+        : loaded.error().code == persona::PersonaErrorCode::invalid_name
+            ? OneShotErrorCode::invalid_input
+            : OneShotErrorCode::context_failed,
         loaded.error().message);
   }
   if (!domain::validate_persona_document(*loaded)) {
@@ -324,9 +323,9 @@ struct ResolvedPersona {
   }
   if (directive.kind == persona::PersonaDirectiveKind::inherit &&
       loaded->reference != *previous) {
-    return one_shot_error(
-        OneShotErrorCode::context_failed,
-        "persona changed since the session was recorded; explicitly select it or disable it");
+    return one_shot_error(OneShotErrorCode::context_failed,
+                          "persona changed since the session was recorded; "
+                          "explicitly select it or disable it");
   }
   const auto selection_source =
       directive.kind == persona::PersonaDirectiveKind::inherit
@@ -381,27 +380,25 @@ struct ResolvedPersona {
   return {};
 }
 
-}  // namespace
+} // namespace
 
 OneShotSurface::OneShotSurface(backend::Backend& backend,
                                backend::ModelContextProvider& model_context,
                                OneShotLimits limits,
                                persona::PersonaSource* persona_source)
-    : m_backend(backend),
-      m_model_context(model_context),
-      m_persona_source(persona_source),
-      m_limits(limits) {}
+    : m_backend(backend), m_model_context(model_context),
+      m_persona_source(persona_source), m_limits(limits) {
+}
 
 OneShotSurface::OneShotSurface(backend::Backend& backend,
                                backend::ModelContextProvider& model_context,
                                storage::SessionStore& session_store,
                                OneShotLimits limits,
                                persona::PersonaSource* persona_source)
-    : m_backend(backend),
-      m_model_context(model_context),
-      m_session_store(&session_store),
-      m_persona_source(persona_source),
-      m_limits(limits) {}
+    : m_backend(backend), m_model_context(model_context),
+      m_session_store(&session_store), m_persona_source(persona_source),
+      m_limits(limits) {
+}
 
 auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                          std::ostream& error, const std::stop_token stop_token)
@@ -538,24 +535,23 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
         return std::unexpected(std::move(opening_spend.error()));
       }
       const auto spend = domain::summarize_session_spend(
-          opening_spend->ledger.records(),
-          *opening_spend->ceiling.ceiling());
+          opening_spend->ledger.records(), *opening_spend->ceiling.ceiling());
       if (!spend.accounted) {
-        return one_shot_error(
-            OneShotErrorCode::spend_accounting_unavailable,
-            "session spend accounting is unavailable; refusing another inference");
+        return one_shot_error(OneShotErrorCode::spend_accounting_unavailable,
+                              "session spend accounting is unavailable; "
+                              "refusing another inference");
       }
       if (spend.reached) {
-        return one_shot_error(
-            OneShotErrorCode::spend_ceiling_reached,
-            "session spend ceiling reached (USD " +
-                spend.accounted->amount().to_string() + " of " +
-                spend.ceiling.amount().to_string() + ")");
+        return one_shot_error(OneShotErrorCode::spend_ceiling_reached,
+                              "session spend ceiling reached (USD " +
+                                  spend.accounted->amount().to_string() +
+                                  " of " + spend.ceiling.amount().to_string() +
+                                  ")");
       }
     }
 
-    auto resolved_persona = resolve_persona(
-        m_persona_source, request.persona, kernel->event_log(), stop_token);
+    auto resolved_persona = resolve_persona(m_persona_source, request.persona,
+                                            kernel->event_log(), stop_token);
     if (!resolved_persona) {
       return std::unexpected(std::move(resolved_persona.error()));
     }
@@ -622,8 +618,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
 
     if (resolved_persona->document) {
       auto persona_instruction = runtime::persona_instruction_input(
-          *resolved_persona->document,
-          resolved_persona->document->text.size());
+          *resolved_persona->document, resolved_persona->document->text.size());
       if (!persona_instruction) {
         return one_shot_error(OneShotErrorCode::context_failed,
                               persona_instruction.error().message);
@@ -671,8 +666,8 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
         {*run_id,
          {*surface_id, *workspace_id, *permission_id,
           resolved_persona->document
-              ? std::optional<domain::PersonaId>{
-                    resolved_persona->document->reference.persona_id}
+              ? std::optional<domain::PersonaId>{resolved_persona->document
+                                                     ->reference.persona_id}
               : std::nullopt},
          std::move(user_message),
          std::move(backend_request),
@@ -741,9 +736,9 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       return one_shot_error(OneShotErrorCode::cancelled, "request cancelled");
     }
     if (projection->status() != domain::RunStatus::completed) {
-      return one_shot_error(
-          OneShotErrorCode::run_failed,
-          run_error ? run_error->message : "one-shot run failed");
+      return one_shot_error(OneShotErrorCode::run_failed,
+                            run_error ? run_error->message
+                                      : "one-shot run failed");
     }
 
     const auto& usage = projection->usage();
@@ -817,4 +812,4 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
   }
 }
 
-}  // namespace aiforge::surfaces
+} // namespace aiforge::surfaces

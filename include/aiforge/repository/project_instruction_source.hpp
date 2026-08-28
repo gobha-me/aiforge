@@ -48,7 +48,8 @@ enum class ProjectInstructionErrorCode {
 };
 
 struct ProjectInstructionError {
-  ProjectInstructionErrorCode code{ProjectInstructionErrorCode::internal_failure};
+  ProjectInstructionErrorCode code{
+      ProjectInstructionErrorCode::internal_failure};
   std::string message;
   std::optional<std::string> relative_path;
   bool retryable{};
@@ -59,10 +60,10 @@ class ProjectInstructionSource {
  public:
   virtual ~ProjectInstructionSource() = default;
 
-  [[nodiscard]] virtual auto discover(
-      ProjectInstructionRequest request, std::stop_token stop_token = {})
+  [[nodiscard]] virtual auto discover(ProjectInstructionRequest request,
+                                      std::stop_token stop_token = {})
       -> std::expected<domain::ProjectInstructionDiscovery,
                        ProjectInstructionError> = 0;
 };
 
-}  // namespace aiforge::repository
+} // namespace aiforge::repository

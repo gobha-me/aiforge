@@ -12,8 +12,8 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unordered_set>
 #include <unistd.h>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -97,7 +97,8 @@ class DuplicateJsonKey final : public std::exception {
     -> std::expected<Json, ConfigFileError> {
   try {
     std::vector<std::unordered_set<std::string>> object_keys;
-    const auto callback = [&object_keys](const int, const Json::parse_event_t event,
+    const auto callback = [&object_keys](const int,
+                                         const Json::parse_event_t event,
                                          Json& parsed) {
       if (event == Json::parse_event_t::object_start) {
         object_keys.emplace_back();
@@ -113,18 +114,19 @@ class DuplicateJsonKey final : public std::exception {
     };
     auto parsed = Json::parse(text, callback, true, false);
     if (!parsed.is_object()) {
-      return std::unexpected(file_error(
-          ConfigFileErrorCode::malformed, path,
-          "the configuration document root must be an object"));
+      return std::unexpected(
+          file_error(ConfigFileErrorCode::malformed, path,
+                     "the configuration document root must be an object"));
     }
     return parsed;
   } catch (const DuplicateJsonKey&) {
-    return std::unexpected(file_error(ConfigFileErrorCode::duplicate_key, path,
-                                      "the configuration document has a duplicate key"));
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::duplicate_key, path,
+                   "the configuration document has a duplicate key"));
   } catch (const Json::exception&) {
-    return std::unexpected(file_error(
-        ConfigFileErrorCode::malformed, path,
-        "the configuration document is not strict UTF-8 JSON"));
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::malformed, path,
+                   "the configuration document is not strict UTF-8 JSON"));
   }
 }
 
@@ -134,26 +136,26 @@ class DuplicateJsonKey final : public std::exception {
   std::error_code error;
   const auto status = std::filesystem::symlink_status(directory, error);
   if (error && error != std::errc::no_such_file_or_directory) {
-    return std::unexpected(file_error(ConfigFileErrorCode::read_failed,
-                                      directory,
-                                      "cannot inspect the configuration directory"));
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::read_failed, directory,
+                   "cannot inspect the configuration directory"));
   }
   if (std::filesystem::exists(status)) {
     if (std::filesystem::is_symlink(status)) {
-      return std::unexpected(file_error(ConfigFileErrorCode::path_escape,
-                                        directory,
-                                        "the AIForge configuration directory cannot be a symlink"));
+      return std::unexpected(file_error(
+          ConfigFileErrorCode::path_escape, directory,
+          "the AIForge configuration directory cannot be a symlink"));
     }
     if (!std::filesystem::is_directory(status)) {
-      return std::unexpected(file_error(ConfigFileErrorCode::not_regular,
-                                        directory,
-                                        "the AIForge configuration path is not a directory"));
+      return std::unexpected(
+          file_error(ConfigFileErrorCode::not_regular, directory,
+                     "the AIForge configuration path is not a directory"));
     }
-    struct stat info {};
+    struct stat info{};
     if (::stat(directory.c_str(), &info) != 0) {
-      return std::unexpected(error_from_errno(ConfigFileErrorCode::read_failed,
-                                              directory,
-                                              "cannot inspect directory permissions"));
+      return std::unexpected(
+          error_from_errno(ConfigFileErrorCode::read_failed, directory,
+                           "cannot inspect directory permissions"));
     }
     if ((info.st_mode & 0077) != 0) {
       return std::unexpected(file_error(
@@ -167,18 +169,19 @@ class DuplicateJsonKey final : public std::exception {
   const auto base = directory.parent_path();
   std::filesystem::create_directories(base, error);
   if (error) {
-    return std::unexpected(file_error(ConfigFileErrorCode::write_failed, base,
-                                      "cannot create the configuration base directory"));
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::write_failed, base,
+                   "cannot create the configuration base directory"));
   }
   if (::mkdir(directory.c_str(), 0700) != 0 && errno != EEXIST) {
-    return std::unexpected(error_from_errno(ConfigFileErrorCode::write_failed,
-                                            directory,
-                                            "cannot create the AIForge configuration directory"));
+    return std::unexpected(
+        error_from_errno(ConfigFileErrorCode::write_failed, directory,
+                         "cannot create the AIForge configuration directory"));
   }
   if (::chmod(directory.c_str(), 0700) != 0) {
-    return std::unexpected(error_from_errno(ConfigFileErrorCode::write_failed,
-                                            directory,
-                                            "cannot secure the AIForge configuration directory"));
+    return std::unexpected(
+        error_from_errno(ConfigFileErrorCode::write_failed, directory,
+                         "cannot secure the AIForge configuration directory"));
   }
   return {};
 }
@@ -191,16 +194,16 @@ class DuplicateJsonKey final : public std::exception {
   UniqueFd descriptor{::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
   if (!descriptor) {
     if (errno == ENOENT) return std::optional<ParsedDocument>{};
-    return std::unexpected(error_from_errno(ConfigFileErrorCode::read_failed,
-                                            path,
-                                            "cannot open the configuration file"));
+    return std::unexpected(
+        error_from_errno(ConfigFileErrorCode::read_failed, path,
+                         "cannot open the configuration file"));
   }
 
-  struct stat info {};
+  struct stat info{};
   if (::fstat(descriptor.get(), &info) != 0) {
-    return std::unexpected(error_from_errno(ConfigFileErrorCode::read_failed,
-                                            path,
-                                            "cannot inspect the configuration file"));
+    return std::unexpected(
+        error_from_errno(ConfigFileErrorCode::read_failed, path,
+                         "cannot inspect the configuration file"));
   }
   if (!S_ISREG(info.st_mode)) {
     return std::unexpected(file_error(ConfigFileErrorCode::not_regular, path,
@@ -219,15 +222,16 @@ class DuplicateJsonKey final : public std::exception {
     const auto count = ::read(descriptor.get(), buffer, sizeof(buffer));
     if (count < 0) {
       if (errno == EINTR) continue;
-      return std::unexpected(error_from_errno(ConfigFileErrorCode::read_failed,
-                                              path,
-                                              "cannot read the configuration file"));
+      return std::unexpected(
+          error_from_errno(ConfigFileErrorCode::read_failed, path,
+                           "cannot read the configuration file"));
     }
     if (count == 0) break;
     if (contents.size() + static_cast<std::size_t>(count) >
         maximum_document_bytes) {
-      return std::unexpected(file_error(ConfigFileErrorCode::too_large, path,
-                                        "the configuration file exceeds 1 MiB"));
+      return std::unexpected(
+          file_error(ConfigFileErrorCode::too_large, path,
+                     "the configuration file exceeds 1 MiB"));
     }
     contents.append(buffer, static_cast<std::size_t>(count));
   }
@@ -247,17 +251,20 @@ class DuplicateJsonKey final : public std::exception {
   try {
     switch (spec.value_kind) {
       case ConfigValueKind::boolean:
-        return value.is_boolean() ? std::expected<ConfigValue, ConfigDiagnostic>{
-                                        ConfigValue{value.get<bool>()}}
-                                  : invalid();
+        return value.is_boolean()
+                   ? std::expected<ConfigValue, ConfigDiagnostic>{ConfigValue{
+                         value.get<bool>()}}
+                   : invalid();
       case ConfigValueKind::signed_integer:
         if (value.is_number_integer()) {
           return ConfigValue{value.get<std::int64_t>()};
         }
         if (value.is_number_unsigned() &&
             value.get<std::uint64_t>() <=
-                static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
-          return ConfigValue{static_cast<std::int64_t>(value.get<std::uint64_t>())};
+                static_cast<std::uint64_t>(
+                    std::numeric_limits<std::int64_t>::max())) {
+          return ConfigValue{
+              static_cast<std::int64_t>(value.get<std::uint64_t>())};
         }
         return invalid();
       case ConfigValueKind::unsigned_integer:
@@ -266,13 +273,14 @@ class DuplicateJsonKey final : public std::exception {
         }
         if (value.is_number_integer()) {
           const auto integer = value.get<std::int64_t>();
-          if (integer >= 0) return ConfigValue{static_cast<std::uint64_t>(integer)};
+          if (integer >= 0)
+            return ConfigValue{static_cast<std::uint64_t>(integer)};
         }
         return invalid();
       case ConfigValueKind::text:
         return value.is_string()
-                   ? std::expected<ConfigValue, ConfigDiagnostic>{
-                         ConfigValue{value.get<std::string>()}}
+                   ? std::expected<ConfigValue, ConfigDiagnostic>{ConfigValue{
+                         value.get<std::string>()}}
                    : invalid();
       case ConfigValueKind::text_list: {
         if (!value.is_array()) return invalid();
@@ -307,8 +315,8 @@ auto collect_leaf_keys(const Json& value, const std::string& prefix,
                        std::vector<std::string>& output) -> void {
   if (value.is_object() && !value.empty()) {
     for (auto iterator = value.begin(); iterator != value.end(); ++iterator) {
-      const auto key = prefix.empty() ? iterator.key()
-                                      : prefix + "." + iterator.key();
+      const auto key =
+          prefix.empty() ? iterator.key() : prefix + "." + iterator.key();
       collect_leaf_keys(iterator.value(), key, output);
     }
     return;
@@ -360,9 +368,9 @@ auto apply_unset(Json& root, const std::string_view key) -> void {
                                contents.size() - written);
     if (count < 0) {
       if (errno == EINTR) continue;
-      return std::unexpected(error_from_errno(ConfigFileErrorCode::write_failed,
-                                              path,
-                                              "cannot write the temporary configuration file"));
+      return std::unexpected(
+          error_from_errno(ConfigFileErrorCode::write_failed, path,
+                           "cannot write the temporary configuration file"));
     }
     written += static_cast<std::size_t>(count);
   }
@@ -377,23 +385,27 @@ auto apply_unset(Json& root, const std::string_view key) -> void {
   temporary += ".tmp." + std::to_string(::getpid()) + "." +
                std::to_string(sequence.fetch_add(1));
 
-  UniqueFd descriptor{::open(temporary.c_str(),
-                             O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-                             0600)};
+  UniqueFd descriptor{
+      ::open(temporary.c_str(),
+             O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600)};
   if (!descriptor) {
-    return std::unexpected(error_from_errno(ConfigFileErrorCode::write_failed,
-                                            temporary,
-                                            "cannot create the temporary configuration file"));
+    return std::unexpected(
+        error_from_errno(ConfigFileErrorCode::write_failed, temporary,
+                         "cannot create the temporary configuration file"));
   }
-  const auto cleanup = [&]() { static_cast<void>(::unlink(temporary.c_str())); };
+  const auto cleanup = [&]() {
+    static_cast<void>(::unlink(temporary.c_str()));
+  };
   const auto contents = root.dump(2) + "\n";
-  if (auto written = write_all(descriptor.get(), contents, temporary); !written) {
+  if (auto written = write_all(descriptor.get(), contents, temporary);
+      !written) {
     cleanup();
     return std::unexpected(std::move(written.error()));
   }
   if (::fsync(descriptor.get()) != 0) {
-    auto error = error_from_errno(ConfigFileErrorCode::sync_failed, temporary,
-                                  "cannot sync the temporary configuration file");
+    auto error =
+        error_from_errno(ConfigFileErrorCode::sync_failed, temporary,
+                         "cannot sync the temporary configuration file");
     cleanup();
     return std::unexpected(std::move(error));
   }
@@ -407,9 +419,9 @@ auto apply_unset(Json& root, const std::string_view key) -> void {
   UniqueFd directory{::open(path.parent_path().c_str(),
                             O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)};
   if (!directory || ::fsync(directory.get()) != 0) {
-    return std::unexpected(error_from_errno(ConfigFileErrorCode::sync_failed,
-                                            path.parent_path(),
-                                            "cannot sync the configuration directory"));
+    return std::unexpected(
+        error_from_errno(ConfigFileErrorCode::sync_failed, path.parent_path(),
+                         "cannot sync the configuration directory"));
   }
   return {};
 }
@@ -432,10 +444,12 @@ template <typename Mutation>
   }
   const auto* spec = find_spec(registry, key);
   if (spec == nullptr || !spec->file_writable || spec->sensitive) {
-    return std::unexpected(file_error(ConfigFileErrorCode::malformed, path,
-                                      "the configuration key is not file-writable"));
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::malformed, path,
+                   "the configuration key is not file-writable"));
   }
-  if (auto directory = check_app_directory(path.parent_path(), true); !directory) {
+  if (auto directory = check_app_directory(path.parent_path(), true);
+      !directory) {
     return std::unexpected(std::move(directory.error()));
   }
 
@@ -443,14 +457,14 @@ template <typename Mutation>
   UniqueFd lock{::open(lock_path.c_str(),
                        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600)};
   if (!lock) {
-    return std::unexpected(error_from_errno(ConfigFileErrorCode::lock_failed,
-                                            lock_path,
-                                            "cannot open the configuration lock"));
+    return std::unexpected(
+        error_from_errno(ConfigFileErrorCode::lock_failed, lock_path,
+                         "cannot open the configuration lock"));
   }
   if (::fchmod(lock.get(), 0600) != 0 || ::flock(lock.get(), LOCK_EX) != 0) {
-    return std::unexpected(error_from_errno(ConfigFileErrorCode::lock_failed,
-                                            lock_path,
-                                            "cannot acquire the configuration lock"));
+    return std::unexpected(
+        error_from_errno(ConfigFileErrorCode::lock_failed, lock_path,
+                         "cannot acquire the configuration lock"));
   }
 
   auto document = read_document(path);
@@ -458,9 +472,10 @@ template <typename Mutation>
   Json root = document->has_value() ? std::move(document->value().root)
                                     : Json::object();
   if (document->has_value() && (document->value().mode & 0077) != 0) {
-    return std::unexpected(file_error(
-        ConfigFileErrorCode::insecure_permissions, path,
-        "refusing to replace a configuration file with permissions broader than 0600"));
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::insecure_permissions, path,
+                   "refusing to replace a configuration file with permissions "
+                   "broader than 0600"));
   }
   if (auto changed = mutation(root, *spec); !changed) {
     return std::unexpected(std::move(changed.error()));
@@ -468,36 +483,40 @@ template <typename Mutation>
   return write_document(path, root);
 }
 
-}  // namespace
+} // namespace
 
 auto resolve_config_path(const ConfigPathEnvironment& environment)
     -> std::expected<std::filesystem::path, ConfigFileError> {
   try {
     std::filesystem::path base;
-    if (environment.xdg_config_home && environment.xdg_config_home->is_absolute()) {
+    if (environment.xdg_config_home &&
+        environment.xdg_config_home->is_absolute()) {
       base = *environment.xdg_config_home;
     } else {
       if (!environment.home) {
-        return std::unexpected(file_error(ConfigFileErrorCode::missing_home, {},
-                                          "HOME is required when XDG_CONFIG_HOME "
-                                          "is unset or relative"));
+        return std::unexpected(
+            file_error(ConfigFileErrorCode::missing_home, {},
+                       "HOME is required when XDG_CONFIG_HOME "
+                       "is unset or relative"));
       }
       if (!environment.home->is_absolute()) {
-        return std::unexpected(file_error(ConfigFileErrorCode::invalid_base_path,
-                                          *environment.home,
-                                          "the configuration home must be absolute"));
+        return std::unexpected(file_error(
+            ConfigFileErrorCode::invalid_base_path, *environment.home,
+            "the configuration home must be absolute"));
       }
       base = *environment.home / ".config";
     }
     return (base / "aiforge" / "config.json").lexically_normal();
   } catch (...) {
-    return std::unexpected(file_error(ConfigFileErrorCode::invalid_base_path, {},
+    return std::unexpected(file_error(ConfigFileErrorCode::invalid_base_path,
+                                      {},
                                       "cannot resolve the configuration path"));
   }
 }
 
 JsonConfigFileStore::JsonConfigFileStore(std::filesystem::path path)
-    : m_path(std::move(path)) {}
+    : m_path(std::move(path)) {
+}
 
 auto JsonConfigFileStore::path() const -> const std::filesystem::path& {
   return m_path;
@@ -507,8 +526,9 @@ auto JsonConfigFileStore::load(const ConfigRegistry& registry) const
     -> std::expected<ConfigLayer, ConfigFileError> {
   try {
     if (auto registry_valid = validate_registry(registry); !registry_valid) {
-      return std::unexpected(file_error(ConfigFileErrorCode::malformed, m_path,
-                                        "the configuration registry is invalid"));
+      return std::unexpected(
+          file_error(ConfigFileErrorCode::malformed, m_path,
+                     "the configuration registry is invalid"));
     }
     auto document = read_document(m_path);
     if (!document) return std::unexpected(std::move(document.error()));
@@ -516,7 +536,9 @@ auto JsonConfigFileStore::load(const ConfigRegistry& registry) const
     if (!document->has_value()) return layer;
     if ((document->value().mode & 0077) != 0) {
       layer.diagnostics.push_back(
-          {ConfigDiagnosticCode::source_warning, ConfigSource::file, {},
+          {ConfigDiagnosticCode::source_warning,
+           ConfigSource::file,
+           {},
            "configuration file permissions are broader than 0600"});
     }
 
@@ -533,7 +555,8 @@ auto JsonConfigFileStore::load(const ConfigRegistry& registry) const
     }
 
     std::unordered_set<std::string> known;
-    for (const auto& spec : registry.keys) known.insert(spec.id);
+    for (const auto& spec : registry.keys)
+      known.insert(spec.id);
     std::vector<std::string> leaves;
     collect_leaf_keys(document->value().root, {}, leaves);
     for (auto& leaf : leaves) {
@@ -546,11 +569,13 @@ auto JsonConfigFileStore::load(const ConfigRegistry& registry) const
     }
     return layer;
   } catch (const std::exception&) {
-    return std::unexpected(file_error(ConfigFileErrorCode::read_failed, m_path,
-                                      "the configuration file adapter failed safely"));
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::read_failed, m_path,
+                   "the configuration file adapter failed safely"));
   } catch (...) {
-    return std::unexpected(file_error(ConfigFileErrorCode::read_failed, m_path,
-                                      "the configuration file adapter failed safely"));
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::read_failed, m_path,
+                   "the configuration file adapter failed safely"));
   }
 }
 
@@ -561,19 +586,20 @@ auto JsonConfigFileStore::set(const ConfigRegistry& registry,
   try {
     return mutate_file(
         m_path, registry, key,
-        [&](Json& root, const ConfigKeySpec& spec)
-            -> std::expected<void, ConfigFileError> {
+        [&](Json& root,
+            const ConfigKeySpec& spec) -> std::expected<void, ConfigFileError> {
           std::vector<std::string_view> raw_list;
           std::string rendered;
           if (spec.value_kind == ConfigValueKind::text_list) {
             const auto* list = std::get_if<std::vector<std::string>>(&value);
             if (list == nullptr) {
-              return std::unexpected(file_error(
-                  ConfigFileErrorCode::malformed, m_path,
-                  "the value is invalid for the configuration key"));
+              return std::unexpected(
+                  file_error(ConfigFileErrorCode::malformed, m_path,
+                             "the value is invalid for the configuration key"));
             }
             raw_list.reserve(list->size());
-            for (const auto& item : *list) raw_list.push_back(item);
+            for (const auto& item : *list)
+              raw_list.push_back(item);
           } else {
             // Re-run public type and size validation without exposing JSON.
             rendered = format_config_value(value);
@@ -582,15 +608,16 @@ auto JsonConfigFileStore::set(const ConfigRegistry& registry,
           const auto validated =
               parse_config_value(spec, raw_list, ConfigSource::file);
           if (!validated || *validated != value) {
-            return std::unexpected(file_error(ConfigFileErrorCode::malformed,
-                                              m_path,
-                                              "the value is invalid for the configuration key"));
+            return std::unexpected(
+                file_error(ConfigFileErrorCode::malformed, m_path,
+                           "the value is invalid for the configuration key"));
           }
           return apply_set(root, key, value, m_path);
         });
   } catch (...) {
-    return std::unexpected(file_error(ConfigFileErrorCode::write_failed, m_path,
-                                      "the configuration file adapter failed safely"));
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::write_failed, m_path,
+                   "the configuration file adapter failed safely"));
   }
 }
 
@@ -598,16 +625,16 @@ auto JsonConfigFileStore::unset(const ConfigRegistry& registry,
                                 const std::string_view key)
     -> std::expected<void, ConfigFileError> {
   try {
-    return mutate_file(
-        m_path, registry, key,
-        [&](Json& root, const ConfigKeySpec&)
-            -> std::expected<void, ConfigFileError> {
-          apply_unset(root, key);
-          return {};
-        });
+    return mutate_file(m_path, registry, key,
+                       [&](Json& root, const ConfigKeySpec&)
+                           -> std::expected<void, ConfigFileError> {
+                         apply_unset(root, key);
+                         return {};
+                       });
   } catch (...) {
-    return std::unexpected(file_error(ConfigFileErrorCode::write_failed, m_path,
-                                      "the configuration file adapter failed safely"));
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::write_failed, m_path,
+                   "the configuration file adapter failed safely"));
   }
 }
 
@@ -623,9 +650,10 @@ auto process_config_path()
     }
     return resolve_config_path(environment);
   } catch (...) {
-    return std::unexpected(file_error(ConfigFileErrorCode::invalid_base_path, {},
-                                      "cannot read the configuration environment"));
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::invalid_base_path, {},
+                   "cannot read the configuration environment"));
   }
 }
 
-}  // namespace aiforge::config
+} // namespace aiforge::config

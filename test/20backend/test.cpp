@@ -12,26 +12,26 @@ namespace {
 
 using namespace aiforge;
 
-template <typename IdType>
-auto make_id(const std::string& value) -> IdType {
+template <typename IdType> auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
 auto request(std::string model = "model") -> backend::BackendRequest {
   const domain::ContextCapacity capacity{1024, 128, 0};
   const domain::ConstructedContext context{
-      {domain::ContextEntry{make_id<domain::ContextEntryId>("context-runtime"),
-                            domain::ContextEntryKind::instruction,
-                            domain::InstructionLayer::application_runtime,
-                            domain::Message{make_id<domain::MessageId>("runtime"),
-                                            domain::Role::system,
-                                            {domain::TextBlock{"runtime contract"}},
-                                            std::nullopt},
-                            {make_id<domain::ContextSourceId>("runtime-source"),
-                             std::nullopt, std::nullopt},
-                            0,
-                            1,
-                            1},
+      {domain::ContextEntry{
+           make_id<domain::ContextEntryId>("context-runtime"),
+           domain::ContextEntryKind::instruction,
+           domain::InstructionLayer::application_runtime,
+           domain::Message{make_id<domain::MessageId>("runtime"),
+                           domain::Role::system,
+                           {domain::TextBlock{"runtime contract"}},
+                           std::nullopt},
+           {make_id<domain::ContextSourceId>("runtime-source"), std::nullopt,
+            std::nullopt},
+           0,
+           1,
+           1},
        domain::ContextEntry{make_id<domain::ContextEntryId>("context-user"),
                             domain::ContextEntryKind::conversation,
                             std::nullopt,
@@ -64,7 +64,7 @@ auto event_step(backend::BackendEvent event) -> testing::ScriptedStep {
   return testing::ScriptedStep{std::move(event)};
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("scripted backend rejects mismatches without consuming the exchange",
           "[backend][failure]") {
@@ -87,23 +87,28 @@ TEST_CASE("scripted backend reports exhausted and startup-failure scripts",
   testing::ScriptedBackend empty{{}};
   const auto exhausted = empty.start(request(), {});
   REQUIRE_FALSE(exhausted);
-  REQUIRE(exhausted.error().kind == backend::BackendErrorKind::script_exhausted);
+  REQUIRE(exhausted.error().kind ==
+          backend::BackendErrorKind::script_exhausted);
 
-  const backend::BackendError unavailable{backend::BackendErrorKind::unavailable,
-                                          "provider unavailable", true, 503};
-  testing::ScriptedBackend failing{{testing::ScriptedExchange{request(), unavailable}}};
+  const backend::BackendError unavailable{
+      backend::BackendErrorKind::unavailable, "provider unavailable", true,
+      503};
+  testing::ScriptedBackend failing{
+      {testing::ScriptedExchange{request(), unavailable}}};
   const auto failed = failing.start(request(), {});
   REQUIRE_FALSE(failed);
   REQUIRE(failed.error() == unavailable);
 }
 
-TEST_CASE("scripted stream preserves event order and clean end-of-stream", "[backend]") {
+TEST_CASE("scripted stream preserves event order and clean end-of-stream",
+          "[backend]") {
   const auto message = make_id<domain::MessageId>("assistant");
   testing::ScriptedBackend fake{{testing::ScriptedExchange{
       request(),
       testing::StreamScript{{
           event_step(backend::ResponseStarted{"response"}),
-          event_step(backend::ContentDelta{message, domain::TextBlock{"hello"}}),
+          event_step(
+              backend::ContentDelta{message, domain::TextBlock{"hello"}}),
           event_step(backend::UsageObserved{{1, 2, 0, 0}}),
           event_step(backend::ResponseFinished{domain::FinishReason::stop}),
           testing::EndOfStream{},
@@ -133,16 +138,19 @@ TEST_CASE("scripted stream preserves event order and clean end-of-stream", "[bac
   REQUIRE(std::holds_alternative<backend::ResponseFinished>(**fourth));
   REQUIRE(end);
   REQUIRE_FALSE(*end);
-  REQUIRE(fake.recorded_requests() == std::vector<backend::BackendRequest>{request()});
+  REQUIRE(fake.recorded_requests() ==
+          std::vector<backend::BackendRequest>{request()});
 }
 
 TEST_CASE("scripted stream exposes mid-stream errors and premature EOF",
           "[backend][failure]") {
   const backend::BackendError protocol{backend::BackendErrorKind::protocol,
-                                       "malformed provider stream", false, std::nullopt};
+                                       "malformed provider stream", false,
+                                       std::nullopt};
   testing::ScriptedBackend failing{{testing::ScriptedExchange{
-      request(), testing::StreamScript{{event_step(backend::ResponseStarted{"response"}),
-                                        protocol}}}}};
+      request(),
+      testing::StreamScript{
+          {event_step(backend::ResponseStarted{"response"}), protocol}}}}};
 
   auto started = failing.start(request(), {});
   REQUIRE(started);
@@ -152,7 +160,8 @@ TEST_CASE("scripted stream exposes mid-stream errors and premature EOF",
   REQUIRE(failed.error() == protocol);
 
   testing::ScriptedBackend premature{{testing::ScriptedExchange{
-      request(), testing::StreamScript{{event_step(backend::ResponseStarted{"response"})}}}}};
+      request(), testing::StreamScript{
+                     {event_step(backend::ResponseStarted{"response"})}}}}};
   auto short_stream = premature.start(request(), {});
   REQUIRE(short_stream);
   REQUIRE((*short_stream)->next({}));
@@ -164,9 +173,10 @@ TEST_CASE("scripted stream exposes mid-stream errors and premature EOF",
 TEST_CASE("cancellation is deterministic before start and between events",
           "[backend][failure]") {
   const testing::ScriptedExchange exchange{
-      request(), testing::StreamScript{{event_step(backend::ResponseStarted{"response"}),
-                                        event_step(backend::ResponseFinished{
-                                            domain::FinishReason::stop})}}};
+      request(),
+      testing::StreamScript{
+          {event_step(backend::ResponseStarted{"response"}),
+           event_step(backend::ResponseFinished{domain::FinishReason::stop})}}};
 
   testing::ScriptedBackend pre_cancelled{{exchange}};
   std::stop_source before;

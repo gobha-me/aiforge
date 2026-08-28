@@ -111,4 +111,4 @@ struct ContextParcel {
   auto operator==(const ContextParcel&) const -> bool = default;
 };
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

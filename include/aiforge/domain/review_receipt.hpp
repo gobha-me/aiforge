@@ -26,7 +26,7 @@ struct ReviewParticipantProvenance {
   std::optional<std::string> backend_version;
   std::optional<ModelId> model_id;
   std::optional<std::string> model_version;
-  auto operator==(const ReviewParticipantProvenance &) const -> bool = default;
+  auto operator==(const ReviewParticipantProvenance&) const -> bool = default;
 };
 
 struct ReviewCandidate {
@@ -95,7 +95,7 @@ struct ReviewChildResult {
   ReviewParticipantProvenance reviewer;
   std::vector<ReviewFinding> findings;
   ReviewVerdict verdict{ReviewVerdict::rejected};
-  auto operator==(const ReviewChildResult &) const -> bool = default;
+  auto operator==(const ReviewChildResult&) const -> bool = default;
 };
 
 struct ReviewOverride {
@@ -107,4 +107,4 @@ struct ReviewOverride {
   auto operator==(const ReviewOverride&) const -> bool = default;
 };
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

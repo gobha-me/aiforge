@@ -13,13 +13,13 @@ struct PlanResourceIntent {
   Effect effect{Effect::read};
   std::string kind;
   std::string value;
-  auto operator==(const PlanResourceIntent &) const -> bool = default;
+  auto operator==(const PlanResourceIntent&) const -> bool = default;
 };
 
 struct PlanEvidenceBinding {
   EvidenceId evidence_id;
   ContentDigest digest;
-  auto operator==(const PlanEvidenceBinding &) const -> bool = default;
+  auto operator==(const PlanEvidenceBinding&) const -> bool = default;
 };
 
 struct PlanTask {
@@ -32,7 +32,7 @@ struct PlanTask {
   // Resource intents describe prospective scope and conflict inputs. They do
   // not grant capabilities or authorize effects.
   std::vector<PlanResourceIntent> resource_intents;
-  auto operator==(const PlanTask &) const -> bool = default;
+  auto operator==(const PlanTask&) const -> bool = default;
 };
 
 struct PlanRevision {
@@ -43,7 +43,7 @@ struct PlanRevision {
   std::optional<RepositorySnapshotIdentity> source_snapshot;
   std::vector<PlanTask> tasks;
   std::vector<PlanEvidenceBinding> evidence;
-  auto operator==(const PlanRevision &) const -> bool = default;
+  auto operator==(const PlanRevision&) const -> bool = default;
 };
 
 enum class PlanDecision {
@@ -63,7 +63,7 @@ struct PlanRevisionDecision {
   PlanDecision decision{PlanDecision::rejected};
   PlanDecisionSource source{PlanDecisionSource::user};
   std::optional<std::string> reason;
-  auto operator==(const PlanRevisionDecision &) const -> bool = default;
+  auto operator==(const PlanRevisionDecision&) const -> bool = default;
 };
 
 enum class PlanInvalidationTrigger {
@@ -75,7 +75,7 @@ struct PlanRevisionInvalidation {
   PlanId plan_id;
   PlanRevisionId revision_id;
   std::vector<PlanInvalidationTrigger> triggers;
-  auto operator==(const PlanRevisionInvalidation &) const -> bool = default;
+  auto operator==(const PlanRevisionInvalidation&) const -> bool = default;
 };
 
 } // namespace aiforge::domain

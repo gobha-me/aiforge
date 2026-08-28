@@ -22,7 +22,7 @@ struct PlanGraphLimits {
   std::size_t maximum_text_bytes{16U * 1024U};
   std::size_t maximum_metadata_bytes{4096};
   std::size_t maximum_total_text_bytes{1024U * 1024U};
-  auto operator==(const PlanGraphLimits &) const -> bool = default;
+  auto operator==(const PlanGraphLimits&) const -> bool = default;
 };
 
 enum class PlanGraphErrorCode {
@@ -49,7 +49,7 @@ struct PlanGraphError {
   std::optional<PlanId> plan_id;
   std::optional<PlanRevisionId> revision_id;
   std::optional<PlanTaskId> task_id;
-  auto operator==(const PlanGraphError &) const -> bool = default;
+  auto operator==(const PlanGraphError&) const -> bool = default;
 };
 
 enum class PlanGraphState {
@@ -82,40 +82,40 @@ struct ProjectedPlanRevision {
     auto operator==(const TaskExecution&) const -> bool = default;
   };
   std::vector<TaskExecution> task_executions;
-  auto operator==(const ProjectedPlanRevision &) const -> bool = default;
+  auto operator==(const ProjectedPlanRevision&) const -> bool = default;
 };
 
-[[nodiscard]] auto validate_plan_revision(const PlanRevision &revision,
-                                          const PlanGraphLimits &limits = {})
+[[nodiscard]] auto validate_plan_revision(const PlanRevision& revision,
+                                          const PlanGraphLimits& limits = {})
     -> std::expected<void, PlanGraphError>;
 
-[[nodiscard]] auto validate_plan_decision(const PlanRevisionDecision &decision,
-                                          const PlanGraphLimits &limits = {})
+[[nodiscard]] auto validate_plan_decision(const PlanRevisionDecision& decision,
+                                          const PlanGraphLimits& limits = {})
     -> std::expected<void, PlanGraphError>;
 
-[[nodiscard]] auto
-validate_plan_invalidation(const PlanRevisionInvalidation &invalidation)
+[[nodiscard]] auto validate_plan_invalidation(
+    const PlanRevisionInvalidation& invalidation)
     -> std::expected<void, PlanGraphError>;
 
 class PlanGraphProjection final {
-public:
-  [[nodiscard]] auto apply(const RunEvent &event,
-                           const PlanGraphLimits &limits = {})
+ public:
+  [[nodiscard]] auto apply(const RunEvent& event,
+                           const PlanGraphLimits& limits = {})
       -> std::expected<void, PlanGraphError>;
 
   [[nodiscard]] static auto rebuild(std::span<const RunEvent> events,
-                                    const PlanGraphLimits &limits = {})
+                                    const PlanGraphLimits& limits = {})
       -> std::expected<PlanGraphProjection, PlanGraphError>;
 
-  [[nodiscard]] auto plan_id() const noexcept -> const std::optional<PlanId> & {
+  [[nodiscard]] auto plan_id() const noexcept -> const std::optional<PlanId>& {
     return m_plan_id;
   }
   [[nodiscard]] auto revisions() const noexcept
-      -> const std::vector<ProjectedPlanRevision> & {
+      -> const std::vector<ProjectedPlanRevision>& {
     return m_revisions;
   }
   [[nodiscard]] auto current_revision() const noexcept
-      -> const ProjectedPlanRevision *;
+      -> const ProjectedPlanRevision*;
   [[nodiscard]] auto state() const noexcept -> PlanGraphState;
   [[nodiscard]] auto active_tasks() const noexcept -> std::span<const PlanTask>;
   [[nodiscard]] auto task_executions() const noexcept
@@ -126,9 +126,9 @@ public:
     return m_last_sequence;
   }
 
-private:
-  [[nodiscard]] auto apply_in_place(const RunEvent &event,
-                                    const PlanGraphLimits &limits)
+ private:
+  [[nodiscard]] auto apply_in_place(const RunEvent& event,
+                                    const PlanGraphLimits& limits)
       -> std::expected<void, PlanGraphError>;
 
   std::optional<PlanId> m_plan_id;

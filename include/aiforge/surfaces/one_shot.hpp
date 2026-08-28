@@ -49,8 +49,7 @@ struct OneShotRequest {
     ephemeral,
   };
 
-  OneShotRequest(std::string prompt,
-                 std::optional<std::string> stdin_evidence,
+  OneShotRequest(std::string prompt, std::optional<std::string> stdin_evidence,
                  domain::ModelId model_id,
                  SessionMode session_mode = SessionMode::create,
                  std::optional<domain::SessionId> session_id = std::nullopt,
@@ -58,12 +57,9 @@ struct OneShotRequest {
                  persona::PersonaDirective persona = {},
                  std::optional<domain::SessionSpendCeiling>
                      session_spend_ceiling = std::nullopt)
-      : prompt(std::move(prompt)),
-        stdin_evidence(std::move(stdin_evidence)),
-        model_id(std::move(model_id)),
-        session_mode(session_mode),
-        session_id(std::move(session_id)),
-        provenance(std::move(provenance)),
+      : prompt(std::move(prompt)), stdin_evidence(std::move(stdin_evidence)),
+        model_id(std::move(model_id)), session_mode(session_mode),
+        session_id(std::move(session_id)), provenance(std::move(provenance)),
         persona(std::move(persona)),
         session_spend_ceiling(std::move(session_spend_ceiling)) {}
 
@@ -102,8 +98,7 @@ class OneShotSurface final {
                  persona::PersonaSource* persona_source = nullptr);
 
   [[nodiscard]] auto run(OneShotRequest request, std::ostream& output,
-                         std::ostream& error,
-                         std::stop_token stop_token = {})
+                         std::ostream& error, std::stop_token stop_token = {})
       -> std::expected<OneShotResult, OneShotError>;
 
  private:
@@ -114,4 +109,4 @@ class OneShotSurface final {
   OneShotLimits m_limits;
 };
 
-}  // namespace aiforge::surfaces
+} // namespace aiforge::surfaces

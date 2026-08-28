@@ -24,11 +24,11 @@ enum class MoneyErrorCode {
 struct MoneyError {
   MoneyErrorCode code;
   std::string message;
-  auto operator==(const MoneyError &) const -> bool = default;
+  auto operator==(const MoneyError&) const -> bool = default;
 };
 
 class DecimalAmount final {
-public:
+ public:
   [[nodiscard]] static auto from(std::string_view text)
       -> std::expected<DecimalAmount, MoneyError>;
 
@@ -38,63 +38,63 @@ public:
   [[nodiscard]] auto scale() const noexcept -> std::uint8_t { return m_scale; }
   [[nodiscard]] auto to_string() const -> std::string;
 
-  auto operator==(const DecimalAmount &) const -> bool = default;
+  auto operator==(const DecimalAmount&) const -> bool = default;
 
-private:
+ private:
   DecimalAmount(std::uint64_t coefficient, std::uint8_t scale)
       : m_coefficient(coefficient), m_scale(scale) {}
 
   std::uint64_t m_coefficient{};
   std::uint8_t m_scale{};
 
-  friend auto add(const DecimalAmount &left, const DecimalAmount &right)
+  friend auto add(const DecimalAmount& left, const DecimalAmount& right)
       -> std::expected<DecimalAmount, MoneyError>;
-  friend auto subtract(const DecimalAmount &left, const DecimalAmount &right)
+  friend auto subtract(const DecimalAmount& left, const DecimalAmount& right)
       -> std::expected<DecimalAmount, MoneyError>;
 };
 
-[[nodiscard]] auto add(const DecimalAmount &left, const DecimalAmount &right)
+[[nodiscard]] auto add(const DecimalAmount& left, const DecimalAmount& right)
     -> std::expected<DecimalAmount, MoneyError>;
-[[nodiscard]] auto subtract(const DecimalAmount &left,
-                            const DecimalAmount &right)
+[[nodiscard]] auto subtract(const DecimalAmount& left,
+                            const DecimalAmount& right)
     -> std::expected<DecimalAmount, MoneyError>;
-[[nodiscard]] auto compare(const DecimalAmount &left,
-                           const DecimalAmount &right) -> std::strong_ordering;
+[[nodiscard]] auto compare(const DecimalAmount& left,
+                           const DecimalAmount& right) -> std::strong_ordering;
 
 class SessionSpendCeiling final {
-public:
+ public:
   [[nodiscard]] static auto from(std::string_view text)
       -> std::expected<SessionSpendCeiling, MoneyError>;
   [[nodiscard]] static auto create(DecimalAmount amount)
       -> std::expected<SessionSpendCeiling, MoneyError>;
 
-  [[nodiscard]] auto amount() const noexcept -> const DecimalAmount & {
+  [[nodiscard]] auto amount() const noexcept -> const DecimalAmount& {
     return m_amount;
   }
 
-  auto operator==(const SessionSpendCeiling &) const -> bool = default;
+  auto operator==(const SessionSpendCeiling&) const -> bool = default;
 
-private:
+ private:
   explicit SessionSpendCeiling(DecimalAmount amount) : m_amount(amount) {}
 
   DecimalAmount m_amount;
 };
 
 class MonetaryAmount final {
-public:
+ public:
   [[nodiscard]] static auto create(std::string unit, DecimalAmount amount)
       -> std::expected<MonetaryAmount, MoneyError>;
 
   [[nodiscard]] auto unit() const noexcept -> std::string_view {
     return m_unit;
   }
-  [[nodiscard]] auto amount() const noexcept -> const DecimalAmount & {
+  [[nodiscard]] auto amount() const noexcept -> const DecimalAmount& {
     return m_amount;
   }
 
-  auto operator==(const MonetaryAmount &) const -> bool = default;
+  auto operator==(const MonetaryAmount&) const -> bool = default;
 
-private:
+ private:
   MonetaryAmount(std::string unit, DecimalAmount amount)
       : m_unit(std::move(unit)), m_amount(amount) {}
 
@@ -103,25 +103,25 @@ private:
 };
 
 class ReportedCost final {
-public:
+ public:
   [[nodiscard]] static auto create(std::vector<MonetaryAmount> amounts)
       -> std::expected<ReportedCost, MoneyError>;
 
   [[nodiscard]] auto amounts() const noexcept
-      -> const std::vector<MonetaryAmount> & {
+      -> const std::vector<MonetaryAmount>& {
     return m_amounts;
   }
 
-  auto operator==(const ReportedCost &) const -> bool = default;
+  auto operator==(const ReportedCost&) const -> bool = default;
 
-private:
+ private:
   explicit ReportedCost(std::vector<MonetaryAmount> amounts)
       : m_amounts(std::move(amounts)) {}
 
   std::vector<MonetaryAmount> m_amounts;
 };
 
-[[nodiscard]] auto add(const ReportedCost &left, const ReportedCost &right)
+[[nodiscard]] auto add(const ReportedCost& left, const ReportedCost& right)
     -> std::expected<ReportedCost, MoneyError>;
 
 } // namespace aiforge::domain

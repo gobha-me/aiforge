@@ -44,7 +44,8 @@ enum class RepositorySnapshotErrorCode {
 };
 
 struct RepositorySnapshotError {
-  RepositorySnapshotErrorCode code{RepositorySnapshotErrorCode::internal_failure};
+  RepositorySnapshotErrorCode code{
+      RepositorySnapshotErrorCode::internal_failure};
   std::string message;
   bool retryable{};
   auto operator==(const RepositorySnapshotError&) const -> bool = default;
@@ -54,10 +55,9 @@ class RepositorySnapshotSource {
  public:
   virtual ~RepositorySnapshotSource() = default;
 
-  [[nodiscard]] virtual auto observe(
-      RepositorySnapshotRequest request, std::stop_token stop_token = {})
-      -> std::expected<domain::RepositorySnapshot,
-                       RepositorySnapshotError> = 0;
+  [[nodiscard]] virtual auto observe(RepositorySnapshotRequest request,
+                                     std::stop_token stop_token = {})
+      -> std::expected<domain::RepositorySnapshot, RepositorySnapshotError> = 0;
 };
 
 [[nodiscard]] auto validate_repository_snapshot(
@@ -65,4 +65,4 @@ class RepositorySnapshotSource {
     const RepositorySnapshotLimits& limits = {})
     -> std::expected<void, RepositorySnapshotError>;
 
-}  // namespace aiforge::repository
+} // namespace aiforge::repository

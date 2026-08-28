@@ -23,14 +23,14 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
-#include <aiforge/adapters/termforge_run_bridge.hpp>
 #include <aiforge/adapters/ask_user_dialog.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
 #include <aiforge/adapters/json_model_catalog_cache.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
-#include <aiforge/adapters/process_provenance.hpp>
 #include <aiforge/adapters/process_credentials.hpp>
+#include <aiforge/adapters/process_provenance.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
+#include <aiforge/adapters/termforge_run_bridge.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
 #include <aiforge/adapters/venice_model_catalog_source.hpp>
 #include <aiforge/runtime/ask_user_tool.hpp>
@@ -41,8 +41,7 @@ namespace {
 using namespace std::chrono_literals;
 using namespace aiforge;
 
-template <typename IdType>
-auto make_id(const std::string& value) -> IdType {
+template <typename IdType> auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
@@ -89,22 +88,18 @@ class LocalServer final {
                        const bool duplicate_finish = false,
                        const bool omit_finish = false)
       : m_echoed_error(std::move(echoed_error)),
-        m_duplicate_cost(duplicate_cost),
-        m_duplicate_finish(duplicate_finish),
-        m_omit_finish(omit_finish),
-        m_cost_value(std::move(cost_value)) {
-    m_server.Get(
-        "/api/v1/models",
-        [this](const httplib::Request& request, httplib::Response& response) {
-          {
-            std::lock_guard lock(m_mutex);
-            m_model_authorization =
-                request.get_header_value("Authorization");
-          }
-          response.set_content(
-              R"({"data":[{"id":"test-model","type":"text","context_length":8192,"model_spec":{"availableContextTokens":8192,"maxCompletionTokens":1024,"offline":false,"pricing":{"input":{"usd":1.42,"diem":2.5},"output":{"usd":2.83},"cache_input":{"usd":0.23}}}}]})",
-              "application/json");
-        });
+        m_duplicate_cost(duplicate_cost), m_duplicate_finish(duplicate_finish),
+        m_omit_finish(omit_finish), m_cost_value(std::move(cost_value)) {
+    m_server.Get("/api/v1/models", [this](const httplib::Request& request,
+                                          httplib::Response& response) {
+      {
+        std::lock_guard lock(m_mutex);
+        m_model_authorization = request.get_header_value("Authorization");
+      }
+      response.set_content(
+          R"({"data":[{"id":"test-model","type":"text","context_length":8192,"model_spec":{"availableContextTokens":8192,"maxCompletionTokens":1024,"offline":false,"pricing":{"input":{"usd":1.42,"diem":2.5},"output":{"usd":2.83},"cache_input":{"usd":0.23}}}}]})",
+          "application/json");
+    });
     m_server.Post(
         "/api/v1/chat/completions",
         [this](const httplib::Request& request, httplib::Response& response) {
@@ -138,22 +133,20 @@ class LocalServer final {
                   "reason\":\"stop\"}]}\n\n";
             }
           }
-          stream +=
-              "data: "
-              "{\"id\":\"response\",\"choices\":[],"
-              "\"cost\":{\"usd\":0,\"diem\":" +
-              m_cost_value + "}}\n\n";
+          stream += "data: "
+                    "{\"id\":\"response\",\"choices\":[],"
+                    "\"cost\":{\"usd\":0,\"diem\":" +
+                    m_cost_value + "}}\n\n";
           if (m_duplicate_cost) {
-            stream +=
-                "data: "
-                "{\"id\":\"response\",\"choices\":[],"
-                "\"cost\":{\"diem\":0.01}}\n\n";
+            stream += "data: "
+                      "{\"id\":\"response\",\"choices\":[],"
+                      "\"cost\":{\"diem\":0.01}}\n\n";
           }
-          stream +=
-              "data: "
-              "{\"id\":\"response\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_"
-              "tokens\":1,\"total_tokens\":3}}\n\n"
-              "data: [DONE]\n\n";
+          stream += "data: "
+                    "{\"id\":\"response\",\"choices\":[],\"usage\":{\"prompt_"
+                    "tokens\":2,\"completion_"
+                    "tokens\":1,\"total_tokens\":3}}\n\n"
+                    "data: [DONE]\n\n";
           response.set_content(std::move(stream), "text/event-stream");
         });
     m_port = m_server.bind_to_any_port("127.0.0.1");
@@ -257,7 +250,7 @@ auto write_file(const std::filesystem::path& path, const std::string& bytes)
   REQUIRE(output);
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("Venice model discovery is public and maps neutral context metadata",
           "[adapter][models]") {
@@ -268,7 +261,8 @@ TEST_CASE("Venice model discovery is public and maps neutral context metadata",
   const auto catalog = source.fetch({});
   REQUIRE(catalog);
   REQUIRE(catalog->entries.size() == 1);
-  REQUIRE(catalog->entries.front().id == make_id<domain::ModelId>("test-model"));
+  REQUIRE(catalog->entries.front().id ==
+          make_id<domain::ModelId>("test-model"));
   REQUIRE(catalog->entries.front().type == "text");
   REQUIRE(catalog->entries.front().context_window_tokens == 8192);
   REQUIRE(catalog->entries.front().maximum_output_tokens == 1024);
@@ -284,17 +278,17 @@ TEST_CASE("Venice model discovery is public and maps neutral context metadata",
   REQUIRE(server.model_authorization().empty());
 }
 
-TEST_CASE("model catalog cache round trips atomically with restrictive permissions",
-          "[adapter][models][cache]") {
+TEST_CASE(
+    "model catalog cache round trips atomically with restrictive permissions",
+    "[adapter][models][cache]") {
   TempDirectory temporary{"aiforge-model-cache"};
   const auto path = temporary.path() / "cache" / "model-catalog.json";
   adapters::JsonModelCatalogCache cache{path};
   model::CatalogEntry entry{make_id<domain::ModelId>("text-model"), "text"};
   entry.name = "Text Model";
   entry.context_window_tokens = 8192;
-  entry.capabilities = {
-      {model::Capability::tool_calling, true},
-      {model::Capability::vision, std::nullopt}};
+  entry.capabilities = {{model::Capability::tool_calling, true},
+                        {model::Capability::vision, std::nullopt}};
   entry.pricing = model::Pricing{};
   entry.pricing->base.input =
       model::Price{domain::DecimalAmount::from("0.5").value(),
@@ -317,15 +311,18 @@ TEST_CASE("model catalog cache round trips atomically with restrictive permissio
           std::filesystem::perms::none);
 }
 
-TEST_CASE("model cache rejects duplicate JSON, loose modes, symlinks and cancellation",
+TEST_CASE("model cache rejects duplicate JSON, loose modes, symlinks and "
+          "cancellation",
           "[adapter][models][cache][failure]") {
   TempDirectory temporary{"aiforge-model-cache-hostile"};
   const auto path = temporary.path() / "model-catalog.json";
   adapters::JsonModelCatalogCache cache{path, 4096};
-  write_file(path,
-             R"({"schema_version":1,"schema_version":1,"fetched_at_ms":0,"entries":[]})");
-  std::filesystem::permissions(path, std::filesystem::perms::owner_read |
-                                         std::filesystem::perms::owner_write,
+  write_file(
+      path,
+      R"({"schema_version":1,"schema_version":1,"fetched_at_ms":0,"entries":[]})");
+  std::filesystem::permissions(path,
+                               std::filesystem::perms::owner_read |
+                                   std::filesystem::perms::owner_write,
                                std::filesystem::perm_options::replace);
   REQUIRE_FALSE(cache.load({}));
 
@@ -341,8 +338,8 @@ TEST_CASE("model cache rejects duplicate JSON, loose modes, symlinks and cancell
       R"({"schema_version":2,"fetched_at_ms":0,"source_id":"test.models","source_revision":null,"entries":[]})");
   std::filesystem::permissions(path,
                                std::filesystem::perms::owner_read |
-                                         std::filesystem::perms::owner_write |
-                                         std::filesystem::perms::group_read,
+                                   std::filesystem::perms::owner_write |
+                                   std::filesystem::perms::group_read,
                                std::filesystem::perm_options::replace);
   REQUIRE_FALSE(cache.load({}));
 
@@ -386,12 +383,12 @@ TEST_CASE("model picker filters, selects, cancels and survives tiny geometry",
         termforge::Key::Char, static_cast<char32_t>(character), false, false,
         false, termforge::KeyAction::Press}));
   }
-  REQUIRE(dialog.on_event(termforge::KeyEvent{
-      termforge::Key::Tab, 0, false, false, false,
-      termforge::KeyAction::Press}));
-  REQUIRE(dialog.on_event(termforge::KeyEvent{
-      termforge::Key::Enter, 0, false, false, false,
-      termforge::KeyAction::Press}));
+  REQUIRE(
+      dialog.on_event(termforge::KeyEvent{termforge::Key::Tab, 0, false, false,
+                                          false, termforge::KeyAction::Press}));
+  REQUIRE(dialog.on_event(termforge::KeyEvent{termforge::Key::Enter, 0, false,
+                                              false, false,
+                                              termforge::KeyAction::Press}));
   REQUIRE(reported);
   REQUIRE(selected == make_id<domain::ModelId>("beta-chat"));
 
@@ -403,9 +400,9 @@ TEST_CASE("model picker filters, selects, cancels and survives tiny geometry",
   cancelled_dialog.set_models(snapshot, make_id<domain::ModelId>("alpha-chat"));
   termforge::Screen tiny{1, 1};
   cancelled_dialog.draw(tiny);
-  REQUIRE(cancelled_dialog.on_event(termforge::KeyEvent{
-      termforge::Key::Escape, 0, false, false, false,
-      termforge::KeyAction::Press}));
+  REQUIRE(cancelled_dialog.on_event(
+      termforge::KeyEvent{termforge::Key::Escape, 0, false, false, false,
+                          termforge::KeyAction::Press}));
   REQUIRE(cancelled_result);
 }
 
@@ -464,13 +461,14 @@ TEST_CASE("filesystem personas are deterministic bounded attributed text",
   REQUIRE_FALSE(traversed);
   REQUIRE(traversed.error().code == persona::PersonaErrorCode::invalid_name);
 
-  const auto bounded = source.load(
-      "Reviewer", {.maximum_personas = 256,
-                   .maximum_name_bytes = 96,
-                   .maximum_file_bytes = 2,
-                   .maximum_description_bytes = 160});
+  const auto bounded =
+      source.load("Reviewer", {.maximum_personas = 256,
+                               .maximum_name_bytes = 96,
+                               .maximum_file_bytes = 2,
+                               .maximum_description_bytes = 160});
   REQUIRE_FALSE(bounded);
-  REQUIRE(bounded.error().code == persona::PersonaErrorCode::resource_exhausted);
+  REQUIRE(bounded.error().code ==
+          persona::PersonaErrorCode::resource_exhausted);
 }
 
 TEST_CASE("filesystem personas fail closed on aliases symlinks and bad text",
@@ -516,11 +514,10 @@ TEST_CASE("filesystem personas fail closed on aliases symlinks and bad text",
   REQUIRE_FALSE(empty);
   REQUIRE(empty.error().code == persona::PersonaErrorCode::malformed_text);
 
-  const auto too_many = source.list(
-      {.maximum_personas = 1,
-       .maximum_name_bytes = 96,
-       .maximum_file_bytes = 1024U * 1024U,
-       .maximum_description_bytes = 160});
+  const auto too_many = source.list({.maximum_personas = 1,
+                                     .maximum_name_bytes = 96,
+                                     .maximum_file_bytes = 1024U * 1024U,
+                                     .maximum_description_bytes = 160});
   REQUIRE_FALSE(too_many);
   REQUIRE(too_many.error().code ==
           persona::PersonaErrorCode::resource_exhausted);
@@ -540,8 +537,8 @@ TEST_CASE("filesystem personas fail closed on aliases symlinks and bad text",
 
 TEST_CASE("Venice adapter rejects unsupported content without a request",
           "[adapter][venice][failure]") {
-  adapters::VeniceBackend backend{
-      secret("secret"), {"http://127.0.0.1:1", 10ms, 10ms, 10ms, 4}};
+  adapters::VeniceBackend backend{secret("secret"),
+                                  {"http://127.0.0.1:1", 10ms, 10ms, 10ms, 4}};
   auto unsupported = context(domain::ArtifactReferenceBlock{
       make_id<domain::ArtifactId>("artifact"), std::nullopt});
   const auto started = backend.start(request(std::move(unsupported)), {});
@@ -553,8 +550,8 @@ TEST_CASE("Venice adapter rejects unsupported content without a request",
 TEST_CASE("Venice adapter terminates after trailing response accounting",
           "[adapter][venice]") {
   LocalServer server;
-  adapters::VeniceBackend backend{
-      secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
   auto started = backend.start(request(), {});
   REQUIRE(started);
 
@@ -593,8 +590,8 @@ TEST_CASE("Venice adapter terminates after trailing response accounting",
 TEST_CASE("Venice adapter rejects duplicate provider cost frames",
           "[adapter][venice][cost][failure]") {
   LocalServer server{std::nullopt, true};
-  adapters::VeniceBackend backend{
-      secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
   auto started = backend.start(request(), {});
   REQUIRE(started);
 
@@ -614,8 +611,8 @@ TEST_CASE("Venice adapter rejects duplicate provider cost frames",
 TEST_CASE("Venice adapter rejects duplicate provider finish frames",
           "[adapter][venice][failure]") {
   LocalServer server{std::nullopt, false, "0.0645375", true};
-  adapters::VeniceBackend backend{
-      secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
   auto started = backend.start(request(), {});
   REQUIRE(started);
 
@@ -635,8 +632,8 @@ TEST_CASE("Venice adapter rejects duplicate provider finish frames",
 TEST_CASE("Venice adapter rejects streams without a finish marker",
           "[adapter][venice][failure]") {
   LocalServer server{std::nullopt, false, "0.0645375", false, true};
-  adapters::VeniceBackend backend{
-      secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
   auto started = backend.start(request(), {});
   REQUIRE(started);
 
@@ -658,8 +655,8 @@ TEST_CASE("Venice adapter rejects invalid provider cost values",
   for (const auto* value : {"-1", "\"invalid\""}) {
     CAPTURE(value);
     LocalServer server{std::nullopt, false, value};
-    adapters::VeniceBackend backend{
-        secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
+    adapters::VeniceBackend backend{secret("test-secret"),
+                                    {server.base_url(), 1s, 1s, 1s, 8}};
     auto started = backend.start(request(), {});
     REQUIRE(started);
 
@@ -680,12 +677,13 @@ TEST_CASE("Venice adapter rejects invalid provider cost values",
 TEST_CASE("Venice adapter sends structured tool results as tool messages",
           "[adapter][venice][tools]") {
   LocalServer server;
-  adapters::VeniceBackend backend{
-      secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
   auto built = context();
   built.entries.front().kind = domain::ContextEntryKind::tool_result;
   built.entries.front().message = {
-      make_id<domain::MessageId>("tool-result"), domain::Role::tool,
+      make_id<domain::MessageId>("tool-result"),
+      domain::Role::tool,
       {domain::StructuredDataBlock{"application/json",
                                    R"({"status":"cancelled"})"}},
       make_id<domain::InvocationId>("ask-call")};
@@ -706,8 +704,8 @@ TEST_CASE("Venice adapter sends structured tool results as tool messages",
 TEST_CASE("Venice adapter exposes neutral model context metadata",
           "[adapter][venice][models]") {
   LocalServer server;
-  adapters::VeniceBackend backend{
-      secret("test-secret"), {server.base_url(), 1s, 1s, 1s, 8}};
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
   const auto model_id = make_id<domain::ModelId>("test-model");
   const auto context = backend.lookup(model_id, {});
   REQUIRE(context);
@@ -718,8 +716,7 @@ TEST_CASE("Venice adapter exposes neutral model context metadata",
   const auto missing =
       backend.lookup(make_id<domain::ModelId>("missing-model"), {});
   REQUIRE_FALSE(missing);
-  REQUIRE(missing.error().kind ==
-          backend::BackendErrorKind::request_rejected);
+  REQUIRE(missing.error().kind == backend::BackendErrorKind::request_rejected);
   REQUIRE(missing.error().redacted_message.find("test-secret") ==
           std::string::npos);
 }
@@ -728,8 +725,8 @@ TEST_CASE("Venice adapter redacts provider bodies containing credentials",
           "[adapter][venice][failure][redaction]") {
   const std::string credential{"provider-echoed-secret"};
   LocalServer server{credential};
-  adapters::VeniceBackend backend{
-      secret(credential), {server.base_url(), 1s, 1s, 1s, 8}};
+  adapters::VeniceBackend backend{secret(credential),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
   auto started = backend.start(request(), {});
   REQUIRE(started);
 
@@ -799,15 +796,20 @@ TEST_CASE("ask_user dialog maps recommended indices back to stable IDs",
           backend::ResponseFinished{domain::FinishReason::tool_call},
           testing::EndOfStream{},
       }}}}};
-  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake,
-                            nullptr, {}, {}, std::move(*snapshot)};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            fake,
+                            nullptr,
+                            {},
+                            {},
+                            std::move(*snapshot)};
   REQUIRE(kernel.start(
       {make_id<domain::RunId>("run"),
-       {make_id<domain::SurfaceId>("tui"),
-        make_id<domain::WorkspaceId>("chat"),
+       {make_id<domain::SurfaceId>("tui"), make_id<domain::WorkspaceId>("chat"),
         make_id<domain::PermissionProfileId>("observe"), std::nullopt},
-       {make_id<domain::MessageId>("user"), domain::Role::user,
-        {domain::TextBlock{"hello"}}, std::nullopt},
+       {make_id<domain::MessageId>("user"),
+        domain::Role::user,
+        {domain::TextBlock{"hello"}},
+        std::nullopt},
        backend_request}));
   const auto deadline = std::chrono::steady_clock::now() + 1s;
   while (!kernel.pending_question_input() &&
@@ -823,23 +825,23 @@ TEST_CASE("ask_user dialog maps recommended indices back to stable IDs",
   REQUIRE(controller.present(*pending, kernel));
   termforge::Screen tiny{8, 3};
   dialog.draw(tiny);
-  REQUIRE(dialog.on_event(termforge::KeyEvent{
-      termforge::Key::Enter, 0, false, false, false,
-      termforge::KeyAction::Press}));
+  REQUIRE(dialog.on_event(termforge::KeyEvent{termforge::Key::Enter, 0, false,
+                                              false, false,
+                                              termforge::KeyAction::Press}));
   REQUIRE(dialog.current_page() == 1);
   REQUIRE(kernel.pending_question_input());
   tiny.resize(1, 1);
   dialog.draw(tiny);
   tiny.resize(40, 12);
   dialog.draw(tiny);
-  REQUIRE(dialog.on_event(termforge::KeyEvent{
-      termforge::Key::Enter, 0, false, false, false,
-      termforge::KeyAction::Press}));
+  REQUIRE(dialog.on_event(termforge::KeyEvent{termforge::Key::Enter, 0, false,
+                                              false, false,
+                                              termforge::KeyAction::Press}));
   REQUIRE(dialog.current_page() == 2);
   REQUIRE(kernel.pending_question_input());
-  REQUIRE(dialog.on_event(termforge::KeyEvent{
-      termforge::Key::Enter, 0, false, false, false,
-      termforge::KeyAction::Press}));
+  REQUIRE(dialog.on_event(termforge::KeyEvent{termforge::Key::Enter, 0, false,
+                                              false, false,
+                                              termforge::KeyAction::Press}));
   REQUIRE_FALSE(controller.last_error());
   REQUIRE_FALSE(kernel.pending_question_input());
 
@@ -851,9 +853,9 @@ TEST_CASE("ask_user dialog maps recommended indices back to stable IDs",
       std::get<domain::StructuredDataBlock>(messages->front().content.front());
   REQUIRE(result.data.find("short") != std::string::npos);
   REQUIRE(result.data.find("yes") != std::string::npos);
-  static_cast<void>(dialog.on_event(termforge::KeyEvent{
-      termforge::Key::Enter, 0, false, false, false,
-      termforge::KeyAction::Press}));
+  static_cast<void>(dialog.on_event(
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}));
   const auto after_duplicate =
       runtime::tool_result_messages(kernel.event_log().events());
   REQUIRE(after_duplicate);
@@ -871,13 +873,15 @@ TEST_CASE("process provenance names a credential source without its secret",
         std::nullopt, true, false, 64, 4}}};
   const config::ConfigLayer environment{
       config::ConfigSource::environment,
-      {{"model", config::ConfigValue{std::string{"venice-model"}}, std::nullopt},
+      {{"model", config::ConfigValue{std::string{"venice-model"}},
+        std::nullopt},
        {"credential", config::ConfigValue{secret}, std::nullopt}},
       {}};
   const std::array layers{environment};
   const auto resolved = config::resolve_config(registry, layers);
   REQUIRE(resolved);
-  REQUIRE(std::get<std::string>(*resolved->find("credential")->value) == secret);
+  REQUIRE(std::get<std::string>(*resolved->find("credential")->value) ==
+          secret);
 
   const auto provenance = adapters::process_run_provenance(
       *resolved, make_id<domain::ModelId>("venice-model"), "venice",
@@ -891,9 +895,9 @@ TEST_CASE("process provenance names a credential source without its secret",
   REQUIRE(std::ranges::any_of(provenance.components, [](const auto& component) {
     return component.component == "aiforge";
   }));
-  const auto credential = std::ranges::find(
-      provenance.configuration, "credential",
-      &domain::ConfigurationProvenanceEntry::key);
+  const auto credential =
+      std::ranges::find(provenance.configuration, "credential",
+                        &domain::ConfigurationProvenanceEntry::key);
   REQUIRE(credential != provenance.configuration.end());
   REQUIRE(credential->sensitive);
   REQUIRE(credential->value_present);
@@ -916,16 +920,16 @@ TEST_CASE("process provenance names a credential source without its secret",
         {session, domain::EventTimestamp{std::chrono::milliseconds{100}}}));
     const std::array events{
         domain::RunEvent{
-            {make_id<domain::EventId>("e1"), make_id<domain::RunId>("run"), 1, 1,
-             domain::EventTimestamp{std::chrono::milliseconds{101}},
+            {make_id<domain::EventId>("e1"), make_id<domain::RunId>("run"), 1,
+             1, domain::EventTimestamp{std::chrono::milliseconds{101}},
              std::nullopt, std::nullopt, std::nullopt},
             domain::RunStarted{make_id<domain::SurfaceId>("one-shot"),
                                make_id<domain::WorkspaceId>("chat"),
                                make_id<domain::PermissionProfileId>("observe"),
                                std::nullopt}},
         domain::RunEvent{
-            {make_id<domain::EventId>("e2"), make_id<domain::RunId>("run"), 2, 1,
-             domain::EventTimestamp{std::chrono::milliseconds{102}},
+            {make_id<domain::EventId>("e2"), make_id<domain::RunId>("run"), 2,
+             1, domain::EventTimestamp{std::chrono::milliseconds{102}},
              std::nullopt, std::nullopt, std::nullopt},
             domain::RunProvenanceRecorded{provenance}}};
     REQUIRE((*store)->append_events(session, events));

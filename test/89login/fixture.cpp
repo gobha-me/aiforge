@@ -148,7 +148,8 @@ auto close_child(Child& child) -> void {
     ::_exit(127);
   }
   const auto flags = ::fcntl(master, F_GETFL, 0);
-  if (flags >= 0) static_cast<void>(::fcntl(master, F_SETFL, flags | O_NONBLOCK));
+  if (flags >= 0)
+    static_cast<void>(::fcntl(master, F_SETFL, flags | O_NONBLOCK));
   return {pid, master, slave, {}};
 }
 
@@ -161,7 +162,8 @@ auto close_child(Child& child) -> void {
     if (ready > 0 && (descriptor.revents & POLLIN) != 0) {
       char buffer[512];
       const auto count = ::read(child.master, buffer, sizeof(buffer));
-      if (count > 0) child.output.append(buffer, static_cast<std::size_t>(count));
+      if (count > 0)
+        child.output.append(buffer, static_cast<std::size_t>(count));
     }
     if (visible_terminal_text(child.output).find(marker) != std::string::npos) {
       return true;
@@ -170,17 +172,17 @@ auto close_child(Child& child) -> void {
   return false;
 }
 
-[[nodiscard]] auto finish(Child& child,
-                          const std::chrono::milliseconds timeout) -> int {
+[[nodiscard]] auto finish(Child& child, const std::chrono::milliseconds timeout)
+    -> int {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   int status{};
   while (std::chrono::steady_clock::now() < deadline) {
     pollfd descriptor{child.master, POLLIN, 0};
-    if (::poll(&descriptor, 1, 20) > 0 &&
-        (descriptor.revents & POLLIN) != 0) {
+    if (::poll(&descriptor, 1, 20) > 0 && (descriptor.revents & POLLIN) != 0) {
       char buffer[512];
       const auto count = ::read(child.master, buffer, sizeof(buffer));
-      if (count > 0) child.output.append(buffer, static_cast<std::size_t>(count));
+      if (count > 0)
+        child.output.append(buffer, static_cast<std::size_t>(count));
     }
     const auto waited = ::waitpid(child.pid, &status, WNOHANG);
     if (waited == child.pid) {
@@ -207,7 +209,7 @@ auto close_child(Child& child) -> void {
 }
 
 [[nodiscard]] auto file_mode(const std::filesystem::path& path) -> mode_t {
-  struct stat info {};
+  struct stat info{};
   return ::stat(path.c_str(), &info) == 0 ? info.st_mode & 0777 : 0;
 }
 
@@ -236,18 +238,18 @@ auto fail(const std::string_view message, Child* child = nullptr) -> int {
          ::chmod((directory / "model-catalog.json").c_str(), 0600) == 0;
 }
 
-}  // namespace
+} // namespace
 
 auto main(const int argc, char* argv[]) -> int {
   if (argc != 2) return fail("expected the aiforge executable path");
   TemporaryDirectory temporary;
-  if (temporary.path().empty()) return fail("could not create a temporary directory");
+  if (temporary.path().empty())
+    return fail("could not create a temporary directory");
   const std::string executable{argv[1]};
   const std::string secret{"pty-secret-do-not-echo"};
 
   auto success = spawn(executable, temporary.path() / "success");
-  if (success.pid < 0 ||
-      !read_until(success, "Venice API key: ", 5s)) {
+  if (success.pid < 0 || !read_until(success, "Venice API key: ", 5s)) {
     close_child(success);
     return fail("login prompt did not appear", &success);
   }
@@ -262,7 +264,8 @@ auto main(const int argc, char* argv[]) -> int {
       success.output.find("Venice credential stored.") == std::string::npos ||
       !echo_enabled(success)) {
     close_child(success);
-    return fail("successful login leaked input or failed to restore echo", &success);
+    return fail("successful login leaked input or failed to restore echo",
+                &success);
   }
   const auto credential_path =
       temporary.path() / "success" / "aiforge" / "credentials";
@@ -272,13 +275,13 @@ auto main(const int argc, char* argv[]) -> int {
   if (stored != secret + "\n" || file_mode(credential_path) != 0600 ||
       file_mode(credential_path.parent_path()) != 0700) {
     close_child(success);
-    return fail("login did not publish a restrictive credential file", &success);
+    return fail("login did not publish a restrictive credential file",
+                &success);
   }
   close_child(success);
 
   auto cancelled = spawn(executable, temporary.path() / "cancelled");
-  if (cancelled.pid < 0 ||
-      !read_until(cancelled, "Venice API key: ", 5s)) {
+  if (cancelled.pid < 0 || !read_until(cancelled, "Venice API key: ", 5s)) {
     close_child(cancelled);
     return fail("cancelled login prompt did not appear", &cancelled);
   }
@@ -301,8 +304,7 @@ auto main(const int argc, char* argv[]) -> int {
   if (!write_offline_catalog(offline_home)) {
     return fail("could not prepare the offline model catalog");
   }
-  auto offline = spawn(executable, offline_home,
-                       ChildMode::offline_chat);
+  auto offline = spawn(executable, offline_home, ChildMode::offline_chat);
   if (offline.pid < 0 || !read_until(offline, "Enter submit", 5s)) {
     close_child(offline);
     return fail("credential-free interactive chat did not open", &offline);
@@ -312,8 +314,9 @@ auto main(const int argc, char* argv[]) -> int {
           static_cast<ssize_t>(prompt.size()) ||
       !read_until(offline, "backend credential is not configured", 5s)) {
     close_child(offline);
-    return fail("credential-free interactive submission was not rejected safely",
-                &offline);
+    return fail(
+        "credential-free interactive submission was not rejected safely",
+        &offline);
   }
   const char exit_key = 4;
   if (::write(offline.master, &exit_key, 1) != 1) {

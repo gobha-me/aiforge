@@ -94,10 +94,10 @@ struct SpendState {
   domain::SessionSpendCeilingProjection ceiling;
 };
 
-[[nodiscard]] auto rebuild_spend_ceiling(const domain::SessionEventLog &log)
+[[nodiscard]] auto rebuild_spend_ceiling(const domain::SessionEventLog& log)
     -> std::expected<domain::SessionSpendCeilingProjection, ChatSessionError> {
   domain::SessionSpendCeilingProjection ceiling;
-  for (const auto &event : log.events()) {
+  for (const auto& event : log.events()) {
     if (!ceiling.apply(event)) {
       return error(ChatSessionErrorCode::session_failed,
                    "session spend ceiling history is invalid");
@@ -106,10 +106,10 @@ struct SpendState {
   return ceiling;
 }
 
-[[nodiscard]] auto rebuild_spend_state(const domain::SessionEventLog &log)
+[[nodiscard]] auto rebuild_spend_state(const domain::SessionEventLog& log)
     -> std::expected<SpendState, ChatSessionError> {
   SpendState state;
-  for (const auto &event : log.events()) {
+  for (const auto& event : log.events()) {
     if (!state.ledger.apply(event) || !state.ceiling.apply(event)) {
       return error(ChatSessionErrorCode::session_failed,
                    "session spend history is invalid");
@@ -119,16 +119,14 @@ struct SpendState {
 }
 
 [[nodiscard]] auto apply_requested_spend_ceiling(
-    runtime::RunKernel &kernel,
-    const std::optional<domain::SessionSpendCeiling> &requested,
-    const ChatIdentitySuffixSource &suffix_source,
-    const std::optional<domain::PersonaId> &persona_id)
+    runtime::RunKernel& kernel,
+    const std::optional<domain::SessionSpendCeiling>& requested,
+    const ChatIdentitySuffixSource& suffix_source,
+    const std::optional<domain::PersonaId>& persona_id)
     -> std::expected<void, ChatSessionError> {
   auto ceiling = rebuild_spend_ceiling(kernel.event_log());
-  if (!ceiling)
-    return std::unexpected(std::move(ceiling.error()));
-  if (!requested)
-    return {};
+  if (!ceiling) return std::unexpected(std::move(ceiling.error()));
+  if (!requested) return {};
   if (ceiling->ceiling()) {
     const auto ordering =
         domain::compare(requested->amount(), ceiling->ceiling()->amount());
@@ -136,8 +134,7 @@ struct SpendState {
       return error(ChatSessionErrorCode::invalid_input,
                    "session spend ceiling cannot be widened");
     }
-    if (ordering == std::strong_ordering::equal)
-      return {};
+    if (ordering == std::strong_ordering::equal) return {};
   }
 
   const auto suffix = suffix_source();
@@ -171,17 +168,18 @@ struct PersonaSetup {
     -> ChatSessionError {
   return {value.code == persona::PersonaErrorCode::cancelled
               ? ChatSessionErrorCode::cancelled
-              : value.code == persona::PersonaErrorCode::invalid_name
-                    ? ChatSessionErrorCode::invalid_input
-                    : ChatSessionErrorCode::context_failed,
+          : value.code == persona::PersonaErrorCode::invalid_name
+              ? ChatSessionErrorCode::invalid_input
+              : ChatSessionErrorCode::context_failed,
           value.message, value.retryable};
 }
 
-[[nodiscard]] auto resolve_persona(
-    persona::PersonaSource* source, const persona::PersonaLimits limits,
-    const persona::PersonaDirective& directive,
-    const domain::SessionEventLog& event_log,
-    const std::stop_token stop_token, const bool allow_attention)
+[[nodiscard]] auto resolve_persona(persona::PersonaSource* source,
+                                   const persona::PersonaLimits limits,
+                                   const persona::PersonaDirective& directive,
+                                   const domain::SessionEventLog& event_log,
+                                   const std::stop_token stop_token,
+                                   const bool allow_attention)
     -> std::expected<PersonaSetup, ChatSessionError> {
   if ((directive.kind == persona::PersonaDirectiveKind::select) !=
           directive.name.has_value() ||
@@ -195,7 +193,8 @@ struct PersonaSetup {
                  "persona history is invalid");
   }
   std::optional<domain::PersonaReference> previous;
-  if (*latest && (*latest)->action == domain::PersonaSelectionAction::selected) {
+  if (*latest &&
+      (*latest)->action == domain::PersonaSelectionAction::selected) {
     previous = (*latest)->persona;
   }
   if (directive.kind == persona::PersonaDirectiveKind::disable) {
@@ -232,9 +231,8 @@ struct PersonaSetup {
   if (!loaded) {
     if (allow_attention &&
         directive.kind == persona::PersonaDirectiveKind::inherit) {
-      return PersonaSetup{
-          std::nullopt, std::nullopt,
-          "Persona needs attention: " + loaded.error().message};
+      return PersonaSetup{std::nullopt, std::nullopt,
+                          "Persona needs attention: " + loaded.error().message};
     }
     return std::unexpected(persona_error(loaded.error()));
   }
@@ -245,8 +243,7 @@ struct PersonaSetup {
   if (directive.kind == persona::PersonaDirectiveKind::inherit &&
       loaded->reference != *previous) {
     if (allow_attention) {
-      return PersonaSetup{
-          std::nullopt, std::nullopt,
+      return PersonaSetup{std::nullopt, std::nullopt,
                           "Persona changed since this session was recorded; "
                           "select it again or turn it off"};
     }
@@ -266,7 +263,7 @@ struct PersonaSetup {
       {}};
 }
 
-}  // namespace
+} // namespace
 
 struct ChatSession::Impl {
   domain::ModelId model_id;
@@ -283,12 +280,12 @@ struct ChatSession::Impl {
   std::optional<domain::PersonaDocument> persona_document;
   std::optional<domain::PersonaSelection> next_persona_selection;
   std::string persona_attention;
-  storage::SessionStore *session_store{};
+  storage::SessionStore* session_store{};
   std::unique_ptr<runtime::RunKernel> kernel;
 };
 
-ChatSession::ChatSession(std::unique_ptr<Impl> impl)
-    : m_impl(std::move(impl)) {}
+ChatSession::ChatSession(std::unique_ptr<Impl> impl) : m_impl(std::move(impl)) {
+}
 ChatSession::~ChatSession() = default;
 
 auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
@@ -397,17 +394,17 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
     const bool allow_persona_attention =
         request.mode == ChatSessionOpen::Mode::resume ||
         request.mode == ChatSessionOpen::Mode::continue_latest;
-    auto persona_setup = resolve_persona(
-        dependencies.persona_source, dependencies.persona_limits,
-        request.persona, kernel->event_log(), stop_token,
-        allow_persona_attention);
+    auto persona_setup = resolve_persona(dependencies.persona_source,
+                                         dependencies.persona_limits,
+                                         request.persona, kernel->event_log(),
+                                         stop_token, allow_persona_attention);
     if (!persona_setup) {
       return std::unexpected(std::move(persona_setup.error()));
     }
     const auto persona_id =
         persona_setup->document
-            ? std::optional<domain::PersonaId>{
-                  persona_setup->document->reference.persona_id}
+            ? std::optional<domain::PersonaId>{persona_setup->document
+                                                   ->reference.persona_id}
             : std::nullopt;
     if (auto applied = apply_requested_spend_ceiling(
             *kernel, request.session_spend_ceiling,
@@ -416,21 +413,13 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
       return std::unexpected(std::move(applied.error()));
     }
     auto impl = std::make_unique<Impl>(Impl{
-        request.model_id,
-        *model,
-        &model_context,
-        output_tokens,
-        limits,
-        durable,
-        std::move(dependencies.identity_suffix_source),
-        std::move(request.provenance),
-        dependencies.persona_source,
-        dependencies.persona_limits,
-        stop_token,
+        request.model_id, *model, &model_context, output_tokens, limits,
+        durable, std::move(dependencies.identity_suffix_source),
+        std::move(request.provenance), dependencies.persona_source,
+        dependencies.persona_limits, stop_token,
         std::move(persona_setup->document),
         std::move(persona_setup->next_selection),
-        std::move(persona_setup->attention), session_store,
-        std::move(kernel)});
+        std::move(persona_setup->attention), session_store, std::move(kernel)});
     return std::unique_ptr<ChatSession>{new ChatSession{std::move(impl)}};
   } catch (...) {
     return error(ChatSessionErrorCode::internal_failure,
@@ -485,8 +474,8 @@ auto ChatSession::submit(std::string prompt)
                      m_impl->persona_attention);
       }
       auto current = m_impl->persona_source->load(
-          m_impl->persona_document->reference.name,
-          m_impl->persona_limits, m_impl->stop_token);
+          m_impl->persona_document->reference.name, m_impl->persona_limits,
+          m_impl->stop_token);
       if (!current) {
         m_impl->persona_attention =
             "Persona needs attention: " + current.error().message;
@@ -589,16 +578,15 @@ auto ChatSession::submit(std::string prompt)
         {*run_id,
          {*surface_id, *workspace_id, *permission_id,
           m_impl->persona_document
-              ? std::optional<domain::PersonaId>{
-                    m_impl->persona_document->reference.persona_id}
+              ? std::optional<domain::PersonaId>{m_impl->persona_document
+                                                     ->reference.persona_id}
               : std::nullopt},
          std::move(user_message),
          std::move(backend_request),
          m_impl->provenance,
          m_impl->next_persona_selection,
          m_impl->model.pricing_observation});
-    if (!started)
-      return std::unexpected(kernel_error(started.error()));
+    if (!started) return std::unexpected(kernel_error(started.error()));
 
     if (m_impl->persona_document) {
       m_impl->next_persona_selection = domain::PersonaSelection{
@@ -644,8 +632,8 @@ auto ChatSession::list_personas()
     return error(ChatSessionErrorCode::context_failed,
                  "persona source is unavailable");
   }
-  auto listed = m_impl->persona_source->list(m_impl->persona_limits,
-                                             m_impl->stop_token);
+  auto listed =
+      m_impl->persona_source->list(m_impl->persona_limits, m_impl->stop_token);
   if (!listed) return std::unexpected(persona_error(listed.error()));
   return std::move(*listed);
 }
@@ -671,10 +659,10 @@ auto ChatSession::select_persona(std::string name)
   if (m_impl->persona_document) previous = m_impl->persona_document->reference;
   auto reference = loaded->reference;
   m_impl->persona_document = std::move(*loaded);
-  m_impl->next_persona_selection = domain::PersonaSelection{
-      domain::PersonaSelectionAction::selected,
-      domain::PersonaSelectionSource::interactive, std::move(reference),
-      std::move(previous)};
+  m_impl->next_persona_selection =
+      domain::PersonaSelection{domain::PersonaSelectionAction::selected,
+                               domain::PersonaSelectionSource::interactive,
+                               std::move(reference), std::move(previous)};
   m_impl->persona_attention.clear();
   return {};
 }
@@ -687,10 +675,10 @@ auto ChatSession::disable_persona() -> std::expected<void, ChatSessionError> {
   std::optional<domain::PersonaReference> previous;
   if (m_impl->persona_document) previous = m_impl->persona_document->reference;
   m_impl->persona_document.reset();
-  m_impl->next_persona_selection = domain::PersonaSelection{
-      domain::PersonaSelectionAction::disabled,
-      domain::PersonaSelectionSource::interactive, std::nullopt,
-      std::move(previous)};
+  m_impl->next_persona_selection =
+      domain::PersonaSelection{domain::PersonaSelectionAction::disabled,
+                               domain::PersonaSelectionSource::interactive,
+                               std::nullopt, std::move(previous)};
   m_impl->persona_attention.clear();
   return {};
 }
@@ -732,8 +720,8 @@ auto ChatSession::select_model(domain::ModelId model_id)
 
 auto ChatSession::persona_state() const -> ChatPersonaState {
   return {m_impl->persona_document
-              ? std::optional<domain::PersonaReference>{
-                    m_impl->persona_document->reference}
+              ? std::optional<domain::PersonaReference>{m_impl->persona_document
+                                                            ->reference}
               : std::nullopt,
           !m_impl->persona_attention.empty(), m_impl->persona_attention};
 }
@@ -751,7 +739,7 @@ auto ChatSession::plan_task_state(
   return std::move(*state);
 }
 
-auto ChatSession::decide_plan(const domain::RunId &run_id,
+auto ChatSession::decide_plan(const domain::RunId& run_id,
                               domain::PlanRevisionDecision decision,
                               runtime::PlanApprovalEnvironment environment)
     -> std::expected<runtime::PlanDecisionOutcome, ChatSessionError> {
@@ -831,4 +819,4 @@ auto ChatSession::active() const noexcept -> bool {
   return m_impl->kernel->active_run_id().has_value();
 }
 
-}  // namespace aiforge::surfaces
+} // namespace aiforge::surfaces

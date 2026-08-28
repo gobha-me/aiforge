@@ -12,7 +12,8 @@ auto main(const int argc, char* argv[]) -> int {
   const std::string draft{std::istreambuf_iterator<char>{input}, {}};
   input.close();
   if (draft == "hang") {
-    for (;;) std::this_thread::sleep_for(std::chrono::seconds{1});
+    for (;;)
+      std::this_thread::sleep_for(std::chrono::seconds{1});
   }
   if (draft == "symlink") {
     std::filesystem::remove(path);
@@ -28,10 +29,9 @@ auto main(const int argc, char* argv[]) -> int {
   } else if (draft == "permissions") {
     output << "exposed";
     output.close();
-    std::filesystem::permissions(
-        path, std::filesystem::perms::owner_read |
-                  std::filesystem::perms::owner_write |
-                  std::filesystem::perms::group_read);
+    std::filesystem::permissions(path, std::filesystem::perms::owner_read |
+                                           std::filesystem::perms::owner_write |
+                                           std::filesystem::perms::group_read);
   } else {
     output << "edited\r\nsecond";
   }
