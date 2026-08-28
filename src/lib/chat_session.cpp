@@ -281,6 +281,10 @@ struct ChatSession::Impl {
   std::optional<domain::PersonaSelection> next_persona_selection;
   std::string persona_attention;
   storage::SessionStore* session_store{};
+  runtime::MemoryController* memory_controller{};
+  runtime::MemorySettings memory_settings{};
+  std::optional<domain::RepositoryId> repository_id;
+  std::string runtime_version;
   std::unique_ptr<runtime::RunKernel> kernel;
 };
 
@@ -412,14 +416,37 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
         !applied) {
       return std::unexpected(std::move(applied.error()));
     }
-    auto impl = std::make_unique<Impl>(Impl{
-        request.model_id, *model, &model_context, output_tokens, limits,
-        durable, std::move(dependencies.identity_suffix_source),
-        std::move(request.provenance), dependencies.persona_source,
-        dependencies.persona_limits, stop_token,
-        std::move(persona_setup->document),
-        std::move(persona_setup->next_selection),
-        std::move(persona_setup->attention), session_store, std::move(kernel)});
+    if (durable && dependencies.memory_controller != nullptr) {
+      auto recovered = dependencies.memory_controller->capture_committed(
+          kernel->event_log().session_id(), kernel->event_log().events(),
+          dependencies.memory_settings, dependencies.repository_id,
+          dependencies.runtime_version);
+      if (!recovered) {
+        return error(ChatSessionErrorCode::session_failed,
+                     recovered.error().message, recovered.error().retryable);
+      }
+    }
+    auto impl = std::make_unique<Impl>(
+        Impl{request.model_id,
+             *model,
+             &model_context,
+             output_tokens,
+             limits,
+             durable,
+             std::move(dependencies.identity_suffix_source),
+             std::move(request.provenance),
+             dependencies.persona_source,
+             dependencies.persona_limits,
+             stop_token,
+             std::move(persona_setup->document),
+             std::move(persona_setup->next_selection),
+             std::move(persona_setup->attention),
+             session_store,
+             dependencies.memory_controller,
+             dependencies.memory_settings,
+             std::move(dependencies.repository_id),
+             std::move(dependencies.runtime_version),
+             std::move(kernel)});
     return std::unique_ptr<ChatSession>{new ChatSession{std::move(impl)}};
   } catch (...) {
     return error(ChatSessionErrorCode::internal_failure,
@@ -527,6 +554,31 @@ auto ChatSession::submit(std::string prompt)
                    std::move(history.error()));
     }
     auto content = std::move(*history);
+    if (m_impl->memory_controller != nullptr) {
+      std::uint64_t mandatory = detail::runtime_contract.size() + prompt.size();
+      for (const auto& item : content)
+        mandatory += item.estimated_tokens;
+      if (m_impl->persona_document) {
+        mandatory += m_impl->persona_document->text.size();
+      }
+      const auto maximum_input =
+          m_impl->model.context_window_tokens - m_impl->output_tokens;
+      const auto available = mandatory < maximum_input
+                                 ? maximum_input - mandatory
+                                 : std::uint64_t{};
+      auto memory = runtime::select_memory_context(
+          *m_impl->memory_controller,
+          {m_impl->repository_id, m_impl->memory_settings.context_tokens,
+           available});
+      if (!memory) {
+        return error(ChatSessionErrorCode::context_failed,
+                     memory.error().message, memory.error().retryable);
+      }
+      for (auto& item : *memory) {
+        item.order = static_cast<std::uint64_t>(content.size()) + 1;
+        content.push_back(std::move(item));
+      }
+    }
     content.push_back(
         {*user_entry_id,
          domain::ContextContentKind::conversation,
@@ -614,6 +666,20 @@ auto ChatSession::drain()
     -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
   auto drained = m_impl->kernel->drain();
   if (!drained) return std::unexpected(kernel_error(drained.error()));
+  if (m_impl->memory_controller != nullptr &&
+      std::ranges::any_of(*drained, [](const auto& event) {
+        return std::holds_alternative<domain::ToolResultRecorded>(
+            event.payload);
+      })) {
+    auto captured = m_impl->memory_controller->capture_committed(
+        m_impl->kernel->event_log().session_id(),
+        m_impl->kernel->event_log().events(), m_impl->memory_settings,
+        m_impl->repository_id, m_impl->runtime_version);
+    if (!captured) {
+      return error(ChatSessionErrorCode::session_failed,
+                   captured.error().message, captured.error().retryable);
+    }
+  }
   return std::move(*drained);
 }
 
@@ -775,6 +841,62 @@ auto ChatSession::update_project_task_status(
   if (!result) {
     return error(ChatSessionErrorCode::session_failed, result.error().message,
                  result.error().retryable);
+  }
+  return {};
+}
+
+auto ChatSession::memory_state(runtime::MemoryMutationTarget target)
+    -> std::expected<runtime::MemoryState, ChatSessionError> {
+  if (m_impl->memory_controller == nullptr) {
+    return error(ChatSessionErrorCode::session_failed,
+                 "durable memory is unavailable");
+  }
+  auto state = m_impl->memory_controller->inspect(std::move(target));
+  if (!state) {
+    return error(ChatSessionErrorCode::session_failed, state.error().message,
+                 state.error().retryable);
+  }
+  return std::move(*state);
+}
+
+auto ChatSession::accept_memory(runtime::MemoryAcceptRequest request)
+    -> std::expected<void, ChatSessionError> {
+  if (m_impl->memory_controller == nullptr) {
+    return error(ChatSessionErrorCode::session_failed,
+                 "durable memory is unavailable");
+  }
+  auto accepted = m_impl->memory_controller->accept(std::move(request));
+  if (!accepted) {
+    return error(ChatSessionErrorCode::session_failed, accepted.error().message,
+                 accepted.error().retryable);
+  }
+  return {};
+}
+
+auto ChatSession::reject_memory(runtime::MemoryRejectRequest request)
+    -> std::expected<void, ChatSessionError> {
+  if (m_impl->memory_controller == nullptr) {
+    return error(ChatSessionErrorCode::session_failed,
+                 "durable memory is unavailable");
+  }
+  auto rejected = m_impl->memory_controller->reject(std::move(request));
+  if (!rejected) {
+    return error(ChatSessionErrorCode::session_failed, rejected.error().message,
+                 rejected.error().retryable);
+  }
+  return {};
+}
+
+auto ChatSession::expire_memory(runtime::MemoryExpireRequest request)
+    -> std::expected<void, ChatSessionError> {
+  if (m_impl->memory_controller == nullptr) {
+    return error(ChatSessionErrorCode::session_failed,
+                 "durable memory is unavailable");
+  }
+  auto expired = m_impl->memory_controller->expire(std::move(request));
+  if (!expired) {
+    return error(ChatSessionErrorCode::session_failed, expired.error().message,
+                 expired.error().retryable);
   }
   return {};
 }

@@ -14,9 +14,14 @@
 #include <aiforge/config/config.hpp>
 #include <aiforge/config/file_store.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
+#include <aiforge/runtime/memory_controller.hpp>
+#include <aiforge/runtime/memory_tool.hpp>
+#include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
 #include <aiforge/surfaces/slash_commands.hpp>
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <format>
@@ -35,6 +40,7 @@
 #include <termforge/widgets/text_box.hpp>
 #include <utility>
 #include <variant>
+#include <version.hpp>
 
 namespace aiforge::adapters {
 namespace {
@@ -113,6 +119,73 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
                      static_cast<unsigned>(date.day()), time.hours().count(),
                      time.minutes().count(), time.seconds().count(),
                      time.subseconds().count());
+}
+
+[[nodiscard]] auto next_memory_suffix() -> std::uint64_t {
+  static std::atomic<std::uint64_t> sequence{};
+  const auto count = sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+  const auto tick = static_cast<std::uint64_t>(
+      std::chrono::steady_clock::now().time_since_epoch().count());
+  return tick ^ count;
+}
+
+[[nodiscard]] auto current_timestamp() -> domain::EventTimestamp {
+  return std::chrono::floor<std::chrono::milliseconds>(
+      std::chrono::system_clock::now());
+}
+
+[[nodiscard]] auto runtime_version() -> std::string {
+  return std::format("{}.{}.{}", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
+}
+
+[[nodiscard]] auto memory_scope_text(const domain::MemoryScope scope)
+    -> std::string_view {
+  return scope == domain::MemoryScope::project ? "project" : "global";
+}
+
+[[nodiscard]] auto memory_kind_text(const domain::MemoryKind kind)
+    -> std::string_view {
+  switch (kind) {
+    case domain::MemoryKind::user_preference: return "preference";
+    case domain::MemoryKind::project_convention: return "convention";
+    case domain::MemoryKind::workflow: return "workflow";
+    case domain::MemoryKind::reusable_fact: return "fact";
+    case domain::MemoryKind::unknown: return "unknown";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] auto lower_copy(const std::string_view value) -> std::string {
+  std::string result{value};
+  std::ranges::transform(result, result.begin(), [](const unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  return result;
+}
+
+[[nodiscard]] auto take_word(std::string_view& value) -> std::string_view {
+  const auto first = value.find_first_not_of(" \t");
+  if (first == std::string_view::npos) {
+    value = {};
+    return {};
+  }
+  value.remove_prefix(first);
+  const auto end = value.find_first_of(" \t");
+  if (end == std::string_view::npos) {
+    const auto result = value;
+    value = {};
+    return result;
+  }
+  const auto result = value.substr(0, end);
+  value.remove_prefix(end);
+  return result;
+}
+
+[[nodiscard]] auto trim_words(std::string_view value) -> std::string_view {
+  const auto first = value.find_first_not_of(" \t");
+  if (first == std::string_view::npos) return {};
+  const auto last = value.find_last_not_of(" \t");
+  return value.substr(first, last - first + 1);
 }
 
 [[nodiscard]] auto load_config(
@@ -1019,6 +1092,293 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
+  [[nodiscard]] auto memory_target(const std::string_view scope)
+      -> std::optional<runtime::MemoryMutationTarget> {
+    if (scope == "global") {
+      return runtime::MemoryMutationTarget{domain::MemoryScope::global,
+                                           std::nullopt};
+    }
+    if (scope != "project") return std::nullopt;
+    auto snapshot = repository_snapshot();
+    if (!snapshot) {
+      m_status = "Project memory is unavailable: " + snapshot.error();
+      return std::nullopt;
+    }
+    return runtime::MemoryMutationTarget{domain::MemoryScope::project,
+                                         snapshot->root.repository_id};
+  }
+
+  auto show_memory(std::optional<std::string> search = std::nullopt) -> bool {
+    std::vector<runtime::MemoryState> states;
+    auto global =
+        m_session->memory_state({domain::MemoryScope::global, std::nullopt});
+    if (!global) {
+      show_panel("Memory — Proposed | Saved | History",
+                 {"Durable memory is unavailable: " + global.error().message},
+                 "Memory is unavailable for this session");
+      return true;
+    }
+    states.push_back(std::move(*global));
+    if (auto snapshot = repository_snapshot()) {
+      auto project = m_session->memory_state(
+          {domain::MemoryScope::project, snapshot->root.repository_id});
+      if (!project) {
+        m_status = project.error().message;
+        return false;
+      }
+      states.push_back(std::move(*project));
+    }
+    const auto needle = search ? lower_copy(*search) : std::string{};
+    const auto matches = [&](const std::string_view id,
+                             const std::string_view content,
+                             const std::string_view rationale) {
+      return needle.empty() || lower_copy(id).contains(needle) ||
+             lower_copy(content).contains(needle) ||
+             lower_copy(rationale).contains(needle);
+    };
+    std::vector<std::string> proposed{"Proposed"};
+    std::vector<std::string> saved{"Saved"};
+    std::vector<std::string> history{"History"};
+    for (const auto& state : states) {
+      for (const auto& view : state.proposals) {
+        const auto& value = view.projected;
+        if (!matches(value.proposal.proposal_id.value(), value.proposal.content,
+                     value.proposal.rationale)) {
+          continue;
+        }
+        auto line = "[" + std::string{value.proposal.proposal_id.value()} +
+                    "] " +
+                    std::string{memory_scope_text(value.proposal.scope)} + "/" +
+                    std::string{memory_kind_text(value.proposal.kind)} + " — " +
+                    value.proposal.content + " @ " +
+                    format_timestamp(value.proposed_at) +
+                    (view.source_available ? "" : " [source unavailable]");
+        if (value.state == domain::ProjectedMemoryProposalState::pending) {
+          proposed.push_back(std::move(line));
+        } else {
+          line += value.state == domain::ProjectedMemoryProposalState::accepted
+                      ? " [accepted]"
+                      : " [rejected]";
+          history.push_back(std::move(line));
+        }
+      }
+      for (const auto& view : state.records) {
+        const auto& value = view.projected;
+        if (!matches(value.record.record_id.value(), value.record.content,
+                     value.record.rationale)) {
+          continue;
+        }
+        auto line = "[" + std::string{value.record.record_id.value()} + "] " +
+                    std::string{memory_scope_text(value.record.scope)} + "/" +
+                    std::string{memory_kind_text(value.record.kind)} + " — " +
+                    value.record.content + " @ " +
+                    format_timestamp(
+                        value.state_changed_at.value_or(value.accepted_at)) +
+                    (view.source_available ? "" : " [source unavailable]");
+        if (value.state == domain::ProjectedMemoryRecordState::current) {
+          saved.push_back(std::move(line));
+        } else {
+          line += value.state == domain::ProjectedMemoryRecordState::superseded
+                      ? " [superseded]"
+                      : " [expired]";
+          history.push_back(std::move(line));
+        }
+      }
+    }
+    if (proposed.size() == 1) proposed.push_back("  none");
+    if (saved.size() == 1) saved.push_back("  none");
+    if (history.size() == 1) history.push_back("  none");
+    std::vector<std::string> lines;
+    lines.reserve(proposed.size() + saved.size() + history.size());
+    lines.insert(lines.end(), std::make_move_iterator(proposed.begin()),
+                 std::make_move_iterator(proposed.end()));
+    lines.insert(lines.end(), std::make_move_iterator(saved.begin()),
+                 std::make_move_iterator(saved.end()));
+    lines.insert(lines.end(), std::make_move_iterator(history.begin()),
+                 std::make_move_iterator(history.end()));
+    show_panel("Memory — Proposed | Saved | History", std::move(lines),
+               search ? "Memory view filtered by '" + *search + "'"
+                      : "Memory state is rebuilt from durable events");
+    return true;
+  }
+
+  auto manage_memory(const std::optional<std::string>& arguments) -> bool {
+    if (!arguments || *arguments == "list") return show_memory();
+    std::string_view rest{*arguments};
+    const auto action = take_word(rest);
+    if (action == "search") {
+      const auto query = trim_words(rest);
+      if (query.empty()) {
+        m_status = "Memory search requires text";
+        return false;
+      }
+      return show_memory(std::string{query});
+    }
+    const auto scope = take_word(rest);
+    auto target = memory_target(scope);
+    if (!target) {
+      if (m_status.empty()) m_status = "Memory scope must be global or project";
+      return false;
+    }
+    auto state = m_session->memory_state(*target);
+    if (!state) {
+      m_status = state.error().message;
+      return false;
+    }
+    constexpr std::size_t maximum_bulk_mutations = 64;
+    if (action == "accept-all" || action == "reject-all") {
+      if (!trim_words(rest).empty()) {
+        m_status = "Bulk memory action accepts only a scope";
+        return false;
+      }
+      std::size_t changed{};
+      for (const auto& view : state->proposals) {
+        if (changed >= maximum_bulk_mutations) break;
+        const auto& proposal = view.projected;
+        if (proposal.state != domain::ProjectedMemoryProposalState::pending)
+          continue;
+        if (action == "accept-all") {
+          if (!proposal.proposal.overlap_record_ids.empty()) continue;
+          auto accepted = m_session->accept_memory(
+              {*target, proposal.proposal.proposal_id,
+               proposal.proposal_event_id, std::nullopt, std::nullopt,
+               std::nullopt});
+          if (!accepted) {
+            m_status = accepted.error().message;
+            return false;
+          }
+        } else {
+          auto rejected = m_session->reject_memory(
+              {*target, proposal.proposal.proposal_id,
+               proposal.proposal_event_id, "rejected by bounded bulk action"});
+          if (!rejected) {
+            m_status = rejected.error().message;
+            return false;
+          }
+        }
+        ++changed;
+      }
+      if (!show_memory()) return false;
+      m_status = std::string{action} + " changed " + std::to_string(changed) +
+                 " memories (limit 64)";
+      return true;
+    }
+
+    const auto identity = take_word(rest);
+    if (identity.empty()) {
+      m_status = "Memory action requires an identity";
+      return false;
+    }
+    if (action == "accept" || action == "edit") {
+      auto proposal_id = domain::MemoryProposalId::from(std::string{identity});
+      if (!proposal_id) {
+        m_status = "Memory proposal identity is invalid";
+        return false;
+      }
+      const auto found = std::ranges::find(
+          state->proposals, *proposal_id, [](const auto& value) {
+            return value.projected.proposal.proposal_id;
+          });
+      if (found == state->proposals.end() ||
+          found->projected.state !=
+              domain::ProjectedMemoryProposalState::pending) {
+        m_status = "Pending memory proposal was not found";
+        return false;
+      }
+      std::optional<std::string> edited;
+      if (action == "edit") {
+        const auto content = trim_words(rest);
+        if (content.empty()) {
+          m_status = "Edited acceptance requires replacement content";
+          return false;
+        }
+        edited = std::string{content};
+      } else if (!trim_words(rest).empty()) {
+        m_status = "Memory accept does not take content; use edit";
+        return false;
+      }
+      std::optional<domain::EventId> expected_record_event_id;
+      const auto replacement = found->projected.proposal.replacement_record_id;
+      if (replacement) {
+        const auto record = std::ranges::find(
+            state->records, *replacement,
+            [](const auto& value) { return value.projected.record.record_id; });
+        if (record == state->records.end() ||
+            record->projected.state !=
+                domain::ProjectedMemoryRecordState::current) {
+          m_status = "Replacement memory is not current";
+          return false;
+        }
+        expected_record_event_id = record->projected.record_event_id;
+      } else if (!found->projected.proposal.overlap_record_ids.empty()) {
+        m_status = "Contradictory memory requires an explicit replacement";
+        return false;
+      }
+      auto accepted = m_session->accept_memory(
+          {*target, *proposal_id, found->projected.proposal_event_id,
+           std::move(edited), replacement, expected_record_event_id});
+      if (!accepted) {
+        m_status = accepted.error().message;
+        return false;
+      }
+    } else if (action == "reject") {
+      auto proposal_id = domain::MemoryProposalId::from(std::string{identity});
+      if (!proposal_id) {
+        m_status = "Memory proposal identity is invalid";
+        return false;
+      }
+      const auto found = std::ranges::find(
+          state->proposals, *proposal_id, [](const auto& value) {
+            return value.projected.proposal.proposal_id;
+          });
+      if (found == state->proposals.end() ||
+          found->projected.state !=
+              domain::ProjectedMemoryProposalState::pending) {
+        m_status = "Pending memory proposal was not found";
+        return false;
+      }
+      const auto reason = trim_words(rest);
+      auto rejected = m_session->reject_memory(
+          {*target, *proposal_id, found->projected.proposal_event_id,
+           reason.empty() ? "rejected by user" : std::string{reason}});
+      if (!rejected) {
+        m_status = rejected.error().message;
+        return false;
+      }
+    } else if (action == "expire") {
+      auto record_id = domain::MemoryRecordId::from(std::string{identity});
+      if (!record_id) {
+        m_status = "Memory record identity is invalid";
+        return false;
+      }
+      const auto found =
+          std::ranges::find(state->records, *record_id, [](const auto& value) {
+            return value.projected.record.record_id;
+          });
+      if (found == state->records.end() ||
+          found->projected.state !=
+              domain::ProjectedMemoryRecordState::current) {
+        m_status = "Current memory record was not found";
+        return false;
+      }
+      const auto reason = trim_words(rest);
+      auto expired = m_session->expire_memory(
+          {*target, *record_id, found->projected.record_event_id,
+           reason.empty() ? "expired by user" : std::string{reason}});
+      if (!expired) {
+        m_status = expired.error().message;
+        return false;
+      }
+    } else {
+      m_status = "Memory action must be search, accept, edit, reject, expire, "
+                 "accept-all, or reject-all";
+      return false;
+    }
+    if (!show_memory()) return false;
+    m_status = "Memory action recorded in durable history";
+    return true;
+  }
+
   auto switch_session(const surfaces::ChatSessionOpen::Mode mode,
                       std::optional<domain::SessionId> session_id) -> bool {
     if (m_session->active()) {
@@ -1270,6 +1630,10 @@ class ChatAppImpl final : public InteractiveChatApp {
         return true;
       case surfaces::SlashCommandAction::show_tasks:
         if (!show_tasks()) return false;
+        m_composer.clear();
+        return true;
+      case surfaces::SlashCommandAction::manage_memory:
+        if (!manage_memory(command.subject)) return false;
         m_composer.clear();
         return true;
     }
@@ -1847,10 +2211,54 @@ auto ProcessInteractiveCommand::execute(Request request,
       store = std::move(*opened);
     }
 
+    auto memory_settings = runtime::resolve_memory_settings(*resolved);
+    if (!memory_settings) {
+      return failure(cli::CommandFailureKind::runtime,
+                     memory_settings.error().message);
+    }
+    std::optional<domain::RepositoryId> repository_id;
+    if (auto snapshot = observe_process_repository(environment.stop_token)) {
+      repository_id = snapshot->root.repository_id;
+    }
+    std::unique_ptr<runtime::MemoryController> memory_controller;
+    runtime::ToolRegistry tool_registry;
+    runtime::ToolRegistrySnapshot tools;
+    if (store) {
+      memory_controller = std::make_unique<runtime::MemoryController>(
+          *store, next_memory_suffix, current_timestamp,
+          environment.stop_token);
+      const runtime::MemoryToolConfiguration tool_configuration{
+          memory_settings->global_capture != domain::MemoryCaptureMode::off,
+          repository_id && memory_settings->project_capture !=
+                               domain::MemoryCaptureMode::off,
+          {}};
+      if (tool_configuration.global_enabled ||
+          tool_configuration.project_enabled) {
+        auto registered =
+            runtime::register_memory_tool(tool_registry, tool_configuration);
+        if (!registered) {
+          return failure(cli::CommandFailureKind::runtime,
+                         registered.error().message);
+        }
+        auto snapshot = tool_registry.snapshot();
+        if (!snapshot) {
+          return failure(cli::CommandFailureKind::runtime,
+                         snapshot.error().message);
+        }
+        tools = std::move(*snapshot);
+      }
+    }
+
     InteractiveChatAppOptions app_options;
     app_options.model_catalog = &(*catalog)->service();
     app_options.session_dependencies.persona_source =
         personas ? &*personas : nullptr;
+    app_options.session_dependencies.tools = std::move(tools);
+    app_options.session_dependencies.memory_controller =
+        memory_controller.get();
+    app_options.session_dependencies.memory_settings = *memory_settings;
+    app_options.session_dependencies.repository_id = repository_id;
+    app_options.session_dependencies.runtime_version = runtime_version();
     auto app = make_interactive_chat_app(
         *backend, (*catalog)->service(), store.get(), std::move(open), editor,
         environment.stop_token, std::move(app_options));

@@ -79,6 +79,7 @@ struct CandidateState {
     case ContextBudgetClass::summary:
     case ContextBudgetClass::tool_result:
     case ContextBudgetClass::repository_evidence:
+    case ContextBudgetClass::memory:
     case ContextBudgetClass::attachment:
     case ContextBudgetClass::unknown: return true;
   }
@@ -119,6 +120,7 @@ struct CandidateState {
     case ContextBudgetClass::tool_result: return budgets.tool_result_tokens;
     case ContextBudgetClass::repository_evidence:
       return budgets.repository_evidence_tokens;
+    case ContextBudgetClass::memory: return budgets.memory_tokens;
     case ContextBudgetClass::attachment: return budgets.attachment_tokens;
     case ContextBudgetClass::unknown: return std::nullopt;
   }
@@ -134,6 +136,7 @@ struct CandidateState {
     case ContextBudgetClass::tool_result: return usage.tool_result_tokens;
     case ContextBudgetClass::repository_evidence:
       return usage.repository_evidence_tokens;
+    case ContextBudgetClass::memory: return usage.memory_tokens;
     case ContextBudgetClass::attachment: return usage.attachment_tokens;
     case ContextBudgetClass::unknown: break;
   }
@@ -231,23 +234,23 @@ struct CandidateState {
   const auto index = static_cast<std::size_t>(budget_class);
   switch (phase) {
     case TaskPhase::orientation: {
-      constexpr std::uint32_t ranks[]{3, 0, 4, 1, 2, 5};
+      constexpr std::uint32_t ranks[]{4, 0, 5, 1, 2, 3, 6};
       return ranks[index];
     }
     case TaskPhase::diagnosis: {
-      constexpr std::uint32_t ranks[]{2, 3, 0, 1, 4, 5};
+      constexpr std::uint32_t ranks[]{2, 4, 0, 1, 3, 5, 6};
       return ranks[index];
     }
     case TaskPhase::editing: {
-      constexpr std::uint32_t ranks[]{1, 4, 2, 0, 3, 5};
+      constexpr std::uint32_t ranks[]{1, 5, 2, 0, 4, 3, 6};
       return ranks[index];
     }
     case TaskPhase::verification: {
-      constexpr std::uint32_t ranks[]{3, 4, 0, 1, 2, 5};
+      constexpr std::uint32_t ranks[]{3, 5, 0, 1, 4, 2, 6};
       return ranks[index];
     }
     case TaskPhase::review: {
-      constexpr std::uint32_t ranks[]{2, 3, 1, 0, 2, 5};
+      constexpr std::uint32_t ranks[]{2, 4, 1, 0, 3, 2, 5};
       return ranks[index];
     }
     case TaskPhase::unknown: return 5;

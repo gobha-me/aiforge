@@ -572,7 +572,10 @@ TEST_CASE("config CLI keeps content and diagnostics on their streams",
   REQUIRE(parsed);
 
   REQUIRE(run_cli({"config", "show"}, output, error) == 0);
-  REQUIRE(output == "model\t<unset>\tunset\n");
+  REQUIRE(output == "model\t<unset>\tunset\n"
+                    "memory.global.capture\toff\tdefault\n"
+                    "memory.project.capture\treview\tdefault\n"
+                    "memory.context.max_tokens\t2048\tdefault\n");
   REQUIRE(error.empty());
 
   REQUIRE(run_cli({"config", "set", "model", "test-model"}, output, error) ==
@@ -609,7 +612,10 @@ TEST_CASE("malformed files are diagnostic for reads but never overwritten",
   std::string error;
 
   REQUIRE(run_cli({"config", "show"}, output, error) == 0);
-  REQUIRE(output == "model\t<unset>\tunset\n");
+  REQUIRE(output == "model\t<unset>\tunset\n"
+                    "memory.global.capture\toff\tdefault\n"
+                    "memory.project.capture\treview\tdefault\n"
+                    "memory.context.max_tokens\t2048\tdefault\n");
   REQUIRE(error.find("warning") != std::string::npos);
 
   REQUIRE(run_cli({"config", "set", "model", "replacement"}, output, error) ==
@@ -628,7 +634,10 @@ TEST_CASE("read-only resolution survives an unavailable config home",
   std::string error;
 
   REQUIRE(run_cli({"config", "show"}, output, error) == 0);
-  REQUIRE(output == "model\tenvironment-model\tenvironment\n");
+  REQUIRE(output == "model\tenvironment-model\tenvironment\n"
+                    "memory.global.capture\toff\tdefault\n"
+                    "memory.project.capture\treview\tdefault\n"
+                    "memory.context.max_tokens\t2048\tdefault\n");
   REQUIRE(error.find("warning") != std::string::npos);
   REQUIRE(error.find("environment-model") == std::string::npos);
 }

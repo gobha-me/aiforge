@@ -561,9 +561,29 @@ TEST_CASE("SQLite storage version one migrates backlog indexes transactionally",
   const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
   auto store = open_store(path);
   store.reset();
-  execute_sql(path, "DROP INDEX events_project_backlog_promoted_repository;"
-                    "DROP INDEX events_project_backlog_status_repository;"
-                    "PRAGMA user_version=1;");
+  execute_sql(
+      path,
+      "PRAGMA foreign_keys=OFF;"
+      "DROP TABLE events;"
+      "DROP TABLE sessions;"
+      "CREATE TABLE sessions("
+      "session_id TEXT PRIMARY KEY NOT NULL,"
+      "created_at_ms INTEGER NOT NULL,"
+      "storage_format_version INTEGER NOT NULL "
+      "CHECK(storage_format_version=1)) STRICT;"
+      "CREATE TABLE events("
+      "session_id TEXT NOT NULL REFERENCES sessions(session_id),"
+      "sequence INTEGER NOT NULL CHECK(sequence>0),"
+      "event_id TEXT NOT NULL,run_id TEXT NOT NULL,"
+      "schema_version INTEGER NOT NULL CHECK(schema_version>0),"
+      "timestamp_ms INTEGER NOT NULL,caused_by_event_id TEXT,"
+      "parent_run_id TEXT,invocation_id TEXT,payload_type TEXT NOT NULL,"
+      "payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),"
+      "PRIMARY KEY(session_id,sequence),UNIQUE(session_id,event_id)) STRICT;"
+      "CREATE INDEX events_session_timestamp "
+      "ON events(session_id,timestamp_ms);"
+      "PRAGMA user_version=1;"
+      "PRAGMA foreign_keys=ON;");
 
   store = open_store(path);
   const auto repository = make_id<domain::RepositoryId>("repository");

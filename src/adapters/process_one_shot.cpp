@@ -1,6 +1,8 @@
 #include <aiforge/adapters/process_one_shot.hpp>
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <istream>
 #include <optional>
@@ -14,11 +16,16 @@
 #include <aiforge/adapters/process_credentials.hpp>
 #include <aiforge/adapters/process_model_catalog.hpp>
 #include <aiforge/adapters/process_provenance.hpp>
+#include <aiforge/adapters/process_repository.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
 #include <aiforge/config/config.hpp>
 #include <aiforge/config/file_store.hpp>
+#include <aiforge/runtime/memory_controller.hpp>
+#include <aiforge/runtime/memory_tool.hpp>
+#include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/surfaces/one_shot.hpp>
+#include <version.hpp>
 
 namespace aiforge::adapters {
 namespace {
@@ -36,6 +43,24 @@ auto warning(std::ostream& error, const std::string_view message) -> bool {
   } catch (...) {
     return false;
   }
+}
+
+[[nodiscard]] auto next_memory_suffix() -> std::uint64_t {
+  static std::atomic<std::uint64_t> sequence{};
+  const auto count = sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+  const auto tick = static_cast<std::uint64_t>(
+      std::chrono::steady_clock::now().time_since_epoch().count());
+  return tick ^ count;
+}
+
+[[nodiscard]] auto current_timestamp() -> domain::EventTimestamp {
+  return std::chrono::floor<std::chrono::milliseconds>(
+      std::chrono::system_clock::now());
+}
+
+[[nodiscard]] auto runtime_version() -> std::string {
+  return std::to_string(VERSION_MAJOR) + '.' + std::to_string(VERSION_MINOR) +
+         '.' + std::to_string(VERSION_PATCH);
 }
 
 [[nodiscard]] auto load_process_config(
@@ -263,6 +288,15 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
         std::unexpected(
             surfaces::OneShotError{surfaces::OneShotErrorCode::internal_failure,
                                    "one-shot session setup failed"});
+    auto memory_settings = runtime::resolve_memory_settings(*resolved);
+    if (!memory_settings) {
+      return failure(cli::CommandFailureKind::runtime,
+                     memory_settings.error().message);
+    }
+    std::optional<domain::RepositoryId> repository_id;
+    if (auto snapshot = observe_process_repository(environment.stop_token)) {
+      repository_id = snapshot->root.repository_id;
+    }
     if (session_mode == surfaces::OneShotRequest::SessionMode::ephemeral) {
       surfaces::OneShotSurface surface{backend,
                                        (*catalog)->service(),
@@ -281,11 +315,42 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
         return failure(cli::CommandFailureKind::runtime,
                        "session storage could not be opened");
       }
+      runtime::MemoryController memory_controller{**store, next_memory_suffix,
+                                                  current_timestamp,
+                                                  environment.stop_token};
+      runtime::ToolRegistry tool_registry;
+      runtime::ToolRegistrySnapshot tools;
+      const runtime::MemoryToolConfiguration tool_configuration{
+          memory_settings->global_capture != domain::MemoryCaptureMode::off,
+          repository_id && memory_settings->project_capture !=
+                               domain::MemoryCaptureMode::off,
+          {}};
+      if (tool_configuration.global_enabled ||
+          tool_configuration.project_enabled) {
+        auto registered =
+            runtime::register_memory_tool(tool_registry, tool_configuration);
+        if (!registered) {
+          return failure(cli::CommandFailureKind::runtime,
+                         registered.error().message);
+        }
+        auto snapshot = tool_registry.snapshot();
+        if (!snapshot) {
+          return failure(cli::CommandFailureKind::runtime,
+                         snapshot.error().message);
+        }
+        tools = std::move(*snapshot);
+      }
       surfaces::OneShotSurface surface{backend,
                                        (*catalog)->service(),
                                        **store,
                                        {m_maximum_input_bytes, 4096},
-                                       persona_source};
+                                       persona_source,
+                                       {std::move(tools),
+                                        {},
+                                        &memory_controller,
+                                        *memory_settings,
+                                        repository_id,
+                                        runtime_version()}};
       result = surface.run(std::move(one_shot_request), output, error,
                            environment.stop_token);
     }

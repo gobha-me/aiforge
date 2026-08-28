@@ -74,6 +74,8 @@ struct PlanIdTag;
 struct PlanRevisionIdTag;
 struct PlanTaskIdTag;
 struct ProjectBacklogItemIdTag;
+struct MemoryProposalIdTag;
+struct MemoryRecordIdTag;
 
 using SessionId = Id<SessionIdTag>;
 using RunId = Id<RunIdTag>;
@@ -106,5 +108,7 @@ using PlanId = Id<PlanIdTag>;
 using PlanRevisionId = Id<PlanRevisionIdTag>;
 using PlanTaskId = Id<PlanTaskIdTag>;
 using ProjectBacklogItemId = Id<ProjectBacklogItemIdTag>;
+using MemoryProposalId = Id<MemoryProposalIdTag>;
+using MemoryRecordId = Id<MemoryRecordIdTag>;
 
 } // namespace aiforge::domain

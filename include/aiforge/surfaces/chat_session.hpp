@@ -2,6 +2,7 @@
 
 #include <aiforge/backend/backend.hpp>
 #include <aiforge/persona/source.hpp>
+#include <aiforge/runtime/memory_controller.hpp>
 #include <aiforge/runtime/plan_task_controller.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/storage/session_store.hpp>
@@ -83,6 +84,10 @@ struct ChatSessionDependencies {
   std::shared_ptr<runtime::ToolPolicy> tool_policy;
   persona::PersonaSource* persona_source{};
   persona::PersonaLimits persona_limits{};
+  runtime::MemoryController* memory_controller{};
+  runtime::MemorySettings memory_settings{};
+  std::optional<domain::RepositoryId> repository_id;
+  std::string runtime_version{"unknown"};
 };
 
 class ChatSession final {
@@ -132,6 +137,15 @@ class ChatSession final {
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto update_project_task_status(
       runtime::ProjectTaskStatusUpdate update)
+      -> std::expected<void, ChatSessionError>;
+
+  [[nodiscard]] auto memory_state(runtime::MemoryMutationTarget target)
+      -> std::expected<runtime::MemoryState, ChatSessionError>;
+  [[nodiscard]] auto accept_memory(runtime::MemoryAcceptRequest request)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto reject_memory(runtime::MemoryRejectRequest request)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto expire_memory(runtime::MemoryExpireRequest request)
       -> std::expected<void, ChatSessionError>;
 
   [[nodiscard]] auto submitted_prompts() const -> std::vector<std::string>;
