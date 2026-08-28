@@ -17,6 +17,7 @@ enum class ContextBudgetClass {
   summary,
   tool_result,
   repository_evidence,
+  memory,
   attachment,
   unknown,
 };
@@ -71,6 +72,7 @@ struct ContextClassBudgets {
   std::optional<std::uint64_t> summary_tokens;
   std::optional<std::uint64_t> tool_result_tokens;
   std::optional<std::uint64_t> repository_evidence_tokens;
+  std::optional<std::uint64_t> memory_tokens;
   std::optional<std::uint64_t> attachment_tokens;
   auto operator==(const ContextClassBudgets&) const -> bool = default;
 };
@@ -120,6 +122,7 @@ struct ContextClassUsage {
   std::uint64_t summary_tokens{};
   std::uint64_t tool_result_tokens{};
   std::uint64_t repository_evidence_tokens{};
+  std::uint64_t memory_tokens{};
   std::uint64_t attachment_tokens{};
   auto operator==(const ContextClassUsage&) const -> bool = default;
 };

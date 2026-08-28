@@ -385,19 +385,22 @@ struct ResolvedPersona {
 OneShotSurface::OneShotSurface(backend::Backend& backend,
                                backend::ModelContextProvider& model_context,
                                OneShotLimits limits,
-                               persona::PersonaSource* persona_source)
+                               persona::PersonaSource* persona_source,
+                               OneShotDependencies dependencies)
     : m_backend(backend), m_model_context(model_context),
-      m_persona_source(persona_source), m_limits(limits) {
+      m_persona_source(persona_source), m_limits(limits),
+      m_dependencies(std::move(dependencies)) {
 }
 
 OneShotSurface::OneShotSurface(backend::Backend& backend,
                                backend::ModelContextProvider& model_context,
                                storage::SessionStore& session_store,
                                OneShotLimits limits,
-                               persona::PersonaSource* persona_source)
+                               persona::PersonaSource* persona_source,
+                               OneShotDependencies dependencies)
     : m_backend(backend), m_model_context(model_context),
       m_session_store(&session_store), m_persona_source(persona_source),
-      m_limits(limits) {
+      m_limits(limits), m_dependencies(std::move(dependencies)) {
 }
 
 auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
@@ -505,7 +508,9 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
           {session_id, mode,
            std::chrono::floor<std::chrono::milliseconds>(
                std::chrono::system_clock::now())},
-          *m_session_store, m_backend, &wake);
+          *m_session_store, m_backend, &wake, runtime::TimestampSource{},
+          runtime::RunKernelLimits{}, m_dependencies.tools,
+          m_dependencies.tool_policy);
       if (!opened) {
         return one_shot_error(stop_token.stop_requested()
                                   ? OneShotErrorCode::cancelled
@@ -516,8 +521,10 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       }
       kernel = std::move(*opened);
     } else {
-      kernel =
-          std::make_unique<runtime::RunKernel>(session_id, m_backend, &wake);
+      kernel = std::make_unique<runtime::RunKernel>(
+          session_id, m_backend, &wake, runtime::TimestampSource{},
+          runtime::RunKernelLimits{}, m_dependencies.tools,
+          m_dependencies.tool_policy);
     }
 
     if (auto applied = apply_requested_spend_ceiling(
@@ -590,6 +597,31 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                             std::move(history.error()));
     }
     auto content = std::move(*history);
+    if (m_dependencies.memory_controller != nullptr) {
+      std::uint64_t mandatory = detail::runtime_contract.size() +
+                                request.prompt.size() + evidence_size;
+      for (const auto& item : content)
+        mandatory += item.estimated_tokens;
+      if (resolved_persona->document) {
+        mandatory += resolved_persona->document->text.size();
+      }
+      const auto maximum_input = model->context_window_tokens - output_tokens;
+      const auto available = mandatory < maximum_input
+                                 ? maximum_input - mandatory
+                                 : std::uint64_t{};
+      auto memory = runtime::select_memory_context(
+          *m_dependencies.memory_controller,
+          {m_dependencies.repository_id,
+           m_dependencies.memory_settings.context_tokens, available});
+      if (!memory) {
+        return one_shot_error(OneShotErrorCode::context_failed,
+                              memory.error().message);
+      }
+      for (auto& item : *memory) {
+        item.order = static_cast<std::uint64_t>(content.size()) + 1;
+        content.push_back(std::move(item));
+      }
+    }
     const auto user_order = static_cast<std::uint64_t>(content.size()) + 1;
     content.push_back(
         {*user_entry_id,
@@ -725,6 +757,17 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
         wake.wait(generation, stop_token);
       }
       generation = wake.generation();
+    }
+
+    if (m_dependencies.memory_controller != nullptr) {
+      auto captured = m_dependencies.memory_controller->capture_committed(
+          kernel->event_log().session_id(), kernel->event_log().events(),
+          m_dependencies.memory_settings, m_dependencies.repository_id,
+          m_dependencies.runtime_version);
+      if (!captured) {
+        return one_shot_error(OneShotErrorCode::run_failed,
+                              captured.error().message);
+      }
     }
 
     const auto* projection = kernel->projection(*run_id);

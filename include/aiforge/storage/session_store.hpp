@@ -51,6 +51,14 @@ struct SessionInfo {
   auto operator==(const SessionInfo&) const -> bool = default;
 };
 
+struct MemoryJournalOpen {
+  domain::SessionId candidate_session_id;
+  domain::MemoryScope scope{domain::MemoryScope::global};
+  std::optional<domain::RepositoryId> repository_id;
+  domain::EventTimestamp created_at;
+  auto operator==(const MemoryJournalOpen&) const -> bool = default;
+};
+
 struct SessionStoreLimits {
   std::size_t maximum_batch_events{4096};
   std::size_t maximum_payload_bytes{8U * 1024U * 1024U};
@@ -91,6 +99,16 @@ class SessionStore {
     return std::unexpected(SessionStoreError{
         SessionStoreErrorCode::unsupported_version,
         "session store does not support project-backlog queries", false});
+  }
+
+  [[nodiscard]] virtual auto open_or_create_memory_journal(
+      MemoryJournalOpen request, std::stop_token stop_token = {})
+      -> std::expected<SessionInfo, SessionStoreError> {
+    static_cast<void>(request);
+    static_cast<void>(stop_token);
+    return std::unexpected(SessionStoreError{
+        SessionStoreErrorCode::unsupported_version,
+        "session store does not support memory journals", false});
   }
 };
 

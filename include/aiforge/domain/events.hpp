@@ -2,6 +2,7 @@
 
 #include <aiforge/domain/child_run.hpp>
 #include <aiforge/domain/content.hpp>
+#include <aiforge/domain/memory.hpp>
 #include <aiforge/domain/money.hpp>
 #include <aiforge/domain/persona.hpp>
 #include <aiforge/domain/plan.hpp>
@@ -413,6 +414,41 @@ struct ProjectBacklogItemStatusChanged {
       -> bool = default;
 };
 
+struct MemoryProposed {
+  MemoryProposal proposal;
+  auto operator==(const MemoryProposed&) const -> bool = default;
+};
+
+struct MemoryPolicyDecided {
+  MemoryPolicyEvaluation evaluation;
+  auto operator==(const MemoryPolicyDecided&) const -> bool = default;
+};
+
+struct MemoryAccepted {
+  MemoryAcceptance acceptance;
+  auto operator==(const MemoryAccepted&) const -> bool = default;
+};
+
+struct MemoryEditedAndAccepted {
+  MemoryEditedAcceptance acceptance;
+  auto operator==(const MemoryEditedAndAccepted&) const -> bool = default;
+};
+
+struct MemoryRejected {
+  MemoryRejection rejection;
+  auto operator==(const MemoryRejected&) const -> bool = default;
+};
+
+struct MemorySuperseded {
+  MemorySupersession supersession;
+  auto operator==(const MemorySuperseded&) const -> bool = default;
+};
+
+struct MemoryExpired {
+  MemoryExpiry expiry;
+  auto operator==(const MemoryExpired&) const -> bool = default;
+};
+
 struct InterRunMessageSent {
   RunId target_run_id;
   std::vector<ContentBlock> content;
@@ -446,7 +482,9 @@ using RunEventPayload = std::variant<
     ReviewOverrideRevoked, PlanRevisionProposed, PlanRevisionDecisionRecorded,
     PlanRevisionInvalidated, SessionTasksMaterialized, ChildRunCreated,
     SessionTaskResultRecorded, ProjectBacklogItemPromoted,
-    ProjectBacklogItemStatusChanged, InterRunMessageSent, UnknownEvent>;
+    ProjectBacklogItemStatusChanged, MemoryProposed, MemoryPolicyDecided,
+    MemoryAccepted, MemoryEditedAndAccepted, MemoryRejected, MemorySuperseded,
+    MemoryExpired, InterRunMessageSent, UnknownEvent>;
 
 struct EventMetadata {
   EventId event_id;

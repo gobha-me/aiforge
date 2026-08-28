@@ -177,7 +177,7 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   const auto& registry = builtin_slash_command_registry();
   const auto listed = registry.describe();
   REQUIRE(listed);
-  REQUIRE(listed->size() == 10);
+  REQUIRE(listed->size() == 11);
   REQUIRE((*listed)[0].name == "help");
   REQUIRE((*listed)[1].name == "quit");
   REQUIRE((*listed)[2].name == "clear");
@@ -188,6 +188,12 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   REQUIRE((*listed)[7].name == "usage");
   REQUIRE((*listed)[8].name == "plan");
   REQUIRE((*listed)[9].name == "tasks");
+  REQUIRE((*listed)[10].name == "memory");
+
+  const auto memory = registry.dispatch("/memory search convention");
+  REQUIRE(memory);
+  REQUIRE((*memory)->action == SlashCommandAction::manage_memory);
+  REQUIRE((*memory)->subject == "search convention");
 
   const auto help = registry.dispatch("/help /clear");
   REQUIRE(help);

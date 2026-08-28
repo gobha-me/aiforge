@@ -17,6 +17,10 @@ add_library(${PROJECT_NAME}_lib STATIC
   json_config_file_store.cpp
   language_analysis.cpp
   model_catalog.cpp
+  memory.cpp
+  memory_controller.cpp
+  memory_projection.cpp
+  memory_tool.cpp
   money.cpp
   one_shot.cpp
   plan.cpp

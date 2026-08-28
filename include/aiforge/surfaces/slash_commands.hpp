@@ -34,6 +34,7 @@ enum class SlashCommandAction {
   show_usage,
   show_plan,
   show_tasks,
+  manage_memory,
 };
 
 struct SlashCommandResult {

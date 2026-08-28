@@ -223,6 +223,15 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
   return no_arguments(arguments, SlashCommandAction::show_tasks);
 }
 
+[[nodiscard]] auto memory_handler(std::string_view arguments,
+                                  const SlashCommandContext&)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  arguments = trim_arguments(arguments);
+  return SlashCommandResult{
+      SlashCommandAction::manage_memory,
+      arguments.empty() ? std::nullopt : std::optional<std::string>{arguments}};
+}
+
 [[nodiscard]] auto builtin_specs() -> std::vector<SlashCommandSpec> {
   return {
       {"help", "help", "[command]", "Show available slash commands.",
@@ -247,6 +256,10 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
        idle_available, plan_handler},
       {"tasks", "tasks", "", "Show session tasks and project backlog.",
        idle_available, tasks_handler},
+      {"memory", "memory",
+       "[search <text> | accept|edit|reject|expire|accept-all|reject-all ...]",
+       "Inspect and manage proposed, saved, and historical memory.",
+       idle_available, memory_handler},
   };
 }
 

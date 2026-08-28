@@ -36,7 +36,7 @@ namespace {
 using Json = nlohmann::json;
 using storage::SessionStoreError;
 using storage::SessionStoreErrorCode;
-constexpr int storage_format_version = 2;
+constexpr int storage_format_version = 3;
 
 template <typename... Visitors> struct Overloaded : Visitors... {
   using Visitors::operator()...;
@@ -1336,6 +1336,232 @@ template <typename IdType>
   return change;
 }
 
+[[nodiscard]] auto memory_scope_name(const domain::MemoryScope scope)
+    -> std::string_view {
+  switch (scope) {
+    case domain::MemoryScope::global: return "global";
+    case domain::MemoryScope::project: return "project";
+    case domain::MemoryScope::unknown: break;
+  }
+  throw CodecFailure{"invalid memory scope"};
+}
+
+[[nodiscard]] auto parse_memory_scope(const Json& value)
+    -> domain::MemoryScope {
+  using Scope = domain::MemoryScope;
+  return enum_value<Scope>(
+      value.get<std::string>(),
+      {{"global", Scope::global}, {"project", Scope::project}});
+}
+
+[[nodiscard]] auto memory_kind_name(const domain::MemoryKind kind)
+    -> std::string_view {
+  switch (kind) {
+    case domain::MemoryKind::user_preference: return "user_preference";
+    case domain::MemoryKind::project_convention: return "project_convention";
+    case domain::MemoryKind::workflow: return "workflow";
+    case domain::MemoryKind::reusable_fact: return "reusable_fact";
+    case domain::MemoryKind::unknown: return "unknown";
+  }
+  throw CodecFailure{"invalid memory kind"};
+}
+
+[[nodiscard]] auto parse_memory_kind(const Json& value) -> domain::MemoryKind {
+  using Kind = domain::MemoryKind;
+  const auto name = value.get<std::string>();
+  if (name == "user_preference") return Kind::user_preference;
+  if (name == "project_convention") return Kind::project_convention;
+  if (name == "workflow") return Kind::workflow;
+  if (name == "reusable_fact") return Kind::reusable_fact;
+  return Kind::unknown;
+}
+
+[[nodiscard]] auto memory_decision_source_name(
+    const domain::MemoryDecisionSource source) -> std::string_view {
+  switch (source) {
+    case domain::MemoryDecisionSource::user: return "user";
+    case domain::MemoryDecisionSource::policy: return "policy";
+  }
+  throw CodecFailure{"invalid memory decision source"};
+}
+
+[[nodiscard]] auto parse_memory_decision_source(const Json& value)
+    -> domain::MemoryDecisionSource {
+  using Source = domain::MemoryDecisionSource;
+  return enum_value<Source>(
+      value.get<std::string>(),
+      {{"user", Source::user}, {"policy", Source::policy}});
+}
+
+[[nodiscard]] auto memory_policy_action_name(
+    const domain::MemoryPolicyAction action) -> std::string_view {
+  switch (action) {
+    case domain::MemoryPolicyAction::stage: return "stage";
+    case domain::MemoryPolicyAction::accept: return "accept";
+    case domain::MemoryPolicyAction::reject: return "reject";
+  }
+  throw CodecFailure{"invalid memory policy action"};
+}
+
+[[nodiscard]] auto parse_memory_policy_action(const Json& value)
+    -> domain::MemoryPolicyAction {
+  using Action = domain::MemoryPolicyAction;
+  return enum_value<Action>(value.get<std::string>(),
+                            {{"stage", Action::stage},
+                             {"accept", Action::accept},
+                             {"reject", Action::reject}});
+}
+
+[[nodiscard]] auto memory_source_json(const domain::MemorySource& source)
+    -> Json {
+  auto events = Json::array();
+  for (const auto& event_id : source.event_ids) {
+    events.push_back(id_text(event_id));
+  }
+  return {{"session_id", id_text(source.session_id)},
+          {"run_id", id_text(source.run_id)},
+          {"invocation_id", id_text(source.invocation_id)},
+          {"event_ids", std::move(events)}};
+}
+
+[[nodiscard]] auto parse_memory_source(const Json& value)
+    -> domain::MemorySource {
+  const auto& raw_events = value.at("event_ids");
+  if (!raw_events.is_array()) throw CodecFailure{"memory source is invalid"};
+  domain::MemorySource source{
+      parse_id<domain::SessionId>(value.at("session_id")),
+      parse_id<domain::RunId>(value.at("run_id")),
+      parse_id<domain::InvocationId>(value.at("invocation_id")),
+      {}};
+  source.event_ids.reserve(raw_events.size());
+  for (const auto& event_id : raw_events) {
+    source.event_ids.push_back(parse_id<domain::EventId>(event_id));
+  }
+  return source;
+}
+
+[[nodiscard]] auto memory_producer_json(const domain::MemoryProducer& producer)
+    -> Json {
+  return {{"model_id", id_text(producer.model_id)},
+          {"runtime_name", producer.runtime_name},
+          {"runtime_version", producer.runtime_version}};
+}
+
+[[nodiscard]] auto parse_memory_producer(const Json& value)
+    -> domain::MemoryProducer {
+  return {parse_id<domain::ModelId>(value.at("model_id")),
+          value.at("runtime_name").get<std::string>(),
+          value.at("runtime_version").get<std::string>()};
+}
+
+[[nodiscard]] auto memory_proposal_json(const domain::MemoryProposal& proposal)
+    -> Json {
+  if (!domain::validate_memory_proposal(proposal)) {
+    throw CodecFailure{"memory proposal is invalid"};
+  }
+  auto overlaps = Json::array();
+  for (const auto& record_id : proposal.overlap_record_ids) {
+    overlaps.push_back(id_text(record_id));
+  }
+  return {{"proposal_id", id_text(proposal.proposal_id)},
+          {"record_id", id_text(proposal.record_id)},
+          {"scope", memory_scope_name(proposal.scope)},
+          {"repository_id", optional_id_json(proposal.repository_id)},
+          {"kind", memory_kind_name(proposal.kind)},
+          {"content", proposal.content},
+          {"rationale", proposal.rationale},
+          {"evidence_excerpt", proposal.evidence_excerpt},
+          {"source", memory_source_json(proposal.source)},
+          {"producer", memory_producer_json(proposal.producer)},
+          {"replacement_record_id",
+           optional_id_json(proposal.replacement_record_id)},
+          {"overlap_record_ids", std::move(overlaps)}};
+}
+
+[[nodiscard]] auto parse_memory_proposal(const Json& value)
+    -> domain::MemoryProposal {
+  const auto& raw_overlaps = value.at("overlap_record_ids");
+  if (!raw_overlaps.is_array()) {
+    throw CodecFailure{"memory proposal relationships are invalid"};
+  }
+  domain::MemoryProposal proposal{
+      parse_id<domain::MemoryProposalId>(value.at("proposal_id")),
+      parse_id<domain::MemoryRecordId>(value.at("record_id")),
+      parse_memory_scope(value.at("scope")),
+      parse_optional_id<domain::RepositoryId>(value.at("repository_id")),
+      parse_memory_kind(value.at("kind")),
+      value.at("content").get<std::string>(),
+      value.at("rationale").get<std::string>(),
+      value.at("evidence_excerpt").get<std::string>(),
+      parse_memory_source(value.at("source")),
+      parse_memory_producer(value.at("producer")),
+      parse_optional_id<domain::MemoryRecordId>(
+          value.at("replacement_record_id")),
+      {}};
+  proposal.overlap_record_ids.reserve(raw_overlaps.size());
+  for (const auto& record_id : raw_overlaps) {
+    proposal.overlap_record_ids.push_back(
+        parse_id<domain::MemoryRecordId>(record_id));
+  }
+  if (!domain::validate_memory_proposal(proposal)) {
+    throw CodecFailure{"memory proposal is invalid"};
+  }
+  return proposal;
+}
+
+[[nodiscard]] auto memory_record_json(const domain::MemoryRecord& record)
+    -> Json {
+  if (!domain::validate_memory_record(record)) {
+    throw CodecFailure{"memory record is invalid"};
+  }
+  return {{"record_id", id_text(record.record_id)},
+          {"proposal_id", id_text(record.proposal_id)},
+          {"scope", memory_scope_name(record.scope)},
+          {"repository_id", optional_id_json(record.repository_id)},
+          {"kind", memory_kind_name(record.kind)},
+          {"content", record.content},
+          {"rationale", record.rationale},
+          {"source", memory_source_json(record.source)},
+          {"producer", memory_producer_json(record.producer)}};
+}
+
+[[nodiscard]] auto parse_memory_record(const Json& value)
+    -> domain::MemoryRecord {
+  domain::MemoryRecord record{
+      parse_id<domain::MemoryRecordId>(value.at("record_id")),
+      parse_id<domain::MemoryProposalId>(value.at("proposal_id")),
+      parse_memory_scope(value.at("scope")),
+      parse_optional_id<domain::RepositoryId>(value.at("repository_id")),
+      parse_memory_kind(value.at("kind")),
+      value.at("content").get<std::string>(),
+      value.at("rationale").get<std::string>(),
+      parse_memory_source(value.at("source")),
+      parse_memory_producer(value.at("producer"))};
+  if (!domain::validate_memory_record(record)) {
+    throw CodecFailure{"memory record is invalid"};
+  }
+  return record;
+}
+
+[[nodiscard]] auto memory_policy_json(
+    const domain::MemoryPolicyEvaluation& evaluation) -> Json {
+  return {{"proposal_id", id_text(evaluation.proposal_id)},
+          {"action", memory_policy_action_name(evaluation.action)},
+          {"source", memory_decision_source_name(evaluation.source)},
+          {"reason", evaluation.reason},
+          {"expected_proposal_event_id",
+           id_text(evaluation.expected_proposal_event_id)}};
+}
+
+[[nodiscard]] auto parse_memory_policy(const Json& value)
+    -> domain::MemoryPolicyEvaluation {
+  return {parse_id<domain::MemoryProposalId>(value.at("proposal_id")),
+          parse_memory_policy_action(value.at("action")),
+          parse_memory_decision_source(value.at("source")),
+          value.at("reason").get<std::string>(),
+          parse_id<domain::EventId>(value.at("expected_proposal_event_id"))};
+}
+
 [[nodiscard]] auto plan_revision_json(const domain::PlanRevision& revision,
                                       const bool include_evidence) -> Json {
   if (!domain::validate_plan_revision(revision)) {
@@ -2406,6 +2632,27 @@ template <typename IdType>
           [](const domain::ProjectBacklogItemStatusChanged&) {
             return std::string{"project_backlog.item_status_changed"};
           },
+          [](const domain::MemoryProposed&) {
+            return std::string{"memory.proposed"};
+          },
+          [](const domain::MemoryPolicyDecided&) {
+            return std::string{"memory.policy_decided"};
+          },
+          [](const domain::MemoryAccepted&) {
+            return std::string{"memory.accepted"};
+          },
+          [](const domain::MemoryEditedAndAccepted&) {
+            return std::string{"memory.edited_and_accepted"};
+          },
+          [](const domain::MemoryRejected&) {
+            return std::string{"memory.rejected"};
+          },
+          [](const domain::MemorySuperseded&) {
+            return std::string{"memory.superseded"};
+          },
+          [](const domain::MemoryExpired&) {
+            return std::string{"memory.expired"};
+          },
           [](const domain::InterRunMessageSent&) {
             return std::string{"run.inter_message_sent"};
           },
@@ -2416,7 +2663,7 @@ template <typename IdType>
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 58,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 65,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started",
@@ -2475,6 +2722,13 @@ template <typename IdType>
       "session.task_result_recorded",
       "project_backlog.item_promoted",
       "project_backlog.item_status_changed",
+      "memory.proposed",
+      "memory.policy_decided",
+      "memory.accepted",
+      "memory.edited_and_accepted",
+      "memory.rejected",
+      "memory.superseded",
+      "memory.expired",
       "run.inter_message_sent"};
   return types.contains(type);
 }
@@ -2749,6 +3003,58 @@ template <typename IdType>
           [](const domain::ProjectBacklogItemStatusChanged& value) -> Json {
             return {
                 {"change", project_backlog_status_change_json(value.change)}};
+          },
+          [](const domain::MemoryProposed& value) -> Json {
+            return {{"proposal", memory_proposal_json(value.proposal)}};
+          },
+          [](const domain::MemoryPolicyDecided& value) -> Json {
+            return {{"evaluation", memory_policy_json(value.evaluation)}};
+          },
+          [](const domain::MemoryAccepted& value) -> Json {
+            return {{"record", memory_record_json(value.acceptance.record)},
+                    {"source",
+                     memory_decision_source_name(value.acceptance.source)},
+                    {"expected_proposal_event_id",
+                     id_text(value.acceptance.expected_proposal_event_id)}};
+          },
+          [](const domain::MemoryEditedAndAccepted& value) -> Json {
+            return {{"acceptance",
+                     {{"record",
+                       memory_record_json(value.acceptance.acceptance.record)},
+                      {"source", memory_decision_source_name(
+                                     value.acceptance.acceptance.source)},
+                      {"expected_proposal_event_id",
+                       id_text(value.acceptance.acceptance
+                                   .expected_proposal_event_id)}}},
+                    {"replaced_record_id",
+                     id_text(value.acceptance.replaced_record_id)},
+                    {"expected_record_event_id",
+                     id_text(value.acceptance.expected_record_event_id)}};
+          },
+          [](const domain::MemoryRejected& value) -> Json {
+            return {
+                {"proposal_id", id_text(value.rejection.proposal_id)},
+                {"source", memory_decision_source_name(value.rejection.source)},
+                {"reason", value.rejection.reason},
+                {"expected_proposal_event_id",
+                 id_text(value.rejection.expected_proposal_event_id)}};
+          },
+          [](const domain::MemorySuperseded& value) -> Json {
+            return {{"record_id", id_text(value.supersession.record_id)},
+                    {"replacement_record_id",
+                     id_text(value.supersession.replacement_record_id)},
+                    {"source",
+                     memory_decision_source_name(value.supersession.source)},
+                    {"expected_record_event_id",
+                     id_text(value.supersession.expected_record_event_id)}};
+          },
+          [](const domain::MemoryExpired& value) -> Json {
+            return {
+                {"record_id", id_text(value.expiry.record_id)},
+                {"source", memory_decision_source_name(value.expiry.source)},
+                {"reason", value.expiry.reason},
+                {"expected_record_event_id",
+                 id_text(value.expiry.expected_record_event_id)}};
           },
           [](const domain::InterRunMessageSent& value) -> Json {
             return {{"target_run_id", id_text(value.target_run_id)},
@@ -3101,6 +3407,50 @@ template <typename IdType>
   if (type == "project_backlog.item_status_changed") {
     return domain::ProjectBacklogItemStatusChanged{
         parse_project_backlog_status_change(value.at("change"))};
+  }
+  if (type == "memory.proposed") {
+    return domain::MemoryProposed{parse_memory_proposal(value.at("proposal"))};
+  }
+  if (type == "memory.policy_decided") {
+    return domain::MemoryPolicyDecided{
+        parse_memory_policy(value.at("evaluation"))};
+  }
+  if (type == "memory.accepted") {
+    return domain::MemoryAccepted{domain::MemoryAcceptance{
+        parse_memory_record(value.at("record")),
+        parse_memory_decision_source(value.at("source")),
+        parse_id<domain::EventId>(value.at("expected_proposal_event_id"))}};
+  }
+  if (type == "memory.edited_and_accepted") {
+    const auto& acceptance = value.at("acceptance");
+    return domain::MemoryEditedAndAccepted{domain::MemoryEditedAcceptance{
+        {parse_memory_record(acceptance.at("record")),
+         parse_memory_decision_source(acceptance.at("source")),
+         parse_id<domain::EventId>(
+             acceptance.at("expected_proposal_event_id"))},
+        parse_id<domain::MemoryRecordId>(value.at("replaced_record_id")),
+        parse_id<domain::EventId>(value.at("expected_record_event_id"))}};
+  }
+  if (type == "memory.rejected") {
+    return domain::MemoryRejected{domain::MemoryRejection{
+        parse_id<domain::MemoryProposalId>(value.at("proposal_id")),
+        parse_memory_decision_source(value.at("source")),
+        value.at("reason").get<std::string>(),
+        parse_id<domain::EventId>(value.at("expected_proposal_event_id"))}};
+  }
+  if (type == "memory.superseded") {
+    return domain::MemorySuperseded{domain::MemorySupersession{
+        parse_id<domain::MemoryRecordId>(value.at("record_id")),
+        parse_id<domain::MemoryRecordId>(value.at("replacement_record_id")),
+        parse_memory_decision_source(value.at("source")),
+        parse_id<domain::EventId>(value.at("expected_record_event_id"))}};
+  }
+  if (type == "memory.expired") {
+    return domain::MemoryExpired{domain::MemoryExpiry{
+        parse_id<domain::MemoryRecordId>(value.at("record_id")),
+        parse_memory_decision_source(value.at("source")),
+        value.at("reason").get<std::string>(),
+        parse_id<domain::EventId>(value.at("expected_record_event_id"))}};
   }
   if (type == "run.inter_message_sent") {
     return domain::InterRunMessageSent{
@@ -3582,7 +3932,28 @@ class Transaction final {
                 "ON events(json_extract(payload_json,'$.change.repository_id'),"
                 "session_id,sequence) "
                 "WHERE payload_type='project_backlog.item_status_changed';"
-                "PRAGMA user_version=2;");
+                "ALTER TABLE sessions ADD COLUMN session_kind TEXT NOT NULL "
+                "DEFAULT 'user';"
+                "ALTER TABLE sessions ADD COLUMN journal_key TEXT;"
+                "CREATE UNIQUE INDEX sessions_memory_journal_key "
+                "ON sessions(journal_key) WHERE session_kind='memory';"
+                "PRAGMA user_version=3;");
+    if (!upgraded) {
+      rollback(database);
+      return upgraded;
+    }
+    return commit(database);
+  }
+  if (version == 2) {
+    auto begun = begin_immediate(database);
+    if (!begun) return begun;
+    const auto upgraded = execute(
+        database, "ALTER TABLE sessions ADD COLUMN session_kind TEXT NOT NULL "
+                  "DEFAULT 'user';"
+                  "ALTER TABLE sessions ADD COLUMN journal_key TEXT;"
+                  "CREATE UNIQUE INDEX sessions_memory_journal_key "
+                  "ON sessions(journal_key) WHERE session_kind='memory';"
+                  "PRAGMA user_version=3;");
     if (!upgraded) {
       rollback(database);
       return upgraded;
@@ -3613,7 +3984,12 @@ class Transaction final {
       "CREATE TABLE sessions("
       "session_id TEXT PRIMARY KEY NOT NULL,"
       "created_at_ms INTEGER NOT NULL,"
-      "storage_format_version INTEGER NOT NULL CHECK(storage_format_version=1)"
+      "storage_format_version INTEGER NOT NULL CHECK(storage_format_version=1),"
+      "session_kind TEXT NOT NULL CHECK(session_kind IN ('user','memory')) "
+      "DEFAULT 'user',"
+      "journal_key TEXT,"
+      "CHECK((session_kind='user' AND journal_key IS NULL) OR "
+      "(session_kind='memory' AND journal_key IS NOT NULL))"
       ") STRICT;"
       "CREATE TABLE events("
       "session_id TEXT NOT NULL REFERENCES sessions(session_id),"
@@ -3640,7 +4016,9 @@ class Transaction final {
       "ON events(json_extract(payload_json,'$.change.repository_id'),"
       "session_id,sequence) "
       "WHERE payload_type='project_backlog.item_status_changed';"
-      "PRAGMA user_version=2;");
+      "CREATE UNIQUE INDEX sessions_memory_journal_key "
+      "ON sessions(journal_key) WHERE session_kind='memory';"
+      "PRAGMA user_version=3;");
   if (!schema) {
     rollback(database);
     return schema;
@@ -3870,7 +4248,8 @@ auto SqliteSessionStore::open_session(const domain::SessionId& session_id,
     std::lock_guard lock(m_impl->mutex);
     auto statement =
         prepare(m_impl->database,
-                std::string{session_info_select} + " WHERE s.session_id=?1");
+                std::string{session_info_select} +
+                    " WHERE s.session_id=?1 AND s.session_kind='user'");
     if (!statement) return std::unexpected(std::move(statement.error()));
     auto bound = bind_text(statement->get(), 1, session_id.value());
     if (!bound) return std::unexpected(std::move(bound.error()));
@@ -3901,7 +4280,8 @@ auto SqliteSessionStore::list_sessions(const std::size_t limit,
     std::lock_guard lock(m_impl->mutex);
     auto statement = prepare(m_impl->database,
                              std::string{session_info_select} +
-                                 " ORDER BY 3 DESC,s.session_id ASC LIMIT ?1");
+                                 " WHERE s.session_kind='user' "
+                                 "ORDER BY 3 DESC,s.session_id ASC LIMIT ?1");
     if (!statement) return std::unexpected(std::move(statement.error()));
     const auto bound = sqlite3_bind_int64(statement->get(), 1,
                                           static_cast<sqlite3_int64>(limit));
@@ -3921,6 +4301,101 @@ auto SqliteSessionStore::list_sessions(const std::size_t limit,
   } catch (...) {
     return std::unexpected(store_error(SessionStoreErrorCode::internal_failure,
                                        "session listing failed internally"));
+  }
+}
+
+auto SqliteSessionStore::open_or_create_memory_journal(
+    storage::MemoryJournalOpen request, const std::stop_token stop_token)
+    -> std::expected<storage::SessionInfo, storage::SessionStoreError> {
+  try {
+    if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
+    const bool valid_scope = (request.scope == domain::MemoryScope::global &&
+                              !request.repository_id) ||
+                             (request.scope == domain::MemoryScope::project &&
+                              request.repository_id.has_value());
+    if (!valid_scope) {
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::invalid_argument,
+                      "memory journal scope and repository identity disagree"));
+    }
+    const std::string journal_key =
+        request.scope == domain::MemoryScope::global
+            ? "global"
+            : "project:" + std::string{request.repository_id->value()};
+    auto created_at = timestamp_count(request.created_at);
+    if (!created_at) return std::unexpected(std::move(created_at.error()));
+
+    std::lock_guard lock(m_impl->mutex);
+    auto begun = begin_immediate(m_impl->database);
+    if (!begun) return std::unexpected(std::move(begun.error()));
+    Transaction transaction{m_impl->database};
+
+    std::optional<domain::SessionId> session_id;
+    auto lookup =
+        prepare(m_impl->database,
+                "SELECT session_id FROM sessions WHERE session_kind='memory' "
+                "AND journal_key=?1");
+    if (!lookup) return std::unexpected(std::move(lookup.error()));
+    auto bound = bind_text(lookup->get(), 1, journal_key);
+    if (!bound) return std::unexpected(std::move(bound.error()));
+    const auto lookup_result = sqlite3_step(lookup->get());
+    if (lookup_result == SQLITE_ROW) {
+      auto existing = column_id<domain::SessionId>(lookup->get(), 0);
+      if (!existing) return std::unexpected(std::move(existing.error()));
+      session_id = std::move(*existing);
+    } else if (lookup_result != SQLITE_DONE) {
+      return std::unexpected(sqlite_error(lookup_result));
+    }
+
+    if (!session_id) {
+      auto insert = prepare(m_impl->database,
+                            "INSERT INTO sessions(session_id,created_at_ms,"
+                            "storage_format_version,session_kind,journal_key) "
+                            "VALUES(?1,?2,1,'memory',?3)");
+      if (!insert) return std::unexpected(std::move(insert.error()));
+      bound = bind_text(insert->get(), 1, request.candidate_session_id.value());
+      if (bound) {
+        const auto result = sqlite3_bind_int64(insert->get(), 2, *created_at);
+        if (result != SQLITE_OK) bound = std::unexpected(sqlite_error(result));
+      }
+      if (bound) bound = bind_text(insert->get(), 3, journal_key);
+      if (!bound) return std::unexpected(std::move(bound.error()));
+      auto inserted = step_done(insert->get());
+      if (!inserted) {
+        return std::unexpected(
+            store_error(inserted.error().code == SessionStoreErrorCode::conflict
+                            ? SessionStoreErrorCode::already_exists
+                            : inserted.error().code,
+                        "memory journal identity conflicts with stored state"));
+      }
+      session_id = std::move(request.candidate_session_id);
+    }
+
+    auto statement =
+        prepare(m_impl->database, std::string{session_info_select} +
+                                      " WHERE s.session_id=?1 "
+                                      "AND s.session_kind='memory'");
+    if (!statement) return std::unexpected(std::move(statement.error()));
+    bound = bind_text(statement->get(), 1, session_id->value());
+    if (!bound) return std::unexpected(std::move(bound.error()));
+    const auto result = sqlite3_step(statement->get());
+    if (result != SQLITE_ROW) {
+      return std::unexpected(result == SQLITE_DONE
+                                 ? store_error(SessionStoreErrorCode::corrupt,
+                                               "memory journal disappeared")
+                                 : sqlite_error(result));
+    }
+    auto info = session_info_from_row(statement->get());
+    if (!info) return std::unexpected(std::move(info.error()));
+    if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
+    auto committed = commit(m_impl->database);
+    if (!committed) return std::unexpected(std::move(committed.error()));
+    transaction.complete();
+    return info;
+  } catch (...) {
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::internal_failure,
+                    "memory journal open failed internally"));
   }
 }
 

@@ -497,6 +497,15 @@ auto builtin_config_registry() -> const ConfigRegistry& {
   static const ConfigRegistry registry{{
       {"model", ConfigValueKind::text, std::string{"AIFORGE_MODEL"},
        std::nullopt, false, true, 1024, 1},
+      {"memory.global.capture", ConfigValueKind::text,
+       std::string{"AIFORGE_MEMORY_GLOBAL_CAPTURE"},
+       ConfigValue{std::string{"off"}}, false, true, 16, 1},
+      {"memory.project.capture", ConfigValueKind::text,
+       std::string{"AIFORGE_MEMORY_PROJECT_CAPTURE"},
+       ConfigValue{std::string{"review"}}, false, true, 16, 1},
+      {"memory.context.max_tokens", ConfigValueKind::unsigned_integer,
+       std::string{"AIFORGE_MEMORY_CONTEXT_MAX_TOKENS"},
+       ConfigValue{std::uint64_t{2048}}, false, true, 32, 1},
   }};
   return registry;
 }
