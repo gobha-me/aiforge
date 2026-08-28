@@ -40,10 +40,10 @@ class ArtifactStore {
  public:
   virtual ~ArtifactStore() = default;
 
-  [[nodiscard]] virtual auto put(
-      ArtifactWrite write, std::span<const std::byte> content,
-      std::stop_token stop_token = {})
+  [[nodiscard]] virtual auto put(ArtifactWrite write,
+                                 std::span<const std::byte> content,
+                                 std::stop_token stop_token = {})
       -> std::expected<domain::ArtifactMetadata, ArtifactStoreError> = 0;
 };
 
-}  // namespace aiforge::storage
+} // namespace aiforge::storage

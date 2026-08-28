@@ -1,8 +1,8 @@
 #include <aiforge/runtime/tool_policy.hpp>
 
 #include <algorithm>
-#include <charconv>
 #include <cctype>
+#include <charconv>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -68,12 +68,14 @@ template <typename Value>
   }
   const std::filesystem::path path{value};
   if (!path.is_absolute()) {
-    return std::unexpected(error(ToolPolicyErrorCode::invalid_request,
-                                 "filesystem capability path must be absolute"));
+    return std::unexpected(
+        error(ToolPolicyErrorCode::invalid_request,
+              "filesystem capability path must be absolute"));
   }
   const auto normalized = path.lexically_normal().generic_string();
   if (normalized.empty() || normalized != value ||
-      normalized.find("/../") != std::string::npos || normalized.ends_with("/..")) {
+      normalized.find("/../") != std::string::npos ||
+      normalized.ends_with("/..")) {
     return std::unexpected(error(ToolPolicyErrorCode::invalid_request,
                                  "filesystem capability path is ambiguous"));
   }
@@ -93,8 +95,8 @@ template <typename Value>
   });
   if (std::ranges::any_of(value, [](const unsigned char character) {
         return !(std::isalnum(character) || character == '.' ||
-                 character == '-' || character == ':' ||
-                 character == '[' || character == ']');
+                 character == '-' || character == ':' || character == '[' ||
+                 character == ']');
       })) {
     return std::unexpected(error(ToolPolicyErrorCode::invalid_request,
                                  "network capability host is invalid"));
@@ -106,8 +108,9 @@ template <typename Value>
                                    const std::string_view label)
     -> std::expected<std::string, ToolPolicyError> {
   if (value.empty() || value.size() > 4096 || contains_control(value)) {
-    return std::unexpected(error(ToolPolicyErrorCode::invalid_request,
-                                 std::string{label} + " capability is invalid"));
+    return std::unexpected(
+        error(ToolPolicyErrorCode::invalid_request,
+              std::string{label} + " capability is invalid"));
   }
   return value;
 }
@@ -182,9 +185,8 @@ template <typename Value>
   return result;
 }
 
-[[nodiscard]] auto grant_covers(
-    const storage::SavedPolicyGrant& grant,
-    const ToolPolicyRequest& request) -> bool {
+[[nodiscard]] auto grant_covers(const storage::SavedPolicyGrant& grant,
+                                const ToolPolicyRequest& request) -> bool {
   return grant.permission_profile_id == request.permission_profile_id &&
          grant.tool_name == request.tool_name &&
          effects_cover(grant.effects, request.effects) &&
@@ -206,8 +208,8 @@ template <typename Value>
          });
 }
 
-[[nodiscard]] auto valid_lifetime(
-    const domain::ApprovalGrantLifetime lifetime) -> bool {
+[[nodiscard]] auto valid_lifetime(const domain::ApprovalGrantLifetime lifetime)
+    -> bool {
   switch (lifetime) {
     case domain::ApprovalGrantLifetime::invocation:
     case domain::ApprovalGrantLifetime::session:
@@ -225,12 +227,14 @@ class DefaultPolicy final : public ToolPolicy {
       if (!validated) return std::unexpected(std::move(validated.error()));
       if (validated->effects.empty() && validated->scopes.empty()) {
         return ToolPolicyResolution{
-            domain::PolicyDecision::allow, {},
+            domain::PolicyDecision::allow,
+            {},
             "the invocation declares no authority-bearing effects",
             domain::PolicyDecisionSource::fallback};
       }
       return ToolPolicyResolution{
-          domain::PolicyDecision::deny, {},
+          domain::PolicyDecision::deny,
+          {},
           "no policy is configured for an effectful invocation",
           domain::PolicyDecisionSource::fallback};
     } catch (...) {
@@ -246,7 +250,7 @@ class DefaultPolicy final : public ToolPolicy {
   }
 };
 
-}  // namespace
+} // namespace
 
 namespace {
 
@@ -285,7 +289,7 @@ namespace {
   return scope;
 }
 
-}  // namespace
+} // namespace
 
 auto normalize_capability_scope(domain::CapabilityScope scope)
     -> std::expected<domain::CapabilityScope, ToolPolicyError> {
@@ -355,7 +359,8 @@ auto intersect_capability_scopes(
 
 CapabilityPolicy::CapabilityPolicy(PermissionProfile profile,
                                    storage::PolicyGrantStore* saved_grants)
-    : m_profile(std::move(profile)), m_saved_grants(saved_grants) {}
+    : m_profile(std::move(profile)), m_saved_grants(saved_grants) {
+}
 
 auto CapabilityPolicy::evaluate(const ToolPolicyRequest& request)
     -> std::expected<ToolPolicyResolution, ToolPolicyError> {
@@ -371,10 +376,13 @@ auto CapabilityPolicy::evaluate(const ToolPolicyRequest& request)
     auto automatic = normalize_scopes(m_profile.automatic_scopes);
     auto ceiling = normalize_scopes(m_profile.approval_ceiling);
     if (!automatic || !ceiling ||
-        std::ranges::any_of(*automatic, [&](const auto& scope) {
-          return std::ranges::find(m_profile.automatic_effects, scope.effect) ==
-                 m_profile.automatic_effects.end();
-        }) ||
+        std::ranges::any_of(*automatic,
+                            [&](const auto& scope) {
+                              return std::ranges::find(
+                                         m_profile.automatic_effects,
+                                         scope.effect) ==
+                                     m_profile.automatic_effects.end();
+                            }) ||
         std::ranges::any_of(*ceiling, [&](const auto& scope) {
           return std::ranges::find(m_profile.approvable_effects,
                                    scope.effect) ==
@@ -414,12 +422,11 @@ auto CapabilityPolicy::evaluate(const ToolPolicyRequest& request)
                                      saved.error().retryable));
       }
       if (std::ranges::any_of(*saved, [&](const auto& grant) {
-            return !valid_saved_grant(grant,
-                                      m_profile.permission_profile_id);
+            return !valid_saved_grant(grant, m_profile.permission_profile_id);
           })) {
-        return std::unexpected(error(
-            ToolPolicyErrorCode::persistence_failure,
-            "saved policy grants contain invalid capability data"));
+        return std::unexpected(
+            error(ToolPolicyErrorCode::persistence_failure,
+                  "saved policy grants contain invalid capability data"));
       }
       if (std::ranges::any_of(*saved, [&](const auto& grant) {
             return grant_covers(grant, *validated) &&
@@ -440,9 +447,11 @@ auto CapabilityPolicy::evaluate(const ToolPolicyRequest& request)
           "the invocation requires explicit user approval",
           domain::PolicyDecisionSource::permission_profile};
     }
-    return ToolPolicyResolution{domain::PolicyDecision::deny, {},
-                                "the active permission profile denies this invocation",
-                                domain::PolicyDecisionSource::permission_profile};
+    return ToolPolicyResolution{
+        domain::PolicyDecision::deny,
+        {},
+        "the active permission profile denies this invocation",
+        domain::PolicyDecisionSource::permission_profile};
   } catch (...) {
     return std::unexpected(error(ToolPolicyErrorCode::internal_failure,
                                  "tool policy evaluation failed internally"));
@@ -473,13 +482,14 @@ auto CapabilityPolicy::approve(const ToolPolicyRequest& request,
         !scopes_cover(*ceiling, *granted) ||
         !scopes_cover(*granted, validated->scopes) ||
         !scopes_cover(validated->scopes, *granted)) {
-      return std::unexpected(error(ToolPolicyErrorCode::scope_widening,
-                                   "approval cannot widen or omit required authority"));
+      return std::unexpected(
+          error(ToolPolicyErrorCode::scope_widening,
+                "approval cannot widen or omit required authority"));
     }
 
     storage::SavedPolicyGrant grant{validated->permission_profile_id,
-                                    validated->tool_name,
-                                    validated->effects, *granted};
+                                    validated->tool_name, validated->effects,
+                                    *granted};
     if (approval.lifetime == domain::ApprovalGrantLifetime::session) {
       m_session_grants.push_back({validated->session_id, grant});
     } else if (approval.lifetime == domain::ApprovalGrantLifetime::saved) {
@@ -489,9 +499,10 @@ auto CapabilityPolicy::approve(const ToolPolicyRequest& request,
       }
       auto saved = m_saved_grants->save_grant(grant);
       if (!saved) {
-        return std::unexpected(error(ToolPolicyErrorCode::persistence_failure,
-                                     "saved policy grant could not be persisted",
-                                     saved.error().retryable));
+        return std::unexpected(
+            error(ToolPolicyErrorCode::persistence_failure,
+                  "saved policy grant could not be persisted",
+                  saved.error().retryable));
       }
     }
     return ToolPolicyResolution{domain::PolicyDecision::allow, *granted,
@@ -507,4 +518,4 @@ auto default_tool_policy() -> std::shared_ptr<ToolPolicy> {
   return std::make_shared<DefaultPolicy>();
 }
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

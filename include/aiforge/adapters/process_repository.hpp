@@ -8,8 +8,7 @@
 
 namespace aiforge::adapters {
 
-[[nodiscard]] auto
-observe_process_repository(std::stop_token stop_token = {})
+[[nodiscard]] auto observe_process_repository(std::stop_token stop_token = {})
     -> std::expected<domain::RepositorySnapshot, std::string>;
 
 } // namespace aiforge::adapters

@@ -38,8 +38,7 @@ using storage::SessionStoreError;
 using storage::SessionStoreErrorCode;
 constexpr int storage_format_version = 2;
 
-template <typename... Visitors>
-struct Overloaded : Visitors... {
+template <typename... Visitors> struct Overloaded : Visitors... {
   using Visitors::operator()...;
 };
 
@@ -123,7 +122,7 @@ template <typename IdType>
 template <typename Enum>
 [[nodiscard]] auto enum_value(
     const std::string_view name,
-                              const std::initializer_list<std::pair<std::string_view, Enum>> values)
+    const std::initializer_list<std::pair<std::string_view, Enum>> values)
     -> Enum {
   for (const auto& [candidate, value] : values) {
     if (candidate == name) return value;
@@ -144,9 +143,11 @@ template <typename Enum>
 
 [[nodiscard]] auto parse_role(const Json& value) -> domain::Role {
   const auto name = value.get<std::string>();
-  return enum_value<domain::Role>(name, {{"system", domain::Role::system}, {"user", domain::Role::user},
-             {"assistant", domain::Role::assistant}, {"tool", domain::Role::tool},
-             {"evidence", domain::Role::evidence}});
+  return enum_value<domain::Role>(name, {{"system", domain::Role::system},
+                                         {"user", domain::Role::user},
+                                         {"assistant", domain::Role::assistant},
+                                         {"tool", domain::Role::tool},
+                                         {"evidence", domain::Role::evidence}});
 }
 
 [[nodiscard]] auto finish_name(const domain::FinishReason value)
@@ -213,7 +214,8 @@ template <typename Enum>
 [[nodiscard]] auto parse_effect(const Json& value) -> domain::Effect {
   const auto name = value.get<std::string>();
   return enum_value<domain::Effect>(
-      name, {{"read", domain::Effect::read}, {"write", domain::Effect::write},
+      name, {{"read", domain::Effect::read},
+             {"write", domain::Effect::write},
              {"remove", domain::Effect::remove},
              {"execute", domain::Effect::execute},
              {"network", domain::Effect::network},
@@ -241,7 +243,8 @@ template <typename Enum>
              {"require_approval", domain::PolicyDecision::require_approval}});
 }
 
-[[nodiscard]] auto policy_source_name(const domain::PolicyDecisionSource value) -> std::string_view {
+[[nodiscard]] auto policy_source_name(const domain::PolicyDecisionSource value)
+    -> std::string_view {
   switch (value) {
     case domain::PolicyDecisionSource::fallback: return "fallback";
     case domain::PolicyDecisionSource::permission_profile:
@@ -257,20 +260,18 @@ template <typename Enum>
     -> domain::PolicyDecisionSource {
   const auto name = value.get<std::string>();
   return enum_value<domain::PolicyDecisionSource>(
-      name, {{"fallback", domain::PolicyDecisionSource::fallback},
-             {"permission_profile",
-              domain::PolicyDecisionSource::permission_profile},
-             {"session_grant", domain::PolicyDecisionSource::session_grant},
-             {"saved_grant", domain::PolicyDecisionSource::saved_grant},
-             {"user_approval",
-              domain::PolicyDecisionSource::user_approval}});
+      name,
+      {{"fallback", domain::PolicyDecisionSource::fallback},
+       {"permission_profile", domain::PolicyDecisionSource::permission_profile},
+       {"session_grant", domain::PolicyDecisionSource::session_grant},
+       {"saved_grant", domain::PolicyDecisionSource::saved_grant},
+       {"user_approval", domain::PolicyDecisionSource::user_approval}});
 }
 
 [[nodiscard]] auto spend_ceiling_source_name(
     const domain::SessionSpendCeilingSource value) -> std::string_view {
   switch (value) {
-    case domain::SessionSpendCeilingSource::command_line:
-      return "command_line";
+    case domain::SessionSpendCeilingSource::command_line: return "command_line";
   }
   throw CodecFailure{"invalid session spend ceiling source"};
 }
@@ -351,36 +352,38 @@ template <typename Enum>
 
 [[nodiscard]] auto content_json(const domain::ContentBlock& block) -> Json {
   return std::visit(
-      Overloaded{[](const domain::TextBlock &value) -> Json {
-            return {{"kind", "text"}, {"text", value.text}};
-          },
-          [](const domain::StructuredDataBlock& value) -> Json {
-            return {{"kind", "structured"},
-                    {"media_type", value.media_type},
-                    {"data", value.data}};
-          },
-          [](const domain::CitationBlock& value) -> Json {
-            return {{"kind", "citation"}, {"uri", value.uri},
-                    {"title", optional_string_json(value.title)}};
-          },
-          [](const domain::ArtifactReferenceBlock& value) -> Json {
-            return {{"kind", "artifact_reference"},
-                    {"artifact_id", id_text(value.artifact_id)},
-                    {"label", optional_string_json(value.label)}};
-          },
-          [](const domain::UnknownContentBlock& value) -> Json {
-            return {{"kind", "unknown"}, {"type_name", value.type_name}};
-          }},
+      Overloaded{[](const domain::TextBlock& value) -> Json {
+                   return {{"kind", "text"}, {"text", value.text}};
+                 },
+                 [](const domain::StructuredDataBlock& value) -> Json {
+                   return {{"kind", "structured"},
+                           {"media_type", value.media_type},
+                           {"data", value.data}};
+                 },
+                 [](const domain::CitationBlock& value) -> Json {
+                   return {{"kind", "citation"},
+                           {"uri", value.uri},
+                           {"title", optional_string_json(value.title)}};
+                 },
+                 [](const domain::ArtifactReferenceBlock& value) -> Json {
+                   return {{"kind", "artifact_reference"},
+                           {"artifact_id", id_text(value.artifact_id)},
+                           {"label", optional_string_json(value.label)}};
+                 },
+                 [](const domain::UnknownContentBlock& value) -> Json {
+                   return {{"kind", "unknown"}, {"type_name", value.type_name}};
+                 }},
       block);
 }
 
 [[nodiscard]] auto parse_content(const Json& value) -> domain::ContentBlock {
   const auto kind = value.at("kind").get<std::string>();
-  if (kind == "text") return domain::TextBlock{value.at("text").get<std::string>()};
+  if (kind == "text")
+    return domain::TextBlock{value.at("text").get<std::string>()};
   if (kind == "structured") {
     return domain::StructuredDataBlock{
         value.at("media_type").get<std::string>(),
-                                       value.at("data").get<std::string>()};
+        value.at("data").get<std::string>()};
   }
   if (kind == "citation") {
     return domain::CitationBlock{value.at("uri").get<std::string>(),
@@ -399,10 +402,10 @@ template <typename Enum>
 }
 
 [[nodiscard]] auto content_list_json(
-    const std::vector<domain::ContentBlock> &values)
-    -> Json {
+    const std::vector<domain::ContentBlock>& values) -> Json {
   auto result = Json::array();
-  for (const auto& value : values) result.push_back(content_json(value));
+  for (const auto& value : values)
+    result.push_back(content_json(value));
   return result;
 }
 
@@ -411,7 +414,8 @@ template <typename Enum>
   if (!values.is_array()) throw CodecFailure{"content list is invalid"};
   std::vector<domain::ContentBlock> result;
   result.reserve(values.size());
-  for (const auto& value : values) result.push_back(parse_content(value));
+  for (const auto& value : values)
+    result.push_back(parse_content(value));
   return result;
 }
 
@@ -424,17 +428,18 @@ template <typename Enum>
 
 [[nodiscard]] auto parse_message(const Json& value) -> domain::Message {
   return {parse_id<domain::MessageId>(value.at("message_id")),
-          parse_role(value.at("role")),
-          parse_content_list(value.at("content")),
+          parse_role(value.at("role")), parse_content_list(value.at("content")),
           parse_optional_id<domain::InvocationId>(value.at("invocation_id"))};
 }
 
 [[nodiscard]] auto domain_error_json(const domain::DomainError& error) -> Json {
-  return {{"code", error_name(error.code)}, {"message", error.message},
+  return {{"code", error_name(error.code)},
+          {"message", error.message},
           {"retryable", error.retryable}};
 }
 
-[[nodiscard]] auto parse_domain_error(const Json &value) -> domain::DomainError {
+[[nodiscard]] auto parse_domain_error(const Json& value)
+    -> domain::DomainError {
   return {parse_error_code(value.at("code")),
           value.at("message").get<std::string>(),
           value.at("retryable").get<bool>()};
@@ -521,36 +526,42 @@ template <typename Enum>
   return result;
 }
 
-[[nodiscard]] auto effects_json(const std::vector<domain::Effect> &effects) -> Json {
+[[nodiscard]] auto effects_json(const std::vector<domain::Effect>& effects)
+    -> Json {
   auto result = Json::array();
-  for (const auto effect : effects) result.push_back(effect_name(effect));
+  for (const auto effect : effects)
+    result.push_back(effect_name(effect));
   return result;
 }
 
-[[nodiscard]] auto parse_effects(const Json &values) -> std::vector<domain::Effect> {
+[[nodiscard]] auto parse_effects(const Json& values)
+    -> std::vector<domain::Effect> {
   if (!values.is_array()) throw CodecFailure{"effect list is invalid"};
   std::vector<domain::Effect> result;
   result.reserve(values.size());
-  for (const auto& value : values) result.push_back(parse_effect(value));
+  for (const auto& value : values)
+    result.push_back(parse_effect(value));
   return result;
 }
 
 [[nodiscard]] auto scope_json(const domain::CapabilityScope& scope) -> Json {
-  return {{"effect", effect_name(scope.effect)}, {"kind", scope.kind},
+  return {{"effect", effect_name(scope.effect)},
+          {"kind", scope.kind},
           {"value", scope.value}};
 }
 
 [[nodiscard]] auto scopes_json(
-    const std::vector<domain::CapabilityScope> &scopes)
-    -> Json {
+    const std::vector<domain::CapabilityScope>& scopes) -> Json {
   auto result = Json::array();
-  for (const auto& scope : scopes) result.push_back(scope_json(scope));
+  for (const auto& scope : scopes)
+    result.push_back(scope_json(scope));
   return result;
 }
 
 [[nodiscard]] auto parse_scopes(const Json& values)
     -> std::vector<domain::CapabilityScope> {
-  if (!values.is_array()) throw CodecFailure{"capability-scope list is invalid"};
+  if (!values.is_array())
+    throw CodecFailure{"capability-scope list is invalid"};
   std::vector<domain::CapabilityScope> result;
   result.reserve(values.size());
   for (const auto& value : values) {
@@ -566,15 +577,15 @@ template <typename Enum>
   auto options = Json::array();
   for (const auto& option : question.options) {
     options.push_back(
-        {{"option_id", option.option_id}, {"label", option.label},
-                       {"description", optional_string_json(option.description)},
-                       {"recommended", option.recommended}});
+        {{"option_id", option.option_id},
+         {"label", option.label},
+         {"description", optional_string_json(option.description)},
+         {"recommended", option.recommended}});
   }
   Json other = nullptr;
   if (question.other) {
     other = {{"label", question.other->label},
-             {"placeholder",
-              optional_string_json(question.other->placeholder)},
+             {"placeholder", optional_string_json(question.other->placeholder)},
              {"maximum_bytes", question.other->maximum_bytes}};
   }
   return {{"question_id", id_text(question.question_id)},
@@ -583,9 +594,9 @@ template <typename Enum>
           {"options", std::move(options)},
           {"required", question.required},
           {"minimum_selections", question.minimum_selections},
-          {"maximum_selections",
-           question.maximum_selections ? Json(*question.maximum_selections)
-                                       : Json(nullptr)},
+          {"maximum_selections", question.maximum_selections
+                                     ? Json(*question.maximum_selections)
+                                     : Json(nullptr)},
           {"other", std::move(other)}};
 }
 
@@ -603,8 +614,11 @@ template <typename Enum>
     const bool optional = value.at("answer_optional").get<bool>();
     const auto selection = parse_selection(value.at("selection"));
     return {parse_id<domain::QuestionId>(value.at("question_id")),
-            value.at("prompt").get<std::string>(), selection,
-            std::move(options), !optional, optional ? 0U : 1U,
+            value.at("prompt").get<std::string>(),
+            selection,
+            std::move(options),
+            !optional,
+            optional ? 0U : 1U,
             selection == domain::QuestionSelection::one
                 ? std::optional<std::size_t>{1}
                 : std::optional<std::size_t>{},
@@ -628,9 +642,11 @@ template <typename Enum>
   }
   return {parse_id<domain::QuestionId>(value.at("question_id")),
           value.at("prompt").get<std::string>(),
-          parse_selection(value.at("selection")), std::move(options),
+          parse_selection(value.at("selection")),
+          std::move(options),
           value.at("required").get<bool>(),
-          value.at("minimum_selections").get<std::size_t>(), maximum,
+          value.at("minimum_selections").get<std::size_t>(),
+          maximum,
           std::move(other)};
 }
 
@@ -677,44 +693,40 @@ template <typename Enum>
 }
 
 [[nodiscard]] auto optional_decimal_json(
-    const std::optional<domain::DecimalAmount> &value)
-    -> Json {
+    const std::optional<domain::DecimalAmount>& value) -> Json {
   return value ? Json(value->to_string()) : Json(nullptr);
 }
 
-[[nodiscard]] auto parse_optional_decimal(const Json &value)
+[[nodiscard]] auto parse_optional_decimal(const Json& value)
     -> std::optional<domain::DecimalAmount> {
-  if (value.is_null())
-    return std::nullopt;
+  if (value.is_null()) return std::nullopt;
   auto parsed = domain::DecimalAmount::from(value.get<std::string>());
-  if (!parsed)
-    throw CodecFailure{"pricing amount is invalid"};
+  if (!parsed) throw CodecFailure{"pricing amount is invalid"};
   return *parsed;
 }
 
-[[nodiscard]] auto price_rate_json(const domain::PriceRate &rate) -> Json {
+[[nodiscard]] auto price_rate_json(const domain::PriceRate& rate) -> Json {
   return {{"usd", optional_decimal_json(rate.usd)},
           {"diem", optional_decimal_json(rate.diem)}};
 }
 
-[[nodiscard]] auto parse_price_rate(const Json &value) -> domain::PriceRate {
+[[nodiscard]] auto parse_price_rate(const Json& value) -> domain::PriceRate {
   return {parse_optional_decimal(value.at("usd")),
           parse_optional_decimal(value.at("diem"))};
 }
 
 [[nodiscard]] auto optional_price_rate_json(
-    const std::optional<domain::PriceRate> &rate) -> Json {
+    const std::optional<domain::PriceRate>& rate) -> Json {
   return rate ? price_rate_json(*rate) : Json(nullptr);
 }
 
-[[nodiscard]] auto parse_optional_price_rate(const Json &value)
+[[nodiscard]] auto parse_optional_price_rate(const Json& value)
     -> std::optional<domain::PriceRate> {
-  if (value.is_null())
-    return std::nullopt;
+  if (value.is_null()) return std::nullopt;
   return parse_price_rate(value);
 }
 
-[[nodiscard]] auto text_price_tier_json(const domain::TextPriceTier &tier)
+[[nodiscard]] auto text_price_tier_json(const domain::TextPriceTier& tier)
     -> Json {
   return {{"input", optional_price_rate_json(tier.input)},
           {"output", optional_price_rate_json(tier.output)},
@@ -722,7 +734,7 @@ template <typename Enum>
           {"cache_write", optional_price_rate_json(tier.cache_write)}};
 }
 
-[[nodiscard]] auto parse_text_price_tier(const Json &value)
+[[nodiscard]] auto parse_text_price_tier(const Json& value)
     -> domain::TextPriceTier {
   return {parse_optional_price_rate(value.at("input")),
           parse_optional_price_rate(value.at("output")),
@@ -731,34 +743,26 @@ template <typename Enum>
 }
 
 [[nodiscard]] auto pricing_origin_name(
-    const domain::PricingCatalogOrigin origin)
-    -> std::string_view {
+    const domain::PricingCatalogOrigin origin) -> std::string_view {
   switch (origin) {
-  case domain::PricingCatalogOrigin::live:
-    return "live";
-  case domain::PricingCatalogOrigin::fresh_cache:
-    return "fresh_cache";
-  case domain::PricingCatalogOrigin::stale_cache:
-    return "stale_cache";
+    case domain::PricingCatalogOrigin::live: return "live";
+    case domain::PricingCatalogOrigin::fresh_cache: return "fresh_cache";
+    case domain::PricingCatalogOrigin::stale_cache: return "stale_cache";
   }
   throw CodecFailure{"pricing catalog origin is invalid"};
 }
 
-[[nodiscard]] auto parse_pricing_origin(const Json &value)
+[[nodiscard]] auto parse_pricing_origin(const Json& value)
     -> domain::PricingCatalogOrigin {
   const auto text = value.get<std::string>();
-  if (text == "live")
-    return domain::PricingCatalogOrigin::live;
-  if (text == "fresh_cache")
-    return domain::PricingCatalogOrigin::fresh_cache;
-  if (text == "stale_cache")
-    return domain::PricingCatalogOrigin::stale_cache;
+  if (text == "live") return domain::PricingCatalogOrigin::live;
+  if (text == "fresh_cache") return domain::PricingCatalogOrigin::fresh_cache;
+  if (text == "stale_cache") return domain::PricingCatalogOrigin::stale_cache;
   throw CodecFailure{"pricing catalog origin is invalid"};
 }
 
 [[nodiscard]] auto pricing_observation_json(
-    const domain::PricingObservation &observation)
-    -> Json {
+    const domain::PricingObservation& observation) -> Json {
   Json extended = nullptr;
   if (observation.pricing.extended) {
     extended = text_price_tier_json(*observation.pricing.extended);
@@ -780,9 +784,9 @@ template <typename Enum>
       {"rate_card_digest", digest_json(observation.rate_card_digest)}};
 }
 
-[[nodiscard]] auto parse_pricing_observation(const Json &value)
+[[nodiscard]] auto parse_pricing_observation(const Json& value)
     -> domain::PricingObservation {
-  const auto &pricing = value.at("pricing");
+  const auto& pricing = value.at("pricing");
   domain::TextPricing parsed{parse_text_price_tier(pricing.at("base"))};
   if (!pricing.at("extended_threshold_tokens").is_null()) {
     parsed.extended_threshold_tokens =
@@ -962,8 +966,7 @@ template <typename Enum>
   using Source = domain::PlanDecisionSource;
   return enum_value<Source>(
       value.get<std::string>(),
-                            {{"user", Source::user},
-                             {"policy", Source::policy}});
+      {{"user", Source::user}, {"policy", Source::policy}});
 }
 
 [[nodiscard]] auto plan_invalidation_trigger_name(
@@ -1007,28 +1010,20 @@ template <typename Enum>
 
 [[nodiscard]] auto parse_plan_resource_intent(const Json& value)
     -> domain::PlanResourceIntent {
-  return {parse_effect(value.at("effect")),
-          value.at("kind").get<std::string>(),
+  return {parse_effect(value.at("effect")), value.at("kind").get<std::string>(),
           value.at("value").get<std::string>()};
 }
 
 [[nodiscard]] auto session_task_outcome_name(
-    const domain::SessionTaskOutcome outcome)
-    -> std::string_view {
+    const domain::SessionTaskOutcome outcome) -> std::string_view {
   using Outcome = domain::SessionTaskOutcome;
   switch (outcome) {
-  case Outcome::completed:
-    return "completed";
-  case Outcome::failed:
-    return "failed";
-  case Outcome::cancelled:
-    return "cancelled";
-  case Outcome::timed_out:
-    return "timed_out";
-  case Outcome::budget_exhausted:
-    return "budget_exhausted";
-  case Outcome::unavailable:
-    return "unavailable";
+    case Outcome::completed: return "completed";
+    case Outcome::failed: return "failed";
+    case Outcome::cancelled: return "cancelled";
+    case Outcome::timed_out: return "timed_out";
+    case Outcome::budget_exhausted: return "budget_exhausted";
+    case Outcome::unavailable: return "unavailable";
   }
   throw CodecFailure{"invalid session task outcome"};
 }
@@ -1048,18 +1043,17 @@ template <typename Enum>
 template <typename IdType>
 [[nodiscard]] auto id_list_json(const std::vector<IdType>& values) -> Json {
   auto result = Json::array();
-  for (const auto &value : values)
+  for (const auto& value : values)
     result.push_back(id_text(value));
   return result;
 }
 
 template <typename IdType>
 [[nodiscard]] auto parse_id_list(const Json& values) -> std::vector<IdType> {
-  if (!values.is_array())
-    throw CodecFailure{"identity list is invalid"};
+  if (!values.is_array()) throw CodecFailure{"identity list is invalid"};
   std::vector<IdType> result;
   result.reserve(values.size());
-  for (const auto &value : values)
+  for (const auto& value : values)
     result.push_back(parse_id<IdType>(value));
   return result;
 }
@@ -1084,7 +1078,7 @@ template <typename IdType>
 }
 
 [[nodiscard]] auto child_run_context_json(
-    const domain::ChildRunContextBinding &context) -> Json {
+    const domain::ChildRunContextBinding& context) -> Json {
   return {{"parcel_id", id_text(context.parcel_id)},
           {"target_snapshot", snapshot_json(context.target_snapshot)},
           {"evidence_ids", id_list_json(context.evidence_ids)},
@@ -1102,8 +1096,7 @@ template <typename IdType>
 }
 
 [[nodiscard]] auto child_run_descriptor_json(
-    const domain::ChildRunDescriptor &descriptor,
-                          const bool include_attempt)
+    const domain::ChildRunDescriptor& descriptor, const bool include_attempt)
     -> Json {
   if (!domain::validate_child_run_descriptor(descriptor)) {
     throw CodecFailure{"child-run descriptor is invalid"};
@@ -1134,8 +1127,7 @@ template <typename IdType>
       parse_child_run_budget(value.at("budget")),
       parse_effects(value.at("effects")),
       parse_scopes(value.at("capability_scopes")),
-      value.contains("attempt") ? value.at("attempt").get<std::uint32_t>()
-                                : 1U,
+      value.contains("attempt") ? value.at("attempt").get<std::uint32_t>() : 1U,
       value.contains("review_receipt_id")
           ? parse_optional_id<domain::ReviewReceiptId>(
                 value.at("review_receipt_id"))
@@ -1147,7 +1139,7 @@ template <typename IdType>
 }
 
 [[nodiscard]] auto session_task_result_json(
-    const domain::SessionTaskResult &result) -> Json {
+    const domain::SessionTaskResult& result) -> Json {
   const domain::ChildRunBudget shape_budget{
       std::numeric_limits<std::uint32_t>::max(),
       std::numeric_limits<std::uint32_t>::max(),
@@ -1248,18 +1240,15 @@ template <typename IdType>
 }
 
 [[nodiscard]] auto project_backlog_source_name(
-    const domain::ProjectBacklogDecisionSource source)
-    -> std::string_view {
+    const domain::ProjectBacklogDecisionSource source) -> std::string_view {
   switch (source) {
-  case domain::ProjectBacklogDecisionSource::user:
-    return "user";
-  case domain::ProjectBacklogDecisionSource::policy:
-    return "policy";
+    case domain::ProjectBacklogDecisionSource::user: return "user";
+    case domain::ProjectBacklogDecisionSource::policy: return "policy";
   }
   throw CodecFailure{"invalid project-backlog decision source"};
 }
 
-[[nodiscard]] auto parse_project_backlog_source(const Json &value)
+[[nodiscard]] auto parse_project_backlog_source(const Json& value)
     -> domain::ProjectBacklogDecisionSource {
   using Source = domain::ProjectBacklogDecisionSource;
   return enum_value<Source>(
@@ -1268,18 +1257,15 @@ template <typename IdType>
 }
 
 [[nodiscard]] auto project_backlog_status_name(
-    const domain::ProjectBacklogItemStatus status)
-    -> std::string_view {
+    const domain::ProjectBacklogItemStatus status) -> std::string_view {
   switch (status) {
-  case domain::ProjectBacklogItemStatus::open:
-    return "open";
-  case domain::ProjectBacklogItemStatus::resolved:
-    return "resolved";
+    case domain::ProjectBacklogItemStatus::open: return "open";
+    case domain::ProjectBacklogItemStatus::resolved: return "resolved";
   }
   throw CodecFailure{"invalid project-backlog status"};
 }
 
-[[nodiscard]] auto parse_project_backlog_status(const Json &value)
+[[nodiscard]] auto parse_project_backlog_status(const Json& value)
     -> domain::ProjectBacklogItemStatus {
   using Status = domain::ProjectBacklogItemStatus;
   return enum_value<Status>(
@@ -1288,7 +1274,7 @@ template <typename IdType>
 }
 
 [[nodiscard]] auto project_backlog_item_json(
-    const domain::ProjectBacklogItem &item) -> Json {
+    const domain::ProjectBacklogItem& item) -> Json {
   if (!domain::validate_project_backlog_item(item)) {
     throw CodecFailure{"project-backlog item is invalid"};
   }
@@ -1303,9 +1289,9 @@ template <typename IdType>
           {"source", project_backlog_source_name(item.source)}};
 }
 
-[[nodiscard]] auto parse_project_backlog_item(const Json &value)
+[[nodiscard]] auto parse_project_backlog_item(const Json& value)
     -> domain::ProjectBacklogItem {
-  const auto &origin = value.at("origin");
+  const auto& origin = value.at("origin");
   domain::ProjectBacklogItem item{
       parse_id<domain::ProjectBacklogItemId>(value.at("item_id")),
       parse_id<domain::RepositoryId>(value.at("repository_id")),
@@ -1322,7 +1308,7 @@ template <typename IdType>
 }
 
 [[nodiscard]] auto project_backlog_status_change_json(
-    const domain::ProjectBacklogStatusChange &change) -> Json {
+    const domain::ProjectBacklogStatusChange& change) -> Json {
   if (!domain::validate_project_backlog_status_change(change)) {
     throw CodecFailure{"project-backlog status change is invalid"};
   }
@@ -1335,7 +1321,7 @@ template <typename IdType>
            optional_id_json(change.expected_status_event_id)}};
 }
 
-[[nodiscard]] auto parse_project_backlog_status_change(const Json &value)
+[[nodiscard]] auto parse_project_backlog_status_change(const Json& value)
     -> domain::ProjectBacklogStatusChange {
   domain::ProjectBacklogStatusChange change{
       parse_id<domain::ProjectBacklogItemId>(value.at("item_id")),
@@ -1351,8 +1337,7 @@ template <typename IdType>
 }
 
 [[nodiscard]] auto plan_revision_json(const domain::PlanRevision& revision,
-                                      const bool include_evidence)
-    -> Json {
+                                      const bool include_evidence) -> Json {
   if (!domain::validate_plan_revision(revision)) {
     throw CodecFailure{"plan revision is invalid"};
   }
@@ -1362,13 +1347,12 @@ template <typename IdType>
   }
   Json result{
       {"plan_id", id_text(revision.plan_id)},
-              {"revision_id", id_text(revision.revision_id)},
-              {"supersedes_revision_id",
-               optional_id_json(revision.supersedes_revision_id)},
-              {"goal", revision.goal},
-              {"source_snapshot",
-               optional_snapshot_json(revision.source_snapshot)},
-              {"tasks", std::move(tasks)}};
+      {"revision_id", id_text(revision.revision_id)},
+      {"supersedes_revision_id",
+       optional_id_json(revision.supersedes_revision_id)},
+      {"goal", revision.goal},
+      {"source_snapshot", optional_snapshot_json(revision.source_snapshot)},
+      {"tasks", std::move(tasks)}};
   if (include_evidence) {
     auto evidence = Json::array();
     for (const auto& binding : revision.evidence) {
@@ -1460,7 +1444,8 @@ template <typename IdType>
   }
   domain::PlanRevisionInvalidation invalidation{
       parse_id<domain::PlanId>(value.at("plan_id")),
-      parse_id<domain::PlanRevisionId>(value.at("revision_id")), {}};
+      parse_id<domain::PlanRevisionId>(value.at("revision_id")),
+      {}};
   invalidation.triggers.reserve(raw_triggers.size());
   for (const auto& trigger : raw_triggers) {
     invalidation.triggers.push_back(parse_plan_invalidation_trigger(trigger));
@@ -1521,19 +1506,15 @@ template <typename IdType>
 [[nodiscard]] auto review_finding_severity_name(
     const domain::ReviewFindingSeverity value) -> std::string {
   switch (value) {
-    case domain::ReviewFindingSeverity::low:
-      return "low";
-    case domain::ReviewFindingSeverity::medium:
-      return "medium";
-    case domain::ReviewFindingSeverity::high:
-      return "high";
-    case domain::ReviewFindingSeverity::critical:
-      return "critical";
+    case domain::ReviewFindingSeverity::low: return "low";
+    case domain::ReviewFindingSeverity::medium: return "medium";
+    case domain::ReviewFindingSeverity::high: return "high";
+    case domain::ReviewFindingSeverity::critical: return "critical";
   }
   throw CodecFailure{"invalid review finding severity"};
 }
 
-[[nodiscard]] auto parse_review_finding_severity(const Json &value)
+[[nodiscard]] auto parse_review_finding_severity(const Json& value)
     -> domain::ReviewFindingSeverity {
   return enum_value<domain::ReviewFindingSeverity>(
       value.get<std::string>(),
@@ -1543,9 +1524,9 @@ template <typename IdType>
        {"critical", domain::ReviewFindingSeverity::critical}});
 }
 
-[[nodiscard]] auto source_json(const domain::RepositorySourceIdentity &source)
+[[nodiscard]] auto source_json(const domain::RepositorySourceIdentity& source)
     -> Json;
-[[nodiscard]] auto parse_source(const Json &value)
+[[nodiscard]] auto parse_source(const Json& value)
     -> domain::RepositorySourceIdentity;
 
 [[nodiscard]] auto review_actor_json(const domain::ReviewActor& actor) -> Json {
@@ -1566,7 +1547,7 @@ template <typename IdType>
 }
 
 [[nodiscard]] auto review_participant_json(
-    const domain::ReviewParticipantProvenance &participant) -> Json {
+    const domain::ReviewParticipantProvenance& participant) -> Json {
   if (!repository::validate_review_participant_provenance(participant)) {
     throw CodecFailure{"review participant provenance is invalid"};
   }
@@ -1579,7 +1560,7 @@ template <typename IdType>
       {"model_version", optional_string_json(participant.model_version)}};
 }
 
-[[nodiscard]] auto parse_review_participant(const Json &value)
+[[nodiscard]] auto parse_review_participant(const Json& value)
     -> domain::ReviewParticipantProvenance {
   domain::ReviewParticipantProvenance result{
       parse_review_actor(value.at("actor")),
@@ -1671,14 +1652,16 @@ template <typename IdType>
       parse_optional_string(value.at("scenario_application_revision")),
       parse_optional_digest(value.at("scenario_fake_script_digest")),
       parse_optional_digest(value.at("scenario_terminal_capabilities_digest")),
-      parse_digest(value.at("result_digest")), std::move(artifacts)};
+      parse_digest(value.at("result_digest")),
+      std::move(artifacts)};
   if (!repository::validate_review_evidence_binding(result)) {
     throw CodecFailure{"review evidence binding is invalid"};
   }
   return result;
 }
 
-[[nodiscard]] auto review_draft_json(const domain::ReviewReceiptDraft &draft) -> Json {
+[[nodiscard]] auto review_draft_json(const domain::ReviewReceiptDraft& draft)
+    -> Json {
   if (!repository::validate_review_receipt_draft(draft)) {
     throw CodecFailure{"review receipt draft is invalid"};
   }
@@ -1687,8 +1670,8 @@ template <typename IdType>
     evidence.push_back(review_evidence_json(binding));
   }
   Json result{{"receipt_id", id_text(draft.receipt_id)},
-          {"candidate", review_candidate_json(draft.candidate)},
-          {"evidence", std::move(evidence)}};
+              {"candidate", review_candidate_json(draft.candidate)},
+              {"evidence", std::move(evidence)}};
   if (draft.author) result["author"] = review_participant_json(*draft.author);
   return result;
 }
@@ -1721,14 +1704,14 @@ template <typename IdType>
     artifacts.push_back(id_text(artifact));
   }
   Json reproduction = Json::array();
-  for (const auto &evidence : finding.reproduction_evidence_ids) {
+  for (const auto& evidence : finding.reproduction_evidence_ids) {
     reproduction.push_back(id_text(evidence));
   }
   Json result{{"finding_id", id_text(finding.finding_id)},
-          {"summary", finding.summary},
-          {"verification_evidence_id",
-           optional_id_json(finding.verification_evidence_id)},
-          {"artifacts", std::move(artifacts)}};
+              {"summary", finding.summary},
+              {"verification_evidence_id",
+               optional_id_json(finding.verification_evidence_id)},
+              {"artifacts", std::move(artifacts)}};
   if (finding.severity != domain::ReviewFindingSeverity::medium) {
     result["severity"] = review_finding_severity_name(finding.severity);
   }
@@ -1747,7 +1730,7 @@ template <typename IdType>
   }
   std::vector<domain::VerificationEvidenceId> reproduction;
   if (value.contains("reproduction_evidence_ids")) {
-    for (const auto &evidence : value.at("reproduction_evidence_ids")) {
+    for (const auto& evidence : value.at("reproduction_evidence_ids")) {
       reproduction.push_back(
           parse_id<domain::VerificationEvidenceId>(evidence));
     }
@@ -1771,7 +1754,8 @@ template <typename IdType>
   return result;
 }
 
-[[nodiscard]] auto review_override_json(const domain::ReviewOverride &value) -> Json {
+[[nodiscard]] auto review_override_json(const domain::ReviewOverride& value)
+    -> Json {
   if (!repository::validate_review_override(value)) {
     throw CodecFailure{"review override is invalid"};
   }
@@ -1923,11 +1907,11 @@ template <typename IdType>
   Json output = Json::array();
   for (const auto& excerpt : evidence.output) {
     output.push_back({{"stream", verification_stream_name(excerpt.stream)},
-         {"text", excerpt.text},
-         {"represented_bytes", excerpt.represented_bytes},
-         {"truncated", excerpt.truncated},
-         {"complete_artifact_id",
-          optional_id_json(excerpt.complete_artifact_id)}});
+                      {"text", excerpt.text},
+                      {"represented_bytes", excerpt.represented_bytes},
+                      {"truncated", excerpt.truncated},
+                      {"complete_artifact_id",
+                       optional_id_json(excerpt.complete_artifact_id)}});
   }
   Json diagnostics = Json::array();
   for (const auto& diagnostic : evidence.diagnostics) {
@@ -1936,7 +1920,7 @@ template <typename IdType>
          {"code", diagnostic.code},
          {"message", diagnostic.message},
          {"source", diagnostic.source ? source_json(*diagnostic.source)
-                                       : Json(nullptr)}});
+                                      : Json(nullptr)}});
   }
   Json artifacts = Json::array();
   for (const auto& artifact : evidence.artifacts) {
@@ -1944,24 +1928,23 @@ template <typename IdType>
   }
   return {
       {"evidence_id", id_text(evidence.evidence_id)},
-          {"kind", verification_kind_name(evidence.kind)},
-          {"extension_name", optional_string_json(evidence.extension_name)},
-          {"outcome", verification_outcome_name(evidence.outcome)},
-          {"source_snapshot", snapshot_json(evidence.source_snapshot)},
-          {"baseline_snapshot",
-           optional_snapshot_json(evidence.baseline_snapshot)},
-          {"build_configuration",
-           optional_digest_json(evidence.build_configuration)},
-          {"producer",
-           {{"name", evidence.producer.name},
-            {"version", evidence.producer.version},
-            {"tool_name", evidence.producer.tool_name},
-            {"invocation_id", id_text(evidence.producer.invocation_id)}}},
-          {"observed_at_ms", evidence.observed_at.time_since_epoch().count()},
-          {"summary", evidence.summary},
-          {"output", std::move(output)},
-          {"diagnostics", std::move(diagnostics)},
-          {"artifacts", std::move(artifacts)}};
+      {"kind", verification_kind_name(evidence.kind)},
+      {"extension_name", optional_string_json(evidence.extension_name)},
+      {"outcome", verification_outcome_name(evidence.outcome)},
+      {"source_snapshot", snapshot_json(evidence.source_snapshot)},
+      {"baseline_snapshot", optional_snapshot_json(evidence.baseline_snapshot)},
+      {"build_configuration",
+       optional_digest_json(evidence.build_configuration)},
+      {"producer",
+       {{"name", evidence.producer.name},
+        {"version", evidence.producer.version},
+        {"tool_name", evidence.producer.tool_name},
+        {"invocation_id", id_text(evidence.producer.invocation_id)}}},
+      {"observed_at_ms", evidence.observed_at.time_since_epoch().count()},
+      {"summary", evidence.summary},
+      {"output", std::move(output)},
+      {"diagnostics", std::move(diagnostics)},
+      {"artifacts", std::move(artifacts)}};
 }
 
 [[nodiscard]] auto parse_verification(const Json& value)
@@ -1969,11 +1952,11 @@ template <typename IdType>
   std::vector<domain::VerificationOutputExcerpt> output;
   for (const auto& excerpt : value.at("output")) {
     output.push_back({parse_verification_stream(excerpt.at("stream")),
-        excerpt.at("text").get<std::string>(),
-        excerpt.at("represented_bytes").get<std::uint64_t>(),
-        excerpt.at("truncated").get<bool>(),
-        parse_optional_id<domain::ArtifactId>(
-            excerpt.at("complete_artifact_id"))});
+                      excerpt.at("text").get<std::string>(),
+                      excerpt.at("represented_bytes").get<std::uint64_t>(),
+                      excerpt.at("truncated").get<bool>(),
+                      parse_optional_id<domain::ArtifactId>(
+                          excerpt.at("complete_artifact_id"))});
   }
   std::vector<domain::VerificationDiagnostic> diagnostics;
   for (const auto& diagnostic : value.at("diagnostics")) {
@@ -1983,8 +1966,8 @@ template <typename IdType>
     }
     diagnostics.push_back(
         {parse_verification_severity(diagnostic.at("severity")),
-        diagnostic.at("code").get<std::string>(),
-        diagnostic.at("message").get<std::string>(), std::move(source)});
+         diagnostic.at("code").get<std::string>(),
+         diagnostic.at("message").get<std::string>(), std::move(source)});
   }
   std::vector<domain::ArtifactId> artifacts;
   for (const auto& artifact : value.at("artifacts")) {
@@ -2006,8 +1989,10 @@ template <typename IdType>
            value.at("producer").at("invocation_id"))},
       std::chrono::sys_time<std::chrono::milliseconds>{
           std::chrono::milliseconds{observed_count}},
-      value.at("summary").get<std::string>(), std::move(output),
-      std::move(diagnostics), std::move(artifacts)};
+      value.at("summary").get<std::string>(),
+      std::move(output),
+      std::move(diagnostics),
+      std::move(artifacts)};
   if (!repository::validate_verification_evidence(result)) {
     throw CodecFailure{"verification evidence is invalid"};
   }
@@ -2059,11 +2044,13 @@ template <typename IdType>
   switch (value) {
     case domain::ProvenanceDiagnosticCode::invalid_registry:
       return "invalid_registry";
-    case domain::ProvenanceDiagnosticCode::duplicate_key: return "duplicate_key";
+    case domain::ProvenanceDiagnosticCode::duplicate_key:
+      return "duplicate_key";
     case domain::ProvenanceDiagnosticCode::duplicate_environment_binding:
       return "duplicate_environment_binding";
     case domain::ProvenanceDiagnosticCode::unknown_key: return "unknown_key";
-    case domain::ProvenanceDiagnosticCode::invalid_value: return "invalid_value";
+    case domain::ProvenanceDiagnosticCode::invalid_value:
+      return "invalid_value";
     case domain::ProvenanceDiagnosticCode::value_too_large:
       return "value_too_large";
     case domain::ProvenanceDiagnosticCode::too_many_values:
@@ -2083,22 +2070,21 @@ template <typename IdType>
   using Code = domain::ProvenanceDiagnosticCode;
   const auto name = value.get<std::string>();
   return enum_value<Code>(
-      name, {{"invalid_registry", Code::invalid_registry},
-             {"duplicate_key", Code::duplicate_key},
-             {"duplicate_environment_binding",
-              Code::duplicate_environment_binding},
-             {"unknown_key", Code::unknown_key},
-             {"invalid_value", Code::invalid_value},
-             {"value_too_large", Code::value_too_large},
-             {"too_many_values", Code::too_many_values},
-             {"sensitive_value", Code::sensitive_value},
-             {"duplicate_source_value", Code::duplicate_source_value},
-             {"source_warning", Code::source_warning}});
+      name,
+      {{"invalid_registry", Code::invalid_registry},
+       {"duplicate_key", Code::duplicate_key},
+       {"duplicate_environment_binding", Code::duplicate_environment_binding},
+       {"unknown_key", Code::unknown_key},
+       {"invalid_value", Code::invalid_value},
+       {"value_too_large", Code::value_too_large},
+       {"too_many_values", Code::too_many_values},
+       {"sensitive_value", Code::sensitive_value},
+       {"duplicate_source_value", Code::duplicate_source_value},
+       {"source_warning", Code::source_warning}});
 }
 
 [[nodiscard]] auto credential_kind_name(
-    const domain::CredentialSourceKind value)
-    -> std::string_view {
+    const domain::CredentialSourceKind value) -> std::string_view {
   switch (value) {
     case domain::CredentialSourceKind::environment: return "environment";
     case domain::CredentialSourceKind::configuration_file:
@@ -2180,15 +2166,14 @@ template <typename IdType>
   auto components = Json::array();
   for (const auto& component : provenance.components) {
     components.push_back(
-        {{"component", component.component},
-                          {"version", component.version}});
+        {{"component", component.component}, {"version", component.version}});
   }
   auto tools = Json::array();
   for (const auto& tool : provenance.tools) {
     tools.push_back(
         {{"tool_name", tool.tool_name},
-                     {"declared_effects", effects_json(tool.declared_effects)},
-                     {"capability_scopes", scopes_json(tool.capability_scopes)}});
+         {"declared_effects", effects_json(tool.declared_effects)},
+         {"capability_scopes", scopes_json(tool.capability_scopes)}});
   }
   return {{"aiforge_version", provenance.aiforge_version},
           {"backend_id", provenance.backend_id},
@@ -2225,12 +2210,13 @@ template <typename IdType>
       {},
       {},
       {}};
-  provenance.backend_version = parse_optional_string(value.at("backend_version"));
+  provenance.backend_version =
+      parse_optional_string(value.at("backend_version"));
   if (!value.at("credential_source").is_null()) {
     const auto& source = value.at("credential_source");
     provenance.credential_source = domain::CredentialSourceReference{
         parse_credential_kind(source.at("kind")),
-                                          source.at("identity").get<std::string>()};
+        source.at("identity").get<std::string>()};
   }
   provenance.configuration.reserve(configuration.size());
   for (const auto& entry : configuration) {
@@ -2259,48 +2245,116 @@ template <typename IdType>
   return std::visit(
       Overloaded{
           [](const domain::RunStarted&) { return std::string{"run.started"}; },
-          [](const domain::RunProvenanceRecorded &) { return std::string{"run.provenance_recorded"}; },
-          [](const domain::PersonaSelectionRecorded &) { return std::string{"persona.selection_recorded"}; },
-          [](const domain::SessionSpendCeilingSet &) { return std::string{"session.spend_ceiling_set"}; },
-          [](const domain::RunAwaitingInput &) { return std::string{"run.awaiting_input"}; },
+          [](const domain::RunProvenanceRecorded&) {
+            return std::string{"run.provenance_recorded"};
+          },
+          [](const domain::PersonaSelectionRecorded&) {
+            return std::string{"persona.selection_recorded"};
+          },
+          [](const domain::SessionSpendCeilingSet&) {
+            return std::string{"session.spend_ceiling_set"};
+          },
+          [](const domain::RunAwaitingInput&) {
+            return std::string{"run.awaiting_input"};
+          },
           [](const domain::RunResumed&) { return std::string{"run.resumed"}; },
-          [](const domain::RunCompletionRequested &) { return std::string{"run.completion_requested"}; },
-          [](const domain::RunCompleted &) { return std::string{"run.completed"}; },
+          [](const domain::RunCompletionRequested&) {
+            return std::string{"run.completion_requested"};
+          },
+          [](const domain::RunCompleted&) {
+            return std::string{"run.completed"};
+          },
           [](const domain::RunFailed&) { return std::string{"run.failed"}; },
-          [](const domain::RunCancelRequested &) { return std::string{"run.cancel_requested"}; },
-          [](const domain::RunCancelled &) { return std::string{"run.cancelled"}; },
-          [](const domain::UserContentAdded &) { return std::string{"content.user_added"}; },
-          [](const domain::AssistantContentStarted &) { return std::string{"content.assistant_started"}; },
-          [](const domain::AssistantContentDeltaAdded &) { return std::string{"content.assistant_delta_added"}; },
-          [](const domain::AssistantContentFinished &) { return std::string{"content.assistant_finished"}; },
-          [](const domain::InferenceStarted &) { return std::string{"inference.started"}; },
+          [](const domain::RunCancelRequested&) {
+            return std::string{"run.cancel_requested"};
+          },
+          [](const domain::RunCancelled&) {
+            return std::string{"run.cancelled"};
+          },
+          [](const domain::UserContentAdded&) {
+            return std::string{"content.user_added"};
+          },
+          [](const domain::AssistantContentStarted&) {
+            return std::string{"content.assistant_started"};
+          },
+          [](const domain::AssistantContentDeltaAdded&) {
+            return std::string{"content.assistant_delta_added"};
+          },
+          [](const domain::AssistantContentFinished&) {
+            return std::string{"content.assistant_finished"};
+          },
+          [](const domain::InferenceStarted&) {
+            return std::string{"inference.started"};
+          },
           [](const domain::InferencePricingObserved&) {
             return std::string{"inference.pricing_observed"};
           },
-          [](const domain::ReasoningMetadataAdded &) { return std::string{"inference.reasoning_metadata_added"}; },
-          [](const domain::UsageRecorded &) { return std::string{"inference.usage_recorded"}; },
+          [](const domain::ReasoningMetadataAdded&) {
+            return std::string{"inference.reasoning_metadata_added"};
+          },
+          [](const domain::UsageRecorded&) {
+            return std::string{"inference.usage_recorded"};
+          },
           [](const domain::InferenceCostRecorded&) {
             return std::string{"inference.cost_recorded"};
           },
-          [](const domain::InferenceFinished &) { return std::string{"inference.finished"}; },
-          [](const domain::InferenceFailed &) { return std::string{"inference.failed"}; },
-          [](const domain::InferenceCancelled &) { return std::string{"inference.cancelled"}; },
-          [](const domain::ToolProposed &) { return std::string{"tool.proposed"}; },
-          [](const domain::ToolPolicyDecided &) { return std::string{"tool.policy_decided"}; },
-          [](const domain::ToolApprovalRequested &) { return std::string{"tool.approval_requested"}; },
-          [](const domain::ToolApprovalDecided &) { return std::string{"tool.approval_decided"}; },
-          [](const domain::ToolPolicyFailed &) { return std::string{"tool.policy_failed"}; },
-          [](const domain::ToolStarted &) { return std::string{"tool.started"}; },
-          [](const domain::ToolProgressed &) { return std::string{"tool.progressed"}; },
-          [](const domain::ToolResultRecorded &) { return std::string{"tool.result_recorded"}; },
-          [](const domain::ToolErrored &) { return std::string{"tool.errored"}; },
-          [](const domain::QuestionRequested &) { return std::string{"question.requested"}; },
-          [](const domain::QuestionAnswered &) { return std::string{"question.answered"}; },
-          [](const domain::QuestionCancelled &) { return std::string{"question.cancelled"}; },
-          [](const domain::ArtifactCreated &) { return std::string{"artifact.created"}; },
-          [](const domain::ArtifactReferenced &) { return std::string{"artifact.referenced"}; },
-          [](const domain::ArtifactDisplayed &) { return std::string{"artifact.displayed"}; },
-          [](const domain::ArtifactRemovedFromView &) { return std::string{"artifact.removed_from_view"}; },
+          [](const domain::InferenceFinished&) {
+            return std::string{"inference.finished"};
+          },
+          [](const domain::InferenceFailed&) {
+            return std::string{"inference.failed"};
+          },
+          [](const domain::InferenceCancelled&) {
+            return std::string{"inference.cancelled"};
+          },
+          [](const domain::ToolProposed&) {
+            return std::string{"tool.proposed"};
+          },
+          [](const domain::ToolPolicyDecided&) {
+            return std::string{"tool.policy_decided"};
+          },
+          [](const domain::ToolApprovalRequested&) {
+            return std::string{"tool.approval_requested"};
+          },
+          [](const domain::ToolApprovalDecided&) {
+            return std::string{"tool.approval_decided"};
+          },
+          [](const domain::ToolPolicyFailed&) {
+            return std::string{"tool.policy_failed"};
+          },
+          [](const domain::ToolStarted&) {
+            return std::string{"tool.started"};
+          },
+          [](const domain::ToolProgressed&) {
+            return std::string{"tool.progressed"};
+          },
+          [](const domain::ToolResultRecorded&) {
+            return std::string{"tool.result_recorded"};
+          },
+          [](const domain::ToolErrored&) {
+            return std::string{"tool.errored"};
+          },
+          [](const domain::QuestionRequested&) {
+            return std::string{"question.requested"};
+          },
+          [](const domain::QuestionAnswered&) {
+            return std::string{"question.answered"};
+          },
+          [](const domain::QuestionCancelled&) {
+            return std::string{"question.cancelled"};
+          },
+          [](const domain::ArtifactCreated&) {
+            return std::string{"artifact.created"};
+          },
+          [](const domain::ArtifactReferenced&) {
+            return std::string{"artifact.referenced"};
+          },
+          [](const domain::ArtifactDisplayed&) {
+            return std::string{"artifact.displayed"};
+          },
+          [](const domain::ArtifactRemovedFromView&) {
+            return std::string{"artifact.removed_from_view"};
+          },
           [](const domain::VerificationEvidenceRecorded&) {
             return std::string{"verification.evidence_recorded"};
           },
@@ -2340,17 +2394,21 @@ template <typename IdType>
           [](const domain::SessionTasksMaterialized&) {
             return std::string{"session.tasks_materialized"};
           },
-          [](const domain::ChildRunCreated &) { return std::string{"run.child_created"}; },
+          [](const domain::ChildRunCreated&) {
+            return std::string{"run.child_created"};
+          },
           [](const domain::SessionTaskResultRecorded&) {
             return std::string{"session.task_result_recorded"};
           },
-          [](const domain::ProjectBacklogItemPromoted &) {
+          [](const domain::ProjectBacklogItemPromoted&) {
             return std::string{"project_backlog.item_promoted"};
           },
-          [](const domain::ProjectBacklogItemStatusChanged &) {
+          [](const domain::ProjectBacklogItemStatusChanged&) {
             return std::string{"project_backlog.item_status_changed"};
           },
-          [](const domain::InterRunMessageSent &) { return std::string{"run.inter_message_sent"}; },
+          [](const domain::InterRunMessageSent&) {
+            return std::string{"run.inter_message_sent"};
+          },
           [](const domain::UnknownEvent& value) { return value.type_name; }},
       payload);
 }
@@ -2361,29 +2419,58 @@ template <typename IdType>
   static_assert(std::variant_size_v<domain::RunEventPayload> == 58,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
-      "run.started", "run.provenance_recorded", "persona.selection_recorded",
+      "run.started",
+      "run.provenance_recorded",
+      "persona.selection_recorded",
       "session.spend_ceiling_set",
-      "run.awaiting_input", "run.resumed",
-      "run.completion_requested", "run.completed", "run.failed",
-      "run.cancel_requested", "run.cancelled", "content.user_added",
-      "content.assistant_started", "content.assistant_delta_added",
-      "content.assistant_finished", "inference.started",
+      "run.awaiting_input",
+      "run.resumed",
+      "run.completion_requested",
+      "run.completed",
+      "run.failed",
+      "run.cancel_requested",
+      "run.cancelled",
+      "content.user_added",
+      "content.assistant_started",
+      "content.assistant_delta_added",
+      "content.assistant_finished",
+      "inference.started",
       "inference.pricing_observed",
-      "inference.reasoning_metadata_added", "inference.usage_recorded",
+      "inference.reasoning_metadata_added",
+      "inference.usage_recorded",
       "inference.cost_recorded",
-      "inference.finished", "inference.failed", "inference.cancelled",
-      "tool.proposed", "tool.policy_decided", "tool.approval_requested",
-      "tool.approval_decided", "tool.policy_failed", "tool.started", "tool.progressed",
-      "tool.result_recorded", "tool.errored", "question.requested",
-      "question.answered", "question.cancelled", "artifact.created",
-      "artifact.referenced", "artifact.displayed",
-      "artifact.removed_from_view", "verification.evidence_recorded",
-      "review.receipt_drafted", "review.requested",
-      "review.finding_opened", "review.finding_resolved",
-      "review.verdict_recorded", "review.verdict_revoked",
-      "review.override_recorded", "review.override_revoked",
-      "plan.revision_proposed", "plan.revision_decision_recorded",
-      "plan.revision_invalidated", "session.tasks_materialized",
+      "inference.finished",
+      "inference.failed",
+      "inference.cancelled",
+      "tool.proposed",
+      "tool.policy_decided",
+      "tool.approval_requested",
+      "tool.approval_decided",
+      "tool.policy_failed",
+      "tool.started",
+      "tool.progressed",
+      "tool.result_recorded",
+      "tool.errored",
+      "question.requested",
+      "question.answered",
+      "question.cancelled",
+      "artifact.created",
+      "artifact.referenced",
+      "artifact.displayed",
+      "artifact.removed_from_view",
+      "verification.evidence_recorded",
+      "review.receipt_drafted",
+      "review.requested",
+      "review.finding_opened",
+      "review.finding_resolved",
+      "review.verdict_recorded",
+      "review.verdict_revoked",
+      "review.override_recorded",
+      "review.override_revoked",
+      "plan.revision_proposed",
+      "plan.revision_decision_recorded",
+      "plan.revision_invalidated",
+      "session.tasks_materialized",
       "run.child_created",
       "session.task_result_recorded",
       "project_backlog.item_promoted",
@@ -2398,7 +2485,8 @@ template <typename IdType>
   return (schema_version == 1 && known_payload_type(type)) ||
          (schema_version == 2 &&
           (type == "plan.revision_proposed" || type == "run.child_created")) ||
-         ((schema_version == 3 || schema_version == 4) && type == "run.child_created");
+         ((schema_version == 3 || schema_version == 4) &&
+          type == "run.child_created");
 }
 
 [[nodiscard]] auto payload_json(const domain::RunEventPayload& payload,
@@ -2409,9 +2497,9 @@ template <typename IdType>
           [](const domain::RunStarted& value) -> Json {
             return {
                 {"surface_id", id_text(value.surface_id)},
-                    {"workspace_id", id_text(value.workspace_id)},
-                    {"permission_profile_id", id_text(value.permission_profile_id)},
-                    {"persona_id", optional_id_json(value.persona_id)}};
+                {"workspace_id", id_text(value.workspace_id)},
+                {"permission_profile_id", id_text(value.permission_profile_id)},
+                {"persona_id", optional_id_json(value.persona_id)}};
           },
           [](const domain::RunProvenanceRecorded& value) -> Json {
             return {{"provenance", run_provenance_json(value.provenance)}};
@@ -2429,7 +2517,9 @@ template <typename IdType>
           [](const domain::RunResumed& value) -> Json {
             return {{"question_id", optional_id_json(value.question_id)}};
           },
-          [](const domain::RunCompletionRequested &) -> Json { return Json::object(); },
+          [](const domain::RunCompletionRequested&) -> Json {
+            return Json::object();
+          },
           [](const domain::RunCompleted&) -> Json { return Json::object(); },
           [](const domain::RunFailed& value) -> Json {
             return {{"error", domain_error_json(value.error)}};
@@ -2460,7 +2550,7 @@ template <typename IdType>
             return {{"inference_id", id_text(value.inference_id)},
                     {"model_id", id_text(value.model_id)}};
           },
-          [](const domain::InferencePricingObserved &value) -> Json {
+          [](const domain::InferencePricingObserved& value) -> Json {
             return {
                 {"inference_id", id_text(value.inference_id)},
                 {"observation", pricing_observation_json(value.observation)}};
@@ -2551,8 +2641,8 @@ template <typename IdType>
           [](const domain::QuestionAnswered& value) -> Json {
             return {
                 {"question_id", id_text(value.answer.question_id)},
-                    {"selected_option_ids", value.answer.selected_option_ids},
-                    {"free_form", optional_string_json(value.answer.free_form)}};
+                {"selected_option_ids", value.answer.selected_option_ids},
+                {"free_form", optional_string_json(value.answer.free_form)}};
           },
           [](const domain::QuestionCancelled& value) -> Json {
             return {{"question_id", id_text(value.question_id)},
@@ -2596,8 +2686,8 @@ template <typename IdType>
           },
           [](const domain::ReviewVerdictRecorded& value) -> Json {
             Json result{{"receipt_id", id_text(value.receipt_id)},
-                    {"verdict", review_verdict_name(value.verdict)},
-                    {"reviewer", review_actor_json(value.reviewer)}};
+                        {"verdict", review_verdict_name(value.verdict)},
+                        {"reviewer", review_actor_json(value.reviewer)}};
             if (value.reviewer_provenance) {
               result["reviewer_provenance"] =
                   review_participant_json(*value.reviewer_provenance);
@@ -2624,8 +2714,7 @@ template <typename IdType>
                      plan_revision_json(value.revision, schema_version >= 2)}};
           },
           [](const domain::PlanRevisionDecisionRecorded& value) -> Json {
-            return {{"decision",
-                     plan_revision_decision_json(value.decision)}};
+            return {{"decision", plan_revision_decision_json(value.decision)}};
           },
           [](const domain::PlanRevisionInvalidated& value) -> Json {
             return {{"invalidation",
@@ -2636,7 +2725,7 @@ template <typename IdType>
                     {"revision_id", id_text(value.revision_id)}};
           },
           [schema_version](const domain::ChildRunCreated& value) -> Json {
-            Json result {{"child_run_id", id_text(value.child_run_id)}};
+            Json result{{"child_run_id", id_text(value.child_run_id)}};
             if (schema_version >= 2) {
               if (!value.descriptor) {
                 throw CodecFailure{
@@ -2647,18 +2736,17 @@ template <typename IdType>
                     "schema-v2 child run cannot encode a retry attempt"};
               }
               result["descriptor"] = child_run_descriptor_json(
-                  *value.descriptor,
-                                            schema_version >= 3);
+                  *value.descriptor, schema_version >= 3);
             }
             return result;
           },
           [](const domain::SessionTaskResultRecorded& value) -> Json {
             return {{"result", session_task_result_json(value.result)}};
           },
-          [](const domain::ProjectBacklogItemPromoted &value) -> Json {
+          [](const domain::ProjectBacklogItemPromoted& value) -> Json {
             return {{"item", project_backlog_item_json(value.item)}};
           },
-          [](const domain::ProjectBacklogItemStatusChanged &value) -> Json {
+          [](const domain::ProjectBacklogItemStatusChanged& value) -> Json {
             return {
                 {"change", project_backlog_status_change_json(value.change)}};
           },
@@ -2671,7 +2759,8 @@ template <typename IdType>
               throw CodecFailure{"unknown event payload is not JSON"};
             }
             std::vector<std::unordered_set<std::string>> keys;
-            const auto callback = [&keys](const int, const Json::parse_event_t event,
+            const auto callback = [&keys](const int,
+                                          const Json::parse_event_t event,
                                           Json& parsed) {
               if (event == Json::parse_event_t::object_start) {
                 keys.emplace_back();
@@ -2685,7 +2774,8 @@ template <typename IdType>
               }
               return true;
             };
-            auto parsed = Json::parse(value.payload.data, callback, true, false);
+            auto parsed =
+                Json::parse(value.payload.data, callback, true, false);
             if (parsed.dump() != value.payload.data) {
               throw CodecFailure{"unknown event payload is not canonical JSON"};
             }
@@ -2726,7 +2816,8 @@ template <typename IdType>
     return domain::RunResumed{
         parse_optional_id<domain::QuestionId>(value.at("question_id"))};
   }
-  if (type == "run.completion_requested") return domain::RunCompletionRequested{};
+  if (type == "run.completion_requested")
+    return domain::RunCompletionRequested{};
   if (type == "run.completed") return domain::RunCompleted{};
   if (type == "run.failed") {
     return domain::RunFailed{parse_domain_error(value.at("error"))};
@@ -2825,17 +2916,15 @@ template <typename IdType>
         parse_id<domain::InvocationId>(value.at("invocation_id")),
         parse_policy(value.at("decision")), parse_scopes(value.at("scopes")),
         parse_optional_string(value.at("reason")),
-        value.contains("source")
-            ? parse_policy_source(value.at("source"))
-            : domain::PolicyDecisionSource::fallback};
+        value.contains("source") ? parse_policy_source(value.at("source"))
+                                 : domain::PolicyDecisionSource::fallback};
   }
   if (type == "tool.approval_requested") {
     return domain::ToolApprovalRequested{
         parse_id<domain::InvocationId>(value.at("invocation_id")),
         parse_scopes(value.at("requested_scopes")),
-        value.contains("reason")
-            ? parse_optional_string(value.at("reason"))
-            : std::nullopt};
+        value.contains("reason") ? parse_optional_string(value.at("reason"))
+                                 : std::nullopt};
   }
   if (type == "tool.approval_decided") {
     return domain::ToolApprovalDecided{
@@ -3043,17 +3132,17 @@ template <typename IdType>
     if (parsed.dump() != text) {
       return std::unexpected(
           store_error(SessionStoreErrorCode::corrupt,
-          "persisted event payload is not in canonical form"));
+                      "persisted event payload is not in canonical form"));
     }
     return parsed;
   } catch (const DuplicateJsonKey&) {
     return std::unexpected(
         store_error(SessionStoreErrorCode::corrupt,
-                                       "persisted event payload has a duplicate key"));
+                    "persisted event payload has a duplicate key"));
   } catch (const Json::exception&) {
     return std::unexpected(
         store_error(SessionStoreErrorCode::corrupt,
-                                       "persisted event payload is invalid UTF-8 JSON"));
+                    "persisted event payload is invalid UTF-8 JSON"));
   }
 }
 
@@ -3069,7 +3158,7 @@ struct EncodedPayload {
     if (type.empty() || type.size() > 256 || has_control_character(type)) {
       return std::unexpected(
           store_error(SessionStoreErrorCode::invalid_argument,
-                                         "event payload type is invalid"));
+                      "event payload type is invalid"));
     }
     if (!known_payload_schema(type, event.metadata.schema_version) &&
         !std::holds_alternative<domain::UnknownEvent>(event.payload)) {
@@ -3081,7 +3170,7 @@ struct EncodedPayload {
         std::holds_alternative<domain::UnknownEvent>(event.payload)) {
       return std::unexpected(
           store_error(SessionStoreErrorCode::invalid_argument,
-          "known event schema cannot carry an opaque payload"));
+                      "known event schema cannot carry an opaque payload"));
     }
     if (event.metadata.schema_version == 1) {
       if (const auto* proposed =
@@ -3101,18 +3190,19 @@ struct EncodedPayload {
       }
     }
     return EncodedPayload{
-        type, payload_json(event.payload, event.metadata.schema_version).dump()};
+        type,
+        payload_json(event.payload, event.metadata.schema_version).dump()};
   } catch (const DuplicateJsonKey&) {
     return std::unexpected(
         store_error(SessionStoreErrorCode::invalid_argument,
-                                       "unknown event payload has a duplicate key"));
+                    "unknown event payload has a duplicate key"));
   } catch (const CodecFailure&) {
     return std::unexpected(store_error(SessionStoreErrorCode::invalid_argument,
                                        "event payload is invalid"));
   } catch (const Json::exception&) {
     return std::unexpected(
         store_error(SessionStoreErrorCode::invalid_argument,
-                                       "event payload cannot be encoded as UTF-8 JSON"));
+                    "event payload cannot be encoded as UTF-8 JSON"));
   }
 }
 
@@ -3133,9 +3223,12 @@ class Statement final {
   }
   ~Statement() { reset(); }
 
-  [[nodiscard]] auto get() const noexcept -> sqlite3_stmt * { return m_statement; }
+  [[nodiscard]] auto get() const noexcept -> sqlite3_stmt* {
+    return m_statement;
+  }
   auto reset() noexcept -> void {
-    if (m_statement != nullptr) static_cast<void>(sqlite3_finalize(m_statement));
+    if (m_statement != nullptr)
+      static_cast<void>(sqlite3_finalize(m_statement));
     m_statement = nullptr;
   }
 
@@ -3174,8 +3267,7 @@ class Statement final {
     case SQLITE_IOERR:
       return store_error(SessionStoreErrorCode::io_failure,
                          "session-store I/O failed");
-    case SQLITE_INTERRUPT:
-      return cancelled_error();
+    case SQLITE_INTERRUPT: return cancelled_error();
     default:
       return store_error(SessionStoreErrorCode::internal_failure,
                          "session-store operation failed internally");
@@ -3196,9 +3288,7 @@ class Statement final {
     -> std::expected<Statement, SessionStoreError> {
   sqlite3_stmt* statement{};
   const auto result = sqlite3_prepare_v2(
-      database, sql.data(),
-                                         static_cast<int>(sql.size()),
-                                         &statement, nullptr);
+      database, sql.data(), static_cast<int>(sql.size()), &statement, nullptr);
   if (result != SQLITE_OK) return std::unexpected(sqlite_error(result));
   return Statement{statement};
 }
@@ -3206,14 +3296,15 @@ class Statement final {
 [[nodiscard]] auto bind_text(sqlite3_stmt* statement, const int index,
                              const std::string_view value)
     -> std::expected<void, SessionStoreError> {
-  if (value.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+  if (value.size() >
+      static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     return std::unexpected(
         store_error(SessionStoreErrorCode::resource_exhausted,
-                                       "session-store text value is too large"));
+                    "session-store text value is too large"));
   }
-  const auto result = sqlite3_bind_text(statement, index, value.data(),
-                                        static_cast<int>(value.size()),
-                                        SQLITE_TRANSIENT);
+  const auto result =
+      sqlite3_bind_text(statement, index, value.data(),
+                        static_cast<int>(value.size()), SQLITE_TRANSIENT);
   if (result != SQLITE_OK) return std::unexpected(sqlite_error(result));
   return {};
 }
@@ -3288,7 +3379,7 @@ template <typename IdType>
         count > std::numeric_limits<sqlite3_int64>::max()) {
       return std::unexpected(
           store_error(SessionStoreErrorCode::invalid_argument,
-                                         "event timestamp is outside storage range"));
+                      "event timestamp is outside storage range"));
     }
   }
   return static_cast<sqlite3_int64>(count);
@@ -3307,29 +3398,29 @@ template <typename IdType>
   if (error && error != std::errc::no_such_file_or_directory) {
     return std::unexpected(
         path_error(SessionStoreErrorCode::io_failure,
-                                      "cannot inspect the session-state directory"));
+                   "cannot inspect the session-state directory"));
   }
   if (std::filesystem::exists(status)) {
     if (std::filesystem::is_symlink(status)) {
       return std::unexpected(
           path_error(SessionStoreErrorCode::permission_denied,
-                                        "session-state directory cannot be a symlink"));
+                     "session-state directory cannot be a symlink"));
     }
     if (!std::filesystem::is_directory(status)) {
       return std::unexpected(
           path_error(SessionStoreErrorCode::permission_denied,
-                                        "session-state path is not a directory"));
+                     "session-state path is not a directory"));
     }
-    struct stat info {};
+    struct stat info{};
     if (::stat(directory.c_str(), &info) != 0) {
       return std::unexpected(
           path_error(SessionStoreErrorCode::io_failure,
-                                        "cannot inspect session-state permissions"));
+                     "cannot inspect session-state permissions"));
     }
     if ((info.st_mode & 0777) != 0700) {
       return std::unexpected(
           path_error(SessionStoreErrorCode::permission_denied,
-                                        "session-state directory must have mode 0700"));
+                     "session-state directory must have mode 0700"));
     }
     return false;
   }
@@ -3339,17 +3430,17 @@ template <typename IdType>
   if (error) {
     return std::unexpected(
         path_error(SessionStoreErrorCode::io_failure,
-                                      "cannot create the state base directory"));
+                   "cannot create the state base directory"));
   }
   if (::mkdir(directory.c_str(), 0700) != 0 && errno != EEXIST) {
     return std::unexpected(
         path_error(SessionStoreErrorCode::io_failure,
-                                      "cannot create the session-state directory"));
+                   "cannot create the session-state directory"));
   }
   if (::chmod(directory.c_str(), 0700) != 0) {
     return std::unexpected(
         path_error(SessionStoreErrorCode::permission_denied,
-                                      "cannot secure the session-state directory"));
+                   "cannot secure the session-state directory"));
   }
   return true;
 }
@@ -3367,13 +3458,13 @@ template <typename IdType>
       !std::filesystem::is_regular_file(status)) {
     return std::unexpected(
         path_error(SessionStoreErrorCode::permission_denied,
-                                      "session database must be a regular non-symlink file"));
+                   "session database must be a regular non-symlink file"));
   }
-  struct stat info {};
+  struct stat info{};
   if (::stat(path.c_str(), &info) != 0) {
     return std::unexpected(
         path_error(SessionStoreErrorCode::io_failure,
-                                      "cannot inspect session database permissions"));
+                   "cannot inspect session database permissions"));
   }
   if ((info.st_mode & 0777) != 0600) {
     return std::unexpected(path_error(SessionStoreErrorCode::permission_denied,
@@ -3385,14 +3476,13 @@ template <typename IdType>
 [[nodiscard]] auto precreate_database(const std::filesystem::path& path)
     -> std::expected<void, SessionStoreError> {
   const int descriptor = ::open(
-      path.c_str(), O_RDWR | O_CREAT | O_EXCL |
-                                                  O_CLOEXEC | O_NOFOLLOW,
-                                0600);
+      path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
   if (descriptor < 0) {
     return std::unexpected(
-        path_error(errno == EACCES || errno == EPERM ? SessionStoreErrorCode::permission_denied
-                                          : SessionStoreErrorCode::io_failure,
-        "cannot create the session database"));
+        path_error(errno == EACCES || errno == EPERM
+                       ? SessionStoreErrorCode::permission_denied
+                       : SessionStoreErrorCode::io_failure,
+                   "cannot create the session database"));
   }
   const auto close_result = ::close(descriptor);
   if (close_result != 0) {
@@ -3409,7 +3499,7 @@ template <typename IdType>
   if (descriptor < 0) {
     return std::unexpected(
         path_error(SessionStoreErrorCode::io_failure,
-                                      "cannot open the session-state directory for sync"));
+                   "cannot open the session-state directory for sync"));
   }
   const auto synced = ::fsync(descriptor);
   const auto saved_errno = errno;
@@ -3418,15 +3508,17 @@ template <typename IdType>
   if (synced != 0) {
     return std::unexpected(
         path_error(SessionStoreErrorCode::io_failure,
-                                      "cannot sync the session-state directory"));
+                   "cannot sync the session-state directory"));
   }
   return {};
 }
 
-[[nodiscard]] auto valid_limits(const storage::SessionStoreLimits &limits) -> bool {
-  return limits.maximum_batch_events != 0 && limits.maximum_payload_bytes != 0 &&
-         limits.maximum_replay_events != 0 && limits.maximum_replay_bytes != 0 &&
-         limits.busy_timeout.count() > 0 &&
+[[nodiscard]] auto valid_limits(const storage::SessionStoreLimits& limits)
+    -> bool {
+  return limits.maximum_batch_events != 0 &&
+         limits.maximum_payload_bytes != 0 &&
+         limits.maximum_replay_events != 0 &&
+         limits.maximum_replay_bytes != 0 && limits.busy_timeout.count() > 0 &&
          limits.busy_timeout.count() <= std::numeric_limits<int>::max();
 }
 
@@ -3465,20 +3557,21 @@ class Transaction final {
 [[nodiscard]] auto migrate(sqlite3* database)
     -> std::expected<void, SessionStoreError> {
   auto version_statement = prepare(database, "PRAGMA user_version");
-  if (!version_statement) return std::unexpected(std::move(version_statement.error()));
+  if (!version_statement)
+    return std::unexpected(std::move(version_statement.error()));
   const auto version_step = sqlite3_step(version_statement->get());
-  if (version_step != SQLITE_ROW) return std::unexpected(sqlite_error(version_step));
+  if (version_step != SQLITE_ROW)
+    return std::unexpected(sqlite_error(version_step));
   const auto version = sqlite3_column_int(version_statement->get(), 0);
   if (version > storage_format_version) {
     return std::unexpected(
         store_error(SessionStoreErrorCode::unsupported_version,
-                                       "session database uses a newer storage version"));
+                    "session database uses a newer storage version"));
   }
   if (version == storage_format_version) return {};
   if (version == 1) {
     auto begun = begin_immediate(database);
-    if (!begun)
-      return begun;
+    if (!begun) return begun;
     const auto upgraded =
         execute(database,
                 "CREATE INDEX events_project_backlog_promoted_repository "
@@ -3499,7 +3592,7 @@ class Transaction final {
   if (version != 0) {
     return std::unexpected(
         store_error(SessionStoreErrorCode::unsupported_version,
-                                       "session database version is unsupported"));
+                    "session database version is unsupported"));
   }
 
   auto schema_count = prepare(
@@ -3510,7 +3603,7 @@ class Transaction final {
       sqlite3_column_int64(schema_count->get(), 0) != 0) {
     return std::unexpected(
         store_error(SessionStoreErrorCode::corrupt,
-                                       "unversioned session database is not empty"));
+                    "unversioned session database is not empty"));
   }
 
   auto begun = begin_immediate(database);
@@ -3569,9 +3662,8 @@ class Transaction final {
   }
   return storage::SessionInfo{
       std::move(*session_id), timestamp_from_count(created),
-                              timestamp_from_count(activity),
-                              static_cast<std::uint64_t>(sequence),
-                              static_cast<std::uint64_t>(run_count)};
+      timestamp_from_count(activity), static_cast<std::uint64_t>(sequence),
+      static_cast<std::uint64_t>(run_count)};
 }
 
 constexpr std::string_view session_info_select{
@@ -3584,7 +3676,7 @@ constexpr std::string_view session_info_select{
     "(SELECT COUNT(DISTINCT e.run_id) FROM events e "
     "WHERE e.session_id=s.session_id) FROM sessions s"};
 
-}  // namespace
+} // namespace
 
 struct SqliteSessionStore::Impl {
   std::filesystem::path path;
@@ -3631,7 +3723,8 @@ auto sqlite_library_version() -> std::string {
 }
 
 SqliteSessionStore::SqliteSessionStore(std::unique_ptr<Impl> impl)
-    : m_impl(std::move(impl)) {}
+    : m_impl(std::move(impl)) {
+}
 
 SqliteSessionStore::~SqliteSessionStore() = default;
 
@@ -3640,19 +3733,19 @@ auto SqliteSessionStore::open(std::filesystem::path path,
     -> std::expected<std::unique_ptr<SqliteSessionStore>,
                      storage::SessionStoreError> {
   try {
-    if (!valid_limits(limits) || !path.is_absolute() || path.filename().empty() ||
-        path.lexically_normal() != path) {
+    if (!valid_limits(limits) || !path.is_absolute() ||
+        path.filename().empty() || path.lexically_normal() != path) {
       return std::unexpected(
           store_error(SessionStoreErrorCode::invalid_argument,
-                                         "session-store path or limits are invalid"));
+                      "session-store path or limits are invalid"));
     }
     auto directory = check_directory(path.parent_path(), true);
     if (!directory) return std::unexpected(std::move(directory.error()));
     auto existing = check_regular_secure_file(path);
     if (!existing) return std::unexpected(std::move(existing.error()));
-    for (const auto suffix : {std::string_view{"-journal"},
-                              std::string_view{"-wal"},
-                              std::string_view{"-shm"}}) {
+    for (const auto suffix :
+         {std::string_view{"-journal"}, std::string_view{"-wal"},
+          std::string_view{"-shm"}}) {
       auto sidecar = std::filesystem::path{path.string() + std::string{suffix}};
       auto checked = check_regular_secure_file(sidecar);
       if (!checked) return std::unexpected(std::move(checked.error()));
@@ -3661,15 +3754,16 @@ auto SqliteSessionStore::open(std::filesystem::path path,
     const bool created = !*existing;
     if (created) {
       auto created_file = precreate_database(path);
-      if (!created_file) return std::unexpected(std::move(created_file.error()));
+      if (!created_file)
+        return std::unexpected(std::move(created_file.error()));
     }
 
     sqlite3* database{};
     const auto open_result =
         sqlite3_open_v2(path.c_str(), &database,
-        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX |
-            SQLITE_OPEN_NOFOLLOW,
-        nullptr);
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                            SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW,
+                        nullptr);
     if (open_result != SQLITE_OK) {
       if (database != nullptr) static_cast<void>(sqlite3_close(database));
       if (created) static_cast<void>(::unlink(path.c_str()));
@@ -3694,13 +3788,13 @@ auto SqliteSessionStore::open(std::filesystem::path path,
     if (sqlite3_step(journal->get()) != SQLITE_ROW) {
       return std::unexpected(
           store_error(SessionStoreErrorCode::io_failure,
-                                         "could not select rollback-journal mode"));
+                      "could not select rollback-journal mode"));
     }
     auto journal_name = column_text(journal->get(), 0);
     if (!journal_name || *journal_name != "delete") {
       return std::unexpected(
           store_error(SessionStoreErrorCode::io_failure,
-                                         "rollback-journal mode is unavailable"));
+                      "rollback-journal mode is unavailable"));
     }
     journal->reset();
     auto migrated = migrate(database);
@@ -3714,11 +3808,11 @@ auto SqliteSessionStore::open(std::filesystem::path path,
   } catch (...) {
     return std::unexpected(
         store_error(SessionStoreErrorCode::internal_failure,
-                                       "session store could not be initialized"));
+                    "session store could not be initialized"));
   }
 }
 
-auto SqliteSessionStore::path() const noexcept -> const std::filesystem::path & {
+auto SqliteSessionStore::path() const noexcept -> const std::filesystem::path& {
   return m_impl->path;
 }
 
@@ -3752,8 +3846,7 @@ auto SqliteSessionStore::create_session(storage::SessionCreate session,
     if (!stepped) {
       if (stepped.error().code == SessionStoreErrorCode::conflict) {
         return std::unexpected(store_error(
-            SessionStoreErrorCode::already_exists,
-                                           "session already exists"));
+            SessionStoreErrorCode::already_exists, "session already exists"));
       }
       return stepped;
     }
@@ -3769,14 +3862,15 @@ auto SqliteSessionStore::create_session(storage::SessionCreate session,
   }
 }
 
-auto SqliteSessionStore::open_session(const domain::SessionId &session_id, const std::stop_token stop_token)
+auto SqliteSessionStore::open_session(const domain::SessionId& session_id,
+                                      const std::stop_token stop_token)
     -> std::expected<storage::SessionInfo, storage::SessionStoreError> {
   try {
     if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
     std::lock_guard lock(m_impl->mutex);
-    auto statement = prepare(m_impl->database,
-                             std::string{session_info_select} +
-                                 " WHERE s.session_id=?1");
+    auto statement =
+        prepare(m_impl->database,
+                std::string{session_info_select} + " WHERE s.session_id=?1");
     if (!statement) return std::unexpected(std::move(statement.error()));
     auto bound = bind_text(statement->get(), 1, session_id.value());
     if (!bound) return std::unexpected(std::move(bound.error()));
@@ -3793,26 +3887,29 @@ auto SqliteSessionStore::open_session(const domain::SessionId &session_id, const
   }
 }
 
-auto SqliteSessionStore::list_sessions(const std::size_t limit, const std::stop_token stop_token)
+auto SqliteSessionStore::list_sessions(const std::size_t limit,
+                                       const std::stop_token stop_token)
     -> std::expected<std::vector<storage::SessionInfo>,
                      storage::SessionStoreError> {
   try {
     if (limit == 0 || limit > 1000) {
       return std::unexpected(
           store_error(SessionStoreErrorCode::invalid_argument,
-                                         "session-list limit must be between 1 and 1000"));
+                      "session-list limit must be between 1 and 1000"));
     }
     if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
     std::lock_guard lock(m_impl->mutex);
     auto statement = prepare(m_impl->database,
-        std::string{session_info_select} +
-            " ORDER BY 3 DESC,s.session_id ASC LIMIT ?1");
+                             std::string{session_info_select} +
+                                 " ORDER BY 3 DESC,s.session_id ASC LIMIT ?1");
     if (!statement) return std::unexpected(std::move(statement.error()));
-    const auto bound = sqlite3_bind_int64(statement->get(), 1, static_cast<sqlite3_int64>(limit));
+    const auto bound = sqlite3_bind_int64(statement->get(), 1,
+                                          static_cast<sqlite3_int64>(limit));
     if (bound != SQLITE_OK) return std::unexpected(sqlite_error(bound));
     std::vector<storage::SessionInfo> sessions;
     while (true) {
-      if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
+      if (stop_token.stop_requested())
+        return std::unexpected(cancelled_error());
       const auto result = sqlite3_step(statement->get());
       if (result == SQLITE_DONE) break;
       if (result != SQLITE_ROW) return std::unexpected(sqlite_error(result));
@@ -3853,14 +3950,14 @@ auto SqliteSessionStore::append_events(
           !event_ids.insert(event.metadata.event_id).second) {
         return std::unexpected(
             store_error(SessionStoreErrorCode::invalid_argument,
-                                           "event batch envelope is invalid"));
+                        "event batch envelope is invalid"));
       }
       auto payload = encode_payload(event);
       if (!payload) return std::unexpected(std::move(payload.error()));
       if (payload->document.size() > m_impl->limits.maximum_payload_bytes) {
         return std::unexpected(
             store_error(SessionStoreErrorCode::resource_exhausted,
-                                           "event payload exceeds the configured limit"));
+                        "event payload exceeds the configured limit"));
       }
       auto timestamp = timestamp_count(event.metadata.timestamp);
       if (!timestamp) return std::unexpected(std::move(timestamp.error()));
@@ -3877,9 +3974,10 @@ auto SqliteSessionStore::append_events(
           std::unexpected(std::move(error))};
     };
 
-    auto current = prepare(m_impl->database, "SELECT COALESCE((SELECT MAX(sequence) FROM "
+    auto current =
+        prepare(m_impl->database, "SELECT COALESCE((SELECT MAX(sequence) FROM "
                                   "events WHERE session_id=?1),0) "
-        "FROM sessions WHERE session_id=?1");
+                                  "FROM sessions WHERE session_id=?1");
     if (!current) return fail(std::move(current.error()));
     auto current_bound = bind_text(current->get(), 1, session_id.value());
     if (!current_bound) return fail(std::move(current_bound.error()));
@@ -3916,7 +4014,8 @@ auto SqliteSessionStore::append_events(
       static_cast<void>(sqlite3_reset(insert->get()));
       static_cast<void>(sqlite3_clear_bindings(insert->get()));
       auto bound = bind_text(insert->get(), 1, session_id.value());
-      const auto bind_integer = [&](const int position, const sqlite3_int64 value)
+      const auto bind_integer = [&](const int position,
+                                    const sqlite3_int64 value)
           -> std::expected<void, SessionStoreError> {
         const auto result = sqlite3_bind_int64(insert->get(), position, value);
         if (result != SQLITE_OK) return std::unexpected(sqlite_error(result));
@@ -3926,8 +4025,10 @@ auto SqliteSessionStore::append_events(
         bound = bind_integer(
             2, static_cast<sqlite3_int64>(event.metadata.sequence));
       }
-      if (bound) bound = bind_text(insert->get(), 3, event.metadata.event_id.value());
-      if (bound) bound = bind_text(insert->get(), 4, event.metadata.run_id.value());
+      if (bound)
+        bound = bind_text(insert->get(), 3, event.metadata.event_id.value());
+      if (bound)
+        bound = bind_text(insert->get(), 4, event.metadata.run_id.value());
       if (bound) bound = bind_integer(5, event.metadata.schema_version);
       if (bound) {
         auto timestamp = timestamp_count(event.metadata.timestamp);
@@ -3939,10 +4040,12 @@ auto SqliteSessionStore::append_events(
                                  event.metadata.caused_by_event_id);
       }
       if (bound) {
-        bound = bind_optional_id(insert->get(), 8, event.metadata.parent_run_id);
+        bound =
+            bind_optional_id(insert->get(), 8, event.metadata.parent_run_id);
       }
       if (bound) {
-        bound = bind_optional_id(insert->get(), 9, event.metadata.invocation_id);
+        bound =
+            bind_optional_id(insert->get(), 9, event.metadata.invocation_id);
       }
       if (bound) bound = bind_text(insert->get(), 10, payload.type);
       if (bound) bound = bind_text(insert->get(), 11, payload.document);
@@ -3960,7 +4063,8 @@ auto SqliteSessionStore::append_events(
   }
 }
 
-auto SqliteSessionStore::replay_events(const domain::SessionId &session_id, const std::stop_token stop_token)
+auto SqliteSessionStore::replay_events(const domain::SessionId& session_id,
+                                       const std::stop_token stop_token)
     -> std::expected<std::vector<domain::RunEvent>,
                      storage::SessionStoreError> {
   try {
@@ -3974,8 +4078,8 @@ auto SqliteSessionStore::replay_events(const domain::SessionId &session_id, cons
           std::unexpected(std::move(error))};
     };
 
-    auto exists = prepare(m_impl->database,
-                          "SELECT 1 FROM sessions WHERE session_id=?1");
+    auto exists =
+        prepare(m_impl->database, "SELECT 1 FROM sessions WHERE session_id=?1");
     if (!exists) return fail(std::move(exists.error()));
     auto exists_bound = bind_text(exists->get(), 1, session_id.value());
     if (!exists_bound) return fail(std::move(exists_bound.error()));
@@ -3988,10 +4092,10 @@ auto SqliteSessionStore::replay_events(const domain::SessionId &session_id, cons
 
     auto statement =
         prepare(m_impl->database,
-        "SELECT sequence,event_id,run_id,schema_version,timestamp_ms,"
+                "SELECT sequence,event_id,run_id,schema_version,timestamp_ms,"
                 "caused_by_event_id,parent_run_id,invocation_id,payload_type,"
                 "payload_json "
-        "FROM events WHERE session_id=?1 ORDER BY sequence ASC");
+                "FROM events WHERE session_id=?1 ORDER BY sequence ASC");
     if (!statement) return fail(std::move(statement.error()));
     auto bound = bind_text(statement->get(), 1, session_id.value());
     if (!bound) return fail(std::move(bound.error()));
@@ -4025,7 +4129,8 @@ auto SqliteSessionStore::replay_events(const domain::SessionId &session_id, cons
       auto run_id = column_id<domain::RunId>(statement->get(), 2);
       auto caused = column_optional_id<domain::EventId>(statement->get(), 5);
       auto parent = column_optional_id<domain::RunId>(statement->get(), 6);
-      auto invocation = column_optional_id<domain::InvocationId>(statement->get(), 7);
+      auto invocation =
+          column_optional_id<domain::InvocationId>(statement->get(), 7);
       auto type = column_text(statement->get(), 8);
       auto document = column_text(statement->get(), 9);
       if (!event_id) return fail(std::move(event_id.error()));
@@ -4041,7 +4146,8 @@ auto SqliteSessionStore::replay_events(const domain::SessionId &session_id, cons
                                 "persisted event identity or type is invalid"));
       }
       if (document->size() > m_impl->limits.maximum_payload_bytes ||
-          document->size() > m_impl->limits.maximum_replay_bytes - replay_bytes) {
+          document->size() >
+              m_impl->limits.maximum_replay_bytes - replay_bytes) {
         return fail(store_error(SessionStoreErrorCode::resource_exhausted,
                                 "session replay exceeds the byte limit"));
       }
@@ -4093,13 +4199,12 @@ auto SqliteSessionStore::replay_events(const domain::SessionId &session_id, cons
 }
 
 auto SqliteSessionStore::replay_project_backlog(
-    const domain::RepositoryId &repository_id,
+    const domain::RepositoryId& repository_id,
     const std::size_t maximum_sessions, const std::stop_token stop_token)
     -> std::expected<std::vector<domain::ProjectBacklogSessionEvents>,
                      storage::SessionStoreError> {
   try {
-    if (stop_token.stop_requested())
-      return std::unexpected(cancelled_error());
+    if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
     if (maximum_sessions == 0 || maximum_sessions > 4096) {
       return std::unexpected(store_error(
           SessionStoreErrorCode::invalid_argument,
@@ -4109,8 +4214,7 @@ auto SqliteSessionStore::replay_project_backlog(
     {
       std::lock_guard lock(m_impl->mutex);
       auto begun = execute(m_impl->database, "BEGIN");
-      if (!begun)
-        return std::unexpected(std::move(begun.error()));
+      if (!begun) return std::unexpected(std::move(begun.error()));
       Transaction transaction{m_impl->database};
       auto statement =
           prepare(m_impl->database,
@@ -4123,11 +4227,9 @@ auto SqliteSessionStore::replay_project_backlog(
                   "WHERE payload_type='project_backlog.item_status_changed' "
                   "AND json_extract(payload_json,'$.change.repository_id')=?1"
                   ") ORDER BY session_id LIMIT ?2");
-      if (!statement)
-        return std::unexpected(std::move(statement.error()));
+      if (!statement) return std::unexpected(std::move(statement.error()));
       auto bound = bind_text(statement->get(), 1, repository_id.value());
-      if (!bound)
-        return std::unexpected(std::move(bound.error()));
+      if (!bound) return std::unexpected(std::move(bound.error()));
       const auto limit_result =
           sqlite3_bind_int64(statement->get(), 2,
                              static_cast<sqlite3_int64>(maximum_sessions + 1U));
@@ -4139,18 +4241,14 @@ auto SqliteSessionStore::replay_project_backlog(
           return std::unexpected(cancelled_error());
         }
         const auto result = sqlite3_step(statement->get());
-        if (result == SQLITE_DONE)
-          break;
-        if (result != SQLITE_ROW)
-          return std::unexpected(sqlite_error(result));
+        if (result == SQLITE_DONE) break;
+        if (result != SQLITE_ROW) return std::unexpected(sqlite_error(result));
         auto session_id = column_id<domain::SessionId>(statement->get(), 0);
-        if (!session_id)
-          return std::unexpected(std::move(session_id.error()));
+        if (!session_id) return std::unexpected(std::move(session_id.error()));
         session_ids.push_back(std::move(*session_id));
       }
       auto committed = execute(m_impl->database, "COMMIT");
-      if (!committed)
-        return std::unexpected(std::move(committed.error()));
+      if (!committed) return std::unexpected(std::move(committed.error()));
       transaction.complete();
     }
     if (session_ids.size() > maximum_sessions) {
@@ -4160,10 +4258,9 @@ auto SqliteSessionStore::replay_project_backlog(
     }
     std::vector<domain::ProjectBacklogSessionEvents> histories;
     histories.reserve(session_ids.size());
-    for (auto &session_id : session_ids) {
+    for (auto& session_id : session_ids) {
       auto events = replay_events(session_id, stop_token);
-      if (!events)
-        return std::unexpected(std::move(events.error()));
+      if (!events) return std::unexpected(std::move(events.error()));
       histories.push_back({std::move(session_id), std::move(*events)});
     }
     return histories;
@@ -4174,4 +4271,4 @@ auto SqliteSessionStore::replay_project_backlog(
   }
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

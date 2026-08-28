@@ -38,7 +38,8 @@ class EchoGuard final {
 
   [[nodiscard]] auto restore() noexcept -> bool {
     if (m_active) {
-      const bool restored = ::tcsetattr(m_descriptor, TCSANOW, &m_original) == 0;
+      const bool restored =
+          ::tcsetattr(m_descriptor, TCSANOW, &m_original) == 0;
       m_active = false;
       return restored;
     }
@@ -51,7 +52,7 @@ class EchoGuard final {
   bool m_active{};
 };
 
-}  // namespace
+} // namespace
 
 auto ProcessLoginCommand::execute(cli::CommandEnvironment& environment,
                                   std::ostream& output, std::ostream& error)
@@ -63,8 +64,8 @@ auto ProcessLoginCommand::execute(cli::CommandEnvironment& environment,
           "login requires terminal input; credentials cannot be piped"));
     }
     if (environment.stop_token.stop_requested()) {
-      return std::unexpected(failure(cli::CommandFailureKind::cancelled,
-                                     "login cancelled"));
+      return std::unexpected(
+          failure(cli::CommandFailureKind::cancelled, "login cancelled"));
     }
 
     EchoGuard echo{environment.input_descriptor};
@@ -87,8 +88,9 @@ auto ProcessLoginCommand::execute(cli::CommandEnvironment& environment,
         const bool restored = echo.restore();
         error << '\n';
         if (!restored) {
-          return std::unexpected(failure(cli::CommandFailureKind::runtime,
-                                         "terminal echo could not be restored"));
+          return std::unexpected(
+              failure(cli::CommandFailureKind::runtime,
+                      "terminal echo could not be restored"));
         }
         return std::unexpected(failure(cli::CommandFailureKind::usage,
                                        "the Venice credential exceeds 64 KiB"));
@@ -106,13 +108,13 @@ auto ProcessLoginCommand::execute(cli::CommandEnvironment& environment,
                                      "credential entry cancelled"));
     }
     if (environment.stop_token.stop_requested()) {
-      return std::unexpected(failure(cli::CommandFailureKind::cancelled,
-                                     "login cancelled"));
+      return std::unexpected(
+          failure(cli::CommandFailureKind::cancelled, "login cancelled"));
     }
     auto secret = credentials::make_secret(std::move(value));
     if (!secret) {
-      return std::unexpected(failure(cli::CommandFailureKind::usage,
-                                     secret.error().message));
+      return std::unexpected(
+          failure(cli::CommandFailureKind::usage, secret.error().message));
     }
     auto path = credentials::process_credential_path();
     if (!path) {
@@ -128,9 +130,9 @@ auto ProcessLoginCommand::execute(cli::CommandEnvironment& environment,
     output << "Venice credential stored.\n";
     return {};
   } catch (...) {
-    return std::unexpected(failure(cli::CommandFailureKind::runtime,
-                                   "login failed internally"));
+    return std::unexpected(
+        failure(cli::CommandFailureKind::runtime, "login failed internally"));
   }
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

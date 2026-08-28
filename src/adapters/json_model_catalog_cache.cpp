@@ -29,15 +29,14 @@ class DuplicateJsonKey final : public std::exception {};
 
 [[nodiscard]] auto failure(std::string message)
     -> std::unexpected<model::CatalogError> {
-  return std::unexpected(model::CatalogError{
-      model::CatalogErrorCode::storage, std::move(message), false});
+  return std::unexpected(model::CatalogError{model::CatalogErrorCode::storage,
+                                             std::move(message), false});
 }
 
-[[nodiscard]] auto cancelled()
-    -> std::unexpected<model::CatalogError> {
-  return std::unexpected(model::CatalogError{
-      model::CatalogErrorCode::cancelled,
-      "model catalog cache operation cancelled", false});
+[[nodiscard]] auto cancelled() -> std::unexpected<model::CatalogError> {
+  return std::unexpected(
+      model::CatalogError{model::CatalogErrorCode::cancelled,
+                          "model catalog cache operation cancelled", false});
 }
 
 [[nodiscard]] auto capability_from_name(const std::string_view name)
@@ -70,27 +69,24 @@ class DuplicateJsonKey final : public std::exception {};
 
 [[nodiscard]] auto parse_price(const Json& value) -> model::Price {
   model::Price result;
-  if (!value.is_object())
-    throw std::runtime_error{"price is not an object"};
+  if (!value.is_object()) throw std::runtime_error{"price is not an object"};
   if (value.contains("usd") && !value.at("usd").is_null()) {
     auto amount =
         domain::DecimalAmount::from(value.at("usd").get<std::string>());
-    if (!amount)
-      throw std::runtime_error{"USD price is invalid"};
+    if (!amount) throw std::runtime_error{"USD price is invalid"};
     result.usd = *amount;
   }
   if (value.contains("diem") && !value.at("diem").is_null()) {
     auto amount =
         domain::DecimalAmount::from(value.at("diem").get<std::string>());
-    if (!amount)
-      throw std::runtime_error{"diem price is invalid"};
+    if (!amount) throw std::runtime_error{"diem price is invalid"};
     result.diem = *amount;
   }
   return result;
 }
 
-[[nodiscard]] auto optional_price_json(
-    const std::optional<model::Price>& price) -> Json {
+[[nodiscard]] auto optional_price_json(const std::optional<model::Price>& price)
+    -> Json {
   return price ? price_json(*price) : Json(nullptr);
 }
 
@@ -108,7 +104,8 @@ class DuplicateJsonKey final : public std::exception {};
 }
 
 [[nodiscard]] auto parse_tier(const Json& value) -> model::PriceTier {
-  if (!value.is_object()) throw std::runtime_error{"price tier is not an object"};
+  if (!value.is_object())
+    throw std::runtime_error{"price tier is not an object"};
   return {parse_optional_price(value.at("input")),
           parse_optional_price(value.at("output")),
           parse_optional_price(value.at("cache_input")),
@@ -120,8 +117,8 @@ class DuplicateJsonKey final : public std::exception {};
   for (const auto& capability : entry.capabilities) {
     capabilities.push_back(
         {{"name", model::capability_name(capability.capability)},
-         {"supported", capability.supported ? Json(*capability.supported)
-                                              : Json(nullptr)}});
+         {"supported",
+          capability.supported ? Json(*capability.supported) : Json(nullptr)}});
   }
   Json pricing = nullptr;
   if (entry.pricing) {
@@ -138,12 +135,12 @@ class DuplicateJsonKey final : public std::exception {};
   return {{"id", entry.id.value()},
           {"type", entry.type},
           {"name", entry.name ? Json(*entry.name) : Json(nullptr)},
-          {"context_window_tokens",
-           entry.context_window_tokens ? Json(*entry.context_window_tokens)
-                                       : Json(nullptr)},
-          {"maximum_output_tokens",
-           entry.maximum_output_tokens ? Json(*entry.maximum_output_tokens)
-                                       : Json(nullptr)},
+          {"context_window_tokens", entry.context_window_tokens
+                                        ? Json(*entry.context_window_tokens)
+                                        : Json(nullptr)},
+          {"maximum_output_tokens", entry.maximum_output_tokens
+                                        ? Json(*entry.maximum_output_tokens)
+                                        : Json(nullptr)},
           {"offline", entry.offline},
           {"traits", entry.traits},
           {"capabilities", std::move(capabilities)},
@@ -167,7 +164,8 @@ class DuplicateJsonKey final : public std::exception {};
   result.offline = value.at("offline").get<bool>();
   result.traits = value.at("traits").get<std::vector<std::string>>();
   for (const auto& encoded : value.at("capabilities")) {
-    auto capability = capability_from_name(encoded.at("name").get<std::string>());
+    auto capability =
+        capability_from_name(encoded.at("name").get<std::string>());
     if (!capability) continue;
     std::optional<bool> supported;
     if (!encoded.at("supported").is_null())
@@ -194,7 +192,7 @@ class DuplicateJsonKey final : public std::exception {};
     std::vector<std::unordered_set<std::string>> object_keys;
     auto document = Json::parse(
         bytes, [&object_keys](const int, const Json::parse_event_t event,
-                             Json& parsed) {
+                              Json& parsed) {
           if (event == Json::parse_event_t::object_start) {
             object_keys.emplace_back();
           } else if (event == Json::parse_event_t::key) {
@@ -208,7 +206,8 @@ class DuplicateJsonKey final : public std::exception {};
           }
           return true;
         });
-    if (!document.is_object() || document.at("schema_version") != cache_schema_version ||
+    if (!document.is_object() ||
+        document.at("schema_version") != cache_schema_version ||
         !document.at("entries").is_array()) {
       return failure("model catalog cache schema is invalid");
     }
@@ -233,7 +232,8 @@ class DuplicateJsonKey final : public std::exception {};
 [[nodiscard]] auto encode_document(const model::CatalogSnapshot& snapshot)
     -> std::string {
   auto entries = Json::array();
-  for (const auto& entry : snapshot.entries) entries.push_back(entry_json(entry));
+  for (const auto& entry : snapshot.entries)
+    entries.push_back(entry_json(entry));
   return Json{{"schema_version", cache_schema_version},
               {"fetched_at_ms", snapshot.fetched_at.time_since_epoch().count()},
               {"source_id", snapshot.source_id},
@@ -241,10 +241,10 @@ class DuplicateJsonKey final : public std::exception {};
                                       ? Json(*snapshot.source_revision)
                                       : Json(nullptr)},
               {"entries", std::move(entries)}}
-             .dump();
+      .dump();
 }
 
-}  // namespace
+} // namespace
 
 auto JsonModelCatalogCache::load(const std::stop_token stop_token)
     -> std::expected<std::optional<model::CatalogSnapshot>,
@@ -252,17 +252,19 @@ auto JsonModelCatalogCache::load(const std::stop_token stop_token)
   if (stop_token.stop_requested()) return cancelled();
 #ifndef _WIN32
   const auto native = m_path.string();
-  const int descriptor = ::open(native.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  const int descriptor =
+      ::open(native.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (descriptor < 0) {
     if (errno == ENOENT) return std::nullopt;
     return failure("model catalog cache could not be opened safely");
   }
-  struct stat metadata {};
+  struct stat metadata{};
   if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
       (metadata.st_mode & (S_IRWXG | S_IRWXO)) != 0 || metadata.st_size < 0 ||
       static_cast<std::uintmax_t>(metadata.st_size) > m_maximum_bytes) {
     ::close(descriptor);
-    return failure("model catalog cache permissions, type, or size are invalid");
+    return failure(
+        "model catalog cache permissions, type, or size are invalid");
   }
   std::string bytes(static_cast<std::size_t>(metadata.st_size), '\0');
   std::size_t offset{};
@@ -271,8 +273,8 @@ auto JsonModelCatalogCache::load(const std::stop_token stop_token)
       ::close(descriptor);
       return cancelled();
     }
-    const auto count = ::read(descriptor, bytes.data() + offset,
-                              bytes.size() - offset);
+    const auto count =
+        ::read(descriptor, bytes.data() + offset, bytes.size() - offset);
     if (count <= 0) {
       ::close(descriptor);
       return failure("model catalog cache could not be read completely");
@@ -308,11 +310,14 @@ auto JsonModelCatalogCache::store(const model::CatalogSnapshot& snapshot,
     return failure("model catalog cache directory cannot be a symlink");
   error.clear();
   std::filesystem::create_directories(m_path.parent_path(), error);
-  if (error) return failure("model catalog cache directory could not be created");
-  std::filesystem::permissions(
-      m_path.parent_path(), std::filesystem::perms::owner_all,
-      std::filesystem::perm_options::replace, error);
-  if (error) return failure("model catalog cache directory permissions could not be set");
+  if (error)
+    return failure("model catalog cache directory could not be created");
+  std::filesystem::permissions(m_path.parent_path(),
+                               std::filesystem::perms::owner_all,
+                               std::filesystem::perm_options::replace, error);
+  if (error)
+    return failure(
+        "model catalog cache directory permissions could not be set");
   const auto target_status = std::filesystem::symlink_status(m_path, error);
   if (!error && std::filesystem::exists(target_status) &&
       (!std::filesystem::is_regular_file(target_status) ||
@@ -326,11 +331,11 @@ auto JsonModelCatalogCache::store(const model::CatalogSnapshot& snapshot,
   temporary += ".tmp-" + std::to_string(::getpid()) + "-" +
                std::to_string(sequence.fetch_add(1, std::memory_order_relaxed));
   const auto native = temporary.string();
-  const int descriptor = ::open(native.c_str(),
-                                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
-                                    O_NOFOLLOW,
-                                S_IRUSR | S_IWUSR);
-  if (descriptor < 0) return failure("model catalog cache temporary file could not be created");
+  const int descriptor = ::open(
+      native.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+      S_IRUSR | S_IWUSR);
+  if (descriptor < 0)
+    return failure("model catalog cache temporary file could not be created");
   std::size_t offset{};
   bool ok{true};
   while (offset < bytes.size()) {
@@ -338,8 +343,8 @@ auto JsonModelCatalogCache::store(const model::CatalogSnapshot& snapshot,
       ok = false;
       break;
     }
-    const auto count = ::write(descriptor, bytes.data() + offset,
-                               bytes.size() - offset);
+    const auto count =
+        ::write(descriptor, bytes.data() + offset, bytes.size() - offset);
     if (count <= 0) {
       ok = false;
       break;
@@ -356,8 +361,8 @@ auto JsonModelCatalogCache::store(const model::CatalogSnapshot& snapshot,
     ::unlink(native.c_str());
     return failure("model catalog cache could not be published atomically");
   }
-  const int directory =
-      ::open(m_path.parent_path().string().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  const int directory = ::open(m_path.parent_path().string().c_str(),
+                               O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   if (directory < 0 || ::fsync(directory) != 0) {
     if (directory >= 0) ::close(directory);
     return failure("model catalog cache directory could not be synchronized");
@@ -371,7 +376,8 @@ auto JsonModelCatalogCache::store(const model::CatalogSnapshot& snapshot,
   output.close();
   if (!output) return failure("model catalog cache could not be written");
   std::filesystem::rename(temporary, m_path, error);
-  if (error) return failure("model catalog cache could not be published atomically");
+  if (error)
+    return failure("model catalog cache could not be published atomically");
 #endif
   return {};
 }
@@ -397,4 +403,4 @@ auto process_model_catalog_cache_path()
   }
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

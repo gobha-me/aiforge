@@ -18,4 +18,4 @@ inline constexpr std::string_view runtime_contract{
                                          std::uint64_t suffix)
     -> std::expected<std::vector<domain::ContextContentInput>, std::string>;
 
-}  // namespace aiforge::surfaces::detail
+} // namespace aiforge::surfaces::detail

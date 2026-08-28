@@ -44,4 +44,4 @@ class ScriptedArtifactStore final : public storage::ArtifactStore {
   std::size_t m_next_exchange{};
 };
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

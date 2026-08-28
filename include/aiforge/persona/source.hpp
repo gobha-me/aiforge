@@ -71,4 +71,4 @@ class PersonaSource {
       -> std::expected<domain::PersonaDocument, PersonaError> = 0;
 };
 
-}  // namespace aiforge::persona
+} // namespace aiforge::persona

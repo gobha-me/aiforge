@@ -25,4 +25,4 @@ class GitExactSourceEditor final : public repository::ExactSourceEditor {
   GitRepositorySnapshotSource& m_snapshot_source;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

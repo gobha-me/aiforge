@@ -32,7 +32,8 @@ using namespace domain;
          kind == ReviewEvidenceKind::scenario;
 }
 
-[[nodiscard]] auto valid_requirement(const ReviewPolicyRequirement &requirement) -> bool {
+[[nodiscard]] auto valid_requirement(const ReviewPolicyRequirement& requirement)
+    -> bool {
   if (!known_kind(requirement.kind) ||
       !bounded_text(requirement.producer_name) ||
       !bounded_text(requirement.producer_version)) {
@@ -79,27 +80,29 @@ auto add_trigger(std::vector<ReviewInvalidationTrigger>& triggers,
   });
 }
 
-auto append_digest_field(std::string &output,
-                         const std::string_view value) -> void {
+auto append_digest_field(std::string& output, const std::string_view value)
+    -> void {
   output += std::to_string(value.size());
   output.push_back(':');
   output.append(value);
 }
 
-auto append_optional_digest_field(std::string &output, const std::optional<std::string> &value) -> void {
+auto append_optional_digest_field(std::string& output,
+                                  const std::optional<std::string>& value)
+    -> void {
   append_digest_field(output, value ? "present" : "absent");
   if (value) append_digest_field(output, *value);
 }
 
-auto append_content_digest(std::string &output,
-                           const ContentDigest &digest) -> void {
+auto append_content_digest(std::string& output, const ContentDigest& digest)
+    -> void {
   append_digest_field(output, digest.algorithm);
   append_digest_field(output, digest.value);
   append_digest_field(output, std::to_string(digest.byte_size));
 }
 
-auto append_participant(std::string &output,
-                        const ReviewParticipantProvenance &participant)
+auto append_participant(std::string& output,
+                        const ReviewParticipantProvenance& participant)
     -> void {
   append_digest_field(output, participant.actor.actor_id);
   append_digest_field(output, participant.actor.display_name);
@@ -117,7 +120,8 @@ auto append_participant(std::string &output,
     const std::vector<ReviewArtifactDigest>& right) -> bool {
   if (left.size() != right.size()) return false;
   return std::ranges::all_of(left, [&](const auto& expected) {
-    const auto found = std::ranges::find(right, expected.artifact_id, &ReviewArtifactDigest::artifact_id);
+    const auto found = std::ranges::find(right, expected.artifact_id,
+                                         &ReviewArtifactDigest::artifact_id);
     return found != right.end() && found->digest == expected.digest;
   });
 }
@@ -138,36 +142,35 @@ auto append_participant(std::string &output,
   append_digest_field(canonical,
                       draft.author ? "author-present" : "author-absent");
   if (draft.author) append_participant(canonical, *draft.author);
-  append_digest_field(canonical, source == ReviewAuthorizationSource::receipt ? "receipt"
-                                                               : "override");
+  append_digest_field(canonical, source == ReviewAuthorizationSource::receipt
+                                     ? "receipt"
+                                     : "override");
   for (const auto& required : policy.required_evidence) {
     append_digest_field(canonical, required.requirement_id.value());
     append_digest_field(canonical, required.producer_name);
     append_digest_field(canonical, required.producer_version);
     append_optional_digest_field(canonical, required.scenario_id);
-    append_optional_digest_field(canonical,
-                                 required.scenario_corpus_version);
+    append_optional_digest_field(canonical, required.scenario_corpus_version);
   }
   for (const auto& binding : draft.evidence) {
     append_digest_field(canonical, binding.requirement_id.value());
     append_digest_field(canonical, binding.producer_name);
     append_digest_field(canonical, binding.producer_version);
     append_optional_digest_field(canonical, binding.scenario_id);
-    append_optional_digest_field(canonical,
-                                 binding.scenario_corpus_version);
+    append_optional_digest_field(canonical, binding.scenario_corpus_version);
     append_optional_digest_field(canonical,
                                  binding.scenario_application_revision);
     append_content_digest(canonical, binding.result_digest);
     if (binding.scenario_fake_script_digest) {
       append_digest_field(canonical, "fake-script-present");
-      append_content_digest(canonical,
-                            *binding.scenario_fake_script_digest);
+      append_content_digest(canonical, *binding.scenario_fake_script_digest);
     } else {
       append_digest_field(canonical, "fake-script-absent");
     }
     if (binding.scenario_terminal_capabilities_digest) {
       append_digest_field(canonical, "terminal-capabilities-present");
-      append_content_digest(canonical, *binding.scenario_terminal_capabilities_digest);
+      append_content_digest(canonical,
+                            *binding.scenario_terminal_capabilities_digest);
     } else {
       append_digest_field(canonical, "terminal-capabilities-absent");
     }
@@ -181,8 +184,8 @@ auto append_participant(std::string &output,
     append_digest_field(canonical, finding.finding.summary);
     append_digest_field(
         canonical, std::to_string(static_cast<int>(finding.finding.severity)));
-    append_digest_field(
-        canonical, finding.finding.source ? "source-present" : "source-absent");
+    append_digest_field(canonical, finding.finding.source ? "source-present"
+                                                          : "source-absent");
     if (finding.finding.source) {
       append_digest_field(
           canonical, finding.finding.source->snapshot.repository_id.value());
@@ -191,10 +194,10 @@ auto append_participant(std::string &output,
       append_digest_field(canonical, finding.finding.source->relative_path);
       append_content_digest(canonical, finding.finding.source->content_digest);
     }
-    for (const auto &artifact : finding.finding.artifacts) {
+    for (const auto& artifact : finding.finding.artifacts) {
       append_digest_field(canonical, artifact.value());
     }
-    for (const auto &evidence : finding.finding.reproduction_evidence_ids) {
+    for (const auto& evidence : finding.finding.reproduction_evidence_ids) {
       append_digest_field(canonical, evidence.value());
     }
     append_digest_field(canonical, finding.open ? "open" : "resolved");
@@ -228,7 +231,7 @@ auto append_participant(std::string &output,
   return {"fnv1a64", std::move(value).str(), canonical.size()};
 }
 
-}  // namespace
+} // namespace
 
 auto ReviewMergeGate::evaluate(
     const repository::ReviewReceiptProjection& receipt,
@@ -257,14 +260,12 @@ auto ReviewMergeGate::evaluate(
     if (!unique(policy_ids) || !unique(policy.trusted_override_actor_ids) ||
         std::ranges::any_of(
             policy.trusted_override_actor_ids,
-                            [](const auto &actor) {
-                              return !bounded_text(actor);
-                            }) ||
+            [](const auto& actor) { return !bounded_text(actor); }) ||
         (!policy.allow_human_override &&
          !policy.trusted_override_actor_ids.empty())) {
       return std::unexpected(
           error(ReviewGateErrorCode::invalid_policy,
-                                   "review authorization policy is inconsistent"));
+                "review authorization policy is inconsistent"));
     }
 
     if (auto valid = repository::validate_review_candidate(
@@ -297,7 +298,7 @@ auto ReviewMergeGate::evaluate(
     for (const auto& required : policy.required_evidence) {
       const auto recorded =
           std::ranges::find(draft.evidence, required.requirement_id,
-          &ReviewEvidenceBinding::requirement_id);
+                            &ReviewEvidenceBinding::requirement_id);
       if (recorded == draft.evidence.end()) {
         add_trigger(result.triggers,
                     ReviewInvalidationTrigger::requirement_missing);
@@ -380,15 +381,14 @@ auto ReviewMergeGate::evaluate(
     }
 
     const auto active_override =
-        std::ranges::find_if(receipt.overrides(), [&](const auto &value) {
+        std::ranges::find_if(receipt.overrides(), [&](const auto& value) {
           return value.active &&
                  std::ranges::find(policy.trusted_override_actor_ids,
                                    value.value.actor.actor_id) !=
                      policy.trusted_override_actor_ids.end();
         });
-    const bool trusted_override =
-        policy.allow_human_override &&
-        active_override != receipt.overrides().end();
+    const bool trusted_override = policy.allow_human_override &&
+                                  active_override != receipt.overrides().end();
     if (!trusted_override &&
         std::ranges::any_of(receipt.overrides(),
                             [](const auto& value) { return value.active; })) {
@@ -414,23 +414,21 @@ auto ReviewMergeGate::evaluate(
       if (evidence_invalidated(result.triggers)) {
         result.state = ReviewGateState::invalidated;
       }
-      result.explanation =
-          "merge authorization denied because current review "
-          "policy is not satisfied";
+      result.explanation = "merge authorization denied because current review "
+                           "policy is not satisfied";
       return result;
     }
 
     const auto* selected_override =
-        *source == ReviewAuthorizationSource::human_override
-            ? &*active_override
-            : nullptr;
+        *source == ReviewAuthorizationSource::human_override ? &*active_override
+                                                             : nullptr;
     const auto digest =
         decision_digest(draft, receipt, policy, *source, selected_override);
     if (policy.require_hosted_check) {
       if (hosted_check == nullptr) {
         return std::unexpected(
             error(ReviewGateErrorCode::hosted_check_failure,
-            "required hosted review check is unavailable", true));
+                  "required hosted review check is unavailable", true));
       }
       HostedReviewCheckUpdate update{
           draft.receipt_id, draft.candidate, HostedReviewCheckState::success,
@@ -442,8 +440,8 @@ auto ReviewMergeGate::evaluate(
       if (!confirmation) {
         return std::unexpected(
             error(ReviewGateErrorCode::hosted_check_failure,
-            "required hosted review check could not be published",
-            confirmation.error().retryable));
+                  "required hosted review check could not be published",
+                  confirmation.error().retryable));
       }
       if (confirmation->candidate != draft.candidate ||
           confirmation->state != HostedReviewCheckState::success ||
@@ -470,4 +468,4 @@ auto ReviewMergeGate::evaluate(
   }
 }
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

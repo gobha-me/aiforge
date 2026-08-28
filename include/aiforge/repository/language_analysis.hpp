@@ -204,4 +204,4 @@ class LanguageAnalysisSource {
     const LanguageAnalysisResult& result)
     -> std::expected<void, LanguageAnalysisError>;
 
-}  // namespace aiforge::repository
+} // namespace aiforge::repository

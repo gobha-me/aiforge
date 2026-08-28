@@ -23,7 +23,7 @@ template <typename Id>
   return std::move(*value);
 }
 
-}  // namespace
+} // namespace
 
 auto persona_instruction_input(const domain::PersonaDocument& document,
                                const std::uint64_t estimated_tokens,
@@ -52,8 +52,10 @@ auto persona_instruction_input(const domain::PersonaDocument& document,
         domain::InstructionLayer::persona,
         domain::InstructionOperation::add,
         std::nullopt,
-        domain::Message{std::move(*message_id), domain::Role::system,
-                        {domain::TextBlock{document.text}}, std::nullopt},
+        domain::Message{std::move(*message_id),
+                        domain::Role::system,
+                        {domain::TextBlock{document.text}},
+                        std::nullopt},
         {std::move(*source_id), document.reference.source_location,
          document.reference.content_digest.algorithm + ":" +
              document.reference.content_digest.value},
@@ -88,4 +90,4 @@ auto latest_persona_selection(const domain::SessionEventLog& event_log)
   }
 }
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

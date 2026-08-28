@@ -20,9 +20,8 @@ enum class ConfigValueKind {
   text_list,
 };
 
-using ConfigValue =
-    std::variant<bool, std::int64_t, std::uint64_t, std::string,
-                 std::vector<std::string>>;
+using ConfigValue = std::variant<bool, std::int64_t, std::uint64_t, std::string,
+                                 std::vector<std::string>>;
 
 enum class ConfigSource {
   command_line,
@@ -133,4 +132,4 @@ struct ResolvedConfig {
 
 [[nodiscard]] auto builtin_config_registry() -> const ConfigRegistry&;
 
-}  // namespace aiforge::config
+} // namespace aiforge::config

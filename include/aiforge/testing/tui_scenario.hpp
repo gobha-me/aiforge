@@ -141,4 +141,4 @@ struct TuiScenarioResult {
                                        const TuiScenarioTargetFactory& factory)
     -> std::expected<TuiScenarioObservation, TuiScenarioError>;
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

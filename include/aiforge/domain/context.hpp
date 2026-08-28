@@ -124,4 +124,4 @@ struct ConstructedContext {
   auto operator==(const ConstructedContext&) const -> bool = default;
 };
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

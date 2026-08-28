@@ -147,4 +147,4 @@ struct RunProvenanceError {
                                            RunProvenanceLimits limits = {})
     -> std::expected<void, RunProvenanceError>;
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

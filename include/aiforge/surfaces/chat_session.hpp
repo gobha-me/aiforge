@@ -87,13 +87,14 @@ struct ChatSessionDependencies {
 
 class ChatSession final {
  public:
-  [[nodiscard]] static auto open(
-      ChatSessionOpen request, backend::Backend& backend,
-      backend::ModelContextProvider& model_context,
-      storage::SessionStore* session_store = nullptr,
-      runtime::RunWakeSink* wake_sink = nullptr,
-      std::stop_token stop_token = {}, ChatSessionLimits limits = {},
-      ChatSessionDependencies dependencies = {})
+  [[nodiscard]] static auto open(ChatSessionOpen request,
+                                 backend::Backend& backend,
+                                 backend::ModelContextProvider& model_context,
+                                 storage::SessionStore* session_store = nullptr,
+                                 runtime::RunWakeSink* wake_sink = nullptr,
+                                 std::stop_token stop_token = {},
+                                 ChatSessionLimits limits = {},
+                                 ChatSessionDependencies dependencies = {})
       -> std::expected<std::unique_ptr<ChatSession>, ChatSessionError>;
 
   ~ChatSession();
@@ -114,8 +115,7 @@ class ChatSession final {
       -> std::expected<std::vector<domain::PersonaSummary>, ChatSessionError>;
   [[nodiscard]] auto select_persona(std::string name)
       -> std::expected<void, ChatSessionError>;
-  [[nodiscard]] auto disable_persona()
-      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto disable_persona() -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto select_model(domain::ModelId model_id)
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto persona_state() const -> ChatPersonaState;
@@ -123,16 +123,15 @@ class ChatSession final {
   [[nodiscard]] auto plan_task_state(
       std::optional<domain::RepositoryId> repository_id = std::nullopt)
       -> std::expected<runtime::PlanTaskState, ChatSessionError>;
-  [[nodiscard]] auto
-  decide_plan(const domain::RunId &run_id,
-              domain::PlanRevisionDecision decision,
-              runtime::PlanApprovalEnvironment environment = {})
+  [[nodiscard]] auto decide_plan(
+      const domain::RunId& run_id, domain::PlanRevisionDecision decision,
+      runtime::PlanApprovalEnvironment environment = {})
       -> std::expected<runtime::PlanDecisionOutcome, ChatSessionError>;
-  [[nodiscard]] auto
-  promote_project_task(runtime::ProjectTaskPromotion promotion)
+  [[nodiscard]] auto promote_project_task(
+      runtime::ProjectTaskPromotion promotion)
       -> std::expected<void, ChatSessionError>;
-  [[nodiscard]] auto
-  update_project_task_status(runtime::ProjectTaskStatusUpdate update)
+  [[nodiscard]] auto update_project_task_status(
+      runtime::ProjectTaskStatusUpdate update)
       -> std::expected<void, ChatSessionError>;
 
   [[nodiscard]] auto submitted_prompts() const -> std::vector<std::string>;
@@ -149,4 +148,4 @@ class ChatSession final {
   std::unique_ptr<Impl> m_impl;
 };
 
-}  // namespace aiforge::surfaces
+} // namespace aiforge::surfaces

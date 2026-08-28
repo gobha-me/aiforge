@@ -9,27 +9,35 @@ namespace {
     -> std::unexpected<repository::ExactSourceEditError> {
   return std::unexpected(repository::ExactSourceEditError{
       repository::ExactSourceEditErrorCode::internal_failure,
-      std::move(message), {}, {}, false, false});
+      std::move(message),
+      {},
+      {},
+      false,
+      false});
 }
 
 [[nodiscard]] auto cancelled()
     -> std::unexpected<repository::ExactSourceEditError> {
   return std::unexpected(repository::ExactSourceEditError{
       repository::ExactSourceEditErrorCode::cancelled,
-      "exact-source operation cancelled", {}, {}, false, false});
+      "exact-source operation cancelled",
+      {},
+      {},
+      false,
+      false});
 }
 
-}  // namespace
+} // namespace
 
 ScriptedExactSourceEditor::ScriptedExactSourceEditor(
     std::vector<ExactSourceReadExchange> read_exchanges,
     std::vector<ExactSourceEditExchange> edit_exchanges)
     : m_read_exchanges(std::move(read_exchanges)),
-      m_edit_exchanges(std::move(edit_exchanges)) {}
+      m_edit_exchanges(std::move(edit_exchanges)) {
+}
 
-auto ScriptedExactSourceEditor::read(
-    repository::ExactSourceReadRequest request,
-    const std::stop_token stop_token)
+auto ScriptedExactSourceEditor::read(repository::ExactSourceReadRequest request,
+                                     const std::stop_token stop_token)
     -> std::expected<repository::ExactSourceReadResult,
                      repository::ExactSourceEditError> {
   try {
@@ -99,4 +107,4 @@ auto ScriptedExactSourceEditor::remaining_edit_exchanges() const noexcept
   return m_edit_exchanges.size() - m_next_edit_exchange;
 }
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

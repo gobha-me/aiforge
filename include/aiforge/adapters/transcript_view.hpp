@@ -55,8 +55,7 @@ class TranscriptView final {
       -> std::expected<void, TranscriptViewError>;
   [[nodiscard]] auto rebuild(std::span<const domain::RunEvent> events)
       -> std::expected<void, TranscriptViewError>;
-  [[nodiscard]] auto clear_view()
-      -> std::expected<void, TranscriptViewError>;
+  [[nodiscard]] auto clear_view() -> std::expected<void, TranscriptViewError>;
 
   auto set_geometry(termforge::Rect geometry) -> void;
   [[nodiscard]] auto on_event(const termforge::Event& event) -> bool;
@@ -82,10 +81,9 @@ class TranscriptView final {
   struct RenderedEntry;
 
   [[nodiscard]] auto render(
-      const domain::SessionTranscriptProjection& projection)
-      const -> std::expected<std::vector<RenderedEntry>, TranscriptViewError>;
-  [[nodiscard]] auto render_run(
-      const domain::TranscriptProjection& projection)
+      const domain::SessionTranscriptProjection& projection) const
+      -> std::expected<std::vector<RenderedEntry>, TranscriptViewError>;
+  [[nodiscard]] auto render_run(const domain::TranscriptProjection& projection)
       const -> std::expected<std::vector<RenderedEntry>, TranscriptViewError>;
   [[nodiscard]] auto sync(std::vector<RenderedEntry> next)
       -> std::expected<void, TranscriptViewError>;
@@ -103,4 +101,4 @@ class TranscriptView final {
   termforge::TextEntryHandle m_live;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

@@ -47,4 +47,4 @@ class ScriptedPolicyGrantStore final : public storage::PolicyGrantStore {
   std::size_t m_load_count{};
 };
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

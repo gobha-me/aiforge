@@ -78,11 +78,12 @@ using Json = nlohmann::json;
     for (const auto& raw_question : root.at("questions")) {
       if (!has_only_keys(raw_question,
                          {"id", "prompt", "kind", "required",
-                          "minimum_selections", "maximum_selections",
-                          "options", "other"})) {
+                          "minimum_selections", "maximum_selections", "options",
+                          "other"})) {
         return execution_error("ask_user question must be an object");
       }
-      auto raw_id = bounded_text(raw_question, "id", domain::QuestionId::max_size);
+      auto raw_id =
+          bounded_text(raw_question, "id", domain::QuestionId::max_size);
       auto prompt = bounded_text(raw_question, "prompt", limits.prompt_bytes);
       auto kind = bounded_text(raw_question, "kind", 8);
       if (!raw_id || !prompt || !kind) {
@@ -92,11 +93,10 @@ using Json = nlohmann::json;
       if (!question_id || !question_ids.insert(*question_id).second) {
         return execution_error("ask_user question IDs must be unique");
       }
-      const auto selection = **kind == "one"
-                                 ? std::optional{domain::QuestionSelection::one}
-                             : **kind == "many"
-                                 ? std::optional{domain::QuestionSelection::many}
-                                 : std::nullopt;
+      const auto selection =
+          **kind == "one"    ? std::optional{domain::QuestionSelection::one}
+          : **kind == "many" ? std::optional{domain::QuestionSelection::many}
+                             : std::nullopt;
       if (!selection || !raw_question.contains("required") ||
           !raw_question.at("required").is_boolean() ||
           !raw_question.contains("minimum_selections") ||
@@ -114,9 +114,10 @@ using Json = nlohmann::json;
       const auto maximum =
           raw_question.at("maximum_selections").get<std::size_t>();
       const auto& raw_options = raw_question.at("options");
-      if (raw_options.empty() || raw_options.size() > limits.options_per_question ||
-          maximum < minimum || maximum == 0 ||
-          (required && minimum == 0) || (!required && minimum != 0) ||
+      if (raw_options.empty() ||
+          raw_options.size() > limits.options_per_question ||
+          maximum < minimum || maximum == 0 || (required && minimum == 0) ||
+          (!required && minimum != 0) ||
           (*selection == domain::QuestionSelection::one && maximum != 1)) {
         return execution_error("ask_user selection bounds are impossible");
       }
@@ -163,17 +164,17 @@ using Json = nlohmann::json;
         if (!label || !placeholder) {
           return execution_error("ask_user Other text is invalid");
         }
-        other = domain::QuestionOtherInput{
-            std::move(**label), std::move(*placeholder),
-            limits.other_answer_bytes};
+        other = domain::QuestionOtherInput{std::move(**label),
+                                           std::move(*placeholder),
+                                           limits.other_answer_bytes};
       }
       const auto available = options.size() + (other ? 1U : 0U);
       if (maximum > available || recommended > maximum) {
         return execution_error("ask_user selection bounds exceed its options");
       }
-      result.push_back({std::move(*question_id), std::move(**prompt), *selection,
-                        std::move(options), required, minimum, maximum,
-                        std::move(other)});
+      result.push_back({std::move(*question_id), std::move(**prompt),
+                        *selection, std::move(options), required, minimum,
+                        maximum, std::move(other)});
     }
     return result;
   } catch (...) {
@@ -240,16 +241,16 @@ class AskUserExecutor final : public ToolExecutor {
          limits.other_answer_bytes <= maximums.other_answer_bytes;
 }
 
-}  // namespace
+} // namespace
 
 auto ask_user_declaration(const AskUserLimits& limits)
     -> backend::ToolDeclaration {
   Json option_properties = Json::object();
   option_properties["id"] = {{"type", "string"}, {"maxLength", 128}};
-  option_properties["label"] = {
-      {"type", "string"}, {"maxLength", limits.label_bytes}};
-  option_properties["description"] = {
-      {"type", "string"}, {"maxLength", limits.description_bytes}};
+  option_properties["label"] = {{"type", "string"},
+                                {"maxLength", limits.label_bytes}};
+  option_properties["description"] = {{"type", "string"},
+                                      {"maxLength", limits.description_bytes}};
   option_properties["recommended"] = {{"type", "boolean"}};
 
   Json option = {{"type", "object"},
@@ -262,10 +263,10 @@ auto ask_user_declaration(const AskUserLimits& limits)
                   {"items", std::move(option)}};
 
   Json other_properties = Json::object();
-  other_properties["label"] = {
-      {"type", "string"}, {"maxLength", limits.label_bytes}};
-  other_properties["placeholder"] = {
-      {"type", "string"}, {"maxLength", limits.description_bytes}};
+  other_properties["label"] = {{"type", "string"},
+                               {"maxLength", limits.label_bytes}};
+  other_properties["placeholder"] = {{"type", "string"},
+                                     {"maxLength", limits.description_bytes}};
   Json other = {{"type", "object"},
                 {"additionalProperties", false},
                 {"required", Json::array({"label"})},
@@ -273,25 +274,23 @@ auto ask_user_declaration(const AskUserLimits& limits)
 
   Json question_properties = Json::object();
   question_properties["id"] = {{"type", "string"}, {"maxLength", 128}};
-  question_properties["prompt"] = {
-      {"type", "string"}, {"maxLength", limits.prompt_bytes}};
-  question_properties["kind"] = {
-      {"enum", Json::array({"one", "many"})}};
+  question_properties["prompt"] = {{"type", "string"},
+                                   {"maxLength", limits.prompt_bytes}};
+  question_properties["kind"] = {{"enum", Json::array({"one", "many"})}};
   question_properties["required"] = {{"type", "boolean"}};
-  question_properties["minimum_selections"] = {
-      {"type", "integer"}, {"minimum", 0}};
-  question_properties["maximum_selections"] = {
-      {"type", "integer"}, {"minimum", 1}};
+  question_properties["minimum_selections"] = {{"type", "integer"},
+                                               {"minimum", 0}};
+  question_properties["maximum_selections"] = {{"type", "integer"},
+                                               {"minimum", 1}};
   question_properties["options"] = std::move(options);
   question_properties["other"] = std::move(other);
 
-  Json question = {
-      {"type", "object"},
-      {"additionalProperties", false},
-      {"required",
-       Json::array({"id", "prompt", "kind", "required",
-                    "minimum_selections", "maximum_selections", "options"})},
-      {"properties", std::move(question_properties)}};
+  Json question = {{"type", "object"},
+                   {"additionalProperties", false},
+                   {"required", Json::array({"id", "prompt", "kind", "required",
+                                             "minimum_selections",
+                                             "maximum_selections", "options"})},
+                   {"properties", std::move(question_properties)}};
   Json questions = {{"type", "array"},
                     {"minItems", 1},
                     {"maxItems", limits.questions},
@@ -303,7 +302,9 @@ auto ask_user_declaration(const AskUserLimits& limits)
   return {"ask_user",
           "Ask the user a small set of structured questions. This gathers "
           "information and grants no authority.",
-          {"application/schema+json", schema.dump()}, {}, {}};
+          {"application/schema+json", schema.dump()},
+          {},
+          {}};
 }
 
 auto register_ask_user_tool(ToolRegistry& registry,
@@ -316,9 +317,9 @@ auto register_ask_user_tool(ToolRegistry& registry,
         "ask_user requires an interactive question input protocol"});
   }
   if (!valid_limits(limits)) {
-    return std::unexpected(ToolRegistryError{
-        ToolRegistryErrorCode::invalid_declaration,
-        "ask_user limits must be positive"});
+    return std::unexpected(
+        ToolRegistryError{ToolRegistryErrorCode::invalid_declaration,
+                          "ask_user limits must be positive"});
   }
   return registry.register_tool(
       ask_user_declaration(limits),
@@ -326,4 +327,4 @@ auto register_ask_user_tool(ToolRegistry& registry,
       ToolExecutionLimits{64U * 1024U, 1, std::chrono::seconds{5}});
 }
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

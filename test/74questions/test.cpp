@@ -31,21 +31,27 @@ auto context(std::vector<domain::Message> tool_messages = {})
       {id<domain::ContextEntryId>("runtime-entry"),
        domain::ContextEntryKind::instruction,
        domain::InstructionLayer::application_runtime,
-       {id<domain::MessageId>("runtime-message"), domain::Role::system,
-        {domain::TextBlock{"runtime"}}, std::nullopt},
+       {id<domain::MessageId>("runtime-message"),
+        domain::Role::system,
+        {domain::TextBlock{"runtime"}},
+        std::nullopt},
        {id<domain::ContextSourceId>("runtime-source"), std::nullopt,
         std::nullopt},
-       0, 1, 1}};
+       0,
+       1,
+       1}};
   std::uint64_t order{2};
   for (auto& message : tool_messages) {
     entries.push_back(
         {id<domain::ContextEntryId>("tool-entry-" + std::to_string(order)),
-         domain::ContextEntryKind::tool_result, std::nullopt,
+         domain::ContextEntryKind::tool_result,
+         std::nullopt,
          std::move(message),
-         {id<domain::ContextSourceId>("tool-source-" +
-                                      std::to_string(order)),
+         {id<domain::ContextSourceId>("tool-source-" + std::to_string(order)),
           std::nullopt, std::nullopt},
-         0, order++, 1});
+         0,
+         order++,
+         1});
   }
   return {std::move(entries), {}, {4096, 512, 0}, order};
 }
@@ -54,9 +60,12 @@ auto request(std::string inference, std::string message,
              const runtime::ToolRegistrySnapshot& tools,
              std::vector<domain::Message> results = {})
     -> backend::BackendRequest {
-  return {id<domain::InferenceId>(inference), id<domain::MessageId>(message),
-          id<domain::ModelId>("model"), context(std::move(results)),
-          tools.declarations(), {}};
+  return {id<domain::InferenceId>(inference),
+          id<domain::MessageId>(message),
+          id<domain::ModelId>("model"),
+          context(std::move(results)),
+          tools.declarations(),
+          {}};
 }
 
 class Wake final : public runtime::RunWakeSink {
@@ -71,9 +80,8 @@ class Wake final : public runtime::RunWakeSink {
 
   auto wait(std::size_t generation) -> void {
     std::unique_lock lock(m_mutex);
-    static_cast<void>(m_changed.wait_for(lock, 1s, [&] {
-      return m_generation != generation;
-    }));
+    static_cast<void>(m_changed.wait_for(
+        lock, 1s, [&] { return m_generation != generation; }));
   }
 
   auto generation() -> std::size_t {
@@ -126,9 +134,11 @@ class MemoryStore final : public storage::SessionStore {
       return std::unexpected(storage::SessionStoreError{
           storage::SessionStoreErrorCode::not_found, "missing", false});
     }
-    const auto last = events.empty() ? created : events.back().metadata.timestamp;
-    return storage::SessionInfo{session_id, created, last,
-                                events.empty() ? 0 : events.back().metadata.sequence};
+    const auto last =
+        events.empty() ? created : events.back().metadata.timestamp;
+    return storage::SessionInfo{
+        session_id, created, last,
+        events.empty() ? 0 : events.back().metadata.sequence};
   }
   auto list_sessions(std::size_t, std::stop_token)
       -> std::expected<std::vector<storage::SessionInfo>,
@@ -157,7 +167,8 @@ class MemoryStore final : public storage::SessionStore {
   }
 };
 
-constexpr std::string_view arguments = R"({"questions":[{"id":"format","prompt":"Choose output","kind":"one","required":true,"minimum_selections":1,"maximum_selections":1,"options":[{"id":"short","label":"Short","recommended":true},{"id":"long","label":"Long"}],"other":{"label":"Other","placeholder":"Describe it"}}]})";
+constexpr std::string_view arguments =
+    R"({"questions":[{"id":"format","prompt":"Choose output","kind":"one","required":true,"minimum_selections":1,"maximum_selections":1,"options":[{"id":"short","label":"Short","recommended":true},{"id":"long","label":"Long"}],"other":{"label":"Other","placeholder":"Describe it"}}]})";
 
 auto snapshot() -> runtime::ToolRegistrySnapshot {
   runtime::ToolRegistry registry;
@@ -167,7 +178,7 @@ auto snapshot() -> runtime::ToolRegistrySnapshot {
   return std::move(*result);
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("ask_user registration requires an interactive input protocol",
           "[questions][registry][failure]") {
@@ -214,8 +225,8 @@ TEST_CASE("ask_user registration requires an interactive input protocol",
       std::string{R"({"questions":[{"id":"q","prompt":")"} +
       std::string(1025, 'x') +
       R"(","kind":"one","required":true,"minimum_selections":1,"maximum_selections":1,"options":[{"id":"x","label":"X"}]}]})";
-  REQUIRE_FALSE(registered->executor->validate(
-      {"application/json", oversized}));
+  REQUIRE_FALSE(
+      registered->executor->validate({"application/json", oversized}));
 }
 
 TEST_CASE("ask_user resolves once and continues inference in the same run",
@@ -224,7 +235,8 @@ TEST_CASE("ask_user resolves once and continues inference in the same run",
   const auto invocation = id<domain::InvocationId>("ask-call");
   auto initial = request("inference-1", "assistant-1", tools);
   const auto result_message = domain::Message{
-      id<domain::MessageId>("tool-message-6"), domain::Role::tool,
+      id<domain::MessageId>("tool-message-6"),
+      domain::Role::tool,
       {domain::StructuredDataBlock{
           "application/json",
           R"({"answers":[{"other":null,"question_id":"format","selected_option_ids":["short"]}],"status":"answered"})"}},
@@ -232,14 +244,13 @@ TEST_CASE("ask_user resolves once and continues inference in the same run",
   auto continuation =
       request("inference-2", "assistant-2", tools, {result_message});
   testing::ScriptedBackend backend{{
-      {initial,
-       testing::StreamScript{{
-           backend::ResponseStarted{"response-1"},
-           backend::ToolCallDelta{invocation, "ask_user",
-                                  std::string{arguments}},
-           backend::ResponseFinished{domain::FinishReason::tool_call},
-           testing::EndOfStream{},
-       }}},
+      {initial, testing::StreamScript{{
+                    backend::ResponseStarted{"response-1"},
+                    backend::ToolCallDelta{invocation, "ask_user",
+                                           std::string{arguments}},
+                    backend::ResponseFinished{domain::FinishReason::tool_call},
+                    testing::EndOfStream{},
+                }}},
       {continuation,
        testing::StreamScript{{
            backend::ResponseStarted{"response-2"},
@@ -250,14 +261,16 @@ TEST_CASE("ask_user resolves once and continues inference in the same run",
        }}},
   }};
   Wake wake;
-  runtime::RunKernel kernel{id<domain::SessionId>("session"), backend, &wake,
-                            {}, {}, tools};
+  runtime::RunKernel kernel{
+      id<domain::SessionId>("session"), backend, &wake, {}, {}, tools};
   REQUIRE(kernel.start(
       {id<domain::RunId>("run"),
        {id<domain::SurfaceId>("tui"), id<domain::WorkspaceId>("chat"),
         id<domain::PermissionProfileId>("observe"), std::nullopt},
-       {id<domain::MessageId>("user"), domain::Role::user,
-        {domain::TextBlock{"hello"}}, std::nullopt},
+       {id<domain::MessageId>("user"),
+        domain::Role::user,
+        {domain::TextBlock{"hello"}},
+        std::nullopt},
        initial}));
   drain_until_questions(kernel, wake);
 
@@ -298,22 +311,24 @@ TEST_CASE("pending ask_user input rehydrates without rerunning the tool",
   auto initial = request("inference-1", "assistant-1", tools);
   testing::ScriptedBackend backend{{
       {initial,
-       testing::StreamScript{{backend::ResponseStarted{"response"},
-                              backend::ToolCallDelta{invocation, "ask_user",
-                                                     std::string{arguments}},
-                              backend::ResponseFinished{
-                                  domain::FinishReason::tool_call},
-                              testing::EndOfStream{}}}},
+       testing::StreamScript{
+           {backend::ResponseStarted{"response"},
+            backend::ToolCallDelta{invocation, "ask_user",
+                                   std::string{arguments}},
+            backend::ResponseFinished{domain::FinishReason::tool_call},
+            testing::EndOfStream{}}}},
   }};
   Wake wake;
-  runtime::RunKernel original{id<domain::SessionId>("session"), backend, &wake,
-                              {}, {}, tools};
+  runtime::RunKernel original{
+      id<domain::SessionId>("session"), backend, &wake, {}, {}, tools};
   REQUIRE(original.start(
       {id<domain::RunId>("run"),
        {id<domain::SurfaceId>("tui"), id<domain::WorkspaceId>("chat"),
         id<domain::PermissionProfileId>("observe"), std::nullopt},
-       {id<domain::MessageId>("user"), domain::Role::user,
-        {domain::TextBlock{"hello"}}, std::nullopt},
+       {id<domain::MessageId>("user"),
+        domain::Role::user,
+        {domain::TextBlock{"hello"}},
+        std::nullopt},
        initial}));
   drain_until_questions(original, wake);
 
@@ -349,15 +364,15 @@ TEST_CASE("pending ask_user input rehydrates without rerunning the tool",
   REQUIRE((*resumed)->cancel_questions(id<domain::RunId>("run"), invocation,
                                        "user cancelled"));
   REQUIRE_FALSE((*resumed)->pending_question_input());
-  REQUIRE_FALSE((*resumed)->cancel_questions(
-      id<domain::RunId>("run"), invocation, "duplicate"));
+  REQUIRE_FALSE((*resumed)->cancel_questions(id<domain::RunId>("run"),
+                                             invocation, "duplicate"));
   const auto results =
       runtime::tool_result_messages((*resumed)->event_log().events());
   REQUIRE(results);
   REQUIRE(results->size() == 1);
-  REQUIRE(std::get<domain::StructuredDataBlock>(
-              results->front().content.front())
-              .data == R"({"status":"cancelled"})");
+  REQUIRE(
+      std::get<domain::StructuredDataBlock>(results->front().content.front())
+          .data == R"({"status":"cancelled"})");
 }
 
 TEST_CASE("ask_user blocks a queued tool until the question resolves",
@@ -366,21 +381,27 @@ TEST_CASE("ask_user blocks a queued tool until the question resolves",
   const auto queued = id<domain::InvocationId>("queued-call");
   const runtime::ToolExecutionLimits limits{4096, 4, 1s};
   auto queued_executor = std::make_shared<testing::ScriptedToolExecutor>(
-      std::vector<testing::ScriptedToolExchange>{{
-          runtime::ToolInvocation{
-              queued, std::nullopt, "after_question",
-              runtime::ValidatedToolArguments{{"application/json", "{}"}},
-              {}, limits},
-          testing::ToolStreamScript{{
-              runtime::ToolExecutionEvent{
-                  runtime::ToolResult{{domain::TextBlock{"after"}}}},
-              testing::ToolEndOfStream{},
-          }}}});
+      std::vector<testing::ScriptedToolExchange>{
+          {runtime::ToolInvocation{
+               queued,
+               std::nullopt,
+               "after_question",
+               runtime::ValidatedToolArguments{{"application/json", "{}"}},
+               {},
+               limits},
+           testing::ToolStreamScript{{
+               runtime::ToolExecutionEvent{
+                   runtime::ToolResult{{domain::TextBlock{"after"}}}},
+               testing::ToolEndOfStream{},
+           }}}});
   runtime::ToolRegistry registry;
   REQUIRE(runtime::register_ask_user_tool(registry, true));
   REQUIRE(registry.register_tool(
-      {"after_question", "Run after the question",
-       {"application/schema+json", R"({"type":"object"})"}, {}, {}},
+      {"after_question",
+       "Run after the question",
+       {"application/schema+json", R"({"type":"object"})"},
+       {},
+       {}},
       queued_executor, limits));
   auto tools = registry.snapshot();
   REQUIRE(tools);
@@ -396,14 +417,16 @@ TEST_CASE("ask_user blocks a queued tool until the question resolves",
        }}},
   }};
   Wake wake;
-  runtime::RunKernel kernel{id<domain::SessionId>("session"), backend, &wake,
-                            {}, {}, *tools};
+  runtime::RunKernel kernel{
+      id<domain::SessionId>("session"), backend, &wake, {}, {}, *tools};
   REQUIRE(kernel.start(
       {id<domain::RunId>("run"),
        {id<domain::SurfaceId>("tui"), id<domain::WorkspaceId>("chat"),
         id<domain::PermissionProfileId>("observe"), std::nullopt},
-       {id<domain::MessageId>("user"), domain::Role::user,
-        {domain::TextBlock{"hello"}}, std::nullopt},
+       {id<domain::MessageId>("user"),
+        domain::Role::user,
+        {domain::TextBlock{"hello"}},
+        std::nullopt},
        initial}));
   drain_until_questions(kernel, wake);
   REQUIRE(queued_executor->recorded_invocations().empty());
@@ -456,12 +479,12 @@ TEST_CASE("question answer persistence failure cannot publish a result",
   auto initial = request("inference-1", "assistant-1", tools);
   testing::ScriptedBackend backend{{
       {initial,
-       testing::StreamScript{{backend::ResponseStarted{"response"},
-                              backend::ToolCallDelta{invocation, "ask_user",
-                                                     std::string{arguments}},
-                              backend::ResponseFinished{
-                                  domain::FinishReason::tool_call},
-                              testing::EndOfStream{}}}},
+       testing::StreamScript{
+           {backend::ResponseStarted{"response"},
+            backend::ToolCallDelta{invocation, "ask_user",
+                                   std::string{arguments}},
+            backend::ResponseFinished{domain::FinishReason::tool_call},
+            testing::EndOfStream{}}}},
   }};
   MemoryStore store;
   Wake wake;
@@ -474,8 +497,10 @@ TEST_CASE("question answer persistence failure cannot publish a result",
       {id<domain::RunId>("run"),
        {id<domain::SurfaceId>("tui"), id<domain::WorkspaceId>("chat"),
         id<domain::PermissionProfileId>("observe"), std::nullopt},
-       {id<domain::MessageId>("user"), domain::Role::user,
-        {domain::TextBlock{"hello"}}, std::nullopt},
+       {id<domain::MessageId>("user"),
+        domain::Role::user,
+        {domain::TextBlock{"hello"}},
+        std::nullopt},
        initial}));
   drain_until_questions(**durable, wake);
   const auto stored_before = store.events.size();

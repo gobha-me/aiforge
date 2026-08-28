@@ -58,4 +58,4 @@ class InteractiveChatApp : public termforge::App {
     InteractiveChatAppOptions options = {})
     -> std::unique_ptr<InteractiveChatApp>;
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

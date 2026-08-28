@@ -6,7 +6,8 @@ namespace aiforge::testing {
 
 ScriptedProjectInstructionSource::ScriptedProjectInstructionSource(
     std::vector<ProjectInstructionExchange> exchanges)
-    : m_exchanges(std::move(exchanges)) {}
+    : m_exchanges(std::move(exchanges)) {
+}
 
 auto ScriptedProjectInstructionSource::discover(
     repository::ProjectInstructionRequest request,
@@ -33,8 +34,8 @@ auto ScriptedProjectInstructionSource::discover(
           "project instruction request did not match script", std::nullopt,
           false});
     }
-    if (auto* error =
-            std::get_if<repository::ProjectInstructionError>(&exchange.outcome)) {
+    if (auto* error = std::get_if<repository::ProjectInstructionError>(
+            &exchange.outcome)) {
       return std::unexpected(*error);
     }
     return std::get<domain::ProjectInstructionDiscovery>(exchange.outcome);
@@ -56,4 +57,4 @@ auto ScriptedProjectInstructionSource::remaining_exchanges() const noexcept
   return m_exchanges.size() - m_next_exchange;
 }
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

@@ -78,8 +78,7 @@ using WorkerUpdate =
 
 [[nodiscard]] auto plan_id_from(const domain::RunEventPayload& payload)
     -> const domain::PlanId* {
-  if (const auto *value =
-          std::get_if<domain::PlanRevisionProposed>(&payload)) {
+  if (const auto* value = std::get_if<domain::PlanRevisionProposed>(&payload)) {
     return &value->revision.plan_id;
   }
   if (const auto* value =
@@ -109,10 +108,12 @@ using WorkerUpdate =
     -> bool {
   return !digest.algorithm.empty() && digest.algorithm.size() <= 128 &&
          !digest.value.empty() && digest.value.size() <= 512 &&
-         std::ranges::all_of(digest.algorithm, [](const unsigned char value) {
-           return std::isalnum(value) != 0 || value == '-' || value == '_' ||
-                  value == '.';
-         }) &&
+         std::ranges::all_of(digest.algorithm,
+                             [](const unsigned char value) {
+                               return std::isalnum(value) != 0 ||
+                                      value == '-' || value == '_' ||
+                                      value == '.';
+                             }) &&
          std::ranges::all_of(digest.value, [](const unsigned char value) {
            return std::isxdigit(value) != 0;
          });
@@ -133,8 +134,8 @@ using WorkerUpdate =
   });
 }
 
-[[nodiscard]] auto plan_basis_drift(const domain::PlanRevision &revision,
-    const PlanApprovalEnvironment& environment)
+[[nodiscard]] auto plan_basis_drift(const domain::PlanRevision& revision,
+                                    const PlanApprovalEnvironment& environment)
     -> std::vector<domain::PlanInvalidationTrigger> {
   std::vector<domain::PlanInvalidationTrigger> result;
   if (revision.source_snapshot &&
@@ -146,7 +147,7 @@ using WorkerUpdate =
       std::ranges::any_of(revision.evidence, [&](const auto& expected) {
         const auto found =
             std::ranges::find(environment.evidence, expected.evidence_id,
-            &domain::PlanEvidenceBinding::evidence_id);
+                              &domain::PlanEvidenceBinding::evidence_id);
         return found == environment.evidence.end() ||
                found->digest != expected.digest;
       });
@@ -236,21 +237,21 @@ using WorkerUpdate =
 [[nodiscard]] auto child_domain_error(const ChildRunError& error)
     -> domain::DomainError {
   switch (error.code) {
-  case ChildRunErrorCode::cancelled:
-    return {domain::ErrorCode::cancelled, "child run cancelled", false};
-  case ChildRunErrorCode::timed_out:
-    return {domain::ErrorCode::cancelled, "child run timed out", false};
-  case ChildRunErrorCode::budget_exhausted:
-    return {domain::ErrorCode::policy, "child-run budget exhausted", false};
-  case ChildRunErrorCode::unavailable:
-    return {domain::ErrorCode::unavailable, "child runner unavailable",
-            error.retryable};
-  case ChildRunErrorCode::protocol_failure:
-    return {domain::ErrorCode::invalid_state, "child runner protocol failure",
-            false};
-  case ChildRunErrorCode::internal_failure:
-    return {domain::ErrorCode::unavailable, "child runner failed internally",
-            false};
+    case ChildRunErrorCode::cancelled:
+      return {domain::ErrorCode::cancelled, "child run cancelled", false};
+    case ChildRunErrorCode::timed_out:
+      return {domain::ErrorCode::cancelled, "child run timed out", false};
+    case ChildRunErrorCode::budget_exhausted:
+      return {domain::ErrorCode::policy, "child-run budget exhausted", false};
+    case ChildRunErrorCode::unavailable:
+      return {domain::ErrorCode::unavailable, "child runner unavailable",
+              error.retryable};
+    case ChildRunErrorCode::protocol_failure:
+      return {domain::ErrorCode::invalid_state, "child runner protocol failure",
+              false};
+    case ChildRunErrorCode::internal_failure:
+      return {domain::ErrorCode::unavailable, "child runner failed internally",
+              false};
   }
   return {domain::ErrorCode::unavailable, "child runner failed", false};
 }
@@ -258,17 +259,17 @@ using WorkerUpdate =
 [[nodiscard]] auto child_outcome(const ChildRunErrorCode code)
     -> domain::SessionTaskOutcome {
   switch (code) {
-  case ChildRunErrorCode::cancelled:
-    return domain::SessionTaskOutcome::cancelled;
-  case ChildRunErrorCode::timed_out:
-    return domain::SessionTaskOutcome::timed_out;
-  case ChildRunErrorCode::budget_exhausted:
-    return domain::SessionTaskOutcome::budget_exhausted;
-  case ChildRunErrorCode::unavailable:
-    return domain::SessionTaskOutcome::unavailable;
-  case ChildRunErrorCode::protocol_failure:
-  case ChildRunErrorCode::internal_failure:
-    return domain::SessionTaskOutcome::failed;
+    case ChildRunErrorCode::cancelled:
+      return domain::SessionTaskOutcome::cancelled;
+    case ChildRunErrorCode::timed_out:
+      return domain::SessionTaskOutcome::timed_out;
+    case ChildRunErrorCode::budget_exhausted:
+      return domain::SessionTaskOutcome::budget_exhausted;
+    case ChildRunErrorCode::unavailable:
+      return domain::SessionTaskOutcome::unavailable;
+    case ChildRunErrorCode::protocol_failure:
+    case ChildRunErrorCode::internal_failure:
+      return domain::SessionTaskOutcome::failed;
   }
   return domain::SessionTaskOutcome::failed;
 }
@@ -277,23 +278,22 @@ using WorkerUpdate =
     const domain::SessionTaskOutcome outcome)
     -> std::optional<domain::DomainError> {
   switch (outcome) {
-  case domain::SessionTaskOutcome::completed:
-    return std::nullopt;
-  case domain::SessionTaskOutcome::failed:
-    return domain::DomainError{domain::ErrorCode::invalid_state,
-                               "child run failed", false};
-  case domain::SessionTaskOutcome::cancelled:
-    return domain::DomainError{domain::ErrorCode::cancelled,
-                               "child run cancelled", false};
-  case domain::SessionTaskOutcome::timed_out:
-    return domain::DomainError{domain::ErrorCode::cancelled,
-                               "child run timed out", false};
-  case domain::SessionTaskOutcome::budget_exhausted:
-    return domain::DomainError{domain::ErrorCode::policy,
-                               "child-run budget exhausted", false};
-  case domain::SessionTaskOutcome::unavailable:
-    return domain::DomainError{domain::ErrorCode::unavailable,
-                               "child runner unavailable", false};
+    case domain::SessionTaskOutcome::completed: return std::nullopt;
+    case domain::SessionTaskOutcome::failed:
+      return domain::DomainError{domain::ErrorCode::invalid_state,
+                                 "child run failed", false};
+    case domain::SessionTaskOutcome::cancelled:
+      return domain::DomainError{domain::ErrorCode::cancelled,
+                                 "child run cancelled", false};
+    case domain::SessionTaskOutcome::timed_out:
+      return domain::DomainError{domain::ErrorCode::cancelled,
+                                 "child run timed out", false};
+    case domain::SessionTaskOutcome::budget_exhausted:
+      return domain::DomainError{domain::ErrorCode::policy,
+                                 "child-run budget exhausted", false};
+    case domain::SessionTaskOutcome::unavailable:
+      return domain::DomainError{domain::ErrorCode::unavailable,
+                                 "child runner unavailable", false};
   }
   return domain::DomainError{domain::ErrorCode::invalid_state,
                              "child run failed", false};
@@ -377,8 +377,8 @@ using WorkerUpdate =
 
   std::set<domain::ArtifactId> created_ids;
   for (const auto& artifact : artifacts) {
-    const bool dimensions_match = artifact.width.has_value() ==
-                                  artifact.height.has_value();
+    const bool dimensions_match =
+        artifact.width.has_value() == artifact.height.has_value();
     if (!artifact.producing_invocation_id ||
         *artifact.producing_invocation_id != invocation_id ||
         artifact.media_type.empty() || artifact.media_type.size() > 255 ||
@@ -400,9 +400,7 @@ using WorkerUpdate =
     }
   }
   return std::ranges::all_of(
-      created_ids, [&](const auto &id) {
-    return referenced.contains(id);
-  });
+      created_ids, [&](const auto& id) { return referenced.contains(id); });
 }
 
 [[nodiscard]] auto valid_question_definitions(
@@ -410,8 +408,7 @@ using WorkerUpdate =
   if (questions.empty() || questions.size() > 3) return false;
   std::set<domain::QuestionId> ids;
   for (const auto& question : questions) {
-    const auto available =
-        question.options.size() + (question.other ? 1U : 0U);
+    const auto available = question.options.size() + (question.other ? 1U : 0U);
     if (!ids.insert(question.question_id).second || question.prompt.empty() ||
         question.prompt.size() > 1024 ||
         has_control_character(question.prompt) || question.options.empty() ||
@@ -442,8 +439,7 @@ using WorkerUpdate =
     }
     if (recommended > *question.maximum_selections) return false;
     if (question.other &&
-        (question.other->label.empty() ||
-         question.other->label.size() > 256 ||
+        (question.other->label.empty() || question.other->label.size() > 256 ||
          has_control_character(question.other->label) ||
          question.other->maximum_bytes == 0 ||
          (question.other->placeholder &&
@@ -464,7 +460,7 @@ using WorkerUpdate =
     if (!answered_ids.insert(answer.question_id).second) return false;
     const auto found =
         std::ranges::find(questions, answer.question_id,
-        &domain::QuestionDefinition::question_id);
+                          &domain::QuestionDefinition::question_id);
     if (found == questions.end()) return false;
     if (answer.free_form &&
         (answer.free_form->empty() || !found->other ||
@@ -503,7 +499,7 @@ using WorkerUpdate =
         {{"question_id", std::string{answer.question_id.value()}},
          {"selected_option_ids", answer.selected_option_ids},
          {"other", answer.free_form ? nlohmann::json(*answer.free_form)
-                                     : nlohmann::json(nullptr)}});
+                                    : nlohmann::json(nullptr)}});
   }
   return {domain::StructuredDataBlock{
       "application/json",
@@ -511,8 +507,7 @@ using WorkerUpdate =
           .dump()}};
 }
 
-[[nodiscard]] auto cancelled_content()
-    -> std::vector<domain::ContentBlock> {
+[[nodiscard]] auto cancelled_content() -> std::vector<domain::ContentBlock> {
   return {domain::StructuredDataBlock{
       "application/json", nlohmann::json{{"status", "cancelled"}}.dump()}};
 }
@@ -527,7 +522,8 @@ using WorkerUpdate =
   return true;
 }
 
-[[nodiscard]] auto valid_policy_decision(const domain::PolicyDecision decision) -> bool {
+[[nodiscard]] auto valid_policy_decision(const domain::PolicyDecision decision)
+    -> bool {
   switch (decision) {
     case domain::PolicyDecision::allow:
     case domain::PolicyDecision::deny:
@@ -556,7 +552,7 @@ using WorkerUpdate =
   return false;
 }
 
-[[nodiscard]] auto tool_invocation_id(const domain::RunEventPayload &payload)
+[[nodiscard]] auto tool_invocation_id(const domain::RunEventPayload& payload)
     -> std::optional<domain::InvocationId> {
   return std::visit(
       [](const auto& value) -> std::optional<domain::InvocationId> {
@@ -568,7 +564,7 @@ using WorkerUpdate =
       payload);
 }
 
-}  // namespace
+} // namespace
 
 struct RunKernel::Impl {
   struct ToolAssembly {
@@ -677,8 +673,13 @@ struct RunKernel::Impl {
   }
 
   [[nodiscard]] auto transaction() const -> Transaction {
-    return {event_log, projections, plan_projections, used_invocation_ids,
-            active, active_children, {}};
+    return {event_log,
+            projections,
+            plan_projections,
+            used_invocation_ids,
+            active,
+            active_children,
+            {}};
   }
 
   [[nodiscard]] auto valid_limits() const noexcept -> bool {
@@ -824,8 +825,7 @@ struct RunKernel::Impl {
             ChildRunFailed{invocation.child_run_id, std::move(next.error())}));
         return;
       }
-      if (!*next)
-        break;
+      if (!*next) break;
       if (terminal) {
         static_cast<void>(push(ChildRunFailed{
             invocation.child_run_id,
@@ -894,7 +894,7 @@ struct RunKernel::Impl {
     const auto enriched_child =
         std::holds_alternative<domain::ChildRunCreated>(payload) &&
         std::get<domain::ChildRunCreated>(payload).descriptor.has_value();
-    const auto *child_payload = std::get_if<domain::ChildRunCreated>(&payload);
+    const auto* child_payload = std::get_if<domain::ChildRunCreated>(&payload);
     const std::uint32_t schema_version =
         enriched_child
             ? (child_payload->descriptor->review_receipt_id ? 4U : 3U)
@@ -903,17 +903,14 @@ struct RunKernel::Impl {
                    : 1U);
     std::optional<domain::RunId> parent_run_id;
     const auto child = transaction.active_children.find(run_id);
-    if (child != transaction.active_children.end() &&
-        child->second.child_run) {
+    if (child != transaction.active_children.end() && child->second.child_run) {
       parent_run_id = child->second.child_run->parent_run_id;
     }
     return domain::RunEvent{
         domain::EventMetadata{
-                                std::move(*event_id), run_id, sequence,
-                                schema_version, timestamp(), std::nullopt,
-                                std::move(parent_run_id),
-                                std::move(invocation_id)},
-                            std::move(payload)};
+            std::move(*event_id), run_id, sequence, schema_version, timestamp(),
+            std::nullopt, std::move(parent_run_id), std::move(invocation_id)},
+        std::move(payload)};
   }
 
   [[nodiscard]] auto make_result_message_id(const Transaction& transaction)
@@ -961,7 +958,8 @@ struct RunKernel::Impl {
             kernel_error(RunKernelErrorCode::invalid_plan_state,
                          "plan projection rejected a generated event"));
       }
-      transaction.plan_projections.insert_or_assign(*plan_id, std::move(plan_candidate));
+      transaction.plan_projections.insert_or_assign(*plan_id,
+                                                    std::move(plan_candidate));
     }
     if (!transaction.event_log.append(*event)) {
       return std::unexpected(
@@ -1024,8 +1022,7 @@ struct RunKernel::Impl {
           kernel_error(RunKernelErrorCode::invalid_tool_state,
                        "tool invocation is already terminal"));
     }
-    if (auto result = record(
-            transaction.active->run_id,
+    if (auto result = record(transaction.active->run_id,
                              domain::ToolErrored{invocation.invocation_id,
                                                  std::move(error),
                                                  invocation.result_message_id},
@@ -1171,8 +1168,7 @@ struct RunKernel::Impl {
                         ToolExecutionErrorCode::internal_failure,
                         "tool validation failed internally", false});
                 try {
-                  validated =
-                      registration->executor->validate(raw_arguments);
+                  validated = registration->executor->validate(raw_arguments);
                 } catch (...) {
                 }
                 if (validated &&
@@ -1186,7 +1182,8 @@ struct RunKernel::Impl {
                           registration->declaration.effects)) ||
                      (!validated->required_scopes.empty() &&
                       std::ranges::any_of(
-                          validated->required_scopes, [&](const auto &scope) {
+                          validated->required_scopes,
+                          [&](const auto& scope) {
                             return std::ranges::none_of(
                                 registration->declaration.capability_scopes,
                                 [&](const auto& declared) {
@@ -1216,19 +1213,17 @@ struct RunKernel::Impl {
                                : validated->required_scopes)
                         : std::vector<domain::CapabilityScope>{};
                 auto required_effects =
-                    validated
-                        ? (validated->required_effects.empty()
-                               ? registration->declaration.effects
-                               : validated->required_effects)
-                        : std::vector<domain::Effect>{};
+                    validated ? (validated->required_effects.empty()
+                                     ? registration->declaration.effects
+                                     : validated->required_effects)
+                              : std::vector<domain::Effect>{};
                 if (auto result = record_or_fail(
                         domain::ToolProposed{
                             invocation_id, assembly.name, raw_arguments,
                             required_effects, std::nullopt,
                             validated && validated->value == raw_arguments,
-                            validated
-                                ? validated->required_scopes
-                                : std::vector<domain::CapabilityScope>{},
+                            validated ? validated->required_scopes
+                                      : std::vector<domain::CapabilityScope>{},
                             required_scopes, *message_id},
                         invocation_id);
                     !result) {
@@ -1426,17 +1421,18 @@ struct RunKernel::Impl {
             }
             invocation.questions = std::move(event.questions);
             for (const auto& question : invocation.questions) {
-              if (auto result = record(active->run_id, domain::QuestionRequested{question},
-                      transaction, invocation.invocation_id);
+              if (auto result = record(active->run_id,
+                                       domain::QuestionRequested{question},
+                                       transaction, invocation.invocation_id);
                   !result) {
                 return result;
               }
             }
             if (auto result =
                     record(active->run_id,
-                    domain::RunAwaitingInput{
-                        invocation.questions.front().question_id},
-                    transaction, invocation.invocation_id);
+                           domain::RunAwaitingInput{
+                               invocation.questions.front().question_id},
+                           transaction, invocation.invocation_id);
                 !result) {
               return result;
             }
@@ -1446,8 +1442,8 @@ struct RunKernel::Impl {
             const auto bytes = content_bytes(event.content);
             if (!bytes ||
                 invocation.output_bytes > invocation.limits.output_bytes ||
-                *bytes > invocation.limits.output_bytes -
-                             invocation.output_bytes) {
+                *bytes >
+                    invocation.limits.output_bytes - invocation.output_bytes) {
               if (operation_stop) operation_stop->request_stop();
               return record_tool_error(
                   transaction, invocation,
@@ -1487,8 +1483,8 @@ struct RunKernel::Impl {
                 const auto artifact_id = artifact.artifact_id;
                 if (auto created =
                         record(active->run_id,
-                        domain::ArtifactCreated{std::move(artifact)},
-                        transaction, invocation.invocation_id);
+                               domain::ArtifactCreated{std::move(artifact)},
+                               transaction, invocation.invocation_id);
                     !created) {
                   return created;
                 }
@@ -1503,10 +1499,9 @@ struct RunKernel::Impl {
               auto result =
                   record(active->run_id,
                          domain::ToolResultRecorded{
-                             invocation.invocation_id,
-                                             std::move(event.content),
-                                             invocation.result_message_id},
-                  transaction, invocation.invocation_id);
+                             invocation.invocation_id, std::move(event.content),
+                             invocation.result_message_id},
+                         transaction, invocation.invocation_id);
               if (result) {
                 invocation.state = InvocationState::terminal;
                 invocation.terminal_event_seen = true;
@@ -1589,11 +1584,13 @@ struct RunKernel::Impl {
         continue;
       }
       invocation.policy_request =
-          ToolPolicyRequest{transaction.event_log.session_id(), transaction.active->run_id,
-          invocation.invocation_id,
-          transaction.active->permission_profile_id,
-          invocation.declaration.name, invocation.requested_effects,
-          invocation.requested_scopes};
+          ToolPolicyRequest{transaction.event_log.session_id(),
+                            transaction.active->run_id,
+                            invocation.invocation_id,
+                            transaction.active->permission_profile_id,
+                            invocation.declaration.name,
+                            invocation.requested_effects,
+                            invocation.requested_scopes};
 
       std::expected<ToolPolicyResolution, ToolPolicyError> resolution =
           std::unexpected(ToolPolicyError{
@@ -1607,14 +1604,13 @@ struct RunKernel::Impl {
         const auto domain_error = policy_failure_error(resolution.error());
         if (auto recorded = record(transaction.active->run_id,
                                    domain::ToolPolicyFailed{
-                                       invocation.invocation_id,
-                                         domain_error},
-                transaction, invocation.invocation_id);
+                                       invocation.invocation_id, domain_error},
+                                   transaction, invocation.invocation_id);
             !recorded) {
           return recorded;
         }
-        if (auto failed = record_tool_error(transaction, invocation,
-                                            domain_error);
+        if (auto failed =
+                record_tool_error(transaction, invocation, domain_error);
             !failed) {
           return failed;
         }
@@ -1638,13 +1634,13 @@ struct RunKernel::Impl {
       } else if (!resolution->scopes.empty()) {
         return fail_live_run(transaction, protocol_domain_error());
       }
-      if (auto recorded = record(
-              transaction.active->run_id,
-              domain::ToolPolicyDecided{
-                  invocation.invocation_id, resolution->decision,
-                  resolution->scopes,
-                  std::move(resolution->redacted_reason), resolution->source},
-              transaction, invocation.invocation_id);
+      if (auto recorded = record(transaction.active->run_id,
+                                 domain::ToolPolicyDecided{
+                                     invocation.invocation_id,
+                                     resolution->decision, resolution->scopes,
+                                     std::move(resolution->redacted_reason),
+                                     resolution->source},
+                                 transaction, invocation.invocation_id);
           !recorded) {
         return recorded;
       }
@@ -1765,12 +1761,12 @@ struct RunKernel::Impl {
   }
 
   [[nodiscard]] auto record_child_terminal(
-      const domain::RunId &child_run_id, Transaction &transaction,
-                        domain::SessionTaskOutcome outcome,
-                        domain::ChildRunConsumption consumption,
-                        std::vector<domain::EvidenceId> evidence_ids,
-                        std::vector<domain::ArtifactId> artifact_ids,
-                        std::optional<domain::DomainError> error,
+      const domain::RunId& child_run_id, Transaction& transaction,
+      domain::SessionTaskOutcome outcome,
+      domain::ChildRunConsumption consumption,
+      std::vector<domain::EvidenceId> evidence_ids,
+      std::vector<domain::ArtifactId> artifact_ids,
+      std::optional<domain::DomainError> error,
       std::optional<domain::ReviewChildResult> review = std::nullopt)
       -> std::expected<void, RunKernelError> {
     const auto active = transaction.active_children.find(child_run_id);
@@ -1797,7 +1793,7 @@ struct RunKernel::Impl {
           "child-run terminal result is malformed or exceeds its budget"));
     }
     if (review) {
-      for (const auto &finding : review->findings) {
+      for (const auto& finding : review->findings) {
         if (auto recorded =
                 record(run_id,
                        domain::ReviewFindingOpened{review->receipt_id, finding},
@@ -1827,9 +1823,10 @@ struct RunKernel::Impl {
       }
     } else if (outcome == domain::SessionTaskOutcome::cancelled ||
                outcome == domain::SessionTaskOutcome::timed_out) {
-      if (auto recorded = record(
-              run_id,
-              domain::RunCancelled{result.error ? std::optional{result.error->message}
+      if (auto recorded =
+              record(run_id,
+                     domain::RunCancelled{
+                         result.error ? std::optional{result.error->message}
                                       : std::nullopt},
                      transaction);
           !recorded) {
@@ -1886,14 +1883,14 @@ struct RunKernel::Impl {
         update.result.consumption.usage.output_tokens >
             budget.maximum_output_tokens;
     domain::SessionTaskResult candidate{active->second.child_run->plan_id,
-        active->second.child_run->revision_id,
-        active->second.child_run->task_id,
-        update.child_run_id,
-        update.result.outcome,
-        update.result.consumption,
-        update.result.evidence_ids,
-        update.result.artifact_ids,
-        update.result.error};
+                                        active->second.child_run->revision_id,
+                                        active->second.child_run->task_id,
+                                        update.child_run_id,
+                                        update.result.outcome,
+                                        update.result.consumption,
+                                        update.result.evidence_ids,
+                                        update.result.artifact_ids,
+                                        update.result.error};
     if (exceeds_budget) {
       const auto error = child_domain_error(
           {ChildRunErrorCode::budget_exhausted, "budget exceeded", false});
@@ -1905,7 +1902,8 @@ struct RunKernel::Impl {
       const auto error = child_domain_error(
           {ChildRunErrorCode::protocol_failure, "invalid result", false});
       return record_child_terminal(update.child_run_id, transaction,
-          domain::SessionTaskOutcome::failed, {}, {}, {}, error);
+                                   domain::SessionTaskOutcome::failed, {}, {},
+                                   {}, error);
     }
     const auto receipt_id = active->second.child_run->review_receipt_id;
     if ((update.result.review &&
@@ -1921,9 +1919,9 @@ struct RunKernel::Impl {
                                    {}, error);
     }
     if (update.result.review) {
-      const domain::ReviewReceiptDraft *draft = nullptr;
-      for (const auto &event : transaction.event_log.events()) {
-        if (const auto *drafted =
+      const domain::ReviewReceiptDraft* draft = nullptr;
+      for (const auto& event : transaction.event_log.events()) {
+        if (const auto* drafted =
                 std::get_if<domain::ReviewReceiptDrafted>(&event.payload);
             drafted && drafted->draft.receipt_id == *receipt_id) {
           draft = &drafted->draft;
@@ -1943,8 +1941,7 @@ struct RunKernel::Impl {
     }
     return record_child_terminal(
         update.child_run_id, transaction, update.result.outcome,
-        update.result.consumption,
-        std::move(update.result.evidence_ids),
+        update.result.consumption, std::move(update.result.evidence_ids),
         std::move(update.result.artifact_ids),
         redacted_child_result_error(update.result.outcome),
         std::move(update.result.review));
@@ -1970,14 +1967,15 @@ struct RunKernel::Impl {
     const auto cancelled = active->second.cancel_requested;
     const auto outcome = cancelled ? domain::SessionTaskOutcome::cancelled
                                    : child_outcome(update.error.code);
-    const auto error = cancelled ? redacted_child_result_error(outcome)
-                                 : std::optional{child_domain_error(update.error)};
+    const auto error = cancelled
+                           ? redacted_child_result_error(outcome)
+                           : std::optional{child_domain_error(update.error)};
     return record_child_terminal(update.child_run_id, transaction, outcome, {},
                                  {}, {}, error);
   }
 
   [[nodiscard]] auto process_child_deadline(
-      const ChildRunDeadlineExpired &update, Transaction &transaction)
+      const ChildRunDeadlineExpired& update, Transaction& transaction)
       -> std::expected<void, RunKernelError> {
     return process_child_failure(
         {update.child_run_id,
@@ -1994,18 +1992,17 @@ struct RunKernel::Impl {
             kernel_error(RunKernelErrorCode::child_runner_unavailable,
                          "child runner is unavailable"));
       }
-      auto [operation, inserted] =
-          child_operations.try_emplace(child_run_id);
+      auto [operation, inserted] = child_operations.try_emplace(child_run_id);
       if (!inserted) {
         return std::unexpected(
             kernel_error(RunKernelErrorCode::invalid_child_state,
-            "child-run worker identity is already active"));
+                         "child-run worker identity is already active"));
       }
       auto stop_source = operation->second.stop;
       operation->second.deadline =
           std::jthread([impl = this, stop_source, child_run_id,
-           timeout = invocation.descriptor.budget.timeout](
-              const std::stop_token stop_token) mutable {
+                        timeout = invocation.descriptor.budget.timeout](
+                           const std::stop_token stop_token) mutable {
             std::mutex mutex;
             std::unique_lock lock(mutex);
             std::condition_variable_any changed;
@@ -2018,16 +2015,16 @@ struct RunKernel::Impl {
             }
           });
       operation->second.worker =
-          std::jthread([impl = this, invocation = std::move(invocation), stop_source,
-           child_run_id](std::stop_token) mutable {
+          std::jthread([impl = this, invocation = std::move(invocation),
+                        stop_source, child_run_id](std::stop_token) mutable {
             try {
               impl->run_child(std::move(invocation), stop_source.get_token());
             } catch (...) {
               try {
                 static_cast<void>(impl->push(
                     ChildRunFailed{child_run_id,
-                    {ChildRunErrorCode::internal_failure,
-                     "child worker failed internally", false}}));
+                                   {ChildRunErrorCode::internal_failure,
+                                    "child worker failed internally", false}}));
               } catch (...) {
               }
             }
@@ -2091,7 +2088,8 @@ RunKernel::RunKernel(domain::SessionId session_id, backend::Backend& backend,
     : m_impl(std::make_unique<Impl>(std::move(session_id), backend, wake_sink,
                                     std::move(timestamp_source), limits,
                                     std::move(tools), std::move(policy),
-                                    std::move(child_runner))) {}
+                                    std::move(child_runner))) {
+}
 
 auto RunKernel::open_durable(DurableSessionOpen session,
                              storage::SessionStore& store,
@@ -2103,9 +2101,8 @@ auto RunKernel::open_durable(DurableSessionOpen session,
     -> std::expected<std::unique_ptr<RunKernel>, RunKernelError> {
   try {
     auto kernel = std::unique_ptr<RunKernel>{new RunKernel(
-        session.session_id, backend, wake_sink,
-                      std::move(timestamp_source), limits, std::move(tools),
-                      std::move(policy), std::move(child_runner))};
+        session.session_id, backend, wake_sink, std::move(timestamp_source),
+        limits, std::move(tools), std::move(policy), std::move(child_runner))};
     if (!kernel->m_impl->valid_limits()) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_limits,
@@ -2209,7 +2206,7 @@ auto RunKernel::open_durable(DurableSessionOpen session,
         if (awaiting_run && awaiting_plan_run) {
           return std::unexpected(
               kernel_error(RunKernelErrorCode::replay_rejected,
-              "durable session contains multiple awaiting runs"));
+                           "durable session contains multiple awaiting runs"));
         }
       }
       if (awaiting_run) {
@@ -2217,21 +2214,16 @@ auto RunKernel::open_durable(DurableSessionOpen session,
         std::optional<domain::RunStarted> started;
         std::vector<domain::InvocationId> current_batch;
         std::map<domain::InvocationId, domain::ToolProposed> proposals;
-        std::map<domain::InvocationId, domain::PolicyDecision>
-            policy_decisions;
-        std::map<domain::InvocationId,
-                 std::vector<domain::CapabilityScope>>
+        std::map<domain::InvocationId, domain::PolicyDecision> policy_decisions;
+        std::map<domain::InvocationId, std::vector<domain::CapabilityScope>>
             policy_scopes;
         std::map<domain::InvocationId, domain::ApprovalDecision>
             approval_decisions;
-        std::map<domain::InvocationId,
-                 std::vector<domain::CapabilityScope>>
+        std::map<domain::InvocationId, std::vector<domain::CapabilityScope>>
             approval_scopes;
-        std::map<domain::InvocationId,
-                 std::vector<domain::QuestionDefinition>>
+        std::map<domain::InvocationId, std::vector<domain::QuestionDefinition>>
             questions;
-        std::map<domain::InvocationId, domain::MessageId>
-            terminal_message_ids;
+        std::map<domain::InvocationId, domain::MessageId> terminal_message_ids;
         std::set<domain::InvocationId> tool_started;
         std::set<domain::InvocationId> tool_terminal;
         for (const auto& event : *events) {
@@ -2255,26 +2247,23 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                          std::get_if<domain::ToolProposed>(&event.payload)) {
             current_batch.push_back(value->invocation_id);
             proposals.insert_or_assign(value->invocation_id, *value);
-          } else if (const auto *value =
-                         std::get_if<domain::ToolPolicyDecided>(
-                             &event.payload)) {
+          } else if (const auto* value = std::get_if<domain::ToolPolicyDecided>(
+                         &event.payload)) {
             policy_decisions.insert_or_assign(value->invocation_id,
-                                               value->decision);
-            policy_scopes.insert_or_assign(value->invocation_id,
-                                           value->scopes);
+                                              value->decision);
+            policy_scopes.insert_or_assign(value->invocation_id, value->scopes);
           } else if (const auto* value =
                          std::get_if<domain::ToolApprovalDecided>(
                              &event.payload)) {
             approval_decisions.insert_or_assign(value->invocation_id,
-                                                 value->decision);
+                                                value->decision);
             approval_scopes.insert_or_assign(value->invocation_id,
                                              value->granted_scopes);
           } else if (const auto* value =
                          std::get_if<domain::ToolStarted>(&event.payload)) {
             tool_started.insert(value->invocation_id);
-          } else if (const auto *value =
-                         std::get_if<domain::QuestionRequested>(
-                             &event.payload)) {
+          } else if (const auto* value = std::get_if<domain::QuestionRequested>(
+                         &event.payload)) {
             if (event.metadata.invocation_id) {
               questions[*event.metadata.invocation_id].push_back(
                   value->question);
@@ -2284,13 +2273,15 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                              &event.payload)) {
             tool_terminal.insert(value->invocation_id);
             if (value->result_message_id) {
-              terminal_message_ids.insert_or_assign(value->invocation_id, *value->result_message_id);
+              terminal_message_ids.insert_or_assign(value->invocation_id,
+                                                    *value->result_message_id);
             }
           } else if (const auto* value =
                          std::get_if<domain::ToolErrored>(&event.payload)) {
             tool_terminal.insert(value->invocation_id);
             if (value->result_message_id) {
-              terminal_message_ids.insert_or_assign(value->invocation_id, *value->result_message_id);
+              terminal_message_ids.insert_or_assign(value->invocation_id,
+                                                    *value->result_message_id);
             }
           } else if (std::holds_alternative<domain::RunAwaitingInput>(
                          event.payload)) {
@@ -2300,7 +2291,7 @@ auto RunKernel::open_durable(DurableSessionOpen session,
         if (!invocation_id || !started) {
           return std::unexpected(
               kernel_error(RunKernelErrorCode::replay_rejected,
-              "awaiting question history lacks runtime identity"));
+                           "awaiting question history lacks runtime identity"));
         }
         if (!proposals.contains(*invocation_id) ||
             !tool_started.contains(*invocation_id) ||
@@ -2308,7 +2299,7 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             !valid_question_definitions(questions[*invocation_id])) {
           return std::unexpected(
               kernel_error(RunKernelErrorCode::replay_rejected,
-              "awaiting question history is incomplete"));
+                           "awaiting question history is incomplete"));
         }
         std::map<domain::InvocationId, Impl::PendingInvocation> invocations;
         for (const auto& current_id : current_batch) {
@@ -2316,7 +2307,7 @@ auto RunKernel::open_durable(DurableSessionOpen session,
           if (proposed == proposals.end()) {
             return std::unexpected(
                 kernel_error(RunKernelErrorCode::replay_rejected,
-                "queued tool history lacks its proposal"));
+                             "queued tool history lacks its proposal"));
           }
           const auto* registration =
               kernel->m_impl->tools.find(proposed->second.tool_name);
@@ -2339,7 +2330,7 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             });
           };
           if (!effects_are_declared(proposed->second.declared_effects,
-                  registration->declaration.effects) ||
+                                    registration->declaration.effects) ||
               !scopes_are_unique(proposed->second.validated_required_scopes) ||
               !scopes_are_unique(proposed->second.requested_scopes) ||
               !scopes_are_declared(
@@ -2348,12 +2339,12 @@ auto RunKernel::open_durable(DurableSessionOpen session,
               std::ranges::any_of(
                   proposed->second.requested_scopes, [&](const auto& scope) {
                     return std::ranges::find(proposed->second.declared_effects,
-                               scope.effect) ==
+                                             scope.effect) ==
                            proposed->second.declared_effects.end();
                   })) {
             return std::unexpected(
                 kernel_error(RunKernelErrorCode::replay_rejected,
-                "queued tool declaration changed during replay"));
+                             "queued tool declaration changed during replay"));
           }
 
           auto state = Impl::InvocationState::proposed;
@@ -2394,20 +2385,21 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                          domain::PolicyDecision::require_approval) {
             state = Impl::InvocationState::awaiting_approval;
             policy_request =
-                ToolPolicyRequest{event_log.session_id(), *awaiting_run, current_id,
-                started->permission_profile_id,
-                proposed->second.tool_name,
-                proposed->second.declared_effects,
-                proposed->second.requested_scopes};
+                ToolPolicyRequest{event_log.session_id(),
+                                  *awaiting_run,
+                                  current_id,
+                                  started->permission_profile_id,
+                                  proposed->second.tool_name,
+                                  proposed->second.declared_effects,
+                                  proposed->second.requested_scopes};
           } else {
             return std::unexpected(
                 kernel_error(RunKernelErrorCode::replay_rejected,
-                "queued tool history has no resumable state"));
+                             "queued tool history has no resumable state"));
           }
 
           auto result_message_id = proposed->second.result_message_id;
-          if (!result_message_id &&
-              terminal_message_ids.contains(current_id)) {
+          if (!result_message_id && terminal_message_ids.contains(current_id)) {
             result_message_id = terminal_message_ids.at(current_id);
           }
           if (!result_message_id) {
@@ -2419,11 +2411,12 @@ auto RunKernel::open_durable(DurableSessionOpen session,
               !proposed->second.arguments_replayable) {
             return std::unexpected(
                 kernel_error(RunKernelErrorCode::replay_rejected,
-                "queued tool history lacks normalized arguments"));
+                             "queued tool history lacks normalized arguments"));
           }
-          auto invocation_questions = questions.contains(current_id)
-                                          ? questions.at(current_id)
-                                          : std::vector<domain::QuestionDefinition>{};
+          auto invocation_questions =
+              questions.contains(current_id)
+                  ? questions.at(current_id)
+                  : std::vector<domain::QuestionDefinition>{};
           invocations.emplace(
               current_id,
               Impl::PendingInvocation{
@@ -2435,29 +2428,29 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                       proposed->second.declared_effects},
                   registration->limits, registration->executor,
                   *result_message_id, proposed->second.declared_effects,
-                  proposed->second.requested_scopes,
-                  std::move(granted_scopes), std::move(policy_request), state,
-                  0, 0, tool_terminal.contains(current_id),
+                  proposed->second.requested_scopes, std::move(granted_scopes),
+                  std::move(policy_request), state, 0, 0,
+                  tool_terminal.contains(current_id),
                   std::move(invocation_questions)});
         }
         kernel->m_impl->active = Impl::ActiveRun{*awaiting_run,
-            started->permission_profile_id,
-            std::nullopt,
-            std::nullopt,
-            {},
-            {},
-            std::move(invocations),
-            std::move(current_batch),
-            std::nullopt,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt};
+                                                 started->permission_profile_id,
+                                                 std::nullopt,
+                                                 std::nullopt,
+                                                 {},
+                                                 {},
+                                                 std::move(invocations),
+                                                 std::move(current_batch),
+                                                 std::nullopt,
+                                                 false,
+                                                 false,
+                                                 false,
+                                                 false,
+                                                 false,
+                                                 false,
+                                                 std::nullopt,
+                                                 std::nullopt,
+                                                 std::nullopt};
       }
       if (awaiting_plan_run) {
         std::optional<domain::RunStarted> started;
@@ -2473,36 +2466,35 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             plan_id = value->revision.plan_id;
           }
         }
-        const auto plan_state =
-            plan_id && plan_projections.contains(*plan_id)
-                ? plan_projections.at(*plan_id).state()
-                : domain::PlanGraphState::not_started;
+        const auto plan_state = plan_id && plan_projections.contains(*plan_id)
+                                    ? plan_projections.at(*plan_id).state()
+                                    : domain::PlanGraphState::not_started;
         if (!started || !plan_id ||
             (plan_state != domain::PlanGraphState::proposed &&
              plan_state != domain::PlanGraphState::revision_requested &&
              plan_state != domain::PlanGraphState::invalidated)) {
           return std::unexpected(
               kernel_error(RunKernelErrorCode::replay_rejected,
-              "awaiting plan history is incomplete"));
+                           "awaiting plan history is incomplete"));
         }
         Impl::ActiveRun active{*awaiting_plan_run,
-            started->permission_profile_id,
-            std::nullopt,
-            std::nullopt,
-            {},
-            {},
-            {},
-            {},
-            std::nullopt,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt};
+                               started->permission_profile_id,
+                               std::nullopt,
+                               std::nullopt,
+                               {},
+                               {},
+                               {},
+                               {},
+                               std::nullopt,
+                               false,
+                               false,
+                               false,
+                               false,
+                               false,
+                               false,
+                               std::nullopt,
+                               std::nullopt,
+                               std::nullopt};
         active.planning_plan_id = *plan_id;
         kernel->m_impl->active = std::move(active);
       }
@@ -2562,13 +2554,13 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
       if (start.attributes.persona_id || persona_entries != 0) {
         return std::unexpected(
             kernel_error(RunKernelErrorCode::invalid_start,
-            "run persona metadata is incomplete"));
+                         "run persona metadata is incomplete"));
       }
     } else {
       if (!domain::validate_persona_selection(*start.persona_selection)) {
         return std::unexpected(
             kernel_error(RunKernelErrorCode::invalid_start,
-            "run persona selection is invalid"));
+                         "run persona selection is invalid"));
       }
       if (start.persona_selection->action ==
           domain::PersonaSelectionAction::disabled) {
@@ -2583,7 +2575,8 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
             start.request.context.entries,
             [](const domain::ContextEntry& entry) {
               return entry.kind == domain::ContextEntryKind::instruction &&
-                     entry.instruction_layer == domain::InstructionLayer::persona;
+                     entry.instruction_layer ==
+                         domain::InstructionLayer::persona;
             });
         const auto expected_digest = persona.content_digest.algorithm + ":" +
                                      persona.content_digest.value;
@@ -2613,9 +2606,9 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
       // a sensitive value into the in-memory log either.
       if (auto valid = domain::validate_run_provenance(*start.provenance);
           !valid) {
-        return std::unexpected(kernel_error(
-            RunKernelErrorCode::invalid_start,
-            "run provenance is invalid: " + valid.error().message));
+        return std::unexpected(kernel_error(RunKernelErrorCode::invalid_start,
+                                            "run provenance is invalid: " +
+                                                valid.error().message));
       }
     }
 
@@ -2654,9 +2647,9 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
     }
     if (start.persona_selection) {
       if (auto result = m_impl->record(start.run_id,
-              domain::PersonaSelectionRecorded{
-                  std::move(*start.persona_selection)},
-              transaction);
+                                       domain::PersonaSelectionRecorded{
+                                           std::move(*start.persona_selection)},
+                                       transaction);
           !result) {
         return result;
       }
@@ -2731,7 +2724,7 @@ auto RunKernel::record_session_spend_ceiling(SessionSpendCeilingChange change)
         !domain::SessionSpendCeiling::create(change.ceiling.amount())) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_start,
-          "session spend ceiling change is invalid"));
+                       "session spend ceiling change is invalid"));
     }
 
     domain::SessionSpendCeilingProjection ceiling_projection;
@@ -2739,7 +2732,7 @@ auto RunKernel::record_session_spend_ceiling(SessionSpendCeilingChange change)
       if (!ceiling_projection.apply(event)) {
         return std::unexpected(
             kernel_error(RunKernelErrorCode::projection_rejected,
-            "session spend ceiling history is invalid"));
+                         "session spend ceiling history is invalid"));
       }
     }
     if (ceiling_projection.ceiling() &&
@@ -2748,28 +2741,25 @@ auto RunKernel::record_session_spend_ceiling(SessionSpendCeilingChange change)
             std::strong_ordering::greater) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_start,
-          "session spend ceiling cannot be widened"));
+                       "session spend ceiling cannot be widened"));
     }
 
     auto transaction = m_impl->transaction();
     if (auto recorded = m_impl->record(
-            change.run_id,
-                                       std::move(change.attributes),
-                                       transaction);
+            change.run_id, std::move(change.attributes), transaction);
         !recorded) {
       return recorded;
     }
     if (auto recorded =
             m_impl->record(change.run_id,
                            domain::SessionSpendCeilingSet{
-                               std::move(change.ceiling),
-                                           change.source},
-            transaction);
+                               std::move(change.ceiling), change.source},
+                           transaction);
         !recorded) {
       return recorded;
     }
-    if (auto recorded = m_impl->record(change.run_id, domain::RunCompleted{},
-                                       transaction);
+    if (auto recorded =
+            m_impl->record(change.run_id, domain::RunCompleted{}, transaction);
         !recorded) {
       return recorded;
     }
@@ -2777,7 +2767,7 @@ auto RunKernel::record_session_spend_ceiling(SessionSpendCeilingChange change)
   } catch (...) {
     return std::unexpected(
         kernel_error(RunKernelErrorCode::internal_failure,
-        "session spend ceiling change failed internally"));
+                     "session spend ceiling change failed internally"));
   }
 }
 
@@ -2802,28 +2792,19 @@ auto RunKernel::start_plan(PlanStart start)
         !domain::validate_plan_revision(start.revision)) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_plan_state,
-          "plan start contains invalid or reused identity"));
+                       "plan start contains invalid or reused identity"));
     }
 
     const auto plan_id = start.revision.plan_id;
-    Impl::ActiveRun active{start.run_id,
-                           start.attributes.permission_profile_id,
-                           std::nullopt,
-                           std::nullopt,
-                           {},
-                           {},
-                           {},
-                           {},
-                           std::nullopt,
-                           false,
-                           false,
-                           false,
-                           false,
-                           false,
-                           false,
-                           std::nullopt,
-                           std::nullopt,
-                           std::nullopt};
+    Impl::ActiveRun active{start.run_id, start.attributes.permission_profile_id,
+                           std::nullopt, std::nullopt,
+                           {},           {},
+                           {},           {},
+                           std::nullopt, false,
+                           false,        false,
+                           false,        false,
+                           false,        std::nullopt,
+                           std::nullopt, std::nullopt};
     active.planning_plan_id = plan_id;
 
     auto transaction = m_impl->transaction();
@@ -2859,15 +2840,15 @@ auto RunKernel::revise_plan(const domain::RunId& run_id,
     if (!m_impl->active || m_impl->active->run_id != run_id) {
       return std::unexpected(
           kernel_error(m_impl->active ? RunKernelErrorCode::wrong_run
-                         : RunKernelErrorCode::no_active_run,
-          "plan revision targets no active planning run"));
+                                      : RunKernelErrorCode::no_active_run,
+                       "plan revision targets no active planning run"));
     }
     if (!m_impl->active->planning_plan_id ||
         *m_impl->active->planning_plan_id != revision.plan_id ||
         !domain::validate_plan_revision(revision)) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::wrong_plan,
-          "plan revision targets another or invalid plan"));
+                       "plan revision targets another or invalid plan"));
     }
     const auto found = m_impl->plan_projections.find(revision.plan_id);
     if (found == m_impl->plan_projections.end() ||
@@ -2875,7 +2856,7 @@ auto RunKernel::revise_plan(const domain::RunId& run_id,
          found->second.state() != domain::PlanGraphState::invalidated)) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_plan_state,
-          "plan is not ready for a superseding revision"));
+                       "plan is not ready for a superseding revision"));
     }
 
     auto transaction = m_impl->transaction();
@@ -2904,8 +2885,7 @@ auto RunKernel::decide_plan(const domain::RunId& run_id,
     }
     if (!domain::validate_plan_decision(decision)) {
       return std::unexpected(kernel_error(
-          RunKernelErrorCode::invalid_plan_state,
-          "plan decision is invalid"));
+          RunKernelErrorCode::invalid_plan_state, "plan decision is invalid"));
     }
     const auto found = m_impl->plan_projections.find(decision.plan_id);
     const auto* current = found == m_impl->plan_projections.end()
@@ -2915,7 +2895,7 @@ auto RunKernel::decide_plan(const domain::RunId& run_id,
         current->revision.revision_id != decision.revision_id) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::wrong_plan,
-          "plan decision does not target the current revision"));
+                       "plan decision does not target the current revision"));
     }
     if (current->decision) {
       if (*current->decision == decision &&
@@ -2925,37 +2905,37 @@ auto RunKernel::decide_plan(const domain::RunId& run_id,
       }
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_plan_state,
-          "plan revision already has a different decision"));
+                       "plan revision already has a different decision"));
     }
     if (current->invalidation_event_id) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_plan_state,
-          "an invalidated plan revision cannot be decided"));
+                       "an invalidated plan revision cannot be decided"));
     }
     if (!m_impl->active || m_impl->active->run_id != run_id ||
         !m_impl->active->planning_plan_id ||
         *m_impl->active->planning_plan_id != decision.plan_id) {
       return std::unexpected(
           kernel_error(m_impl->active ? RunKernelErrorCode::wrong_run
-                         : RunKernelErrorCode::no_active_run,
-          "plan decision targets no active planning run"));
+                                      : RunKernelErrorCode::no_active_run,
+                       "plan decision targets no active planning run"));
     }
 
     if (decision.decision == domain::PlanDecision::approved) {
       if (!valid_plan_environment(environment)) {
         return std::unexpected(
             kernel_error(RunKernelErrorCode::invalid_plan_state,
-            "plan approval environment is invalid"));
+                         "plan approval environment is invalid"));
       }
       auto triggers = plan_basis_drift(current->revision, environment);
       if (!triggers.empty()) {
         auto transaction = m_impl->transaction();
         if (auto recorded =
                 m_impl->record(run_id,
-                domain::PlanRevisionInvalidated{
-                    {decision.plan_id, decision.revision_id,
-                     std::move(triggers)}},
-                transaction);
+                               domain::PlanRevisionInvalidated{
+                                   {decision.plan_id, decision.revision_id,
+                                    std::move(triggers)}},
+                               transaction);
             !recorded) {
           return std::unexpected(std::move(recorded.error()));
         }
@@ -2969,8 +2949,7 @@ auto RunKernel::decide_plan(const domain::RunId& run_id,
 
     auto transaction = m_impl->transaction();
     if (auto recorded = m_impl->record(
-            run_id,
-            domain::PlanRevisionDecisionRecorded{std::move(decision)},
+            run_id, domain::PlanRevisionDecisionRecorded{std::move(decision)},
             transaction);
         !recorded) {
       return std::unexpected(std::move(recorded.error()));
@@ -2981,7 +2960,8 @@ auto RunKernel::decide_plan(const domain::RunId& run_id,
     if (projected_state == domain::PlanGraphState::approved) {
       if (auto recorded = m_impl->record(
               run_id,
-              domain::SessionTasksMaterialized{current->revision.plan_id, current->revision.revision_id},
+              domain::SessionTasksMaterialized{current->revision.plan_id,
+                                               current->revision.revision_id},
               transaction);
           !recorded) {
         return std::unexpected(std::move(recorded.error()));
@@ -2989,8 +2969,8 @@ auto RunKernel::decide_plan(const domain::RunId& run_id,
     }
     if (projected_state == domain::PlanGraphState::approved ||
         projected_state == domain::PlanGraphState::rejected) {
-      if (auto recorded = m_impl->record(run_id, domain::RunCompleted{},
-                                         transaction);
+      if (auto recorded =
+              m_impl->record(run_id, domain::RunCompleted{}, transaction);
           !recorded) {
         return std::unexpected(std::move(recorded.error()));
       }
@@ -3017,7 +2997,7 @@ auto RunKernel::revalidate_plan_approval(PlanApprovalRevalidation revalidation)
     if (!valid_plan_environment(revalidation.environment)) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_plan_state,
-          "plan revalidation environment is invalid"));
+                       "plan revalidation environment is invalid"));
     }
     const auto found = m_impl->plan_projections.find(revalidation.plan_id);
     const auto* current = found == m_impl->plan_projections.end()
@@ -3037,7 +3017,7 @@ auto RunKernel::revalidate_plan_approval(PlanApprovalRevalidation revalidation)
         !current->materialization_event_id) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_plan_state,
-          "only materialized approved tasks can be revalidated"));
+                       "only materialized approved tasks can be revalidated"));
     }
     auto triggers =
         plan_basis_drift(current->revision, revalidation.environment);
@@ -3050,22 +3030,22 @@ auto RunKernel::revalidate_plan_approval(PlanApprovalRevalidation revalidation)
     if (m_impl->projections.contains(revalidation.run_id)) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_plan_state,
-          "plan revalidation run identity is already present"));
+                       "plan revalidation run identity is already present"));
     }
 
     auto transaction = m_impl->transaction();
     if (auto recorded =
-            m_impl->record(revalidation.run_id, std::move(revalidation.attributes),
-            transaction);
+            m_impl->record(revalidation.run_id,
+                           std::move(revalidation.attributes), transaction);
         !recorded) {
       return std::unexpected(std::move(recorded.error()));
     }
     if (auto recorded =
             m_impl->record(revalidation.run_id,
-            domain::PlanRevisionInvalidated{
-                {revalidation.plan_id, revalidation.revision_id,
-                 std::move(triggers)}},
-            transaction);
+                           domain::PlanRevisionInvalidated{
+                               {revalidation.plan_id, revalidation.revision_id,
+                                std::move(triggers)}},
+                           transaction);
         !recorded) {
       return std::unexpected(std::move(recorded.error()));
     }
@@ -3081,7 +3061,7 @@ auto RunKernel::revalidate_plan_approval(PlanApprovalRevalidation revalidation)
   } catch (...) {
     return std::unexpected(
         kernel_error(RunKernelErrorCode::internal_failure,
-        "plan approval revalidation failed internally"));
+                     "plan approval revalidation failed internally"));
   }
 }
 
@@ -3106,14 +3086,14 @@ auto RunKernel::dispatch_child(ChildRunStart start)
     if (runner_capacity == 0 || runner_capacity > 16) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_child_state,
-          "child runner reports an invalid concurrency limit"));
+                       "child runner reports an invalid concurrency limit"));
     }
     const auto dispatch_capacity = std::min(
         runner_capacity, m_impl->limits.task_scheduling.maximum_concurrency);
     if (m_impl->active_children.size() >= dispatch_capacity) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::run_already_active,
-          "child-run dispatch capacity is exhausted"));
+                       "child-run dispatch capacity is exhausted"));
     }
     if (m_impl->projections.contains(start.child_run_id)) {
       return std::unexpected(
@@ -3144,8 +3124,7 @@ auto RunKernel::dispatch_child(ChildRunStart start)
     const auto* execution = plan->second.task_execution(start.task_id);
     if (task == current->revision.tasks.end() || execution == nullptr) {
       return std::unexpected(kernel_error(
-          RunKernelErrorCode::invalid_child_state,
-                       "session task is unknown"));
+          RunKernelErrorCode::invalid_child_state, "session task is unknown"));
     }
     const auto expected_attempt =
         static_cast<std::uint32_t>(execution->attempts.size() + 1U);
@@ -3185,7 +3164,7 @@ auto RunKernel::dispatch_child(ChildRunStart start)
       if (active_revision == nullptr) {
         return std::unexpected(
             kernel_error(RunKernelErrorCode::invalid_child_state,
-            "active child run has no current task revision"));
+                         "active child run has no current task revision"));
       }
       const auto active_task = std::ranges::find(
           active_revision->revision.tasks, active.child_run->task_id,
@@ -3194,7 +3173,7 @@ auto RunKernel::dispatch_child(ChildRunStart start)
           domain::task_resource_conflict(selected_task, *active_task)) {
         return std::unexpected(
             kernel_error(RunKernelErrorCode::invalid_child_state,
-            "child-run resource intents overlap an active task"));
+                         "child-run resource intents overlap an active task"));
       }
     }
     const auto parent_materialized = std::ranges::any_of(
@@ -3219,8 +3198,8 @@ auto RunKernel::dispatch_child(ChildRunStart start)
           kernel_error(RunKernelErrorCode::invalid_child_state,
                        "child-run context is invalid or stale"));
     }
-    const domain::ReviewReceiptDraft *existing_review = nullptr;
-    const domain::ReviewActor *existing_requester = nullptr;
+    const domain::ReviewReceiptDraft* existing_review = nullptr;
+    const domain::ReviewActor* existing_requester = nullptr;
     if (start.review) {
       if (!repository::validate_review_receipt_draft(start.review->draft) ||
           !repository::validate_review_actor(start.review->requested_by) ||
@@ -3235,7 +3214,7 @@ auto RunKernel::dispatch_child(ChildRunStart start)
                               }) ||
           start.requested_effects !=
               std::vector<domain::Effect>{domain::Effect::read} ||
-          std::ranges::any_of(start.requested_scopes, [](const auto &scope) {
+          std::ranges::any_of(start.requested_scopes, [](const auto& scope) {
             return scope.effect != domain::Effect::read;
           })) {
         return std::unexpected(kernel_error(
@@ -3243,11 +3222,11 @@ auto RunKernel::dispatch_child(ChildRunStart start)
             "review child requires a current read-only review request"));
       }
       const auto has_diff =
-          std::ranges::any_of(start.context.items, [](const auto &item) {
+          std::ranges::any_of(start.context.items, [](const auto& item) {
             return std::holds_alternative<domain::DiffEvidence>(item.reference);
           });
       const auto has_exact_source =
-          std::ranges::any_of(start.context.items, [](const auto &item) {
+          std::ranges::any_of(start.context.items, [](const auto& item) {
             return std::holds_alternative<domain::ExactSourceEvidence>(
                 item.reference);
           });
@@ -3256,13 +3235,13 @@ auto RunKernel::dispatch_child(ChildRunStart start)
             RunKernelErrorCode::invalid_child_state,
             "review child context requires diff and exact-source evidence"));
       }
-      for (const auto &event : m_impl->event_log.events()) {
-        if (const auto *drafted =
+      for (const auto& event : m_impl->event_log.events()) {
+        if (const auto* drafted =
                 std::get_if<domain::ReviewReceiptDrafted>(&event.payload);
             drafted &&
             drafted->draft.receipt_id == start.review->draft.receipt_id) {
           existing_review = &drafted->draft;
-        } else if (const auto *requested =
+        } else if (const auto* requested =
                        std::get_if<domain::ReviewRequested>(&event.payload);
                    requested &&
                    requested->receipt_id == start.review->draft.receipt_id) {
@@ -3315,9 +3294,14 @@ auto RunKernel::dispatch_child(ChildRunStart start)
       context.evidence_ids.push_back(item.evidence_id);
     }
     domain::ChildRunDescriptor descriptor{
-        start.parent_run_id,     start.plan_id,       start.revision_id,
-        start.task_id,           std::move(context),  start.budget,
-        start.requested_effects, std::move(*narrowed),
+        start.parent_run_id,
+        start.plan_id,
+        start.revision_id,
+        start.task_id,
+        std::move(context),
+        start.budget,
+        start.requested_effects,
+        std::move(*narrowed),
         start.attempt,
         start.review ? std::optional{start.review->draft.receipt_id}
                      : std::nullopt};
@@ -3356,11 +3340,11 @@ auto RunKernel::dispatch_child(ChildRunStart start)
       if (auto recorded = m_impl->record(
               start.child_run_id,
               domain::ReviewReceiptDrafted{start.review->draft}, transaction);
-        !recorded) {
-      return recorded;
-    }
-    if (auto recorded = m_impl->record(
-            start.child_run_id,
+          !recorded) {
+        return recorded;
+      }
+      if (auto recorded = m_impl->record(
+              start.child_run_id,
               domain::ReviewRequested{start.review->draft.receipt_id,
                                       start.review->requested_by},
               transaction);
@@ -3381,16 +3365,14 @@ auto RunKernel::dispatch_child(ChildRunStart start)
     ChildRunInvocation invocation{start.child_run_id, descriptor, selected_task,
                                   std::move(start.context)};
     auto launched = m_impl->launch_child(std::move(invocation));
-    if (launched)
-      return {};
+    if (launched) return {};
     auto failure = m_impl->transaction();
     auto terminal =
         m_impl->process_child_failure({start.child_run_id,
                                        {ChildRunErrorCode::unavailable,
                                         "child worker could not start", false}},
                                       failure);
-    if (!terminal)
-      return terminal;
+    if (!terminal) return terminal;
     if (auto committed = m_impl->commit(std::move(failure)); !committed) {
       return committed;
     }
@@ -3424,7 +3406,7 @@ auto RunKernel::promote_project_task(ProjectTaskPromotion promotion)
     }
     const auto found =
         m_impl->plan_projections.find(promotion.item.origin.plan_id);
-    const auto *current = found == m_impl->plan_projections.end()
+    const auto* current = found == m_impl->plan_projections.end()
                               ? nullptr
                               : found->second.current_revision();
     if (current == nullptr ||
@@ -3438,7 +3420,7 @@ auto RunKernel::promote_project_task(ProjectTaskPromotion promotion)
     const auto task = std::ranges::find(current->revision.tasks,
                                         promotion.item.origin.task_id,
                                         &domain::PlanTask::task_id);
-    const auto *execution =
+    const auto* execution =
         found->second.task_execution(promotion.item.origin.task_id);
     if (task == current->revision.tasks.end() || promotion.item.task != *task ||
         execution == nullptr ||
@@ -3450,10 +3432,9 @@ auto RunKernel::promote_project_task(ProjectTaskPromotion promotion)
                        "only unresolved exact session tasks can be promoted"));
     }
     auto backlog = project_backlog(promotion.item.repository_id);
-    if (!backlog)
-      return std::unexpected(std::move(backlog.error()));
+    if (!backlog) return std::unexpected(std::move(backlog.error()));
     if (backlog->find(promotion.item.item_id) != nullptr ||
-        std::ranges::any_of(backlog->items(), [&](const auto &item) {
+        std::ranges::any_of(backlog->items(), [&](const auto& item) {
           return item.item.origin == promotion.item.origin;
         })) {
       return std::unexpected(
@@ -3507,9 +3488,8 @@ auto RunKernel::update_project_task_status(ProjectTaskStatusUpdate update)
           "project task status contains invalid or reused identity"));
     }
     auto backlog = project_backlog(update.change.repository_id);
-    if (!backlog)
-      return std::unexpected(std::move(backlog.error()));
-    const auto *item = backlog->find(update.change.item_id);
+    if (!backlog) return std::unexpected(std::move(backlog.error()));
+    const auto* item = backlog->find(update.change.item_id);
     if (item == nullptr ||
         item->item.origin.session_id != m_impl->event_log.session_id()) {
       return std::unexpected(kernel_error(
@@ -3620,7 +3600,7 @@ auto RunKernel::cancel_run(const domain::RunId& run_id,
     if (m_impl->active->planning_plan_id) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_plan_state,
-          "planning runs are resolved through plan decisions"));
+                       "planning runs are resolved through plan decisions"));
     }
     if (m_impl->active->run_terminal || m_impl->active->backend_terminal_seen) {
       return std::unexpected(kernel_error(RunKernelErrorCode::already_terminal,
@@ -3707,8 +3687,7 @@ auto RunKernel::decide_approval(const domain::RunId& run_id,
         !scopes_are_unique(resolution.granted_scopes) ||
         (resolution.decision != domain::ApprovalDecision::approved &&
          (!resolution.granted_scopes.empty() ||
-          resolution.lifetime !=
-              domain::ApprovalGrantLifetime::invocation))) {
+          resolution.lifetime != domain::ApprovalGrantLifetime::invocation))) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_tool_state,
                        "approval decision is malformed"));
@@ -3725,19 +3704,17 @@ auto RunKernel::decide_approval(const domain::RunId& run_id,
       std::expected<ToolPolicyResolution, ToolPolicyError> approved =
           std::unexpected(
               ToolPolicyError{ToolPolicyErrorCode::internal_failure,
-              "tool policy approval failed internally", false});
+                              "tool policy approval failed internally", false});
       try {
         approved = m_impl->policy->approve(
             *invocation.policy_request,
-            ToolPolicyApproval{resolution.granted_scopes,
-                               resolution.lifetime});
+            ToolPolicyApproval{resolution.granted_scopes, resolution.lifetime});
       } catch (...) {
       }
       if (!approved) {
         const auto domain_error = policy_failure_error(approved.error());
         if (auto failed = m_impl->record(
-                run_id,
-                domain::ToolPolicyFailed{invocation_id, domain_error},
+                run_id, domain::ToolPolicyFailed{invocation_id, domain_error},
                 transaction, invocation_id);
             !failed) {
           return failed;
@@ -3758,9 +3735,8 @@ auto RunKernel::decide_approval(const domain::RunId& run_id,
             m_impl->record(run_id,
                            domain::ToolApprovalDecided{
                                invocation_id, resolution.decision,
-                                        invocation.granted_scopes,
-                                        resolution.lifetime},
-            transaction, invocation_id);
+                               invocation.granted_scopes, resolution.lifetime},
+                           transaction, invocation_id);
         !result) {
       return result;
     }
@@ -3787,9 +3763,9 @@ auto RunKernel::decide_approval(const domain::RunId& run_id,
   }
 }
 
-auto RunKernel::answer_questions(const domain::RunId &run_id,
-    const domain::InvocationId& invocation_id,
-    std::vector<domain::QuestionAnswer> answers)
+auto RunKernel::answer_questions(const domain::RunId& run_id,
+                                 const domain::InvocationId& invocation_id,
+                                 std::vector<domain::QuestionAnswer> answers)
     -> std::expected<void, RunKernelError> {
   try {
     if (m_impl->unusable) {
@@ -3820,16 +3796,15 @@ auto RunKernel::answer_questions(const domain::RunId &run_id,
     auto transaction = m_impl->transaction();
     auto& invocation = transaction.active->invocations.at(invocation_id);
     for (const auto& answer : answers) {
-      if (auto result = m_impl->record(run_id, domain::QuestionAnswered{answer}, transaction,
-              invocation_id);
+      if (auto result = m_impl->record(run_id, domain::QuestionAnswered{answer},
+                                       transaction, invocation_id);
           !result) {
         return result;
       }
     }
     if (auto result = m_impl->record(
             run_id,
-            domain::ToolResultRecorded{invocation_id,
-                                       answered_content(answers),
+            domain::ToolResultRecorded{invocation_id, answered_content(answers),
                                        invocation.result_message_id},
             transaction, invocation_id);
         !result) {
@@ -3854,9 +3829,9 @@ auto RunKernel::answer_questions(const domain::RunId &run_id,
   }
 }
 
-auto RunKernel::cancel_questions(const domain::RunId &run_id,
-    const domain::InvocationId& invocation_id,
-    std::optional<std::string> reason)
+auto RunKernel::cancel_questions(const domain::RunId& run_id,
+                                 const domain::InvocationId& invocation_id,
+                                 std::optional<std::string> reason)
     -> std::expected<void, RunKernelError> {
   try {
     if (m_impl->unusable) {
@@ -3864,8 +3839,7 @@ auto RunKernel::cancel_questions(const domain::RunId &run_id,
           RunKernelErrorCode::storage_failure,
           "run kernel is unavailable after a persistence failure"));
     }
-    if (reason &&
-        (reason->size() > 4096 || has_control_character(*reason))) {
+    if (reason && (reason->size() > 4096 || has_control_character(*reason))) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_tool_state,
                        "question cancellation reason is invalid"));
@@ -3893,8 +3867,7 @@ auto RunKernel::cancel_questions(const domain::RunId &run_id,
     auto& invocation = transaction.active->invocations.at(invocation_id);
     for (const auto& question : invocation.questions) {
       if (auto result = m_impl->record(
-              run_id,
-              domain::QuestionCancelled{question.question_id, reason},
+              run_id, domain::QuestionCancelled{question.question_id, reason},
               transaction, invocation_id);
           !result) {
         return result;
@@ -3929,7 +3902,7 @@ auto RunKernel::cancel_questions(const domain::RunId &run_id,
 }
 
 auto RunKernel::continue_run(
-    const domain::RunId &run_id, backend::BackendRequest request,
+    const domain::RunId& run_id, backend::BackendRequest request,
     std::optional<domain::PricingObservation> pricing_observation)
     -> std::expected<void, RunKernelError> {
   try {
@@ -4169,22 +4142,20 @@ auto RunKernel::plan_projection(const domain::PlanId& plan_id) const noexcept
   return found == m_impl->plan_projections.end() ? nullptr : &found->second;
 }
 
-auto RunKernel::active_session_tasks() const
-    -> std::vector<ActiveSessionTask> {
+auto RunKernel::active_session_tasks() const -> std::vector<ActiveSessionTask> {
   const auto state_from = [](const domain::SessionTaskOutcome outcome) {
     switch (outcome) {
-    case domain::SessionTaskOutcome::completed:
-      return SessionTaskState::completed;
-    case domain::SessionTaskOutcome::failed:
-      return SessionTaskState::failed;
-    case domain::SessionTaskOutcome::cancelled:
-      return SessionTaskState::cancelled;
-    case domain::SessionTaskOutcome::timed_out:
-      return SessionTaskState::timed_out;
-    case domain::SessionTaskOutcome::budget_exhausted:
-      return SessionTaskState::budget_exhausted;
-    case domain::SessionTaskOutcome::unavailable:
-      return SessionTaskState::unavailable;
+      case domain::SessionTaskOutcome::completed:
+        return SessionTaskState::completed;
+      case domain::SessionTaskOutcome::failed: return SessionTaskState::failed;
+      case domain::SessionTaskOutcome::cancelled:
+        return SessionTaskState::cancelled;
+      case domain::SessionTaskOutcome::timed_out:
+        return SessionTaskState::timed_out;
+      case domain::SessionTaskOutcome::budget_exhausted:
+        return SessionTaskState::budget_exhausted;
+      case domain::SessionTaskOutcome::unavailable:
+        return SessionTaskState::unavailable;
     }
     return SessionTaskState::failed;
   };
@@ -4213,7 +4184,7 @@ auto RunKernel::active_session_tasks() const
   return result;
 }
 
-auto RunKernel::project_backlog(const domain::RepositoryId &repository_id) const
+auto RunKernel::project_backlog(const domain::RepositoryId& repository_id) const
     -> std::expected<domain::ProjectBacklogProjection, RunKernelError> {
   try {
     std::vector<domain::ProjectBacklogSessionEvents> histories;
@@ -4235,4 +4206,4 @@ auto RunKernel::project_backlog(const domain::RepositoryId &repository_id) const
   }
 }
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

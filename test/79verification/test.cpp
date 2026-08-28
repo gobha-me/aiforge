@@ -13,8 +13,7 @@ namespace {
 
 using namespace aiforge;
 
-template <typename Id>
-auto id(std::string value) -> Id {
+template <typename Id> auto id(std::string value) -> Id {
   auto parsed = Id::from(std::move(value));
   REQUIRE(parsed);
   return std::move(*parsed);
@@ -30,28 +29,27 @@ auto snapshot(std::string value = "aaaaaaaaaaaaaaaa")
   return {id<domain::RepositoryId>("repository"), digest(std::move(value), 0)};
 }
 
-auto evidence(
-    const domain::VerificationOutcome outcome =
-        domain::VerificationOutcome::passed) -> domain::VerificationEvidence {
+auto evidence(const domain::VerificationOutcome outcome =
+                  domain::VerificationOutcome::passed)
+    -> domain::VerificationEvidence {
   const auto invocation = id<domain::InvocationId>("verification-invocation");
   const auto artifact = id<domain::ArtifactId>("complete-output");
-  return {
-      id<domain::VerificationEvidenceId>("verification-1"),
-      domain::VerificationKind::test,
-      std::nullopt,
-      outcome,
-      snapshot(),
-      std::nullopt,
-      digest("bbbbbbbbbbbbbbbb", 128),
-      {"ctest", "3.28", "run_process", invocation},
-      std::chrono::sys_time<std::chrono::milliseconds>{
-          std::chrono::milliseconds{100}},
-      "29 tests passed",
-      {{domain::VerificationOutputStream::standard_output, "29/29 passed", 4096,
-        true, artifact}},
-      {{domain::VerificationDiagnosticSeverity::warning, "W1", "bounded warning",
-        std::nullopt}},
-      {id<domain::ArtifactId>("test-report")}};
+  return {id<domain::VerificationEvidenceId>("verification-1"),
+          domain::VerificationKind::test,
+          std::nullopt,
+          outcome,
+          snapshot(),
+          std::nullopt,
+          digest("bbbbbbbbbbbbbbbb", 128),
+          {"ctest", "3.28", "run_process", invocation},
+          std::chrono::sys_time<std::chrono::milliseconds>{
+              std::chrono::milliseconds{100}},
+          "29 tests passed",
+          {{domain::VerificationOutputStream::standard_output, "29/29 passed",
+            4096, true, artifact}},
+          {{domain::VerificationDiagnosticSeverity::warning, "W1",
+            "bounded warning", std::nullopt}},
+          {id<domain::ArtifactId>("test-report")}};
 }
 
 auto environment(const domain::VerificationEvidence& value)
@@ -63,10 +61,11 @@ auto environment(const domain::VerificationEvidence& value)
           true};
 }
 
-}  // namespace
+} // namespace
 
-TEST_CASE("verification evidence rejects malformed identity provenance and output",
-          "[verification][failure]") {
+TEST_CASE(
+    "verification evidence rejects malformed identity provenance and output",
+    "[verification][failure]") {
   auto value = evidence();
   value.kind = domain::VerificationKind::unknown;
   auto result = repository::validate_verification_evidence(value);
@@ -168,7 +167,8 @@ TEST_CASE("verification diagnostics snapshots and artifacts fail closed",
 TEST_CASE("verification freshness tracks source configuration and artifacts",
           "[verification][freshness]") {
   const auto value = evidence();
-  auto current = repository::assess_verification_evidence(value, environment(value));
+  auto current =
+      repository::assess_verification_evidence(value, environment(value));
   REQUIRE(current);
   REQUIRE(current->freshness == domain::EvidenceFreshness::current);
   REQUIRE(current->affected_triggers.empty());
@@ -239,9 +239,11 @@ TEST_CASE("verification records become bounded untrusted context evidence",
           repository::VerificationEvidenceErrorCode::invalid_evidence);
 
   auto crowded = evidence();
-  crowded.diagnostics.assign(
-      1021, {domain::VerificationDiagnosticSeverity::warning, {}, "warning",
-             std::nullopt});
+  crowded.diagnostics.assign(1021,
+                             {domain::VerificationDiagnosticSeverity::warning,
+                              {},
+                              "warning",
+                              std::nullopt});
   const auto too_many_blocks = repository::make_verification_context_item(
       crowded, id<domain::EvidenceId>("crowded-verification"),
       domain::EvidenceFreshness::current, 32);

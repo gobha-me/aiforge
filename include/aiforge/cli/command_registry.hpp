@@ -85,8 +85,7 @@ class ModelsCommand {
  public:
   virtual ~ModelsCommand() = default;
   [[nodiscard]] virtual auto execute(CommandEnvironment& environment,
-                                     std::ostream& output,
-                                     std::ostream& error)
+                                     std::ostream& output, std::ostream& error)
       -> std::expected<void, CommandFailure> = 0;
 };
 
@@ -94,13 +93,12 @@ class LoginCommand {
  public:
   virtual ~LoginCommand() = default;
   [[nodiscard]] virtual auto execute(CommandEnvironment& environment,
-                                     std::ostream& output,
-                                     std::ostream& error)
+                                     std::ostream& output, std::ostream& error)
       -> std::expected<void, CommandFailure> = 0;
 };
 
 class PlanCommand {
-public:
+ public:
   virtual ~PlanCommand() = default;
 
   enum class SessionMode {
@@ -114,8 +112,8 @@ public:
   };
 
   [[nodiscard]] virtual auto execute(Request request,
-                                     CommandEnvironment &environment,
-                                     std::ostream &output, std::ostream &error)
+                                     CommandEnvironment& environment,
+                                     std::ostream& output, std::ostream& error)
       -> std::expected<void, CommandFailure> = 0;
 };
 
@@ -130,7 +128,7 @@ struct CommandEnvironment {
   ModelsCommand* models{};
   LoginCommand* login{};
   int input_descriptor{-1};
-  PlanCommand *plan{};
+  PlanCommand* plan{};
 };
 
 struct CommandContext {
@@ -231,4 +229,4 @@ class CommandDispatcher final {
                            std::ostream& output, std::ostream& error) noexcept
     -> int;
 
-}  // namespace aiforge::cli
+} // namespace aiforge::cli

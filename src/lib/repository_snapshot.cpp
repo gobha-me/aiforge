@@ -25,7 +25,7 @@ auto same_source_state(const RepositorySnapshot& left,
   return same_source_state(snapshot_identity(left), snapshot_identity(right));
 }
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain
 
 namespace aiforge::repository {
 namespace {
@@ -51,10 +51,12 @@ namespace {
       !bounded_text(digest.value, 512) || digest.byte_size > maximum_bytes) {
     return false;
   }
-  return std::ranges::all_of(digest.algorithm, [](const unsigned char value) {
-           return std::isalnum(value) != 0 || value == '-' || value == '_' ||
-                  value == '.';
-         }) &&
+  return std::ranges::all_of(digest.algorithm,
+                             [](const unsigned char value) {
+                               return std::isalnum(value) != 0 ||
+                                      value == '-' || value == '_' ||
+                                      value == '.';
+                             }) &&
          std::ranges::all_of(digest.value, [](const unsigned char value) {
            return std::isxdigit(value) != 0;
          });
@@ -62,7 +64,8 @@ namespace {
 
 [[nodiscard]] auto valid_relative_path(const std::string& value,
                                        const std::size_t maximum) -> bool {
-  if (value.empty() || value.size() > maximum || value.find('\0') != std::string::npos) {
+  if (value.empty() || value.size() > maximum ||
+      value.find('\0') != std::string::npos) {
     return false;
   }
   const std::filesystem::path path{value};
@@ -75,14 +78,14 @@ namespace {
   return path.generic_string() == value;
 }
 
-[[nodiscard]] auto add_checked(std::uint64_t& total,
-                               const std::uint64_t value) -> bool {
+[[nodiscard]] auto add_checked(std::uint64_t& total, const std::uint64_t value)
+    -> bool {
   if (value > std::numeric_limits<std::uint64_t>::max() - total) return false;
   total += value;
   return true;
 }
 
-}  // namespace
+} // namespace
 
 auto validate_repository_snapshot(const domain::RepositorySnapshot& snapshot,
                                   const RepositorySnapshotLimits& limits)
@@ -124,8 +127,7 @@ auto validate_repository_snapshot(const domain::RepositorySnapshot& snapshot,
 
   if (snapshot.vcs) {
     const auto& vcs = *snapshot.vcs;
-    if (!bounded_text(vcs.system, 64) ||
-        !bounded_text(vcs.object_format, 64)) {
+    if (!bounded_text(vcs.system, 64) || !bounded_text(vcs.object_format, 64)) {
       return failure(RepositorySnapshotErrorCode::invalid_request,
                      "VCS identity is invalid");
     }
@@ -176,7 +178,7 @@ auto validate_repository_snapshot(const domain::RepositorySnapshot& snapshot,
     const bool untracked =
         change.change_kind == domain::RepositoryChangeKind::untracked;
     if (untracked !=
-        (change.stage == domain::RepositoryChangeStage::untracked) ||
+            (change.stage == domain::RepositoryChangeStage::untracked) ||
         (untracked && change.index_digest)) {
       return failure(RepositorySnapshotErrorCode::invalid_request,
                      "untracked repository entry is inconsistent");
@@ -187,9 +189,9 @@ auto validate_repository_snapshot(const domain::RepositorySnapshot& snapshot,
       return failure(RepositorySnapshotErrorCode::invalid_request,
                      "repository entry content state is inconsistent");
     }
-    for (const auto* digest : {change.index_digest ? &*change.index_digest : nullptr,
-                               change.worktree_digest ? &*change.worktree_digest
-                                                      : nullptr}) {
+    for (const auto* digest :
+         {change.index_digest ? &*change.index_digest : nullptr,
+          change.worktree_digest ? &*change.worktree_digest : nullptr}) {
       if (digest == nullptr) continue;
       if (!valid_digest(*digest, limits.maximum_file_bytes) ||
           !add_checked(total_bytes, digest->byte_size)) {
@@ -205,4 +207,4 @@ auto validate_repository_snapshot(const domain::RepositorySnapshot& snapshot,
   return {};
 }
 
-}  // namespace aiforge::repository
+} // namespace aiforge::repository

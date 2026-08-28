@@ -5,21 +5,21 @@
 namespace aiforge::testing {
 namespace {
 
-[[nodiscard]] auto failure(persona::PersonaErrorCode code,
-                           std::string message,
+[[nodiscard]] auto failure(persona::PersonaErrorCode code, std::string message,
                            std::optional<std::string> name = std::nullopt)
     -> std::unexpected<persona::PersonaError> {
   return std::unexpected(
       persona::PersonaError{code, std::move(message), std::move(name), false});
 }
 
-}  // namespace
+} // namespace
 
 ScriptedPersonaSource::ScriptedPersonaSource(
     std::vector<PersonaListOutcome> list_outcomes,
     std::vector<PersonaLoadExchange> load_exchanges)
     : m_list_outcomes(std::move(list_outcomes)),
-      m_load_exchanges(std::move(load_exchanges)) {}
+      m_load_exchanges(std::move(load_exchanges)) {
+}
 
 auto ScriptedPersonaSource::list(const persona::PersonaLimits limits,
                                  const std::stop_token stop_token)
@@ -99,4 +99,4 @@ auto ScriptedPersonaSource::remaining_loads() const noexcept -> std::size_t {
   return m_load_exchanges.size() - m_next_load;
 }
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

@@ -11,4 +11,4 @@ class ProcessLoginCommand final : public cli::LoginCommand {
       -> std::expected<void, cli::CommandFailure> override;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

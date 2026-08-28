@@ -55,13 +55,16 @@ struct VerificationEvidenceEnvironment {
   std::optional<domain::ContentDigest> build_configuration;
   std::vector<domain::ArtifactId> available_artifacts;
   bool artifact_observation_complete{};
-  auto operator==(const VerificationEvidenceEnvironment&) const -> bool = default;
+  auto operator==(const VerificationEvidenceEnvironment&) const
+      -> bool = default;
 };
 
 struct VerificationEvidenceAssessment {
-  domain::EvidenceFreshness freshness{domain::EvidenceFreshness::possibly_stale};
+  domain::EvidenceFreshness freshness{
+      domain::EvidenceFreshness::possibly_stale};
   std::vector<VerificationInvalidationTrigger> affected_triggers;
-  auto operator==(const VerificationEvidenceAssessment&) const -> bool = default;
+  auto operator==(const VerificationEvidenceAssessment&) const
+      -> bool = default;
 };
 
 [[nodiscard]] auto validate_verification_evidence(
@@ -73,15 +76,13 @@ struct VerificationEvidenceAssessment {
     const domain::VerificationEvidence& evidence,
     const VerificationEvidenceEnvironment& environment,
     const VerificationEvidenceLimits& limits = {})
-    -> std::expected<VerificationEvidenceAssessment,
-                     VerificationEvidenceError>;
+    -> std::expected<VerificationEvidenceAssessment, VerificationEvidenceError>;
 
 [[nodiscard]] auto make_verification_context_item(
     const domain::VerificationEvidence& evidence,
-    domain::EvidenceId context_evidence_id,
-    domain::EvidenceFreshness freshness,
+    domain::EvidenceId context_evidence_id, domain::EvidenceFreshness freshness,
     std::uint64_t estimated_tokens,
     const VerificationEvidenceLimits& limits = {})
     -> std::expected<domain::ContextParcelItem, VerificationEvidenceError>;
 
-}  // namespace aiforge::repository
+} // namespace aiforge::repository

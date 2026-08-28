@@ -15,8 +15,7 @@ namespace {
 
 using namespace aiforge;
 
-template <typename Id>
-auto id(std::string value) -> Id {
+template <typename Id> auto id(std::string value) -> Id {
   auto parsed = Id::from(std::move(value));
   REQUIRE(parsed);
   return std::move(*parsed);
@@ -68,7 +67,8 @@ auto scenario_binding() -> domain::ReviewEvidenceBinding {
 }
 
 auto draft() -> domain::ReviewReceiptDraft {
-  return {id<domain::ReviewReceiptId>("receipt"), candidate(),
+  return {id<domain::ReviewReceiptId>("receipt"),
+          candidate(),
           {verification_binding(), scenario_binding()},
           std::nullopt};
 }
@@ -91,12 +91,12 @@ auto event(const std::uint64_t sequence, Payload payload,
 auto approved_events() -> std::vector<domain::RunEvent> {
   const auto value = draft();
   return {event(1, domain::ReviewReceiptDrafted{value}),
-      event(2, domain::ReviewRequested{value.receipt_id, actor()}),
-      event(3,
-            domain::ReviewVerdictRecorded{value.receipt_id,
-                                          domain::ReviewVerdict::approved,
+          event(2, domain::ReviewRequested{value.receipt_id, actor()}),
+          event(3,
+                domain::ReviewVerdictRecorded{value.receipt_id,
+                                              domain::ReviewVerdict::approved,
                                               actor(), std::nullopt},
-            "approval")};
+                "approval")};
 }
 
 auto policy(const bool hosted = false) -> runtime::ReviewAuthorizationPolicy {
@@ -105,8 +105,7 @@ auto policy(const bool hosted = false) -> runtime::ReviewAuthorizationPolicy {
             std::nullopt, std::nullopt},
            {id<domain::ReviewRequirementId>("tui-scenario"),
             domain::ReviewEvidenceKind::scenario, "aiforge-scenario", "1",
-            std::string{"interactive-stream"},
-            std::string{"corpus-v1"}}},
+            std::string{"interactive-stream"}, std::string{"corpus-v1"}}},
           false,
           {},
           hosted};
@@ -123,15 +122,14 @@ auto contains(const runtime::ReviewGateDecision& decision,
          decision.triggers.end();
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("review receipt validation rejects ambiguous or duplicated evidence",
           "[review][receipt][failure]") {
   auto value = draft();
   REQUIRE(repository::validate_review_receipt_draft(value));
 
-  value.evidence.front().kind =
-      static_cast<domain::ReviewEvidenceKind>(999);
+  value.evidence.front().kind = static_cast<domain::ReviewEvidenceKind>(999);
   auto result = repository::validate_review_receipt_draft(value);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code ==
@@ -192,7 +190,8 @@ TEST_CASE("review lifecycle projects findings verdicts revocation and conflict",
           repository::ReviewReceiptState::review_requested);
 
   const domain::ReviewFinding finding{
-      id<domain::ReviewFindingId>("finding"), "A bounded defect",
+      id<domain::ReviewFindingId>("finding"),
+      "A bounded defect",
       id<domain::VerificationEvidenceId>("verification"),
       {id<domain::ArtifactId>("test-report")},
       domain::ReviewFindingSeverity::medium,
@@ -202,10 +201,10 @@ TEST_CASE("review lifecycle projects findings verdicts revocation and conflict",
       event(3, domain::ReviewFindingOpened{value.receipt_id, finding})));
   REQUIRE(projection.apply(
       event(4,
-      domain::ReviewVerdictRecorded{value.receipt_id,
-                                    domain::ReviewVerdict::approved,
+            domain::ReviewVerdictRecorded{value.receipt_id,
+                                          domain::ReviewVerdict::approved,
                                           actor(), std::nullopt},
-      "approval")));
+            "approval")));
   REQUIRE(projection.state() == repository::ReviewReceiptState::findings_open);
   REQUIRE(projection.apply(event(
       5, domain::ReviewFindingResolved{value.receipt_id, finding.finding_id,
@@ -219,13 +218,14 @@ TEST_CASE("review lifecycle projects findings verdicts revocation and conflict",
   REQUIRE(projection.state() == repository::ReviewReceiptState::revoked);
   REQUIRE(projection.apply(
       event(7,
-      domain::ReviewVerdictRecorded{value.receipt_id,
-                                    domain::ReviewVerdict::approved,
+            domain::ReviewVerdictRecorded{value.receipt_id,
+                                          domain::ReviewVerdict::approved,
                                           actor(), std::nullopt},
-      "approval-two")));
+            "approval-two")));
   REQUIRE(projection.apply(event(
       8,
-      domain::ReviewVerdictRecorded{value.receipt_id, domain::ReviewVerdict::changes_requested,
+      domain::ReviewVerdictRecorded{value.receipt_id,
+                                    domain::ReviewVerdict::changes_requested,
                                     actor("second-reviewer"), std::nullopt},
       "conflict")));
   REQUIRE(projection.state() == repository::ReviewReceiptState::conflicted);
@@ -312,8 +312,7 @@ TEST_CASE("merge gate invalidates changed candidates evidence and policy",
   REQUIRE(decision);
   REQUIRE_FALSE(decision->authorization);
   REQUIRE(contains(
-      *decision,
-      runtime::ReviewInvalidationTrigger::verifier_version_changed));
+      *decision, runtime::ReviewInvalidationTrigger::verifier_version_changed));
 
   stale_policy = policy();
   stale_policy.required_evidence.back().scenario_corpus_version = "corpus-v2";
@@ -321,8 +320,7 @@ TEST_CASE("merge gate invalidates changed candidates evidence and policy",
   REQUIRE(decision);
   REQUIRE_FALSE(decision->authorization);
   REQUIRE(contains(
-      *decision,
-      runtime::ReviewInvalidationTrigger::scenario_version_changed));
+      *decision, runtime::ReviewInvalidationTrigger::scenario_version_changed));
 }
 
 TEST_CASE("trusted overrides are loud candidate-bound and revocable",
@@ -410,7 +408,8 @@ TEST_CASE("required hosted checks confirm the exact candidate and decision",
       draft().candidate, runtime::HostedReviewCheckState::success,
       local->authorization->decision_digest()};
   testing::ScriptedHostedReviewCheck fake{{{expected, confirmation}}};
-  auto decision = gate.evaluate(*projection, hosted_policy, environment(), &fake);
+  auto decision =
+      gate.evaluate(*projection, hosted_policy, environment(), &fake);
   REQUIRE(decision);
   REQUIRE(decision->authorization);
   REQUIRE(decision->hosted_check == confirmation);
@@ -421,18 +420,18 @@ TEST_CASE("required hosted checks confirm the exact candidate and decision",
   auto mismatch = confirmation;
   mismatch.candidate = candidate("ffffffffffffffff");
   testing::ScriptedHostedReviewCheck mismatched{{{expected, mismatch}}};
-  decision = gate.evaluate(*projection, hosted_policy, environment(),
-                           &mismatched);
+  decision =
+      gate.evaluate(*projection, hosted_policy, environment(), &mismatched);
   REQUIRE_FALSE(decision);
   REQUIRE(decision.error().code ==
           runtime::ReviewGateErrorCode::hosted_check_failure);
 
   testing::ScriptedHostedReviewCheck unavailable{
-      {{expected,
-      runtime::HostedReviewCheckError{
-          runtime::HostedReviewCheckErrorCode::unavailable, "offline", true}}}};
-  decision = gate.evaluate(*projection, hosted_policy, environment(),
-                           &unavailable);
+      {{expected, runtime::HostedReviewCheckError{
+                      runtime::HostedReviewCheckErrorCode::unavailable,
+                      "offline", true}}}};
+  decision =
+      gate.evaluate(*projection, hosted_policy, environment(), &unavailable);
   REQUIRE_FALSE(decision);
   REQUIRE(decision.error().retryable);
 }

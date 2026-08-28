@@ -19,9 +19,8 @@ namespace {
 
 using namespace domain;
 
-[[nodiscard]] auto error(
-    const ContextBuildErrorCode code, std::string message,
-    std::optional<ContextEntryId> entry_id = std::nullopt)
+[[nodiscard]] auto error(const ContextBuildErrorCode code, std::string message,
+                         std::optional<ContextEntryId> entry_id = std::nullopt)
     -> std::unexpected<ContextBuildError> {
   return std::unexpected(
       ContextBuildError{code, std::move(message), std::move(entry_id)});
@@ -29,26 +28,22 @@ using namespace domain;
 
 [[nodiscard]] auto layer_rank(const InstructionLayer layer) -> std::uint32_t {
   switch (layer) {
-    case InstructionLayer::application_runtime:
-      return 0;
-    case InstructionLayer::workspace:
-      return 1;
-    case InstructionLayer::project:
-      return 2;
-    case InstructionLayer::persona:
-      return 3;
-    case InstructionLayer::session:
-      return 4;
-    case InstructionLayer::task:
-      return 5;
+    case InstructionLayer::application_runtime: return 0;
+    case InstructionLayer::workspace: return 1;
+    case InstructionLayer::project: return 2;
+    case InstructionLayer::persona: return 3;
+    case InstructionLayer::session: return 4;
+    case InstructionLayer::task: return 5;
     case InstructionLayer::unknown:
       return std::numeric_limits<std::uint32_t>::max();
   }
   return std::numeric_limits<std::uint32_t>::max();
 }
 
-[[nodiscard]] auto valid_provenance(const ContextProvenance& provenance) -> bool {
-  return (!provenance.source_location || !provenance.source_location->empty()) &&
+[[nodiscard]] auto valid_provenance(const ContextProvenance& provenance)
+    -> bool {
+  return (!provenance.source_location ||
+          !provenance.source_location->empty()) &&
          (!provenance.digest || !provenance.digest->empty());
 }
 
@@ -58,7 +53,8 @@ using namespace domain;
   });
 }
 
-[[nodiscard]] auto add_checked(std::uint64_t& total, const std::uint64_t value) -> bool {
+[[nodiscard]] auto add_checked(std::uint64_t& total, const std::uint64_t value)
+    -> bool {
   if (value > std::numeric_limits<std::uint64_t>::max() - total) return false;
   total += value;
   return true;
@@ -69,17 +65,19 @@ using namespace domain;
   const auto left_rank = layer_rank(*left.instruction_layer);
   const auto right_rank = layer_rank(*right.instruction_layer);
   if (left_rank != right_rank) return left_rank < right_rank;
-  if (left.specificity != right.specificity) return left.specificity < right.specificity;
+  if (left.specificity != right.specificity)
+    return left.specificity < right.specificity;
   if (left.order != right.order) return left.order < right.order;
   return left.entry_id < right.entry_id;
 }
 
-[[nodiscard]] auto content_before(const ContextEntry& left, const ContextEntry& right) -> bool {
+[[nodiscard]] auto content_before(const ContextEntry& left,
+                                  const ContextEntry& right) -> bool {
   if (left.order != right.order) return left.order < right.order;
   return left.entry_id < right.entry_id;
 }
 
-}  // namespace
+} // namespace
 
 auto ContextBuilder::build(ContextBuildInput input) const
     -> std::expected<ConstructedContext, ContextBuildError> {
@@ -120,46 +118,55 @@ auto ContextBuilder::build(ContextBuildInput input) const
                    "unknown instruction layer or operation is unsupported",
                    instruction.entry_id);
     }
-    if (instruction.layer != InstructionLayer::project && instruction.specificity != 0) {
+    if (instruction.layer != InstructionLayer::project &&
+        instruction.specificity != 0) {
       return error(ContextBuildErrorCode::invalid_instruction,
                    "only project instructions may have subtree specificity",
                    instruction.entry_id);
     }
     if (instruction.layer == InstructionLayer::application_runtime &&
         instruction.operation != InstructionOperation::add) {
-      return error(ContextBuildErrorCode::runtime_instruction_mutation,
-                   "application runtime instructions cannot be replaced or disabled",
-                   instruction.entry_id);
+      return error(
+          ContextBuildErrorCode::runtime_instruction_mutation,
+          "application runtime instructions cannot be replaced or disabled",
+          instruction.entry_id);
     }
     has_runtime_instruction =
         has_runtime_instruction ||
         instruction.layer == InstructionLayer::application_runtime;
 
-    const bool adds_message = instruction.operation != InstructionOperation::disable;
-    const bool targets_entry = instruction.operation != InstructionOperation::add;
+    const bool adds_message =
+        instruction.operation != InstructionOperation::disable;
+    const bool targets_entry =
+        instruction.operation != InstructionOperation::add;
     if (adds_message != instruction.message.has_value() ||
         targets_entry != instruction.target_entry_id.has_value() ||
         (adds_message && instruction.estimated_tokens == 0) ||
         (!adds_message && instruction.estimated_tokens != 0)) {
       return error(ContextBuildErrorCode::invalid_instruction,
-                   "instruction operation has inconsistent message, target, or size fields",
+                   "instruction operation has inconsistent message, target, or "
+                   "size fields",
                    instruction.entry_id);
     }
     if (instruction.message) {
       if (instruction.message->role != Role::system ||
-          instruction.message->invocation_id || instruction.message->content.empty()) {
+          instruction.message->invocation_id ||
+          instruction.message->content.empty()) {
         return error(ContextBuildErrorCode::invalid_instruction,
-                     "instruction messages must be nonempty system messages without an invocation",
+                     "instruction messages must be nonempty system messages "
+                     "without an invocation",
                      instruction.entry_id);
       }
       if (contains_unknown(*instruction.message)) {
-        return error(ContextBuildErrorCode::unsupported_content,
-                     "unknown instruction content cannot enter a backend request",
-                     instruction.entry_id);
+        return error(
+            ContextBuildErrorCode::unsupported_content,
+            "unknown instruction content cannot enter a backend request",
+            instruction.entry_id);
       }
       if (!message_ids.insert(instruction.message->message_id).second) {
         return error(ContextBuildErrorCode::duplicate_message_id,
-                     "context message IDs must be unique", instruction.entry_id);
+                     "context message IDs must be unique",
+                     instruction.entry_id);
       }
     }
   }
@@ -175,24 +182,29 @@ auto ContextBuilder::build(ContextBuildInput input) const
     }
     if (!valid_provenance(content.provenance)) {
       return error(ContextBuildErrorCode::invalid_provenance,
-                   "content provenance contains an empty value", content.entry_id);
+                   "content provenance contains an empty value",
+                   content.entry_id);
     }
     if (content.order == 0 || content.estimated_tokens == 0 ||
         content.message.content.empty()) {
       return error(ContextBuildErrorCode::invalid_content,
-                   "context content must have positive order and size and nonempty blocks",
+                   "context content must have positive order and size and "
+                   "nonempty blocks",
                    content.entry_id);
     }
     if (contains_unknown(content.message)) {
       return error(ContextBuildErrorCode::unsupported_content,
-                   "unknown content cannot enter a backend request", content.entry_id);
+                   "unknown content cannot enter a backend request",
+                   content.entry_id);
     }
     const bool role_is_valid =
         (content.kind == ContextContentKind::conversation &&
-         (content.message.role == Role::user || content.message.role == Role::assistant) &&
+         (content.message.role == Role::user ||
+          content.message.role == Role::assistant) &&
          !content.message.invocation_id) ||
         (content.kind == ContextContentKind::evidence &&
-         content.message.role == Role::evidence && !content.message.invocation_id) ||
+         content.message.role == Role::evidence &&
+         !content.message.invocation_id) ||
         (content.kind == ContextContentKind::tool_result &&
          content.message.role == Role::tool && content.message.invocation_id);
     if (!role_is_valid) {
@@ -204,15 +216,17 @@ auto ContextBuilder::build(ContextBuildInput input) const
     }
   }
   if (!has_runtime_instruction) {
-    return error(ContextBuildErrorCode::missing_runtime_instruction,
-                 "constructed context requires an application runtime instruction");
+    return error(
+        ContextBuildErrorCode::missing_runtime_instruction,
+        "constructed context requires an application runtime instruction");
   }
 
   std::vector<const InstructionInput*> operations;
   operations.reserve(input.instructions.size());
-  for (const auto& instruction : input.instructions) operations.push_back(&instruction);
+  for (const auto& instruction : input.instructions)
+    operations.push_back(&instruction);
   std::ranges::sort(operations, [](const InstructionInput* left,
-                                  const InstructionInput* right) {
+                                   const InstructionInput* right) {
     if (left->order != right->order) return left->order < right->order;
     return left->entry_id < right->entry_id;
   });
@@ -221,23 +235,27 @@ auto ContextBuilder::build(ContextBuildInput input) const
   std::map<ContextEntryId, ContextDecisionRecord> decisions;
   for (const auto* instruction : operations) {
     if (instruction->operation != InstructionOperation::add) {
-      const auto target_definition = instructions_by_id.find(*instruction->target_entry_id);
+      const auto target_definition =
+          instructions_by_id.find(*instruction->target_entry_id);
       if (target_definition == instructions_by_id.end()) {
         return error(ContextBuildErrorCode::unknown_target,
                      "instruction replacement target does not exist",
                      instruction->entry_id);
       }
       if (target_definition->second->order >= instruction->order) {
-        return error(ContextBuildErrorCode::target_not_earlier,
-                     "instruction replacement target must precede its operation",
-                     instruction->entry_id);
+        return error(
+            ContextBuildErrorCode::target_not_earlier,
+            "instruction replacement target must precede its operation",
+            instruction->entry_id);
       }
       if (target_definition->second->layer != instruction->layer) {
-        return error(ContextBuildErrorCode::cross_layer_replacement,
-                     "instruction operations cannot affect another authority layer",
-                     instruction->entry_id);
+        return error(
+            ContextBuildErrorCode::cross_layer_replacement,
+            "instruction operations cannot affect another authority layer",
+            instruction->entry_id);
       }
-      const auto active = active_instructions.find(*instruction->target_entry_id);
+      const auto active =
+          active_instructions.find(*instruction->target_entry_id);
       if (active == active_instructions.end()) {
         return error(ContextBuildErrorCode::unknown_target,
                      "instruction replacement target is no longer active",
@@ -245,37 +263,34 @@ auto ContextBuilder::build(ContextBuildInput input) const
       }
       decisions.insert_or_assign(
           active->first,
-          ContextDecisionRecord{
-              active->first,
-              instruction->operation == InstructionOperation::replace
-                  ? ContextDecision::superseded
-                  : ContextDecision::disabled,
-              instruction->entry_id});
+          ContextDecisionRecord{active->first,
+                                instruction->operation ==
+                                        InstructionOperation::replace
+                                    ? ContextDecision::superseded
+                                    : ContextDecision::disabled,
+                                instruction->entry_id});
       active_instructions.erase(active);
     }
 
     if (instruction->operation == InstructionOperation::disable) {
       decisions.insert_or_assign(
           instruction->entry_id,
-          ContextDecisionRecord{instruction->entry_id, ContextDecision::disabled,
+          ContextDecisionRecord{instruction->entry_id,
+                                ContextDecision::disabled,
                                 instruction->target_entry_id});
       continue;
     }
 
     active_instructions.emplace(
         instruction->entry_id,
-        ContextEntry{instruction->entry_id,
-                     ContextEntryKind::instruction,
-                     instruction->layer,
-                     *instruction->message,
-                     instruction->provenance,
-                     instruction->specificity,
-                     instruction->order,
-                     instruction->estimated_tokens});
-    decisions.insert_or_assign(
-        instruction->entry_id,
-        ContextDecisionRecord{instruction->entry_id, ContextDecision::admitted,
-                              std::nullopt});
+        ContextEntry{instruction->entry_id, ContextEntryKind::instruction,
+                     instruction->layer, *instruction->message,
+                     instruction->provenance, instruction->specificity,
+                     instruction->order, instruction->estimated_tokens});
+    decisions.insert_or_assign(instruction->entry_id,
+                               ContextDecisionRecord{instruction->entry_id,
+                                                     ContextDecision::admitted,
+                                                     std::nullopt});
   }
 
   std::vector<ContextEntry> instruction_entries;
@@ -301,22 +316,19 @@ auto ContextBuilder::build(ContextBuildInput input) const
         kind = ContextEntryKind::tool_result;
         break;
       case ContextContentKind::unknown:
-        return error(ContextBuildErrorCode::unsupported_content,
-                     "unknown context content kind cannot enter a backend request",
-                     content.entry_id);
+        return error(
+            ContextBuildErrorCode::unsupported_content,
+            "unknown context content kind cannot enter a backend request",
+            content.entry_id);
     }
-    content_entries.push_back(ContextEntry{content.entry_id,
-                                           kind,
-                                           std::nullopt,
-                                           std::move(content.message),
-                                           std::move(content.provenance),
-                                           0,
-                                           content.order,
-                                           content.estimated_tokens});
-    decisions.insert_or_assign(
-        content.entry_id,
-        ContextDecisionRecord{content.entry_id, ContextDecision::admitted,
-                              std::nullopt});
+    content_entries.push_back(
+        ContextEntry{content.entry_id, kind, std::nullopt,
+                     std::move(content.message), std::move(content.provenance),
+                     0, content.order, content.estimated_tokens});
+    decisions.insert_or_assign(content.entry_id,
+                               ContextDecisionRecord{content.entry_id,
+                                                     ContextDecision::admitted,
+                                                     std::nullopt});
   }
   std::ranges::sort(content_entries, content_before);
 
@@ -354,4 +366,4 @@ auto ContextBuilder::build(ContextBuildInput input) const
                             estimated_input};
 }
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

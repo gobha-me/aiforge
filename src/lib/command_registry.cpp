@@ -252,7 +252,8 @@ auto one_shot_handler(CommandContext& context,
     return usage_exit_code;
   }
   if (persona_name && no_persona) {
-    context.error << "aiforge: --persona and --no-persona are mutually exclusive\n";
+    context.error
+        << "aiforge: --persona and --no-persona are mutually exclusive\n";
     return usage_exit_code;
   }
   if (requested_model &&
@@ -318,19 +319,15 @@ auto one_shot_handler(CommandContext& context,
                ? std::optional<std::string>{requested_model->front()}
                : std::nullopt,
            session_spend_ceiling},
-          context.environment,
-          context.output, context.error);
+          context.environment, context.output, context.error);
       if (result) return success_exit_code;
       if (!result.error().message.empty()) {
         context.error << "aiforge: " << result.error().message << '\n';
       }
       switch (result.error().kind) {
-        case CommandFailureKind::usage:
-          return usage_exit_code;
-        case CommandFailureKind::cancelled:
-          return 130;
-        case CommandFailureKind::runtime:
-          return failure_exit_code;
+        case CommandFailureKind::usage: return usage_exit_code;
+        case CommandFailureKind::cancelled: return 130;
+        case CommandFailureKind::runtime: return failure_exit_code;
       }
     }
     context.error << "aiforge: a prompt is required for one-shot input\n";
@@ -354,9 +351,8 @@ auto one_shot_handler(CommandContext& context,
   auto result = context.environment.one_shot->execute(
       {prompt->front(), session_mode, std::move(resume_id),
        std::move(persona_directive),
-       requested_model
-           ? std::optional<std::string>{requested_model->front()}
-           : std::nullopt,
+       requested_model ? std::optional<std::string>{requested_model->front()}
+                       : std::nullopt,
        session_spend_ceiling},
       context.environment, context.output, context.error);
   if (result) return success_exit_code;
@@ -364,12 +360,9 @@ auto one_shot_handler(CommandContext& context,
     context.error << "aiforge: " << result.error().message << '\n';
   }
   switch (result.error().kind) {
-    case CommandFailureKind::usage:
-      return usage_exit_code;
-    case CommandFailureKind::cancelled:
-      return 130;
-    case CommandFailureKind::runtime:
-      return failure_exit_code;
+    case CommandFailureKind::usage: return usage_exit_code;
+    case CommandFailureKind::cancelled: return 130;
+    case CommandFailureKind::runtime: return failure_exit_code;
   }
   return failure_exit_code;
 }
@@ -383,24 +376,22 @@ auto chat_handler(CommandContext& context) -> int {
 }
 
 auto models_handler(CommandContext& context) -> int {
-  if (context.environment.models == nullptr) return unavailable_handler(context);
+  if (context.environment.models == nullptr)
+    return unavailable_handler(context);
   auto result = context.environment.models->execute(
       context.environment, context.output, context.error);
   if (result) return success_exit_code;
   if (!result.error().message.empty())
     context.error << "aiforge: " << result.error().message << '\n';
   switch (result.error().kind) {
-  case CommandFailureKind::usage:
-    return usage_exit_code;
-  case CommandFailureKind::cancelled:
-    return 130;
-  case CommandFailureKind::runtime:
-    return failure_exit_code;
+    case CommandFailureKind::usage: return usage_exit_code;
+    case CommandFailureKind::cancelled: return 130;
+    case CommandFailureKind::runtime: return failure_exit_code;
   }
   return failure_exit_code;
 }
 
-auto plan_handler(CommandContext &context) -> int {
+auto plan_handler(CommandContext& context) -> int {
   const auto resume =
       parsed_text_values(context.invocation, "plan.session.resume");
   const bool continue_latest =
@@ -425,8 +416,7 @@ auto plan_handler(CommandContext &context) -> int {
   }
   std::optional<domain::SessionId> session_id;
   if (resume) {
-    if (resume->size() != 1)
-      return usage_exit_code;
+    if (resume->size() != 1) return usage_exit_code;
     auto parsed = domain::SessionId::from(std::string{resume->front()});
     if (!parsed) {
       context.error << "aiforge: session ID is invalid\n";
@@ -434,15 +424,13 @@ auto plan_handler(CommandContext &context) -> int {
     }
     session_id = std::move(*parsed);
   }
-  if (context.environment.plan == nullptr)
-    return unavailable_handler(context);
+  if (context.environment.plan == nullptr) return unavailable_handler(context);
   auto result = context.environment.plan->execute(
       {continue_latest ? PlanCommand::SessionMode::continue_latest
                        : PlanCommand::SessionMode::resume,
        std::move(session_id)},
       context.environment, context.output, context.error);
-  if (result)
-    return success_exit_code;
+  if (result) return success_exit_code;
   if (!result.error().message.empty()) {
     context.error << "aiforge: " << result.error().message << '\n';
   }
@@ -614,7 +602,7 @@ auto config_unset_handler(CommandContext& context) -> int {
   return success_exit_code;
 }
 
-}  // namespace
+} // namespace
 
 auto make_parser_schema(const CommandRegistry& registry)
     -> std::expected<ParserSchema, RegistryDiagnostic> {
@@ -957,4 +945,4 @@ auto project_version() -> std::string {
   return result;
 }
 
-}  // namespace aiforge::cli
+} // namespace aiforge::cli

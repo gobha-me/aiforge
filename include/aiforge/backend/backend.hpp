@@ -101,10 +101,10 @@ struct ResponseCancelled {
   auto operator==(const ResponseCancelled&) const -> bool = default;
 };
 
-using BackendEvent = std::variant<ResponseStarted, ContentDelta, ReasoningDelta,
-                                  ToolCallDelta, CitationObserved, UsageObserved,
-                                  CostObserved, ResponseFinished,
-                                  ResponseCancelled>;
+using BackendEvent =
+    std::variant<ResponseStarted, ContentDelta, ReasoningDelta, ToolCallDelta,
+                 CitationObserved, UsageObserved, CostObserved,
+                 ResponseFinished, ResponseCancelled>;
 
 enum class BackendErrorKind {
   request_rejected,
@@ -156,7 +156,8 @@ class Backend {
  public:
   virtual ~Backend() = default;
 
-  [[nodiscard]] virtual auto start(BackendRequest request, std::stop_token stop_token)
+  [[nodiscard]] virtual auto start(BackendRequest request,
+                                   std::stop_token stop_token)
       -> std::expected<std::unique_ptr<BackendStream>, BackendError> = 0;
 };
 
@@ -169,4 +170,4 @@ class ModelContextProvider {
       -> std::expected<ModelContextInfo, BackendError> = 0;
 };
 
-}  // namespace aiforge::backend
+} // namespace aiforge::backend

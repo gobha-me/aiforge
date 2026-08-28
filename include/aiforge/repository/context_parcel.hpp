@@ -55,8 +55,7 @@ struct ContextParcelEstimate {
 };
 
 [[nodiscard]] auto validate_context_parcel(
-    const domain::ContextParcel& parcel,
-    const ContextParcelLimits& limits = {})
+    const domain::ContextParcel& parcel, const ContextParcelLimits& limits = {})
     -> std::expected<ContextParcelEstimate, ContextParcelError>;
 
-}  // namespace aiforge::repository
+} // namespace aiforge::repository

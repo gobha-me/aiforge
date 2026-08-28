@@ -39,9 +39,8 @@ struct UnknownContentBlock {
   auto operator==(const UnknownContentBlock&) const -> bool = default;
 };
 
-using ContentBlock =
-    std::variant<TextBlock, StructuredDataBlock, CitationBlock, ArtifactReferenceBlock,
-                 UnknownContentBlock>;
+using ContentBlock = std::variant<TextBlock, StructuredDataBlock, CitationBlock,
+                                  ArtifactReferenceBlock, UnknownContentBlock>;
 
 enum class Role {
   system,
@@ -149,4 +148,4 @@ struct QuestionAnswer {
   auto operator==(const QuestionAnswer&) const -> bool = default;
 };
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

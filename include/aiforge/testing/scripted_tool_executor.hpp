@@ -55,4 +55,4 @@ class ScriptedToolExecutor final : public runtime::ToolExecutor {
   std::size_t m_next_exchange{};
 };
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

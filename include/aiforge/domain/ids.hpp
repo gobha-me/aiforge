@@ -1,7 +1,7 @@
 #pragma once
 
-#include <cstddef>
 #include <compare>
+#include <cstddef>
 #include <expected>
 #include <string>
 #include <string_view>
@@ -15,10 +15,10 @@ enum class IdError {
   control_character,
 };
 
-template <typename Tag>
-class Id final {
+template <typename Tag> class Id final {
  public:
-  [[nodiscard]] static auto from(std::string value) -> std::expected<Id, IdError> {
+  [[nodiscard]] static auto from(std::string value)
+      -> std::expected<Id, IdError> {
     if (value.empty()) return std::unexpected(IdError::empty);
     if (value.size() > max_size) return std::unexpected(IdError::too_long);
     for (const unsigned char character : value) {
@@ -29,7 +29,9 @@ class Id final {
     return Id{std::move(value)};
   }
 
-  [[nodiscard]] auto value() const noexcept -> std::string_view { return m_value; }
+  [[nodiscard]] auto value() const noexcept -> std::string_view {
+    return m_value;
+  }
 
   auto operator<=>(const Id&) const = default;
 
@@ -105,4 +107,4 @@ using PlanRevisionId = Id<PlanRevisionIdTag>;
 using PlanTaskId = Id<PlanTaskIdTag>;
 using ProjectBacklogItemId = Id<ProjectBacklogItemIdTag>;
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

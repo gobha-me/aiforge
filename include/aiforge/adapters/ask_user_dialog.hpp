@@ -46,4 +46,4 @@ class AskUserDialogController final {
   bool m_resolved{};
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

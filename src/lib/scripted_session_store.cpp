@@ -7,16 +7,16 @@ namespace aiforge::testing {
 namespace {
 
 [[nodiscard]] auto error(const storage::SessionStoreErrorCode code,
-                         std::string message)
-    -> storage::SessionStoreError {
+                         std::string message) -> storage::SessionStoreError {
   return {code, std::move(message), false};
 }
 
-}  // namespace
+} // namespace
 
 ScriptedSessionStore::ScriptedSessionStore(
     std::vector<SessionStoreExchange> exchanges)
-    : m_exchanges(std::move(exchanges)) {}
+    : m_exchanges(std::move(exchanges)) {
+}
 
 auto ScriptedSessionStore::next(SessionStoreCall call,
                                 const std::stop_token stop_token)
@@ -27,13 +27,15 @@ auto ScriptedSessionStore::next(SessionStoreCall call,
   }
   m_recorded_calls.push_back(call);
   if (m_next_exchange >= m_exchanges.size()) {
-    return std::unexpected(error(storage::SessionStoreErrorCode::internal_failure,
-                                 "scripted session store is exhausted"));
+    return std::unexpected(
+        error(storage::SessionStoreErrorCode::internal_failure,
+              "scripted session store is exhausted"));
   }
   const auto& exchange = m_exchanges[m_next_exchange];
   if (exchange.expected_call != call) {
-    return std::unexpected(error(storage::SessionStoreErrorCode::internal_failure,
-                                 "session-store call did not match the script"));
+    return std::unexpected(
+        error(storage::SessionStoreErrorCode::internal_failure,
+              "session-store call did not match the script"));
   }
   ++m_next_exchange;
   if (const auto* failure =
@@ -49,18 +51,20 @@ auto ScriptedSessionStore::create_session(storage::SessionCreate session,
   auto result = next(CreateSessionCall{std::move(session)}, stop_token);
   if (!result) return std::unexpected(std::move(result.error()));
   if (!std::holds_alternative<VoidSessionStoreResult>(*result)) {
-    return std::unexpected(error(storage::SessionStoreErrorCode::internal_failure,
-                                 "scripted create outcome has the wrong type"));
+    return std::unexpected(
+        error(storage::SessionStoreErrorCode::internal_failure,
+              "scripted create outcome has the wrong type"));
   }
   return {};
 }
 
-auto ScriptedSessionStore::open_session(
-    const domain::SessionId& session_id, const std::stop_token stop_token)
+auto ScriptedSessionStore::open_session(const domain::SessionId& session_id,
+                                        const std::stop_token stop_token)
     -> std::expected<storage::SessionInfo, storage::SessionStoreError> {
   auto result = next(OpenSessionCall{session_id}, stop_token);
   if (!result) return std::unexpected(std::move(result.error()));
-  if (const auto* info = std::get_if<storage::SessionInfo>(&*result)) return *info;
+  if (const auto* info = std::get_if<storage::SessionInfo>(&*result))
+    return *info;
   return std::unexpected(error(storage::SessionStoreErrorCode::internal_failure,
                                "scripted open outcome has the wrong type"));
 }
@@ -88,14 +92,15 @@ auto ScriptedSessionStore::append_events(
       AppendEventsCall{session_id, {events.begin(), events.end()}}, stop_token);
   if (!result) return std::unexpected(std::move(result.error()));
   if (!std::holds_alternative<VoidSessionStoreResult>(*result)) {
-    return std::unexpected(error(storage::SessionStoreErrorCode::internal_failure,
-                                 "scripted append outcome has the wrong type"));
+    return std::unexpected(
+        error(storage::SessionStoreErrorCode::internal_failure,
+              "scripted append outcome has the wrong type"));
   }
   return {};
 }
 
-auto ScriptedSessionStore::replay_events(
-    const domain::SessionId& session_id, const std::stop_token stop_token)
+auto ScriptedSessionStore::replay_events(const domain::SessionId& session_id,
+                                         const std::stop_token stop_token)
     -> std::expected<std::vector<domain::RunEvent>,
                      storage::SessionStoreError> {
   auto result = next(ReplayEventsCall{session_id}, stop_token);
@@ -109,15 +114,14 @@ auto ScriptedSessionStore::replay_events(
 }
 
 auto ScriptedSessionStore::replay_project_backlog(
-    const domain::RepositoryId &repository_id,
+    const domain::RepositoryId& repository_id,
     const std::size_t maximum_sessions, const std::stop_token stop_token)
     -> std::expected<std::vector<domain::ProjectBacklogSessionEvents>,
                      storage::SessionStoreError> {
   auto result = next(ReplayProjectBacklogCall{repository_id, maximum_sessions},
                      stop_token);
-  if (!result)
-    return std::unexpected(std::move(result.error()));
-  if (const auto *histories =
+  if (!result) return std::unexpected(std::move(result.error()));
+  if (const auto* histories =
           std::get_if<std::vector<domain::ProjectBacklogSessionEvents>>(
               &*result)) {
     return *histories;
@@ -136,4 +140,4 @@ auto ScriptedSessionStore::remaining_exchanges() const noexcept -> std::size_t {
   return m_exchanges.size() - m_next_exchange;
 }
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

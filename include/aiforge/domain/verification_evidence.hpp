@@ -61,7 +61,8 @@ struct VerificationOutputExcerpt {
 };
 
 struct VerificationDiagnostic {
-  VerificationDiagnosticSeverity severity{VerificationDiagnosticSeverity::unknown};
+  VerificationDiagnosticSeverity severity{
+      VerificationDiagnosticSeverity::unknown};
   std::string code;
   std::string message;
   std::optional<RepositorySourceIdentity> source;
@@ -91,4 +92,4 @@ struct VerificationEvidenceReference {
   auto operator==(const VerificationEvidenceReference&) const -> bool = default;
 };
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

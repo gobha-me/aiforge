@@ -15,7 +15,8 @@ struct EndOfStream {
   auto operator==(const EndOfStream&) const -> bool = default;
 };
 
-using ScriptedStep = std::variant<backend::BackendEvent, backend::BackendError, EndOfStream>;
+using ScriptedStep =
+    std::variant<backend::BackendEvent, backend::BackendError, EndOfStream>;
 
 struct StreamScript {
   std::vector<ScriptedStep> steps;
@@ -34,8 +35,10 @@ class ScriptedBackend final : public backend::Backend {
  public:
   explicit ScriptedBackend(std::vector<ScriptedExchange> exchanges);
 
-  [[nodiscard]] auto start(backend::BackendRequest request, std::stop_token stop_token)
-      -> std::expected<std::unique_ptr<backend::BackendStream>, backend::BackendError> override;
+  [[nodiscard]] auto start(backend::BackendRequest request,
+                           std::stop_token stop_token)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override;
 
   [[nodiscard]] auto recorded_requests() const noexcept
       -> const std::vector<backend::BackendRequest>&;
@@ -47,4 +50,4 @@ class ScriptedBackend final : public backend::Backend {
   std::size_t m_next_exchange{};
 };
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

@@ -26,4 +26,4 @@ class ProcessDraftEditor final : public surfaces::DraftEditor {
   ProcessDraftEditorLimits m_limits;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

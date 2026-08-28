@@ -17,8 +17,7 @@ namespace {
 
 using namespace aiforge;
 
-template <typename IdType>
-auto make_id(const std::string& value) -> IdType {
+template <typename IdType> auto make_id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
@@ -43,10 +42,12 @@ auto started() -> domain::RunStarted {
           make_id<domain::PermissionProfileId>("observe"), std::nullopt};
 }
 
-auto message(const std::string& id, const domain::Role role,
-             std::string text) -> domain::Message {
-  return {make_id<domain::MessageId>(id), role,
-          {domain::TextBlock{std::move(text)}}, std::nullopt};
+auto message(const std::string& id, const domain::Role role, std::string text)
+    -> domain::Message {
+  return {make_id<domain::MessageId>(id),
+          role,
+          {domain::TextBlock{std::move(text)}},
+          std::nullopt};
 }
 
 auto verification(const domain::InvocationId& invocation,
@@ -70,7 +71,7 @@ auto verification(const domain::InvocationId& invocation,
           {artifact}};
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("transcript projection rejects invalid ordering transactionally",
           "[transcript][failure]") {
@@ -78,9 +79,9 @@ TEST_CASE("transcript projection rejects invalid ordering transactionally",
   const auto inference = make_id<domain::InferenceId>("inference");
   const auto assistant = make_id<domain::MessageId>("assistant");
 
-  auto rejected = projection.apply(event(
-      1, domain::AssistantContentDeltaAdded{
-             assistant, inference, domain::TextBlock{"orphan"}}));
+  auto rejected = projection.apply(
+      event(1, domain::AssistantContentDeltaAdded{
+                   assistant, inference, domain::TextBlock{"orphan"}}));
   REQUIRE_FALSE(rejected);
   REQUIRE(projection.last_sequence() == 0);
 
@@ -89,8 +90,8 @@ TEST_CASE("transcript projection rejects invalid ordering transactionally",
   REQUIRE(projection.apply(event(5, started(), "start")));
   REQUIRE(projection.last_sequence() == 5);
 
-  rejected = projection.apply(event(6, domain::UnknownEvent{"duplicate"},
-                                    "start"));
+  rejected =
+      projection.apply(event(6, domain::UnknownEvent{"duplicate"}, "start"));
   REQUIRE_FALSE(rejected);
   REQUIRE(rejected.error().code ==
           domain::TranscriptProjectionErrorCode::duplicate_event);
@@ -110,22 +111,24 @@ TEST_CASE("transcript rebuild equals deterministic incremental application",
   const auto assistant = make_id<domain::MessageId>("assistant");
   const std::vector events{
       event(1, started()),
-      event(2, domain::UserContentAdded{
-                   message("user", domain::Role::user, "hello")}),
-      event(3, domain::InferenceStarted{
-                   inference, make_id<domain::ModelId>("model")}),
+      event(2, domain::UserContentAdded{message("user", domain::Role::user,
+                                                "hello")}),
+      event(3, domain::InferenceStarted{inference,
+                                        make_id<domain::ModelId>("model")}),
       event(4, domain::AssistantContentStarted{assistant, inference}),
-      event(5, domain::AssistantContentDeltaAdded{
-                   assistant, inference, domain::TextBlock{"**answer**"}}),
+      event(5,
+            domain::AssistantContentDeltaAdded{
+                assistant, inference, domain::TextBlock{"**answer**"}}),
       event(6, domain::UsageRecorded{inference, {4, 2, 1, 0}}),
       event(7, domain::AssistantContentFinished{assistant, inference}),
-      event(8, domain::InferenceFinished{inference,
-                                         domain::FinishReason::stop}),
+      event(8,
+            domain::InferenceFinished{inference, domain::FinishReason::stop}),
       event(9, domain::RunCompleted{}),
   };
 
   domain::TranscriptProjection incremental;
-  for (const auto& value : events) REQUIRE(incremental.apply(value));
+  for (const auto& value : events)
+    REQUIRE(incremental.apply(value));
   const auto rebuilt = domain::TranscriptProjection::rebuild(events);
   REQUIRE(rebuilt);
   REQUIRE(rebuilt->items() == incremental.items());
@@ -149,8 +152,11 @@ TEST_CASE("a provenance record replays without adding a transcript item",
       make_id<domain::ModelId>("model"),
       domain::CredentialSourceReference{
           domain::CredentialSourceKind::environment, "VENICE_API_KEY"},
-      {{"model", std::string{"venice-model"}, true,
-        domain::ProvenanceSource::environment, false,
+      {{"model",
+        std::string{"venice-model"},
+        true,
+        domain::ProvenanceSource::environment,
+        false,
         {{domain::ProvenanceSource::environment,
           domain::ProvenanceDisposition::selected, std::nullopt}}}},
       {{"aiforge", "0.10.0"}},
@@ -158,13 +164,14 @@ TEST_CASE("a provenance record replays without adding a transcript item",
   const std::vector events{
       event(1, started()),
       event(2, domain::RunProvenanceRecorded{provenance}),
-      event(3, domain::UserContentAdded{
-                   message("user", domain::Role::user, "hello")}),
+      event(3, domain::UserContentAdded{message("user", domain::Role::user,
+                                                "hello")}),
       event(4, domain::RunCompleted{}),
   };
 
   domain::TranscriptProjection incremental;
-  for (const auto& value : events) REQUIRE(incremental.apply(value));
+  for (const auto& value : events)
+    REQUIRE(incremental.apply(value));
   const auto rebuilt = domain::TranscriptProjection::rebuild(events);
   REQUIRE(rebuilt);
   REQUIRE(rebuilt->items() == incremental.items());
@@ -177,9 +184,9 @@ TEST_CASE("a provenance record replays without adding a transcript item",
 
   // The once-per-run rule is inherited from the run projection.
   auto duplicated = events;
-  duplicated.insert(duplicated.begin() + 2,
-                    event(3, domain::RunProvenanceRecorded{provenance},
-                          "event-3b"));
+  duplicated.insert(
+      duplicated.begin() + 2,
+      event(3, domain::RunProvenanceRecorded{provenance}, "event-3b"));
   duplicated.back().metadata.sequence = 5;
   REQUIRE_FALSE(domain::TranscriptProjection::rebuild(duplicated));
 }
@@ -203,47 +210,46 @@ TEST_CASE("session transcript composes sequential and interleaved runs",
   };
 
   domain::SessionTranscriptProjection incremental;
-  for (const auto& value : events) REQUIRE(incremental.apply(value));
+  for (const auto& value : events)
+    REQUIRE(incremental.apply(value));
   const auto rebuilt = domain::SessionTranscriptProjection::rebuild(events);
   REQUIRE(rebuilt);
   REQUIRE(rebuilt->runs().size() == 2);
   REQUIRE(rebuilt->last_sequence() == 7);
-  REQUIRE(rebuilt->runs()[0].run_id() ==
-          make_id<domain::RunId>("first-run"));
-  REQUIRE(rebuilt->runs()[1].run_id() ==
-          make_id<domain::RunId>("second-run"));
+  REQUIRE(rebuilt->runs()[0].run_id() == make_id<domain::RunId>("first-run"));
+  REQUIRE(rebuilt->runs()[1].run_id() == make_id<domain::RunId>("second-run"));
   REQUIRE(rebuilt->runs()[0].items() == incremental.runs()[0].items());
   REQUIRE(rebuilt->runs()[1].items() == incremental.runs()[1].items());
 }
 
-TEST_CASE("session transcript rejects cross-run envelope failures transactionally",
-          "[transcript][session][failure]") {
+TEST_CASE(
+    "session transcript rejects cross-run envelope failures transactionally",
+    "[transcript][session][failure]") {
   domain::SessionTranscriptProjection projection;
   REQUIRE(projection.apply(event(1, started(), "start", "first-run")));
   REQUIRE(projection.apply(
       event(3, domain::RunCompleted{}, "complete", "first-run")));
 
-  auto rejected = projection.apply(
-      event(4, started(), "start", "second-run"));
+  auto rejected = projection.apply(event(4, started(), "start", "second-run"));
   REQUIRE_FALSE(rejected);
   REQUIRE(rejected.error().code ==
           domain::TranscriptProjectionErrorCode::duplicate_event);
   REQUIRE(projection.last_sequence() == 3);
   REQUIRE(projection.runs().size() == 1);
 
-  rejected = projection.apply(
-      event(2, started(), "second-start", "second-run"));
+  rejected =
+      projection.apply(event(2, started(), "second-start", "second-run"));
   REQUIRE_FALSE(rejected);
   REQUIRE(rejected.error().code ==
           domain::TranscriptProjectionErrorCode::non_monotonic_sequence);
   REQUIRE(projection.last_sequence() == 3);
   REQUIRE(projection.runs().size() == 1);
 
-  rejected = projection.apply(event(
-      4,
-      domain::UserContentAdded{
-          message("orphan", domain::Role::user, "missing start")},
-      "orphan-message", "second-run"));
+  rejected = projection.apply(
+      event(4,
+            domain::UserContentAdded{
+                message("orphan", domain::Role::user, "missing start")},
+            "orphan-message", "second-run"));
   REQUIRE_FALSE(rejected);
   REQUIRE(rejected.error().code ==
           domain::TranscriptProjectionErrorCode::invalid_transition);
@@ -257,22 +263,23 @@ TEST_CASE("unfinished and cancelled assistant content remains visible",
   const auto inference = make_id<domain::InferenceId>("inference");
   const auto assistant = make_id<domain::MessageId>("assistant");
   REQUIRE(projection.apply(event(1, started())));
-  REQUIRE(projection.apply(event(
-      2, domain::InferenceStarted{inference, make_id<domain::ModelId>("model")})));
+  REQUIRE(projection.apply(
+      event(2, domain::InferenceStarted{inference,
+                                        make_id<domain::ModelId>("model")})));
   REQUIRE(projection.apply(
       event(3, domain::AssistantContentStarted{assistant, inference})));
-  REQUIRE(projection.apply(event(
-      4, domain::AssistantContentDeltaAdded{
-             assistant, inference, domain::TextBlock{"partial"}})));
+  REQUIRE(projection.apply(
+      event(4, domain::AssistantContentDeltaAdded{
+                   assistant, inference, domain::TextBlock{"partial"}})));
 
   auto& streaming =
       std::get<domain::TranscriptMessage>(projection.items().back());
   REQUIRE(streaming.state == domain::TranscriptMessageState::streaming);
 
-  REQUIRE(projection.apply(event(
-      5, domain::InferenceCancelled{inference, std::string{"escape"}})));
   REQUIRE(projection.apply(
-      event(6, domain::RunCancelled{std::string{"escape"}})));
+      event(5, domain::InferenceCancelled{inference, std::string{"escape"}})));
+  REQUIRE(
+      projection.apply(event(6, domain::RunCancelled{std::string{"escape"}})));
   REQUIRE(projection.items().size() == 1);
   const auto& cancelled =
       std::get<domain::TranscriptMessage>(projection.items().back());
@@ -287,33 +294,35 @@ TEST_CASE("tool summaries enforce one ordered terminal lifecycle",
   const auto invocation = make_id<domain::InvocationId>("invocation");
   const domain::CapabilityScope scope{domain::Effect::read, "root", "/repo"};
   REQUIRE(projection.apply(event(1, started())));
-  REQUIRE(projection.apply(event(
-      2,
-      domain::ToolProposed{invocation, "read", {"application/json", "{}"},
-                           {domain::Effect::read}},
-      {}, "run", invocation)));
-  REQUIRE(projection.apply(event(
-      3, domain::ToolPolicyDecided{invocation,
-                                   domain::PolicyDecision::require_approval,
-                                   {scope}, std::nullopt},
-      {}, "run", invocation)));
-  REQUIRE(projection.apply(event(
-      4, domain::ToolApprovalRequested{invocation, {scope}}, {}, "run",
-      invocation)));
-  REQUIRE(projection.apply(event(
-      5, domain::ToolApprovalDecided{invocation,
-                                     domain::ApprovalDecision::approved,
-                                     {scope}},
-      {}, "run", invocation)));
+  REQUIRE(
+      projection.apply(event(2,
+                             domain::ToolProposed{invocation,
+                                                  "read",
+                                                  {"application/json", "{}"},
+                                                  {domain::Effect::read}},
+                             {}, "run", invocation)));
+  REQUIRE(projection.apply(
+      event(3,
+            domain::ToolPolicyDecided{invocation,
+                                      domain::PolicyDecision::require_approval,
+                                      {scope},
+                                      std::nullopt},
+            {}, "run", invocation)));
+  REQUIRE(projection.apply(
+      event(4, domain::ToolApprovalRequested{invocation, {scope}}, {}, "run",
+            invocation)));
+  REQUIRE(projection.apply(
+      event(5,
+            domain::ToolApprovalDecided{
+                invocation, domain::ApprovalDecision::approved, {scope}},
+            {}, "run", invocation)));
   REQUIRE(projection.apply(
       event(6, domain::ToolStarted{invocation}, {}, "run", invocation)));
   REQUIRE(projection.apply(event(
-      7,
-      domain::ToolProgressed{invocation, {domain::TextBlock{"working"}}},
-      {}, "run", invocation)));
+      7, domain::ToolProgressed{invocation, {domain::TextBlock{"working"}}}, {},
+      "run", invocation)));
   REQUIRE(projection.apply(event(
-      8,
-      domain::ToolResultRecorded{invocation, {domain::TextBlock{"done"}}},
+      8, domain::ToolResultRecorded{invocation, {domain::TextBlock{"done"}}},
       {}, "run", invocation)));
 
   const auto& summary =
@@ -323,8 +332,7 @@ TEST_CASE("tool summaries enforce one ordered terminal lifecycle",
   REQUIRE(summary.result.size() == 1);
 
   const auto duplicate = projection.apply(event(
-      9,
-      domain::ToolResultRecorded{invocation, {domain::TextBlock{"again"}}},
+      9, domain::ToolResultRecorded{invocation, {domain::TextBlock{"again"}}},
       {}, "run", invocation));
   REQUIRE_FALSE(duplicate);
   REQUIRE(projection.last_sequence() == 8);
@@ -337,29 +345,32 @@ TEST_CASE("cancelled approval accepts one terminal tool error",
   domain::TranscriptProjection projection;
   const auto invocation = make_id<domain::InvocationId>("invocation");
   REQUIRE(projection.apply(event(1, started())));
-  REQUIRE(projection.apply(event(
-      2,
-      domain::ToolProposed{invocation, "read", {"application/json", "{}"},
-                           {domain::Effect::read}},
-      {}, "run", invocation)));
-  REQUIRE(projection.apply(event(
-      3,
-      domain::ToolPolicyDecided{invocation,
-                                domain::PolicyDecision::require_approval, {},
-                                std::nullopt},
-      {}, "run", invocation)));
-  REQUIRE(projection.apply(event(
-      4, domain::ToolApprovalRequested{invocation, {}}, {}, "run",
-      invocation)));
-  REQUIRE(projection.apply(event(
-      5,
-      domain::ToolApprovalDecided{invocation,
-                                  domain::ApprovalDecision::cancelled, {}},
-      {}, "run", invocation)));
+  REQUIRE(
+      projection.apply(event(2,
+                             domain::ToolProposed{invocation,
+                                                  "read",
+                                                  {"application/json", "{}"},
+                                                  {domain::Effect::read}},
+                             {}, "run", invocation)));
+  REQUIRE(projection.apply(
+      event(3,
+            domain::ToolPolicyDecided{invocation,
+                                      domain::PolicyDecision::require_approval,
+                                      {},
+                                      std::nullopt},
+            {}, "run", invocation)));
+  REQUIRE(
+      projection.apply(event(4, domain::ToolApprovalRequested{invocation, {}},
+                             {}, "run", invocation)));
+  REQUIRE(projection.apply(
+      event(5,
+            domain::ToolApprovalDecided{
+                invocation, domain::ApprovalDecision::cancelled, {}},
+            {}, "run", invocation)));
   const domain::DomainError cancelled{domain::ErrorCode::cancelled,
                                       "tool approval cancelled", false};
-  REQUIRE(projection.apply(event(
-      6, domain::ToolErrored{invocation, cancelled}, {}, "run", invocation)));
+  REQUIRE(projection.apply(event(6, domain::ToolErrored{invocation, cancelled},
+                                 {}, "run", invocation)));
   const auto& summary =
       std::get<domain::TranscriptToolSummary>(projection.items().back());
   REQUIRE(summary.state == domain::TranscriptToolState::cancelled);
@@ -377,37 +388,44 @@ TEST_CASE("questions and artifacts reject unknown or invalid references",
   REQUIRE(projection.apply(event(1, started())));
   REQUIRE(projection.apply(event(
       2, domain::UserContentAdded{message("user", domain::Role::user, "hi")})));
-  REQUIRE(projection.apply(event(
-      3, domain::QuestionRequested{domain::QuestionDefinition{
-             question, "Choose", domain::QuestionSelection::one,
-             {{"yes", "Yes", std::nullopt}}, true, 1, 1,
-             domain::QuestionOtherInput{"Other", std::nullopt, 4096}}})));
+  REQUIRE(projection.apply(
+      event(3, domain::QuestionRequested{domain::QuestionDefinition{
+                   question,
+                   "Choose",
+                   domain::QuestionSelection::one,
+                   {{"yes", "Yes", std::nullopt}},
+                   true,
+                   1,
+                   1,
+                   domain::QuestionOtherInput{"Other", std::nullopt, 4096}}})));
 
-  auto invalid = projection.apply(event(
-      4, domain::QuestionAnswered{
-             domain::QuestionAnswer{question, {"missing"}, std::nullopt}},
-      "bad-answer"));
+  auto invalid =
+      projection.apply(event(4,
+                             domain::QuestionAnswered{domain::QuestionAnswer{
+                                 question, {"missing"}, std::nullopt}},
+                             "bad-answer"));
   REQUIRE_FALSE(invalid);
   REQUIRE(projection.last_sequence() == 3);
-  REQUIRE(projection.apply(event(
-      4, domain::QuestionAnswered{
-             domain::QuestionAnswer{question, {"yes"}, std::nullopt}},
-      "answer")));
+  REQUIRE(
+      projection.apply(event(4,
+                             domain::QuestionAnswered{domain::QuestionAnswer{
+                                 question, {"yes"}, std::nullopt}},
+                             "answer")));
 
-  invalid = projection.apply(event(
-      5, domain::ArtifactReferenced{artifact, user}, "early-reference"));
+  invalid = projection.apply(
+      event(5, domain::ArtifactReferenced{artifact, user}, "early-reference"));
   REQUIRE_FALSE(invalid);
   REQUIRE(invalid.error().code ==
           domain::TranscriptProjectionErrorCode::unknown_artifact);
   REQUIRE(projection.last_sequence() == 4);
 
-  const domain::ArtifactMetadata metadata{artifact, "text/plain", 4,
-                                          "sha256:abcd", std::nullopt,
-                                          std::nullopt, std::nullopt};
+  const domain::ArtifactMetadata metadata{
+      artifact,     "text/plain", 4,           "sha256:abcd",
+      std::nullopt, std::nullopt, std::nullopt};
   REQUIRE(projection.apply(
       event(5, domain::ArtifactCreated{metadata}, "artifact-created")));
-  REQUIRE(projection.apply(event(
-      6, domain::ArtifactReferenced{artifact, user}, "artifact-reference")));
+  REQUIRE(projection.apply(event(6, domain::ArtifactReferenced{artifact, user},
+                                 "artifact-reference")));
   REQUIRE(std::holds_alternative<domain::TranscriptArtifactReference>(
       projection.items().back()));
   REQUIRE(std::get<domain::TranscriptMessage>(projection.items().front())
@@ -423,64 +441,66 @@ TEST_CASE("verification evidence replays after its terminal invocation",
   const std::vector events{
       event(1, started()),
       event(2,
-            domain::ToolProposed{invocation, "run_process",
-                                 {"application/json", "{}"}, {}},
+            domain::ToolProposed{
+                invocation, "run_process", {"application/json", "{}"}, {}},
             {}, "run", invocation),
       event(3,
-            domain::ToolPolicyDecided{invocation,
-                                      domain::PolicyDecision::allow, {},
-                                      std::nullopt},
+            domain::ToolPolicyDecided{
+                invocation, domain::PolicyDecision::allow, {}, std::nullopt},
             {}, "run", invocation),
       event(4, domain::ToolStarted{invocation}, {}, "run", invocation),
       event(5,
-            domain::ArtifactCreated{{artifact, "text/plain", 6,
-                                     "sha256:passed", invocation,
-                                     std::nullopt, std::nullopt}},
+            domain::ArtifactCreated{{artifact, "text/plain", 6, "sha256:passed",
+                                     invocation, std::nullopt, std::nullopt}},
             "artifact", "run", invocation),
-      event(6,
-            domain::ToolResultRecorded{invocation,
-                                       {domain::TextBlock{"passed"}}},
-            {}, "run", invocation),
+      event(
+          6,
+          domain::ToolResultRecorded{invocation, {domain::TextBlock{"passed"}}},
+          {}, "run", invocation),
       event(7, domain::VerificationEvidenceRecorded{recorded}, {}, "run",
             invocation),
   };
-  for (const auto& value : events) REQUIRE(projection.apply(value));
+  for (const auto& value : events)
+    REQUIRE(projection.apply(value));
 
   REQUIRE(std::holds_alternative<domain::TranscriptVerificationSummary>(
       projection.items().back()));
-  REQUIRE(std::get<domain::TranscriptVerificationSummary>(
-              projection.items().back())
-              .evidence == recorded);
+  REQUIRE(
+      std::get<domain::TranscriptVerificationSummary>(projection.items().back())
+          .evidence == recorded);
   const auto replayed = domain::TranscriptProjection::rebuild(events);
   REQUIRE(replayed);
   REQUIRE(replayed->items() == projection.items());
 
-  const auto duplicate = projection.apply(event(
-      8, domain::VerificationEvidenceRecorded{recorded}, {}, "run",
-      invocation));
+  const auto duplicate =
+      projection.apply(event(8, domain::VerificationEvidenceRecorded{recorded},
+                             {}, "run", invocation));
   REQUIRE_FALSE(duplicate);
   REQUIRE(projection.last_sequence() == 7);
 }
 
-TEST_CASE("verification evidence rejects live invocations and unknown artifacts",
-          "[transcript][verification][failure]") {
+TEST_CASE(
+    "verification evidence rejects live invocations and unknown artifacts",
+    "[transcript][verification][failure]") {
   domain::TranscriptProjection projection;
   const auto invocation = make_id<domain::InvocationId>("verification-call");
   const auto artifact = make_id<domain::ArtifactId>("missing-output");
   REQUIRE(projection.apply(event(1, started())));
-  REQUIRE(projection.apply(event(
-      2,
-      domain::ToolProposed{invocation, "run_process",
-                           {"application/json", "{}"}, {}},
-      {}, "run", invocation)));
-  REQUIRE(projection.apply(event(
-      3, domain::ToolPolicyDecided{invocation, domain::PolicyDecision::allow,
-                                   {}, std::nullopt},
-      {}, "run", invocation)));
+  REQUIRE(projection.apply(
+      event(2,
+            domain::ToolProposed{
+                invocation, "run_process", {"application/json", "{}"}, {}},
+            {}, "run", invocation)));
+  REQUIRE(projection.apply(
+      event(3,
+            domain::ToolPolicyDecided{
+                invocation, domain::PolicyDecision::allow, {}, std::nullopt},
+            {}, "run", invocation)));
   REQUIRE(projection.apply(
       event(4, domain::ToolStarted{invocation}, {}, "run", invocation)));
   auto rejected = projection.apply(event(
-      5, domain::VerificationEvidenceRecorded{verification(invocation, artifact)},
+      5,
+      domain::VerificationEvidenceRecorded{verification(invocation, artifact)},
       {}, "run", invocation));
   REQUIRE_FALSE(rejected);
   REQUIRE(projection.last_sequence() == 4);
@@ -489,7 +509,8 @@ TEST_CASE("verification evidence rejects live invocations and unknown artifacts"
       5, domain::ToolResultRecorded{invocation, {domain::TextBlock{"passed"}}},
       "result", "run", invocation)));
   rejected = projection.apply(event(
-      6, domain::VerificationEvidenceRecorded{verification(invocation, artifact)},
+      6,
+      domain::VerificationEvidenceRecorded{verification(invocation, artifact)},
       "verification", "run", invocation));
   REQUIRE_FALSE(rejected);
   REQUIRE(rejected.error().code ==
@@ -502,24 +523,28 @@ TEST_CASE("question identities are scoped to their tool invocation",
   const auto question = make_id<domain::QuestionId>("question");
   const auto first = make_id<domain::InvocationId>("first-call");
   const auto second = make_id<domain::InvocationId>("second-call");
-  const domain::QuestionDefinition definition{
-      question, "Choose", domain::QuestionSelection::one,
-      {{"yes", "Yes", std::nullopt}}, true, 1, 1, std::nullopt};
+  const domain::QuestionDefinition definition{question,
+                                              "Choose",
+                                              domain::QuestionSelection::one,
+                                              {{"yes", "Yes", std::nullopt}},
+                                              true,
+                                              1,
+                                              1,
+                                              std::nullopt};
   REQUIRE(projection.apply(event(1, started())));
-  REQUIRE(projection.apply(event(2, domain::QuestionRequested{definition},
-                                 {}, "run", first)));
-  REQUIRE_FALSE(projection.apply(event(
-      3, domain::QuestionAnswered{{question, {"yes"}, std::nullopt}}, {},
-      "run", second)));
+  REQUIRE(projection.apply(
+      event(2, domain::QuestionRequested{definition}, {}, "run", first)));
+  REQUIRE_FALSE(projection.apply(
+      event(3, domain::QuestionAnswered{{question, {"yes"}, std::nullopt}}, {},
+            "run", second)));
   REQUIRE(projection.last_sequence() == 2);
+  REQUIRE(projection.apply(
+      event(3, domain::QuestionAnswered{{question, {"yes"}, std::nullopt}}, {},
+            "run", first)));
+  REQUIRE(projection.apply(
+      event(4, domain::QuestionRequested{definition}, {}, "run", second)));
   REQUIRE(projection.apply(event(
-      3, domain::QuestionAnswered{{question, {"yes"}, std::nullopt}}, {},
-      "run", first)));
-  REQUIRE(projection.apply(event(4, domain::QuestionRequested{definition},
-                                 {}, "run", second)));
-  REQUIRE(projection.apply(event(
-      5, domain::QuestionCancelled{question, "cancelled"}, {}, "run",
-      second)));
+      5, domain::QuestionCancelled{question, "cancelled"}, {}, "run", second)));
 
   REQUIRE(projection.items().size() == 2);
   REQUIRE(std::get<domain::TranscriptQuestionSummary>(projection.items()[0])
@@ -530,9 +555,8 @@ TEST_CASE("question identities are scoped to their tool invocation",
 
 TEST_CASE("untrusted text sanitization is deterministic and UTF-8 safe",
           "[presentation][failure]") {
-  const std::string input =
-      std::string{"safe\r\n\x1b[31mred\x1b[0m\x01"} +
-      std::string{"\xC0\xAF", 2} + "\tend";
+  const std::string input = std::string{"safe\r\n\x1b[31mred\x1b[0m\x01"} +
+                            std::string{"\xC0\xAF", 2} + "\tend";
   const auto clean = presentation::sanitize_untrusted_text(input);
   REQUIRE(clean);
   REQUIRE(clean->find('\x1b') == std::string::npos);
@@ -547,17 +571,15 @@ TEST_CASE("Markdown-lite produces semantic spans without dropping literals",
       "value();\n```\nunterminated **marker");
   REQUIRE(document);
   REQUIRE(document->size() == 5);
-  REQUIRE(presentation::has_semantic(
-      document->front().front().semantic,
-      presentation::TextSemantic::heading));
+  REQUIRE(presentation::has_semantic(document->front().front().semantic,
+                                     presentation::TextSemantic::heading));
   REQUIRE(document->at(1).front().text == "\xE2\x80\xA2 ");
-  REQUIRE(presentation::has_semantic(
-      document->at(1).at(1).semantic,
-      presentation::TextSemantic::strong));
-  REQUIRE(presentation::has_semantic(
-      document->at(2).front().semantic, presentation::TextSemantic::code));
-  REQUIRE(presentation::has_semantic(
-      document->at(3).front().semantic, presentation::TextSemantic::code));
+  REQUIRE(presentation::has_semantic(document->at(1).at(1).semantic,
+                                     presentation::TextSemantic::strong));
+  REQUIRE(presentation::has_semantic(document->at(2).front().semantic,
+                                     presentation::TextSemantic::code));
+  REQUIRE(presentation::has_semantic(document->at(3).front().semantic,
+                                     presentation::TextSemantic::code));
   const auto plain = presentation::flatten(*document);
   REQUIRE(plain);
   REQUIRE(plain->find("unterminated **marker") != std::string::npos);
@@ -580,5 +602,6 @@ TEST_CASE("Markdown-lite handles a bounded ten-megabyte line",
 
   const auto rejected = presentation::tokenize_markdown_lite(large, 1024);
   REQUIRE_FALSE(rejected);
-  REQUIRE(rejected.error().code == presentation::TextErrorCode::input_too_large);
+  REQUIRE(rejected.error().code ==
+          presentation::TextErrorCode::input_too_large);
 }

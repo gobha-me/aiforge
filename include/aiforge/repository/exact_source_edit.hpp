@@ -111,4 +111,4 @@ class ExactSourceEditor {
     const ExactSourceEditReceipt& receipt)
     -> std::expected<void, ExactSourceEditError>;
 
-}  // namespace aiforge::repository
+} // namespace aiforge::repository

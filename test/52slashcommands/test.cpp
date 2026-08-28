@@ -12,8 +12,12 @@ namespace {
 
 using namespace aiforge::surfaces;
 
-auto available(const SlashCommandContext&) -> bool { return true; }
-auto unavailable(const SlashCommandContext&) -> bool { return false; }
+auto available(const SlashCommandContext&) -> bool {
+  return true;
+}
+auto unavailable(const SlashCommandContext&) -> bool {
+  return false;
+}
 
 auto show(std::string_view arguments, const SlashCommandContext&)
     -> std::expected<SlashCommandResult, SlashCommandError> {
@@ -35,11 +39,11 @@ auto fails(std::string_view, const SlashCommandContext&)
 auto spec(std::string id, std::string name,
           SlashCommandAvailability predicate = available,
           SlashCommandHandler handler = show) -> SlashCommandSpec {
-  return {std::move(id), std::move(name), "[value]", "Test command.",
-          predicate, handler};
+  return {std::move(id),   std::move(name), "[value]",
+          "Test command.", predicate,       handler};
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("slash registries reject invalid and ambiguous definitions",
           "[slash][registry][failure]") {
@@ -57,13 +61,13 @@ TEST_CASE("slash registries reject invalid and ambiguous definitions",
   REQUIRE(registry.error().code ==
           SlashCommandRegistryErrorCode::missing_availability);
 
-  registry = SlashCommandRegistry::create(
-      {spec("same", "one"), spec("same", "two")});
+  registry =
+      SlashCommandRegistry::create({spec("same", "one"), spec("same", "two")});
   REQUIRE_FALSE(registry);
   REQUIRE(registry.error().code == SlashCommandRegistryErrorCode::duplicate_id);
 
-  registry = SlashCommandRegistry::create(
-      {spec("one", "same"), spec("two", "same")});
+  registry =
+      SlashCommandRegistry::create({spec("one", "same"), spec("two", "same")});
   REQUIRE_FALSE(registry);
   REQUIRE(registry.error().code ==
           SlashCommandRegistryErrorCode::duplicate_name);
@@ -115,9 +119,9 @@ TEST_CASE(
 
 TEST_CASE("handler exceptions are contained and redacted",
           "[slash][dispatch][failure]") {
-  auto registry = SlashCommandRegistry::create(
-      {spec("throw", "throw", available, throws),
-       spec("fail", "fail", available, fails)});
+  auto registry =
+      SlashCommandRegistry::create({spec("throw", "throw", available, throws),
+                                    spec("fail", "fail", available, fails)});
   REQUIRE(registry);
   const auto result = registry->dispatch("/throw");
   REQUIRE_FALSE(result);
@@ -194,13 +198,13 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   REQUIRE_FALSE(quit);
   REQUIRE(quit.error().code == SlashCommandErrorCode::invalid_arguments);
 
-  const auto edit = registry.dispatch(
-      "/edit", {.editor_available = false, .stop_token = {}});
+  const auto edit =
+      registry.dispatch("/edit", {.editor_available = false, .stop_token = {}});
   REQUIRE_FALSE(edit);
   REQUIRE(edit.error().code == SlashCommandErrorCode::unavailable_command);
 
-  const auto active = registry.dispatch(
-      "/help", {.run_active = true, .stop_token = {}});
+  const auto active =
+      registry.dispatch("/help", {.run_active = true, .stop_token = {}});
   REQUIRE_FALSE(active);
   REQUIRE(active.error().code == SlashCommandErrorCode::unavailable_command);
 
@@ -247,7 +251,8 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
 
   const auto invalid_model = registry.dispatch("/model two models");
   REQUIRE_FALSE(invalid_model);
-  REQUIRE(invalid_model.error().code == SlashCommandErrorCode::invalid_arguments);
+  REQUIRE(invalid_model.error().code ==
+          SlashCommandErrorCode::invalid_arguments);
 
   const auto usage = registry.dispatch("/usage");
   REQUIRE(usage);
@@ -279,8 +284,8 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
     REQUIRE(rejected.error().code == SlashCommandErrorCode::invalid_arguments);
   }
 
-  for (const auto invalid : {"/session resume", "/session list extra",
-                             "/session unknown"}) {
+  for (const auto invalid :
+       {"/session resume", "/session list extra", "/session unknown"}) {
     const auto rejected = registry.dispatch(invalid);
     REQUIRE_FALSE(rejected);
     REQUIRE(rejected.error().code == SlashCommandErrorCode::invalid_arguments);
@@ -294,8 +299,8 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
 
   std::stop_source cancelled;
   cancelled.request_stop();
-  const auto stopped = registry.dispatch(
-      "/help", {.stop_token = cancelled.get_token()});
+  const auto stopped =
+      registry.dispatch("/help", {.stop_token = cancelled.get_token()});
   REQUIRE_FALSE(stopped);
   REQUIRE(stopped.error().code == SlashCommandErrorCode::cancelled);
 }

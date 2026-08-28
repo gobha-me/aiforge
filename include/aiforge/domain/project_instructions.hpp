@@ -27,4 +27,4 @@ struct ProjectInstructionDiscovery {
   auto operator==(const ProjectInstructionDiscovery&) const -> bool = default;
 };
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

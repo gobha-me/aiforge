@@ -19,8 +19,8 @@ class ModelPickerDialog final : public termforge::Dialog {
 
   auto set_models(const model::CatalogSnapshot& snapshot,
                   const domain::ModelId& current) -> void;
-  auto on_result(
-      std::function<void(std::optional<domain::ModelId>)> callback) -> void;
+  auto on_result(std::function<void(std::optional<domain::ModelId>)> callback)
+      -> void;
 
  protected:
   [[nodiscard]] auto content_rows() const -> int override { return 10; }
@@ -48,4 +48,4 @@ class ModelPickerDialog final : public termforge::Dialog {
   std::function<void(std::optional<domain::ModelId>)> m_on_result;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

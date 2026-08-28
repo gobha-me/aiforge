@@ -35,4 +35,4 @@ class DraftEditor {
       -> std::expected<std::string, DraftEditorError> = 0;
 };
 
-}  // namespace aiforge::surfaces
+} // namespace aiforge::surfaces

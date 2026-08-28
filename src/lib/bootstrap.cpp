@@ -3,7 +3,8 @@
 namespace aiforge {
 
 auto bootstrap_status() noexcept -> std::string_view {
-  return "AIForge core is available; interactive and network adapters are not enabled yet.";
+  return "AIForge core is available; interactive and network adapters are not "
+         "enabled yet.";
 }
 
-}  // namespace aiforge
+} // namespace aiforge

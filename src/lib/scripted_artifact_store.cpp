@@ -6,13 +6,13 @@ namespace aiforge::testing {
 
 ScriptedArtifactStore::ScriptedArtifactStore(
     std::vector<ArtifactStoreExchange> exchanges)
-    : m_exchanges(std::move(exchanges)) {}
+    : m_exchanges(std::move(exchanges)) {
+}
 
 auto ScriptedArtifactStore::put(storage::ArtifactWrite write,
                                 const std::span<const std::byte> content,
                                 const std::stop_token stop_token)
-    -> std::expected<domain::ArtifactMetadata,
-                     storage::ArtifactStoreError> {
+    -> std::expected<domain::ArtifactMetadata, storage::ArtifactStoreError> {
   try {
     if (stop_token.stop_requested()) {
       return std::unexpected(storage::ArtifactStoreError{
@@ -59,4 +59,4 @@ auto ScriptedArtifactStore::remaining_exchanges() const noexcept
   return m_exchanges.size() - m_next_exchange;
 }
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

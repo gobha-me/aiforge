@@ -20,16 +20,11 @@ namespace {
 
 [[nodiscard]] auto role_name(const domain::Role role) -> std::string_view {
   switch (role) {
-    case domain::Role::user:
-      return "You";
-    case domain::Role::assistant:
-      return "Assistant";
-    case domain::Role::tool:
-      return "Tool";
-    case domain::Role::system:
-      return "System";
-    case domain::Role::evidence:
-      return "Evidence";
+    case domain::Role::user: return "You";
+    case domain::Role::assistant: return "Assistant";
+    case domain::Role::tool: return "Tool";
+    case domain::Role::system: return "System";
+    case domain::Role::evidence: return "Evidence";
   }
   return "Message";
 }
@@ -37,22 +32,15 @@ namespace {
 [[nodiscard]] auto tool_state(const domain::TranscriptToolState state)
     -> std::string_view {
   switch (state) {
-    case domain::TranscriptToolState::proposed:
-      return "proposed";
-    case domain::TranscriptToolState::allowed:
-      return "allowed";
+    case domain::TranscriptToolState::proposed: return "proposed";
+    case domain::TranscriptToolState::allowed: return "allowed";
     case domain::TranscriptToolState::awaiting_approval:
       return "awaiting approval";
-    case domain::TranscriptToolState::running:
-      return "running";
-    case domain::TranscriptToolState::complete:
-      return "complete";
-    case domain::TranscriptToolState::denied:
-      return "denied";
-    case domain::TranscriptToolState::cancelled:
-      return "cancelled";
-    case domain::TranscriptToolState::failed:
-      return "failed";
+    case domain::TranscriptToolState::running: return "running";
+    case domain::TranscriptToolState::complete: return "complete";
+    case domain::TranscriptToolState::denied: return "denied";
+    case domain::TranscriptToolState::cancelled: return "cancelled";
+    case domain::TranscriptToolState::failed: return "failed";
   }
   return "unknown";
 }
@@ -125,11 +113,12 @@ auto append_span(termforge::StyledText& output, std::string text,
 [[nodiscard]] auto flatten_rich(const termforge::StyledText& text)
     -> std::string {
   std::string output;
-  for (const auto& span : text) output += span.text;
+  for (const auto& span : text)
+    output += span.text;
   return output;
 }
 
-}  // namespace
+} // namespace
 
 struct TranscriptView::RenderedEntry {
   termforge::StyledText rich;
@@ -140,7 +129,9 @@ struct TranscriptView::RenderedEntry {
 
 TranscriptView::TranscriptView(const TranscriptRenderMode mode,
                                TranscriptTheme theme)
-    : m_mode(mode), m_theme(std::move(theme)), m_owner(std::this_thread::get_id()) {}
+    : m_mode(mode), m_theme(std::move(theme)),
+      m_owner(std::this_thread::get_id()) {
+}
 
 TranscriptView::~TranscriptView() = default;
 
@@ -163,8 +154,9 @@ auto TranscriptView::draw(termforge::Screen& screen) -> void {
 auto TranscriptView::apply(const domain::RunEvent& event)
     -> std::expected<void, TranscriptViewError> {
   if (!owner_thread()) {
-    return error(TranscriptViewErrorCode::wrong_thread,
-                 "transcript widgets may be changed only on their owner thread");
+    return error(
+        TranscriptViewErrorCode::wrong_thread,
+        "transcript widgets may be changed only on their owner thread");
   }
   try {
     auto candidate = m_projection;
@@ -186,8 +178,9 @@ auto TranscriptView::apply(const domain::RunEvent& event)
 auto TranscriptView::rebuild(const std::span<const domain::RunEvent> events)
     -> std::expected<void, TranscriptViewError> {
   if (!owner_thread()) {
-    return error(TranscriptViewErrorCode::wrong_thread,
-                 "transcript widgets may be changed only on their owner thread");
+    return error(
+        TranscriptViewErrorCode::wrong_thread,
+        "transcript widgets may be changed only on their owner thread");
   }
   try {
     auto candidate = domain::SessionTranscriptProjection::rebuild(events);
@@ -207,11 +200,11 @@ auto TranscriptView::rebuild(const std::span<const domain::RunEvent> events)
   }
 }
 
-auto TranscriptView::clear_view()
-    -> std::expected<void, TranscriptViewError> {
+auto TranscriptView::clear_view() -> std::expected<void, TranscriptViewError> {
   if (!owner_thread()) {
-    return error(TranscriptViewErrorCode::wrong_thread,
-                 "transcript widgets may be changed only on their owner thread");
+    return error(
+        TranscriptViewErrorCode::wrong_thread,
+        "transcript widgets may be changed only on their owner thread");
   }
   try {
     m_text_box.clear();
@@ -235,7 +228,8 @@ auto TranscriptView::render(
       auto rendered = render_run(run);
       if (!rendered) return std::unexpected(std::move(rendered.error()));
       result.reserve(result.size() + rendered->size());
-      for (auto& entry : *rendered) result.push_back(std::move(entry));
+      for (auto& entry : *rendered)
+        result.push_back(std::move(entry));
     }
     return result;
   } catch (...) {
@@ -350,8 +344,8 @@ auto TranscriptView::render_run(const domain::TranscriptProjection& projection)
       return {};
     };
 
-    for (std::size_t item_index = 0;
-         item_index < projection.items().size(); ++item_index) {
+    for (std::size_t item_index = 0; item_index < projection.items().size();
+         ++item_index) {
       const auto& item = projection.items()[item_index];
       termforge::StyledText output;
       bool entry_live = live(item);
@@ -381,11 +375,11 @@ auto TranscriptView::render_run(const domain::TranscriptProjection& projection)
             message->usage.reasoning_tokens != 0) {
           append_span(
               output,
-              std::format("\n[usage: input={} output={} cached={} reasoning={}]",
-                          message->usage.input_tokens,
-                          message->usage.output_tokens,
-                          message->usage.cached_input_tokens,
-                          message->usage.reasoning_tokens),
+              std::format(
+                  "\n[usage: input={} output={} cached={} reasoning={}]",
+                  message->usage.input_tokens, message->usage.output_tokens,
+                  message->usage.cached_input_tokens,
+                  message->usage.reasoning_tokens),
               style(m_theme.muted));
         }
       } else if (const auto* tool =
@@ -396,10 +390,12 @@ auto TranscriptView::render_run(const domain::TranscriptProjection& projection)
                     "Tool " + *name + " — " +
                         std::string{tool_state(tool->state)},
                     style(m_theme.tool, presentation::TextSemantic::strong));
-        const auto& content = tool->result.empty() ? tool->progress : tool->result;
+        const auto& content =
+            tool->result.empty() ? tool->progress : tool->result;
         if (!content.empty()) {
           append_span(output, "\n", style(m_theme.tool));
-          if (auto rendered = blocks(output, content, m_theme.tool); !rendered) {
+          if (auto rendered = blocks(output, content, m_theme.tool);
+              !rendered) {
             return std::unexpected(std::move(rendered.error()));
           }
         }
@@ -429,24 +425,25 @@ auto TranscriptView::render_run(const domain::TranscriptProjection& projection)
           return value->state ==
                  domain::TranscriptQuestionState::awaiting_answer;
         });
-        const bool all_answered = std::ranges::all_of(
-            questions, [](const auto* value) {
+        const bool all_answered =
+            std::ranges::all_of(questions, [](const auto* value) {
               return value->state == domain::TranscriptQuestionState::answered;
             });
-        const bool all_cancelled = std::ranges::all_of(
-            questions, [](const auto* value) {
+        const bool all_cancelled =
+            std::ranges::all_of(questions, [](const auto* value) {
               return value->state == domain::TranscriptQuestionState::cancelled;
             });
-        append_span(output,
-                    std::string{questions.size() == 1 ? "Question" : "Questions"} +
-                        " — " +
-                        (entry_live ? "awaiting answer"
-                                    : all_answered ? "answered"
-                                    : all_cancelled ? "cancelled" : "resolved"),
-                    style(m_theme.question,
-                          presentation::TextSemantic::strong));
-        for (std::size_t question_index = 0;
-             question_index < questions.size(); ++question_index) {
+        append_span(
+            output,
+            std::string{questions.size() == 1 ? "Question" : "Questions"} +
+                " — " +
+                (entry_live      ? "awaiting answer"
+                 : all_answered  ? "answered"
+                 : all_cancelled ? "cancelled"
+                                 : "resolved"),
+            style(m_theme.question, presentation::TextSemantic::strong));
+        for (std::size_t question_index = 0; question_index < questions.size();
+             ++question_index) {
           const auto& current = *questions[question_index];
           auto prompt = sanitized(current.question.prompt);
           if (!prompt) return std::unexpected(std::move(prompt.error()));
@@ -458,9 +455,9 @@ auto TranscriptView::render_run(const domain::TranscriptProjection& projection)
               current.answer) {
             std::vector<std::string> labels;
             for (const auto& selected : current.answer->selected_option_ids) {
-              const auto found = std::ranges::find(
-                  current.question.options, selected,
-                  &domain::QuestionOption::option_id);
+              const auto found =
+                  std::ranges::find(current.question.options, selected,
+                                    &domain::QuestionOption::option_id);
               if (found != current.question.options.end()) {
                 labels.push_back(found->label);
               }
@@ -492,7 +489,8 @@ auto TranscriptView::render_run(const domain::TranscriptProjection& projection)
                         artifact->artifact.byte_size),
             style(m_theme.artifact, presentation::TextSemantic::strong));
       } else if (const auto* verification =
-                     std::get_if<domain::TranscriptVerificationSummary>(&item)) {
+                     std::get_if<domain::TranscriptVerificationSummary>(
+                         &item)) {
         auto summary = sanitized(verification->evidence.summary);
         if (!summary) return std::unexpected(std::move(summary.error()));
         append_span(
@@ -519,8 +517,7 @@ auto TranscriptView::render_run(const domain::TranscriptProjection& projection)
                               : m_theme.muted,
                           presentation::TextSemantic::strong));
       }
-      result.push_back(
-          RenderedEntry{output, flatten_rich(output), entry_live});
+      result.push_back(RenderedEntry{output, flatten_rich(output), entry_live});
     }
     return result;
   } catch (...) {
@@ -583,8 +580,7 @@ auto TranscriptView::sync(std::vector<RenderedEntry> next)
         m_live = {};
       }
       for (std::size_t index = common; index < next.size(); ++index) {
-        append_entry(next[index],
-                     index + 1 == next.size() && next[index].live);
+        append_entry(next[index], index + 1 == next.size() && next[index].live);
       }
     } else {
       replace_all(next);
@@ -597,4 +593,4 @@ auto TranscriptView::sync(std::vector<RenderedEntry> next)
   }
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

@@ -125,8 +125,7 @@ template <typename Id>
     case runtime::SessionTaskState::failed: return "failed";
     case runtime::SessionTaskState::cancelled: return "cancelled";
     case runtime::SessionTaskState::timed_out: return "timed_out";
-    case runtime::SessionTaskState::budget_exhausted:
-      return "budget_exhausted";
+    case runtime::SessionTaskState::budget_exhausted: return "budget_exhausted";
     case runtime::SessionTaskState::unavailable: return "unavailable";
   }
   return "unknown";
@@ -154,7 +153,7 @@ template <typename Id>
 [[nodiscard]] auto source_name(
     const domain::ProjectBacklogDecisionSource source) -> std::string_view {
   return source == domain::ProjectBacklogDecisionSource::user ? "user"
-                                                               : "policy";
+                                                              : "policy";
 }
 
 [[nodiscard]] auto task_json(const domain::PlanTask& task) -> Json {
@@ -173,9 +172,9 @@ template <typename Id>
                        {"value", intent.value}});
   }
   return {{"task_id", task.task_id.value()},
-          {"parent_task_id",
-           task.parent_task_id ? Json(task.parent_task_id->value())
-                               : Json(nullptr)},
+          {"parent_task_id", task.parent_task_id
+                                 ? Json(task.parent_task_id->value())
+                                 : Json(nullptr)},
           {"dependency_task_ids", std::move(dependencies)},
           {"title", task.title},
           {"acceptance_criteria", task.acceptance_criteria},
@@ -209,11 +208,11 @@ template <typename Id>
     }
     Json evidence = Json::array();
     for (const auto& binding : state.plan->revision.evidence) {
-      evidence.push_back(
-          {{"evidence_id", binding.evidence_id.value()},
-           {"digest", {{"algorithm", binding.digest.algorithm},
-                       {"value", binding.digest.value},
-                       {"byte_size", binding.digest.byte_size}}}});
+      evidence.push_back({{"evidence_id", binding.evidence_id.value()},
+                          {"digest",
+                           {{"algorithm", binding.digest.algorithm},
+                            {"value", binding.digest.value},
+                            {"byte_size", binding.digest.byte_size}}}});
     }
     Json source = nullptr;
     if (state.plan->revision.source_snapshot) {
@@ -242,11 +241,10 @@ template <typename Id>
       for (const auto& blocker : task.blockers) {
         blockers.push_back(blocker.value());
       }
-      result["schedule"].push_back(
-          {{"task_id", task.task_id.value()},
-           {"state", readiness_name(task.state)},
-           {"blockers", std::move(blockers)},
-           {"next_attempt", task.next_attempt}});
+      result["schedule"].push_back({{"task_id", task.task_id.value()},
+                                    {"state", readiness_name(task.state)},
+                                    {"blockers", std::move(blockers)},
+                                    {"next_attempt", task.next_attempt}});
     }
     for (const auto& task_id : state.schedule->dispatchable_task_ids) {
       result["proposed_dispatch_task_ids"].push_back(task_id.value());
@@ -258,9 +256,8 @@ template <typename Id>
          {"revision_id", task.revision_id.value()},
          {"task", task_json(task.task)},
          {"state", session_task_state_name(task.state)},
-         {"child_run_id",
-          task.child_run_id ? Json(task.child_run_id->value())
-                            : Json(nullptr)}});
+         {"child_run_id", task.child_run_id ? Json(task.child_run_id->value())
+                                            : Json(nullptr)}});
   }
   for (const auto& item : state.project_backlog) {
     result["project_backlog"].push_back(
@@ -275,8 +272,8 @@ template <typename Id>
          {"status_event_id", item.status_event_id.value()},
          {"promotion_event_id", item.promotion_event_id.value()},
          {"source", source_name(item.item.source)},
-         {"reason", item.status_reason ? Json(*item.status_reason)
-                                       : Json(nullptr)}});
+         {"reason",
+          item.status_reason ? Json(*item.status_reason) : Json(nullptr)}});
   }
   return result;
 }
@@ -287,8 +284,8 @@ template <typename Id>
     std::vector<std::unordered_set<std::string>> keys;
     bool duplicate{};
     const auto callback = [&keys, &duplicate](const int,
-                                             const Json::parse_event_t event,
-                                             Json& value) {
+                                              const Json::parse_event_t event,
+                                              Json& value) {
       if (event == Json::parse_event_t::object_start) {
         keys.emplace_back();
       } else if (event == Json::parse_event_t::key) {
@@ -312,8 +309,9 @@ template <typename Id>
   }
 }
 
-[[nodiscard]] auto exact_keys(
-    const Json& value, const std::set<std::string_view>& allowed) -> bool {
+[[nodiscard]] auto exact_keys(const Json& value,
+                              const std::set<std::string_view>& allowed)
+    -> bool {
   if (!value.is_object()) return false;
   return std::ranges::all_of(value.items(), [&](const auto& item) {
     return allowed.contains(item.key());
@@ -321,8 +319,7 @@ template <typename Id>
 }
 
 [[nodiscard]] auto run_attributes() -> domain::RunStarted {
-  return {*domain::SurfaceId::from("jsonl"),
-          *domain::WorkspaceId::from("code"),
+  return {*domain::SurfaceId::from("jsonl"), *domain::WorkspaceId::from("code"),
           *domain::PermissionProfileId::from("plan-control"), std::nullopt};
 }
 
@@ -344,9 +341,10 @@ struct RepositoryObservation {
   return {{"schema_version", 1},
           {"request_id", std::move(request_id)},
           {"ok", false},
-          {"error", {{"code", std::move(code)},
-                     {"message", std::move(message)},
-                     {"retryable", retryable}}}};
+          {"error",
+           {{"code", std::move(code)},
+            {"message", std::move(message)},
+            {"retryable", retryable}}}};
 }
 
 auto write_response(std::ostream& output, const Json& response) -> bool {
@@ -390,7 +388,7 @@ auto write_response(std::ostream& output, const Json& response) -> bool {
                         error.message, error.retryable);
 }
 
-}  // namespace
+} // namespace
 
 auto ProcessPlanCommand::execute(Request request,
                                  cli::CommandEnvironment& environment,
@@ -431,10 +429,10 @@ auto ProcessPlanCommand::execute(Request request,
     }
     runtime::PlanTaskController controller{**kernel, store->get()};
     auto repository = observe_repository(environment.stop_token);
-    auto repository_id = repository.snapshot
-                             ? std::optional{
-                                   repository.snapshot->root.repository_id}
-                             : std::nullopt;
+    auto repository_id =
+        repository.snapshot
+            ? std::optional{repository.snapshot->root.repository_id}
+            : std::nullopt;
 
     std::set<std::string> request_ids;
     std::size_t request_count{};
@@ -446,8 +444,7 @@ auto ProcessPlanCommand::execute(Request request,
           read_bounded_line(environment.input, line, stream_bytes);
       if (line_status == LineReadStatus::end) break;
       if (line_status == LineReadStatus::input_failure) {
-        return failure(cli::CommandFailureKind::runtime,
-                       "JSONL input failed");
+        return failure(cli::CommandFailureKind::runtime, "JSONL input failed");
       }
       if (line_status == LineReadStatus::resource_exhausted) {
         if (!write_response(
@@ -486,9 +483,8 @@ auto ProcessPlanCommand::execute(Request request,
         }
         continue;
       }
-      Json request_id = parsed->contains("request_id")
-                            ? (*parsed)["request_id"]
-                            : Json(nullptr);
+      Json request_id = parsed->contains("request_id") ? (*parsed)["request_id"]
+                                                       : Json(nullptr);
       if (!parsed->contains("schema_version") ||
           (*parsed)["schema_version"] != 1 || !request_id.is_string() ||
           request_id.get_ref<const std::string&>().empty() ||
@@ -496,9 +492,9 @@ auto ProcessPlanCommand::execute(Request request,
           !parsed->contains("operation") ||
           !(*parsed)["operation"].is_string()) {
         protocol_failed = true;
-        if (!write_response(
-                output, response_error(request_id, "invalid_envelope",
-                                       "request envelope is invalid"))) {
+        if (!write_response(output,
+                            response_error(request_id, "invalid_envelope",
+                                           "request envelope is invalid"))) {
           return failure(cli::CommandFailureKind::runtime,
                          "JSONL output failed");
         }
@@ -506,9 +502,9 @@ auto ProcessPlanCommand::execute(Request request,
       }
       if (!request_ids.insert(request_id.get<std::string>()).second) {
         protocol_failed = true;
-        if (!write_response(
-                output, response_error(request_id, "duplicate_request_id",
-                                       "request ID is duplicated"))) {
+        if (!write_response(output,
+                            response_error(request_id, "duplicate_request_id",
+                                           "request ID is duplicated"))) {
           return failure(cli::CommandFailureKind::runtime,
                          "JSONL output failed");
         }
@@ -520,19 +516,18 @@ auto ProcessPlanCommand::execute(Request request,
       if (operation == "inspect") {
         if (!exact_keys(*parsed,
                         {"schema_version", "request_id", "operation"})) {
-          operation_error = response_error(
-              request_id, "invalid_request", "inspect has unknown fields");
+          operation_error = response_error(request_id, "invalid_request",
+                                           "inspect has unknown fields");
         }
       } else if (operation == "decide") {
         if (!exact_keys(*parsed,
-                        {"schema_version", "request_id", "operation",
-                         "plan_id", "revision_id", "decision", "reason"}) ||
-            !parsed->contains("plan_id") ||
-            !parsed->contains("revision_id") ||
+                        {"schema_version", "request_id", "operation", "plan_id",
+                         "revision_id", "decision", "reason"}) ||
+            !parsed->contains("plan_id") || !parsed->contains("revision_id") ||
             !parsed->contains("decision") ||
             !(*parsed)["decision"].is_string()) {
-          operation_error = response_error(
-              request_id, "invalid_request", "plan decision is malformed");
+          operation_error = response_error(request_id, "invalid_request",
+                                           "plan decision is malformed");
         } else {
           auto plan_id = parse_id<domain::PlanId>((*parsed)["plan_id"]);
           auto revision_id =
@@ -564,16 +559,16 @@ auto ProcessPlanCommand::execute(Request request,
               }
             }
             if (!decision) {
-              operation_error = response_error(
-                  request_id, "invalid_request", "plan decision is invalid");
+              operation_error = response_error(request_id, "invalid_request",
+                                               "plan decision is invalid");
             } else {
               runtime::PlanApprovalEnvironment approval_environment;
               if (*decision == domain::PlanDecision::approved && before->plan) {
                 repository = observe_repository(environment.stop_token);
-                repository_id = repository.snapshot
-                                    ? std::optional{
-                                          repository.snapshot->root.repository_id}
-                                    : std::nullopt;
+                repository_id =
+                    repository.snapshot
+                        ? std::optional{repository.snapshot->root.repository_id}
+                        : std::nullopt;
                 if (before->plan->revision.source_snapshot) {
                   if (!repository.snapshot) {
                     operation_error = response_error(
@@ -586,9 +581,10 @@ auto ProcessPlanCommand::execute(Request request,
                   }
                 }
                 if (!before->plan->revision.evidence.empty()) {
-                  operation_error = response_error(
-                      request_id, "evidence_unavailable",
-                      "bound evidence cannot be re-established by this surface");
+                  operation_error =
+                      response_error(request_id, "evidence_unavailable",
+                                     "bound evidence cannot be re-established "
+                                     "by this surface");
                 }
               }
               if (!operation_error) {
@@ -607,14 +603,13 @@ auto ProcessPlanCommand::execute(Request request,
         }
       } else if (operation == "promote") {
         repository = observe_repository(environment.stop_token);
-        repository_id = repository.snapshot
-                            ? std::optional{
-                                  repository.snapshot->root.repository_id}
-                            : std::nullopt;
+        repository_id =
+            repository.snapshot
+                ? std::optional{repository.snapshot->root.repository_id}
+                : std::nullopt;
         const std::set<std::string_view> keys{
-            "schema_version", "request_id", "operation", "run_id",
-            "item_id", "repository_id", "plan_id", "revision_id",
-            "task_id"};
+            "schema_version", "request_id", "operation",   "run_id", "item_id",
+            "repository_id",  "plan_id",    "revision_id", "task_id"};
         auto run_id = parsed->contains("run_id")
                           ? parse_id<domain::RunId>((*parsed)["run_id"])
                           : std::nullopt;
@@ -651,9 +646,10 @@ auto ProcessPlanCommand::execute(Request request,
             !requested_repository || !plan_id || !revision_id || !task_id ||
             !repository_id || *requested_repository != *repository_id ||
             task == nullptr) {
-          operation_error = response_error(
-              request_id, "invalid_request",
-              "promotion must target an exact unresolved task in the current repository");
+          operation_error =
+              response_error(request_id, "invalid_request",
+                             "promotion must target an exact unresolved task "
+                             "in the current repository");
         } else {
           auto promoted = controller.promote(
               {*run_id,
@@ -669,9 +665,9 @@ auto ProcessPlanCommand::execute(Request request,
         }
       } else if (operation == "set_backlog_status") {
         const std::set<std::string_view> keys{
-            "schema_version", "request_id", "operation", "run_id",
-            "item_id", "repository_id", "status", "reason",
-            "expected_status_event_id"};
+            "schema_version", "request_id", "operation",
+            "run_id",         "item_id",    "repository_id",
+            "status",         "reason",     "expected_status_event_id"};
         auto run_id = parsed->contains("run_id")
                           ? parse_id<domain::RunId>((*parsed)["run_id"])
                           : std::nullopt;
@@ -683,15 +679,14 @@ auto ProcessPlanCommand::execute(Request request,
             parsed->contains("repository_id")
                 ? parse_id<domain::RepositoryId>((*parsed)["repository_id"])
                 : std::nullopt;
-        auto expected =
-            parsed->contains("expected_status_event_id")
-                ? parse_id<domain::EventId>(
-                      (*parsed)["expected_status_event_id"])
-                : std::nullopt;
+        auto expected = parsed->contains("expected_status_event_id")
+                            ? parse_id<domain::EventId>(
+                                  (*parsed)["expected_status_event_id"])
+                            : std::nullopt;
         std::optional<std::string> reason;
-        const auto reason_valid =
-            !parsed->contains("reason") || (*parsed)["reason"].is_null() ||
-            (*parsed)["reason"].is_string();
+        const auto reason_valid = !parsed->contains("reason") ||
+                                  (*parsed)["reason"].is_null() ||
+                                  (*parsed)["reason"].is_string();
         if (parsed->contains("reason") && (*parsed)["reason"].is_string()) {
           reason = (*parsed)["reason"].get<std::string>();
         }
@@ -707,9 +702,10 @@ auto ProcessPlanCommand::execute(Request request,
             !requested_repository || !repository_id ||
             *requested_repository != *repository_id || !expected || !status ||
             !reason_valid) {
-          operation_error = response_error(
-              request_id, "invalid_request",
-              "project-backlog status request is malformed or targets another repository");
+          operation_error =
+              response_error(request_id, "invalid_request",
+                             "project-backlog status request is malformed or "
+                             "targets another repository");
         } else {
           auto changed = controller.set_backlog_status(
               {*run_id,
@@ -749,8 +745,7 @@ auto ProcessPlanCommand::execute(Request request,
                            {"request_id", request_id},
                            {"ok", true},
                            {"state", state_json(*state, repository_id)}})) {
-        return failure(cli::CommandFailureKind::runtime,
-                       "JSONL output failed");
+        return failure(cli::CommandFailureKind::runtime, "JSONL output failed");
       }
     }
 
@@ -758,13 +753,12 @@ auto ProcessPlanCommand::execute(Request request,
       return failure(cli::CommandFailureKind::usage,
                      "plan --jsonl received no requests");
     }
-    return protocol_failed
-               ? failure(cli::CommandFailureKind::usage, {})
-               : std::expected<void, cli::CommandFailure>{};
+    return protocol_failed ? failure(cli::CommandFailureKind::usage, {})
+                           : std::expected<void, cli::CommandFailure>{};
   } catch (...) {
     return failure(cli::CommandFailureKind::runtime,
                    "plan JSONL control failed internally");
   }
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

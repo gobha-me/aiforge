@@ -4,16 +4,16 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <atomic>
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
-#include <thread>
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -45,8 +45,7 @@ class TemporaryDirectory {
       : m_path(std::move(other.m_path)) {
     other.m_path.clear();
   }
-  auto operator=(TemporaryDirectory&& other) noexcept
-      -> TemporaryDirectory& {
+  auto operator=(TemporaryDirectory&& other) noexcept -> TemporaryDirectory& {
     if (this == &other) return *this;
     std::error_code error;
     if (!m_path.empty()) std::filesystem::remove_all(m_path, error);
@@ -82,8 +81,10 @@ auto read_file(const std::filesystem::path& path) -> std::string {
 auto shell_quote(const std::filesystem::path& path) -> std::string {
   std::string result{"'"};
   for (const char value : path.string()) {
-    if (value == '\'') result.append("'\\''");
-    else result.push_back(value);
+    if (value == '\'')
+      result.append("'\\''");
+    else
+      result.push_back(value);
   }
   result.push_back('\'');
   return result;
@@ -110,7 +111,8 @@ auto initialized_repository() -> TemporaryDirectory {
 }
 
 auto source() -> adapters::GitRepositorySnapshotSource {
-  auto opened = adapters::GitRepositorySnapshotSource::open(REPOSITORY_TEST_GIT);
+  auto opened =
+      adapters::GitRepositorySnapshotSource::open(REPOSITORY_TEST_GIT);
   REQUIRE(opened);
   return std::move(*opened);
 }
@@ -118,13 +120,12 @@ auto source() -> adapters::GitRepositorySnapshotSource {
 auto write_executable(const std::filesystem::path& path,
                       const std::string_view script) -> void {
   write_file(path, script);
-  std::filesystem::permissions(
-      path, std::filesystem::perms::owner_read |
-                std::filesystem::perms::owner_write |
-                std::filesystem::perms::owner_exec);
+  std::filesystem::permissions(path, std::filesystem::perms::owner_read |
+                                         std::filesystem::perms::owner_write |
+                                         std::filesystem::perms::owner_exec);
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("Git repository source validates executable and root failures") {
   auto relative = adapters::GitRepositorySnapshotSource::open("git");
@@ -147,14 +148,15 @@ TEST_CASE("Git repository source validates executable and root failures") {
 
   std::stop_source cancelled;
   cancelled.request_stop();
-  auto stopped = observer.observe({directory.path().string(), {}},
-                                  cancelled.get_token());
+  auto stopped =
+      observer.observe({directory.path().string(), {}}, cancelled.get_token());
   REQUIRE_FALSE(stopped);
   REQUIRE(stopped.error().code ==
           repository::RepositorySnapshotErrorCode::cancelled);
 }
 
-TEST_CASE("plain repository snapshots hash files and symlinks without following") {
+TEST_CASE(
+    "plain repository snapshots hash files and symlinks without following") {
   TemporaryDirectory directory;
   write_file(directory.path() / "a.txt", "alpha");
   write_file(directory.path() / "sub" / "b.txt", "beta");
@@ -277,7 +279,8 @@ TEST_CASE("project instruction discovery fails closed on paths and content") {
           repository::ProjectInstructionErrorCode::resource_exhausted);
 }
 
-TEST_CASE("project instruction discovery detects stale baselines and cancellation") {
+TEST_CASE(
+    "project instruction discovery detects stale baselines and cancellation") {
   auto directory = initialized_repository();
   write_file(directory.path() / "AGENTS.md", "first\n");
   auto observer = source();
@@ -295,8 +298,8 @@ TEST_CASE("project instruction discovery detects stale baselines and cancellatio
   REQUIRE(current);
   std::stop_source stopped;
   stopped.request_stop();
-  auto cancelled = instructions.discover({*current, "", {}},
-                                         stopped.get_token());
+  auto cancelled =
+      instructions.discover({*current, "", {}}, stopped.get_token());
   REQUIRE_FALSE(cancelled);
   REQUIRE(cancelled.error().code ==
           repository::ProjectInstructionErrorCode::cancelled);
@@ -309,7 +312,8 @@ TEST_CASE("project instruction discovery detects stale baselines and cancellatio
   REQUIRE(empty->documents.empty());
 }
 
-TEST_CASE("project instruction discovery rejects repository changes during reads") {
+TEST_CASE(
+    "project instruction discovery rejects repository changes during reads") {
   TemporaryDirectory directory;
   const auto fake_git = directory.path() / "git";
   const auto counter = directory.path() / "status-count";
@@ -318,17 +322,21 @@ TEST_CASE("project instruction discovery rejects repository changes during reads
       fake_git,
       "#!/bin/sh\n"
       "case \"$*\" in\n"
-      "  *--show-toplevel*) printf '%s\\n' '" + canonical + "' ;;\n"
-      "  *--show-object-format*) printf 'sha1\\n' ;;\n"
-      "  *status*) n=0; [ -f '" + counter.string() +
-          "' ] && n=$(cat '" + counter.string() +
+      "  *--show-toplevel*) printf '%s\\n' '" +
+          canonical +
+          "' ;;\n"
+          "  *--show-object-format*) printf 'sha1\\n' ;;\n"
+          "  *status*) n=0; [ -f '" +
+          counter.string() + "' ] && n=$(cat '" + counter.string() +
           "'); n=$((n + 1)); printf '%s' \"$n\" > '" + counter.string() +
-          "'; if [ \"$n\" -le 4 ]; then oid=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; "
+          "'; if [ \"$n\" -le 4 ]; then "
+          "oid=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; "
           "else oid=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; fi; "
           "printf '# branch.oid %s\\0# branch.head main\\0' \"$oid\" ;;\n"
-      "  *hash-object*) cat >/dev/null; printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n' ;;\n"
-      "  *) exit 1 ;;\n"
-      "esac\n");
+          "  *hash-object*) cat >/dev/null; printf "
+          "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n' ;;\n"
+          "  *) exit 1 ;;\n"
+          "esac\n");
   auto opened = adapters::GitRepositorySnapshotSource::open(fake_git.string());
   REQUIRE(opened);
   const auto baseline = opened->observe({directory.path().string(), {}});
@@ -340,7 +348,8 @@ TEST_CASE("project instruction discovery rejects repository changes during reads
           repository::ProjectInstructionErrorCode::unstable);
 }
 
-TEST_CASE("Git snapshots resolve aliases and describe branch dirty and detached state") {
+TEST_CASE("Git snapshots resolve aliases and describe branch dirty and "
+          "detached state") {
   auto directory = initialized_repository();
   std::filesystem::create_directories(directory.path() / "nested");
   write_file(directory.path() / "ignored.txt", "ignored");
@@ -409,7 +418,8 @@ TEST_CASE("Git snapshots distinguish unborn and nested repository roots") {
           std::filesystem::canonical(nested).generic_string());
 }
 
-TEST_CASE("Git snapshots represent staged rename and enforce observation budgets") {
+TEST_CASE(
+    "Git snapshots represent staged rename and enforce observation budgets") {
   auto directory = initialized_repository();
   git(directory.path(), "mv tracked.txt renamed.txt");
 
@@ -439,31 +449,31 @@ TEST_CASE("Git snapshots represent staged rename and enforce observation budgets
           repository::RepositorySnapshotErrorCode::resource_exhausted);
 }
 
-TEST_CASE("Git repository source bounds malformed oversized and slow commands") {
+TEST_CASE(
+    "Git repository source bounds malformed oversized and slow commands") {
   TemporaryDirectory directory;
   const auto malformed_git = directory.path() / "malformed-git";
   const auto canonical = std::filesystem::canonical(directory.path()).string();
-  write_executable(
-      malformed_git,
-      "#!/bin/sh\n"
-      "case \"$*\" in\n"
-      "  *--show-toplevel*) printf '%s\\n' '" + canonical + "' ;;\n"
-      "  *--show-object-format*) printf 'sha1\\n' ;;\n"
-      "  *status*) printf 'broken\\0' ;;\n"
-      "  *) exit 1 ;;\n"
-      "esac\n");
-  auto malformed = adapters::GitRepositorySnapshotSource::open(
-      malformed_git.string());
+  write_executable(malformed_git,
+                   "#!/bin/sh\n"
+                   "case \"$*\" in\n"
+                   "  *--show-toplevel*) printf '%s\\n' '" +
+                       canonical +
+                       "' ;;\n"
+                       "  *--show-object-format*) printf 'sha1\\n' ;;\n"
+                       "  *status*) printf 'broken\\0' ;;\n"
+                       "  *) exit 1 ;;\n"
+                       "esac\n");
+  auto malformed =
+      adapters::GitRepositorySnapshotSource::open(malformed_git.string());
   REQUIRE(malformed);
-  auto malformed_result =
-      malformed->observe({directory.path().string(), {}});
+  auto malformed_result = malformed->observe({directory.path().string(), {}});
   REQUIRE_FALSE(malformed_result);
   REQUIRE(malformed_result.error().code ==
           repository::RepositorySnapshotErrorCode::vcs_failure);
 
   const auto noisy_git = directory.path() / "noisy-git";
-  write_executable(noisy_git,
-                   "#!/bin/sh\nprintf '0123456789abcdef'\n");
+  write_executable(noisy_git, "#!/bin/sh\nprintf '0123456789abcdef'\n");
   auto noisy = adapters::GitRepositorySnapshotSource::open(noisy_git.string());
   REQUIRE(noisy);
   repository::RepositorySnapshotLimits tiny_output;
@@ -485,15 +495,16 @@ TEST_CASE("Git repository source bounds malformed oversized and slow commands") 
           repository::RepositorySnapshotErrorCode::timed_out);
   REQUIRE(timed_out.error().retryable);
 
-  auto cancellable = adapters::GitRepositorySnapshotSource::open(slow_git.string());
+  auto cancellable =
+      adapters::GitRepositorySnapshotSource::open(slow_git.string());
   REQUIRE(cancellable);
   std::stop_source stop;
   std::jthread canceller{[&] {
     std::this_thread::sleep_for(std::chrono::milliseconds{20});
     stop.request_stop();
   }};
-  auto cancelled = cancellable->observe({directory.path().string(), {}},
-                                        stop.get_token());
+  auto cancelled =
+      cancellable->observe({directory.path().string(), {}}, stop.get_token());
   REQUIRE_FALSE(cancelled);
   REQUIRE(cancelled.error().code ==
           repository::RepositorySnapshotErrorCode::cancelled);
@@ -506,17 +517,22 @@ TEST_CASE("Git repository source bounds malformed oversized and slow commands") 
       changing_git,
       "#!/bin/sh\n"
       "case \"$*\" in\n"
-      "  *--show-toplevel*) printf '%s\\n' '" + canonical + "' ;;\n"
-      "  *--show-object-format*) printf 'sha1\\n' ;;\n"
-      "  *status*) printf '# branch.oid aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\0# branch.head main\\0'; "
-          "if [ -e '" + counter.string() +
-          "' ]; then printf '? second\\0'; else : > '" + counter.string() +
+      "  *--show-toplevel*) printf '%s\\n' '" +
+          canonical +
+          "' ;;\n"
+          "  *--show-object-format*) printf 'sha1\\n' ;;\n"
+          "  *status*) printf '# branch.oid "
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\0# branch.head main\\0'; "
+          "if [ -e '" +
+          counter.string() + "' ]; then printf '? second\\0'; else : > '" +
+          counter.string() +
           "'; printf '? first\\0'; fi ;;\n"
-      "  *hash-object*) cat >/dev/null; printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n' ;;\n"
-      "  *) exit 1 ;;\n"
-      "esac\n");
-  auto changing = adapters::GitRepositorySnapshotSource::open(
-      changing_git.string());
+          "  *hash-object*) cat >/dev/null; printf "
+          "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n' ;;\n"
+          "  *) exit 1 ;;\n"
+          "esac\n");
+  auto changing =
+      adapters::GitRepositorySnapshotSource::open(changing_git.string());
   REQUIRE(changing);
   auto unstable = changing->observe({directory.path().string(), {}});
   REQUIRE_FALSE(unstable);
@@ -525,8 +541,9 @@ TEST_CASE("Git repository source bounds malformed oversized and slow commands") 
   REQUIRE(unstable.error().retryable);
 }
 
-TEST_CASE("exact-source reads fail closed on missing unsupported and aliased paths",
-          "[repository][edit][failure]") {
+TEST_CASE(
+    "exact-source reads fail closed on missing unsupported and aliased paths",
+    "[repository][edit][failure]") {
   auto directory = initialized_repository();
   TemporaryDirectory outside;
   write_file(outside.path() / "file.cpp", "outside\n");
@@ -572,8 +589,9 @@ TEST_CASE("exact-source reads fail closed on missing unsupported and aliased pat
           repository::ExactSourceEditErrorCode::invalid_request);
 }
 
-TEST_CASE("exact-source edits reject stale repository and preserve user content",
-          "[repository][edit][failure]") {
+TEST_CASE(
+    "exact-source edits reject stale repository and preserve user content",
+    "[repository][edit][failure]") {
   auto directory = initialized_repository();
   auto observer = source();
   const auto baseline = observer.observe({directory.path().string(), {}});
@@ -610,8 +628,9 @@ TEST_CASE("exact-source edits reject stale repository and preserve user content"
   REQUIRE(read_file(second_directory.path() / "tracked.txt") == "first\n");
 }
 
-TEST_CASE("exact-source edits reject deleted renamed branch and digest conflicts",
-          "[repository][edit][failure]") {
+TEST_CASE(
+    "exact-source edits reject deleted renamed branch and digest conflicts",
+    "[repository][edit][failure]") {
   auto deleted_directory = initialized_repository();
   auto deleted_observer = source();
   const auto deleted_baseline =
@@ -627,7 +646,8 @@ TEST_CASE("exact-source edits reject deleted renamed branch and digest conflicts
   REQUIRE_FALSE(deleted);
   REQUIRE(deleted.error().code ==
           repository::ExactSourceEditErrorCode::stale_snapshot);
-  REQUIRE_FALSE(std::filesystem::exists(deleted_directory.path() / "tracked.txt"));
+  REQUIRE_FALSE(
+      std::filesystem::exists(deleted_directory.path() / "tracked.txt"));
 
   auto renamed_directory = initialized_repository();
   auto renamed_observer = source();
@@ -684,18 +704,17 @@ TEST_CASE("exact-source edits reject deleted renamed branch and digest conflicts
   REQUIRE(read_file(mismatch_directory.path() / "tracked.txt") == "first\n");
 }
 
-TEST_CASE("exact-source edits serialize shared baselines and preserve permissions",
-          "[repository][edit][concurrency]") {
+TEST_CASE(
+    "exact-source edits serialize shared baselines and preserve permissions",
+    "[repository][edit][concurrency]") {
   auto directory = initialized_repository();
   const auto target = directory.path() / "tracked.txt";
-  std::filesystem::permissions(
-      target, std::filesystem::perms::owner_read |
-                  std::filesystem::perms::owner_write |
-                  std::filesystem::perms::group_read);
+  std::filesystem::permissions(target, std::filesystem::perms::owner_read |
+                                           std::filesystem::perms::owner_write |
+                                           std::filesystem::perms::group_read);
   auto first_observer = source();
   auto second_observer = source();
-  const auto baseline =
-      first_observer.observe({directory.path().string(), {}});
+  const auto baseline = first_observer.observe({directory.path().string(), {}});
   REQUIRE(baseline);
   adapters::GitExactSourceEditor first_editor{first_observer};
   adapters::GitExactSourceEditor second_editor{second_observer};
@@ -725,7 +744,8 @@ TEST_CASE("exact-source edits serialize shared baselines and preserve permission
   REQUIRE(read_file(target) == "second\n");
 }
 
-TEST_CASE("exact-source reads accept captured dirty state and edits support insertion",
+TEST_CASE("exact-source reads accept captured dirty state and edits support "
+          "insertion",
           "[repository][edit][smoke]") {
   auto directory = initialized_repository();
   write_file(directory.path() / "tracked.txt", "dirty\n");
@@ -755,8 +775,8 @@ TEST_CASE("exact-source reads accept captured dirty state and edits support inse
 
   std::stop_source cancelled;
   cancelled.request_stop();
-  const auto stopped = editor.read(
-      {*baseline, "tracked.txt", {}}, cancelled.get_token());
+  const auto stopped =
+      editor.read({*baseline, "tracked.txt", {}}, cancelled.get_token());
   REQUIRE_FALSE(stopped);
   REQUIRE(stopped.error().code ==
           repository::ExactSourceEditErrorCode::cancelled);

@@ -17,15 +17,15 @@ namespace {
 
 using namespace aiforge;
 
-template <typename IdType> auto id(const std::string &value) -> IdType {
+template <typename IdType> auto id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
-auto amount(const std::string &value) -> domain::DecimalAmount {
+auto amount(const std::string& value) -> domain::DecimalAmount {
   return domain::DecimalAmount::from(value).value();
 }
 
-auto pricing(const std::string &input = "1.42") -> domain::TextPricing {
+auto pricing(const std::string& input = "1.42") -> domain::TextPricing {
   domain::TextPricing result;
   result.base.input = domain::PriceRate{amount(input), amount("2.5")};
   result.base.output = domain::PriceRate{amount("2.83"), std::nullopt};
@@ -33,7 +33,7 @@ auto pricing(const std::string &input = "1.42") -> domain::TextPricing {
   return result;
 }
 
-auto observation(const std::string &input = "1.42")
+auto observation(const std::string& input = "1.42")
     -> domain::PricingObservation {
   return domain::make_pricing_observation(
              id<domain::ModelId>("model"), "venice.models", std::nullopt,
@@ -160,12 +160,12 @@ TEST_CASE(
   REQUIRE_FALSE(wrong);
   REQUIRE(wrong.error().code == domain::UsageLedgerErrorCode::wrong_run);
 
-  const auto wrong_model = domain::make_pricing_observation(
-                               id<domain::ModelId>("other-model"),
-                               "venice.models", std::nullopt,
-                               domain::EventTimestamp{},
-                               domain::PricingCatalogOrigin::live, pricing())
-                               .value();
+  const auto wrong_model =
+      domain::make_pricing_observation(
+          id<domain::ModelId>("other-model"), "venice.models", std::nullopt,
+          domain::EventTimestamp{}, domain::PricingCatalogOrigin::live,
+          pricing())
+          .value();
   auto mismatched = ledger.apply(
       event(2, domain::InferencePricingObserved{inference, wrong_model}));
   REQUIRE_FALSE(mismatched);
@@ -213,11 +213,11 @@ TEST_CASE("run kernel records pricing before backend work and replay is "
       observed};
   REQUIRE(kernel.start(std::move(start)));
 
-  const auto &events = kernel.event_log().events();
-  const auto started = std::ranges::find_if(events, [](const auto &item) {
+  const auto& events = kernel.event_log().events();
+  const auto started = std::ranges::find_if(events, [](const auto& item) {
     return std::holds_alternative<domain::InferenceStarted>(item.payload);
   });
-  const auto priced = std::ranges::find_if(events, [](const auto &item) {
+  const auto priced = std::ranges::find_if(events, [](const auto& item) {
     return std::holds_alternative<domain::InferencePricingObserved>(
         item.payload);
   });
@@ -227,7 +227,7 @@ TEST_CASE("run kernel records pricing before backend work and replay is "
 
   domain::RunProjection replayed_run;
   domain::UsageLedgerProjection replayed_ledger;
-  for (const auto &item : events) {
+  for (const auto& item : events) {
     REQUIRE(replayed_run.apply(item));
     REQUIRE(replayed_ledger.apply(item));
   }
@@ -242,11 +242,11 @@ TEST_CASE("catalog estimates keep token buckets exact without double charging",
   prices.base.input = domain::PriceRate{amount("1"), amount("2")};
   prices.base.cache_input = domain::PriceRate{amount("0.5"), amount("1")};
   prices.base.output = domain::PriceRate{amount("2"), amount("4")};
-  const auto record = usage_record({1'000'000, 500'000, 200'000, 100'000},
-                                   std::move(prices));
+  const auto record =
+      usage_record({1'000'000, 500'000, 200'000, 100'000}, std::move(prices));
 
-  const auto usd = domain::estimate_inference_cost(
-      record, domain::CostEstimateUnit::usd);
+  const auto usd =
+      domain::estimate_inference_cost(record, domain::CostEstimateUnit::usd);
   REQUIRE(usd);
   REQUIRE(usd->amount.unit() == "USD");
   REQUIRE(usd->amount.amount().to_string() == "1.9");
@@ -265,8 +265,8 @@ TEST_CASE("catalog estimates keep token buckets exact without double charging",
                             domain::InferenceUsageStatus::failed,
                             domain::InferenceUsageStatus::cancelled}) {
     lifecycle.status = status;
-    REQUIRE(domain::estimate_inference_cost(
-        lifecycle, domain::CostEstimateUnit::usd));
+    REQUIRE(domain::estimate_inference_cost(lifecycle,
+                                            domain::CostEstimateUnit::usd));
   }
 }
 
@@ -285,18 +285,17 @@ TEST_CASE("catalog estimates select tiers only when both interpretations agree",
   };
 
   auto base = usage_record({60, 40, 0, 0}, prices());
-  REQUIRE(domain::estimate_inference_cost(base,
-                                          domain::CostEstimateUnit::usd)
+  REQUIRE(domain::estimate_inference_cost(base, domain::CostEstimateUnit::usd)
               ->tier == domain::PricingTierSelection::base);
 
   auto extended = usage_record({101, 0, 0, 0}, prices());
-  REQUIRE(domain::estimate_inference_cost(extended,
-                                          domain::CostEstimateUnit::usd)
-              ->tier == domain::PricingTierSelection::extended);
+  REQUIRE(
+      domain::estimate_inference_cost(extended, domain::CostEstimateUnit::usd)
+          ->tier == domain::PricingTierSelection::extended);
 
   auto ambiguous = usage_record({90, 20, 0, 0}, prices());
-  const auto result = domain::estimate_inference_cost(
-      ambiguous, domain::CostEstimateUnit::usd);
+  const auto result =
+      domain::estimate_inference_cost(ambiguous, domain::CostEstimateUnit::usd);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().reason ==
           domain::CostEstimateUnavailableReason::ambiguous_extended_tier);
@@ -305,63 +304,59 @@ TEST_CASE("catalog estimates select tiers only when both interpretations agree",
 TEST_CASE("catalog estimates fail closed on unobservable or inconsistent data",
           "[pricing][estimate][failure]") {
   auto prices = pricing();
-  prices.base.cache_write =
-      domain::PriceRate{amount("0.1"), amount("0.1")};
+  prices.base.cache_write = domain::PriceRate{amount("0.1"), amount("0.1")};
   auto cache_write = usage_record({10, 2, 0, 0}, std::move(prices));
-  REQUIRE(domain::estimate_inference_cost(
-              cache_write, domain::CostEstimateUnit::usd)
+  REQUIRE(domain::estimate_inference_cost(cache_write,
+                                          domain::CostEstimateUnit::usd)
               .error()
-              .reason == domain::CostEstimateUnavailableReason::
-                             cache_write_usage_unavailable);
+              .reason ==
+          domain::CostEstimateUnavailableReason::cache_write_usage_unavailable);
 
   auto inconsistent = usage_record({2, 1, 3, 0}, pricing());
-  REQUIRE(domain::estimate_inference_cost(
-              inconsistent, domain::CostEstimateUnit::usd)
+  REQUIRE(domain::estimate_inference_cost(inconsistent,
+                                          domain::CostEstimateUnit::usd)
               .error()
               .reason ==
           domain::CostEstimateUnavailableReason::inconsistent_usage);
   inconsistent.usage = {2, 1, 0, 2};
-  REQUIRE(domain::estimate_inference_cost(
-              inconsistent, domain::CostEstimateUnit::usd)
+  REQUIRE(domain::estimate_inference_cost(inconsistent,
+                                          domain::CostEstimateUnit::usd)
               .error()
               .reason ==
           domain::CostEstimateUnavailableReason::inconsistent_usage);
 
   inconsistent.usage = {1, 0, 0, 0};
   inconsistent.usage_observed = false;
-  REQUIRE(domain::estimate_inference_cost(
-              inconsistent, domain::CostEstimateUnit::usd)
+  REQUIRE(domain::estimate_inference_cost(inconsistent,
+                                          domain::CostEstimateUnit::usd)
               .error()
               .reason ==
           domain::CostEstimateUnavailableReason::usage_unobserved);
   inconsistent.usage_observed = true;
   inconsistent.pricing_observation.reset();
-  REQUIRE(domain::estimate_inference_cost(
-              inconsistent, domain::CostEstimateUnit::usd)
+  REQUIRE(domain::estimate_inference_cost(inconsistent,
+                                          domain::CostEstimateUnit::usd)
               .error()
               .reason ==
           domain::CostEstimateUnavailableReason::pricing_unobserved);
 
   domain::TextPricing usd_only;
-  usd_only.base.input =
-      domain::PriceRate{amount("1"), std::nullopt};
-  const auto missing_diem =
-      usage_record({1, 0, 0, 0}, std::move(usd_only));
-  REQUIRE(domain::estimate_inference_cost(
-              missing_diem, domain::CostEstimateUnit::venice_diem)
+  usd_only.base.input = domain::PriceRate{amount("1"), std::nullopt};
+  const auto missing_diem = usage_record({1, 0, 0, 0}, std::move(usd_only));
+  REQUIRE(domain::estimate_inference_cost(missing_diem,
+                                          domain::CostEstimateUnit::venice_diem)
               .error()
               .reason == domain::CostEstimateUnavailableReason::missing_rate);
   auto missing_output = missing_diem;
   missing_output.usage = {0, 1, 0, 0};
-  REQUIRE(domain::estimate_inference_cost(
-              missing_output, domain::CostEstimateUnit::usd)
+  REQUIRE(domain::estimate_inference_cost(missing_output,
+                                          domain::CostEstimateUnit::usd)
               .error()
               .reason == domain::CostEstimateUnavailableReason::missing_rate);
 
   auto forged = usage_record({1, 0, 0, 0}, pricing());
   forged.pricing_observation->rate_card_digest.value = "forged";
-  REQUIRE(domain::estimate_inference_cost(forged,
-                                          domain::CostEstimateUnit::usd)
+  REQUIRE(domain::estimate_inference_cost(forged, domain::CostEstimateUnit::usd)
               .error()
               .reason ==
           domain::CostEstimateUnavailableReason::invalid_pricing);
@@ -373,18 +368,18 @@ TEST_CASE("catalog estimate arithmetic is exact or explicitly unavailable",
   precise.base.input =
       domain::PriceRate{amount("0.000000000000000001"), std::nullopt};
   auto too_precise = usage_record({1, 0, 0, 0}, std::move(precise));
-  REQUIRE(domain::estimate_inference_cost(
-              too_precise, domain::CostEstimateUnit::usd)
+  REQUIRE(domain::estimate_inference_cost(too_precise,
+                                          domain::CostEstimateUnit::usd)
               .error()
               .reason ==
           domain::CostEstimateUnavailableReason::arithmetic_overflow);
 
   domain::TextPricing large;
-  large.base.input = domain::PriceRate{
-      amount("18446744073709551615"), std::nullopt};
+  large.base.input =
+      domain::PriceRate{amount("18446744073709551615"), std::nullopt};
   auto overflowing = usage_record({2'000'000, 0, 0, 0}, std::move(large));
-  REQUIRE(domain::estimate_inference_cost(
-              overflowing, domain::CostEstimateUnit::usd)
+  REQUIRE(domain::estimate_inference_cost(overflowing,
+                                          domain::CostEstimateUnit::usd)
               .error()
               .reason ==
           domain::CostEstimateUnavailableReason::arithmetic_overflow);
@@ -398,8 +393,8 @@ TEST_CASE("session catalog estimates expose per-unit partial coverage",
   missing.pricing_observation.reset();
   const std::vector records{available, missing};
 
-  const auto usd = domain::summarize_cost_estimates(
-      records, domain::CostEstimateUnit::usd);
+  const auto usd =
+      domain::summarize_cost_estimates(records, domain::CostEstimateUnit::usd);
   REQUIRE(usd.subtotal);
   REQUIRE(usd.subtotal->amount().to_string() == "1");
   REQUIRE(usd.estimated_inferences == 1);
@@ -409,8 +404,8 @@ TEST_CASE("session catalog estimates expose per-unit partial coverage",
               domain::CostEstimateUnavailableReason::pricing_unobserved, 1}});
 
   auto zero = usage_record({}, pricing());
-  const auto zero_estimate = domain::estimate_inference_cost(
-      zero, domain::CostEstimateUnit::usd);
+  const auto zero_estimate =
+      domain::estimate_inference_cost(zero, domain::CostEstimateUnit::usd);
   REQUIRE(zero_estimate);
   REQUIRE(zero_estimate->amount.amount().to_string() == "0");
 }
@@ -418,15 +413,15 @@ TEST_CASE("session catalog estimates expose per-unit partial coverage",
 TEST_CASE("session estimate aggregation overflow remains explicit",
           "[pricing][estimate][projection][failure]") {
   domain::TextPricing prices;
-  prices.base.input = domain::PriceRate{
-      amount("18446744073709551615"), std::nullopt};
+  prices.base.input =
+      domain::PriceRate{amount("18446744073709551615"), std::nullopt};
   auto first = usage_record({1'000'000, 0, 0, 0}, prices);
   auto second = first;
   second.inference_id = id<domain::InferenceId>("second");
   const std::vector records{first, second};
 
-  const auto summary = domain::summarize_cost_estimates(
-      records, domain::CostEstimateUnit::usd);
+  const auto summary =
+      domain::summarize_cost_estimates(records, domain::CostEstimateUnit::usd);
   REQUIRE(summary.estimated_inferences == 2);
   REQUIRE_FALSE(summary.subtotal);
   REQUIRE(summary.aggregation_failure ==

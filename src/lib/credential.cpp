@@ -73,25 +73,25 @@ class UniqueFd final {
   }
   if (std::filesystem::exists(status)) {
     if (std::filesystem::is_symlink(status)) {
-      return std::unexpected(failure(
-          CredentialErrorCode::path_escape, directory,
-          "the AIForge credential directory cannot be a symlink"));
+      return std::unexpected(
+          failure(CredentialErrorCode::path_escape, directory,
+                  "the AIForge credential directory cannot be a symlink"));
     }
     if (!std::filesystem::is_directory(status)) {
-      return std::unexpected(failure(
-          CredentialErrorCode::not_regular, directory,
-          "the AIForge credential path is not a directory"));
+      return std::unexpected(
+          failure(CredentialErrorCode::not_regular, directory,
+                  "the AIForge credential path is not a directory"));
     }
-    struct stat info {};
+    struct stat info{};
     if (::stat(directory.c_str(), &info) != 0) {
-      return std::unexpected(errno_failure(CredentialErrorCode::read_failed,
-                                           directory,
-                                           "cannot inspect credential directory permissions"));
+      return std::unexpected(
+          errno_failure(CredentialErrorCode::read_failed, directory,
+                        "cannot inspect credential directory permissions"));
     }
     if ((info.st_mode & 0077) != 0) {
-      return std::unexpected(failure(
-          CredentialErrorCode::insecure_permissions, directory,
-          "the AIForge credential directory must have mode 0700"));
+      return std::unexpected(
+          failure(CredentialErrorCode::insecure_permissions, directory,
+                  "the AIForge credential directory must have mode 0700"));
     }
     return {};
   }
@@ -100,26 +100,26 @@ class UniqueFd final {
   const auto base = directory.parent_path();
   std::filesystem::create_directories(base, error);
   if (error) {
-    return std::unexpected(failure(
-        CredentialErrorCode::write_failed, base,
-        "cannot create the credential base directory"));
+    return std::unexpected(
+        failure(CredentialErrorCode::write_failed, base,
+                "cannot create the credential base directory"));
   }
   if (::mkdir(directory.c_str(), 0700) != 0 && errno != EEXIST) {
-    return std::unexpected(errno_failure(CredentialErrorCode::write_failed,
-                                         directory,
-                                         "cannot create the AIForge credential directory"));
+    return std::unexpected(
+        errno_failure(CredentialErrorCode::write_failed, directory,
+                      "cannot create the AIForge credential directory"));
   }
   if (::chmod(directory.c_str(), 0700) != 0) {
-    return std::unexpected(errno_failure(CredentialErrorCode::write_failed,
-                                         directory,
-                                         "cannot secure the AIForge credential directory"));
+    return std::unexpected(
+        errno_failure(CredentialErrorCode::write_failed, directory,
+                      "cannot secure the AIForge credential directory"));
   }
   return validate_directory(directory, false);
 }
 
 [[nodiscard]] auto inspect_target(const std::filesystem::path& path)
     -> std::expected<bool, CredentialError> {
-  struct stat info {};
+  struct stat info{};
   if (::lstat(path.c_str(), &info) != 0) {
     if (errno == ENOENT) return false;
     return std::unexpected(errno_failure(CredentialErrorCode::read_failed, path,
@@ -134,9 +134,9 @@ class UniqueFd final {
                                    "the credential file is not regular"));
   }
   if ((info.st_mode & 0077) != 0) {
-    return std::unexpected(failure(
-        CredentialErrorCode::insecure_permissions, path,
-        "the credential file must have mode 0600"));
+    return std::unexpected(failure(CredentialErrorCode::insecure_permissions,
+                                   path,
+                                   "the credential file must have mode 0600"));
   }
   return true;
 }
@@ -150,9 +150,9 @@ class UniqueFd final {
         ::write(descriptor, value.data() + written, value.size() - written);
     if (count < 0) {
       if (errno == EINTR) continue;
-      return std::unexpected(errno_failure(CredentialErrorCode::write_failed,
-                                           path,
-                                           "cannot write the temporary credential file"));
+      return std::unexpected(
+          errno_failure(CredentialErrorCode::write_failed, path,
+                        "cannot write the temporary credential file"));
     }
     if (count == 0) {
       return std::unexpected(failure(CredentialErrorCode::write_failed, path,
@@ -165,13 +165,15 @@ class UniqueFd final {
 
 auto clear_string(std::string& value) noexcept -> void {
   volatile char* bytes = value.empty() ? nullptr : value.data();
-  for (std::size_t index = 0; index < value.size(); ++index) bytes[index] = 0;
+  for (std::size_t index = 0; index < value.size(); ++index)
+    bytes[index] = 0;
   value.clear();
 }
 
-}  // namespace
+} // namespace
 
-Secret::Secret(std::string value) : m_value(std::move(value)) {}
+Secret::Secret(std::string value) : m_value(std::move(value)) {
+}
 
 Secret::Secret(Secret&& other) noexcept : m_value(std::move(other.m_value)) {
   other.clear();
@@ -186,9 +188,13 @@ auto Secret::operator=(Secret&& other) noexcept -> Secret& {
   return *this;
 }
 
-Secret::~Secret() { clear(); }
+Secret::~Secret() {
+  clear();
+}
 
-auto Secret::view() const noexcept -> std::string_view { return m_value; }
+auto Secret::view() const noexcept -> std::string_view {
+  return m_value;
+}
 
 auto Secret::release() && -> std::string {
   auto released = std::move(m_value);
@@ -196,19 +202,21 @@ auto Secret::release() && -> std::string {
   return released;
 }
 
-auto Secret::clear() noexcept -> void { clear_string(m_value); }
+auto Secret::clear() noexcept -> void {
+  clear_string(m_value);
+}
 
 auto make_secret(std::string value) -> std::expected<Secret, CredentialError> {
-  const auto invalid = value.empty() ||
-                       value.size() > maximum_credential_bytes ||
-                       !std::ranges::all_of(value, [](const unsigned char byte) {
-                         return byte >= 0x21U && byte <= 0x7eU;
-                       });
+  const auto invalid =
+      value.empty() || value.size() > maximum_credential_bytes ||
+      !std::ranges::all_of(value, [](const unsigned char byte) {
+        return byte >= 0x21U && byte <= 0x7eU;
+      });
   if (invalid) {
     clear_string(value);
-    return std::unexpected(failure(
-        CredentialErrorCode::invalid_value, {},
-        "the Venice credential must be a nonempty printable token no larger than 64 KiB"));
+    return std::unexpected(failure(CredentialErrorCode::invalid_value, {},
+                                   "the Venice credential must be a nonempty "
+                                   "printable token no larger than 64 KiB"));
   }
   return Secret{std::move(value)};
 }
@@ -227,9 +235,9 @@ auto resolve_credential_path(const CredentialPathEnvironment& environment)
             "HOME is required when XDG_CONFIG_HOME is unset or relative"));
       }
       if (!environment.home->is_absolute()) {
-        return std::unexpected(failure(
-            CredentialErrorCode::invalid_base_path, *environment.home,
-            "the credential home must be absolute"));
+        return std::unexpected(failure(CredentialErrorCode::invalid_base_path,
+                                       *environment.home,
+                                       "the credential home must be absolute"));
       }
       base = *environment.home / ".config";
     }
@@ -258,7 +266,8 @@ auto process_credential_path()
 }
 
 FileCredentialStore::FileCredentialStore(std::filesystem::path path)
-    : m_path(std::move(path)) {}
+    : m_path(std::move(path)) {
+}
 
 auto FileCredentialStore::path() const noexcept
     -> const std::filesystem::path& {
@@ -284,24 +293,23 @@ auto FileCredentialStore::load()
                                            m_path,
                                            "cannot open the credential file"));
     }
-    struct stat info {};
+    struct stat info{};
     if (::fstat(descriptor.get(), &info) != 0) {
-      return std::unexpected(errno_failure(CredentialErrorCode::read_failed,
-                                           m_path,
-                                           "cannot inspect the credential file"));
+      return std::unexpected(
+          errno_failure(CredentialErrorCode::read_failed, m_path,
+                        "cannot inspect the credential file"));
     }
     if (!S_ISREG(info.st_mode)) {
       return std::unexpected(failure(CredentialErrorCode::not_regular, m_path,
                                      "the credential file is not regular"));
     }
     if ((info.st_mode & 0077) != 0) {
-      return std::unexpected(failure(CredentialErrorCode::insecure_permissions,
-                                     m_path,
-                                     "the credential file must have mode 0600"));
+      return std::unexpected(
+          failure(CredentialErrorCode::insecure_permissions, m_path,
+                  "the credential file must have mode 0600"));
     }
-    if (info.st_size < 0 ||
-        static_cast<std::uintmax_t>(info.st_size) >
-            maximum_credential_bytes + 1U) {
+    if (info.st_size < 0 || static_cast<std::uintmax_t>(info.st_size) >
+                                maximum_credential_bytes + 1U) {
       return std::unexpected(failure(CredentialErrorCode::too_large, m_path,
                                      "the credential file exceeds 64 KiB"));
     }
@@ -314,9 +322,9 @@ auto FileCredentialStore::load()
       if (count < 0) {
         if (errno == EINTR) continue;
         clear_string(contents);
-        return std::unexpected(errno_failure(CredentialErrorCode::read_failed,
-                                             m_path,
-                                             "cannot read the credential file"));
+        return std::unexpected(
+            errno_failure(CredentialErrorCode::read_failed, m_path,
+                          "cannot read the credential file"));
       }
       if (count == 0) break;
       if (contents.size() + static_cast<std::size_t>(count) >
@@ -363,9 +371,9 @@ auto FileCredentialStore::store(const Secret& credential)
                                            "cannot open the credential lock"));
     }
     if (::fchmod(lock.get(), 0600) != 0 || ::flock(lock.get(), LOCK_EX) != 0) {
-      return std::unexpected(errno_failure(CredentialErrorCode::lock_failed,
-                                           lock_path,
-                                           "cannot acquire the credential lock"));
+      return std::unexpected(
+          errno_failure(CredentialErrorCode::lock_failed, lock_path,
+                        "cannot acquire the credential lock"));
     }
     auto target = inspect_target(m_path);
     if (!target) return std::unexpected(std::move(target.error()));
@@ -374,16 +382,17 @@ auto FileCredentialStore::store(const Secret& credential)
     auto temporary = m_path;
     temporary += ".tmp." + std::to_string(::getpid()) + "." +
                  std::to_string(sequence.fetch_add(1));
-    UniqueFd descriptor{::open(temporary.c_str(),
-                               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
-                                   O_NOFOLLOW,
-                               0600)};
+    UniqueFd descriptor{
+        ::open(temporary.c_str(),
+               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600)};
     if (!descriptor) {
-      return std::unexpected(errno_failure(CredentialErrorCode::write_failed,
-                                           temporary,
-                                           "cannot create the temporary credential file"));
+      return std::unexpected(
+          errno_failure(CredentialErrorCode::write_failed, temporary,
+                        "cannot create the temporary credential file"));
     }
-    const auto cleanup = [&]() { static_cast<void>(::unlink(temporary.c_str())); };
+    const auto cleanup = [&]() {
+      static_cast<void>(::unlink(temporary.c_str()));
+    };
     std::string contents{credential.view()};
     contents.push_back('\n');
     auto written = write_all(descriptor.get(), contents, temporary);
@@ -408,9 +417,9 @@ auto FileCredentialStore::store(const Secret& credential)
     UniqueFd directory{::open(m_path.parent_path().c_str(),
                               O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)};
     if (!directory || ::fsync(directory.get()) != 0) {
-      return std::unexpected(errno_failure(CredentialErrorCode::sync_failed,
-                                           m_path.parent_path(),
-                                           "cannot sync the credential directory"));
+      return std::unexpected(
+          errno_failure(CredentialErrorCode::sync_failed, m_path.parent_path(),
+                        "cannot sync the credential directory"));
     }
     return {};
   } catch (...) {
@@ -440,10 +449,10 @@ auto resolve_credential(std::optional<std::string> environment_value,
     }
     CredentialResolution resolution;
     if (*loaded) {
-      resolution.credential.emplace(ResolvedCredential{
-          std::move(**loaded),
-          {domain::CredentialSourceKind::configuration_file,
-           "aiforge/credentials"}});
+      resolution.credential.emplace(
+          ResolvedCredential{std::move(**loaded),
+                             {domain::CredentialSourceKind::configuration_file,
+                              "aiforge/credentials"}});
     }
     return resolution;
   } catch (...) {
@@ -452,4 +461,4 @@ auto resolve_credential(std::optional<std::string> environment_value,
   }
 }
 
-}  // namespace aiforge::credentials
+} // namespace aiforge::credentials

@@ -48,10 +48,12 @@ namespace {
       !bounded_text(digest.value, 512) || digest.byte_size > maximum_bytes) {
     return false;
   }
-  return std::ranges::all_of(digest.algorithm, [](const unsigned char value) {
-           return std::isalnum(value) != 0 || value == '-' || value == '_' ||
-                  value == '.';
-         }) &&
+  return std::ranges::all_of(digest.algorithm,
+                             [](const unsigned char value) {
+                               return std::isalnum(value) != 0 ||
+                                      value == '-' || value == '_' ||
+                                      value == '.';
+                             }) &&
          std::ranges::all_of(digest.value, [](const unsigned char value) {
            return std::isxdigit(value) != 0;
          });
@@ -64,13 +66,13 @@ namespace {
          limits.timeout > std::chrono::milliseconds::zero() &&
          limits.maximum_path_bytes <= maximums.maximum_path_bytes &&
          limits.maximum_source_bytes <= maximums.maximum_source_bytes &&
-         limits.maximum_replacement_bytes <= maximums.maximum_replacement_bytes &&
+         limits.maximum_replacement_bytes <=
+             maximums.maximum_replacement_bytes &&
          limits.timeout <= maximums.timeout;
 }
 
-[[nodiscard]] auto validate_baseline(
-    const domain::RepositorySnapshot& baseline,
-    const ExactSourceEditLimits& limits)
+[[nodiscard]] auto validate_baseline(const domain::RepositorySnapshot& baseline,
+                                     const ExactSourceEditLimits& limits)
     -> std::expected<void, ExactSourceEditError> {
   RepositorySnapshotLimits snapshot_limits;
   snapshot_limits.maximum_path_bytes = limits.maximum_path_bytes;
@@ -86,7 +88,7 @@ namespace {
   return {};
 }
 
-}  // namespace
+} // namespace
 
 auto validate_exact_source_read_request(const ExactSourceReadRequest& request)
     -> std::expected<void, ExactSourceEditError> {
@@ -105,8 +107,7 @@ auto validate_exact_source_edit_request(const ExactSourceEditRequest& request)
     return failure(ExactSourceEditErrorCode::invalid_request,
                    "exact-source edit request is invalid");
   }
-  if (request.replacement.size() >
-      request.limits.maximum_replacement_bytes) {
+  if (request.replacement.size() > request.limits.maximum_replacement_bytes) {
     return failure(ExactSourceEditErrorCode::resource_exhausted,
                    "exact-source replacement exceeds its byte budget");
   }
@@ -131,8 +132,8 @@ auto validate_exact_source_edit_request(const ExactSourceEditRequest& request)
     return failure(ExactSourceEditErrorCode::resource_exhausted,
                    "exact-source edit size overflowed");
   }
-  const auto result_size = source.content_digest.byte_size - removed +
-                           request.replacement.size();
+  const auto result_size =
+      source.content_digest.byte_size - removed + request.replacement.size();
   if (result_size > request.limits.maximum_source_bytes) {
     return failure(ExactSourceEditErrorCode::resource_exhausted,
                    "exact-source edit exceeds its source byte budget");
@@ -140,9 +141,8 @@ auto validate_exact_source_edit_request(const ExactSourceEditRequest& request)
   return {};
 }
 
-auto validate_exact_source_edit_receipt(
-    const ExactSourceEditRequest& request,
-    const ExactSourceEditReceipt& receipt)
+auto validate_exact_source_edit_receipt(const ExactSourceEditRequest& request,
+                                        const ExactSourceEditReceipt& receipt)
     -> std::expected<void, ExactSourceEditError> {
   auto valid = validate_exact_source_edit_request(request);
   if (!valid) return valid;
@@ -162,7 +162,8 @@ auto validate_exact_source_edit_receipt(
       receipt.resulting_source.relative_path !=
           request.expected_source.relative_path ||
       receipt.resulting_source.range ||
-      receipt.resulting_source.content_digest.byte_size != expected_after_size ||
+      receipt.resulting_source.content_digest.byte_size !=
+          expected_after_size ||
       !valid_digest(receipt.resulting_source.content_digest,
                     request.limits.maximum_source_bytes)) {
     return failure(ExactSourceEditErrorCode::internal_failure,
@@ -171,4 +172,4 @@ auto validate_exact_source_edit_receipt(
   return {};
 }
 
-}  // namespace aiforge::repository
+} // namespace aiforge::repository

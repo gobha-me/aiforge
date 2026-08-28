@@ -12,15 +12,14 @@ namespace {
 
 using namespace aiforge;
 
-template <typename Id>
-auto id(std::string value) -> Id {
+template <typename Id> auto id(std::string value) -> Id {
   auto result = Id::from(std::move(value));
   REQUIRE(result);
   return std::move(*result);
 }
 
-auto digest(std::string value = "aaaaaaaaaaaaaaaa", const std::uint64_t bytes = 6)
-    -> domain::ContentDigest {
+auto digest(std::string value = "aaaaaaaaaaaaaaaa",
+            const std::uint64_t bytes = 6) -> domain::ContentDigest {
   return {"test-sha256", std::move(value), bytes};
 }
 
@@ -36,8 +35,7 @@ auto baseline(std::string fingerprint = "aaaaaaaaaaaaaaaa")
 
 auto source(const domain::RepositorySnapshot& value,
             std::string content_digest = "bbbbbbbbbbbbbbbb",
-            const std::uint64_t bytes = 6)
-    -> domain::RepositorySourceIdentity {
+            const std::uint64_t bytes = 6) -> domain::RepositorySourceIdentity {
   return {domain::snapshot_identity(value), "src/file.cpp",
           digest(std::move(content_digest), bytes), std::nullopt};
 }
@@ -59,16 +57,16 @@ auto receipt(const repository::ExactSourceEditRequest& request)
                             (request.range.end - request.range.begin) +
                             request.replacement.size();
   after.content_digest = digest("dddddddddddddddd", result_bytes);
-  return {request.expected_source,
-          after,
-          request.range,
-          {request.range.begin,
-           request.range.begin + request.replacement.size()},
-          request.expected_source.snapshot,
-          after.snapshot};
+  return {
+      request.expected_source,
+      after,
+      request.range,
+      {request.range.begin, request.range.begin + request.replacement.size()},
+      request.expected_source.snapshot,
+      after.snapshot};
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("exact-source requests reject malformed paths limits and baselines",
           "[repository][edit][failure]") {
@@ -107,27 +105,33 @@ TEST_CASE("exact-source receipt validation rejects invented outcomes",
   const auto request = edit_request();
   auto result = receipt(request);
   result.previous_source.relative_path = "src/other.cpp";
-  REQUIRE_FALSE(repository::validate_exact_source_edit_receipt(request, result));
+  REQUIRE_FALSE(
+      repository::validate_exact_source_edit_receipt(request, result));
 
   result = receipt(request);
   result.resulting_range.end += 1;
-  REQUIRE_FALSE(repository::validate_exact_source_edit_receipt(request, result));
+  REQUIRE_FALSE(
+      repository::validate_exact_source_edit_receipt(request, result));
 
   result = receipt(request);
   result.resulting_source.content_digest.byte_size += 1;
-  REQUIRE_FALSE(repository::validate_exact_source_edit_receipt(request, result));
+  REQUIRE_FALSE(
+      repository::validate_exact_source_edit_receipt(request, result));
 
   result = receipt(request);
-  result.after_snapshot.repository_id = id<domain::RepositoryId>("other-repository");
+  result.after_snapshot.repository_id =
+      id<domain::RepositoryId>("other-repository");
   result.resulting_source.snapshot = result.after_snapshot;
-  REQUIRE_FALSE(repository::validate_exact_source_edit_receipt(request, result));
+  REQUIRE_FALSE(
+      repository::validate_exact_source_edit_receipt(request, result));
 }
 
-TEST_CASE("scripted exact-source editor fails closed on cancellation and script drift",
+TEST_CASE("scripted exact-source editor fails closed on cancellation and "
+          "script drift",
           "[repository][edit][scripted][failure]") {
   const auto read = read_request();
   const repository::ExactSourceReadResult read_result{source(read.baseline),
-                                                       "abcdef"};
+                                                      "abcdef"};
   testing::ScriptedExactSourceEditor editor{{{read, read_result}}, {}};
 
   auto wrong = read;
@@ -155,8 +159,11 @@ TEST_CASE("scripted exact-source editor preserves typed failures and receipts",
   const auto expected_receipt = receipt(request);
   const repository::ExactSourceEditError conflict{
       repository::ExactSourceEditErrorCode::concurrent_change,
-      "changed", request.expected_source.snapshot, request.expected_source,
-      true, false};
+      "changed",
+      request.expected_source.snapshot,
+      request.expected_source,
+      true,
+      false};
   testing::ScriptedExactSourceEditor editor{
       {}, {{request, conflict}, {request, expected_receipt}}};
 
@@ -175,13 +182,13 @@ TEST_CASE("valid exact-source insertion replacement and receipt are accepted",
   insertion.range = {3, 3};
   insertion.replacement = "++";
   REQUIRE(repository::validate_exact_source_edit_request(insertion));
-  REQUIRE(repository::validate_exact_source_edit_receipt(
-      insertion, receipt(insertion)));
+  REQUIRE(repository::validate_exact_source_edit_receipt(insertion,
+                                                         receipt(insertion)));
 
   auto replacement = edit_request();
   replacement.range = {0, replacement.expected_source.content_digest.byte_size};
   replacement.replacement.clear();
   REQUIRE(repository::validate_exact_source_edit_request(replacement));
-  REQUIRE(repository::validate_exact_source_edit_receipt(
-      replacement, receipt(replacement)));
+  REQUIRE(repository::validate_exact_source_edit_receipt(replacement,
+                                                         receipt(replacement)));
 }

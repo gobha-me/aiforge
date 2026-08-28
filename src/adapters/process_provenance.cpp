@@ -29,4 +29,4 @@ auto process_run_provenance(
   return provenance;
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

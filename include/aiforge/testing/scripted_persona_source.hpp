@@ -29,11 +29,9 @@ class ScriptedPersonaSource final : public persona::PersonaSource {
                           std::stop_token stop_token = {})
       -> std::expected<std::vector<domain::PersonaSummary>,
                        persona::PersonaError> override;
-  [[nodiscard]] auto load(std::string name,
-                          persona::PersonaLimits limits = {},
+  [[nodiscard]] auto load(std::string name, persona::PersonaLimits limits = {},
                           std::stop_token stop_token = {})
-      -> std::expected<domain::PersonaDocument,
-                       persona::PersonaError> override;
+      -> std::expected<domain::PersonaDocument, persona::PersonaError> override;
 
   [[nodiscard]] auto recorded_loads() const noexcept
       -> const std::vector<std::string>&;
@@ -48,4 +46,4 @@ class ScriptedPersonaSource final : public persona::PersonaSource {
   std::size_t m_next_load{};
 };
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

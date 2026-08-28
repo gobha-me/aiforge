@@ -36,8 +36,8 @@ namespace {
   return {code, std::move(error.message), error.retryable};
 }
 
-[[nodiscard]] auto
-valid_revision_reason(const domain::PlanRevisionDecision& decision) -> bool {
+[[nodiscard]] auto valid_revision_reason(
+    const domain::PlanRevisionDecision& decision) -> bool {
   if (decision.decision != domain::PlanDecision::revision_requested) {
     return true;
   }

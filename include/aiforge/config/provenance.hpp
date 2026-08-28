@@ -8,9 +8,9 @@
 namespace aiforge::config {
 
 // Projects a resolved configuration into neutral domain provenance so it can be
-// recorded as a run event. A sensitive key contributes presence, source, and its
-// decision trail; its resolved value is never copied. Free diagnostic text is
-// deliberately dropped: the per-entry decision codes carry the same facts
+// recorded as a run event. A sensitive key contributes presence, source, and
+// its decision trail; its resolved value is never copied. Free diagnostic text
+// is deliberately dropped: the per-entry decision codes carry the same facts
 // without carrying a message that could quote a value.
 [[nodiscard]] auto configuration_provenance(const ResolvedConfig& resolved)
     -> std::vector<domain::ConfigurationProvenanceEntry>;
@@ -22,4 +22,4 @@ namespace aiforge::config {
 [[nodiscard]] auto provenance_diagnostic_code(ConfigDiagnosticCode code)
     -> domain::ProvenanceDiagnosticCode;
 
-}  // namespace aiforge::config
+} // namespace aiforge::config

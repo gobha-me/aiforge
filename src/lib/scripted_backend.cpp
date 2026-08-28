@@ -8,10 +8,12 @@ namespace {
 
 class ScriptedStream final : public backend::BackendStream {
  public:
-  explicit ScriptedStream(StreamScript script) : m_steps(std::move(script.steps)) {}
+  explicit ScriptedStream(StreamScript script)
+      : m_steps(std::move(script.steps)) {}
 
   auto next(const std::stop_token stop_token)
-      -> std::expected<std::optional<backend::BackendEvent>, backend::BackendError> override {
+      -> std::expected<std::optional<backend::BackendEvent>,
+                       backend::BackendError> override {
     if (m_ended) return std::optional<backend::BackendEvent>{};
 
     if (stop_token.stop_requested()) {
@@ -49,36 +51,41 @@ class ScriptedStream final : public backend::BackendStream {
                                "backend start cancelled", false, std::nullopt};
 }
 
-}  // namespace
+} // namespace
 
 ScriptedBackend::ScriptedBackend(std::vector<ScriptedExchange> exchanges)
-    : m_exchanges(std::move(exchanges)) {}
+    : m_exchanges(std::move(exchanges)) {
+}
 
-auto ScriptedBackend::start(backend::BackendRequest request, const std::stop_token stop_token)
-    -> std::expected<std::unique_ptr<backend::BackendStream>, backend::BackendError> {
+auto ScriptedBackend::start(backend::BackendRequest request,
+                            const std::stop_token stop_token)
+    -> std::expected<std::unique_ptr<backend::BackendStream>,
+                     backend::BackendError> {
   if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
 
   m_recorded_requests.push_back(request);
 
   if (m_next_exchange >= m_exchanges.size()) {
-    return std::unexpected(backend::BackendError{backend::BackendErrorKind::script_exhausted,
-                                                 "scripted backend has no exchange remaining",
-                                                 false, std::nullopt});
+    return std::unexpected(backend::BackendError{
+        backend::BackendErrorKind::script_exhausted,
+        "scripted backend has no exchange remaining", false, std::nullopt});
   }
 
   const auto& exchange = m_exchanges[m_next_exchange];
   if (request != exchange.expected_request) {
-    return std::unexpected(backend::BackendError{backend::BackendErrorKind::script_mismatch,
-                                                 "backend request did not match the script",
-                                                 false, std::nullopt});
+    return std::unexpected(backend::BackendError{
+        backend::BackendErrorKind::script_mismatch,
+        "backend request did not match the script", false, std::nullopt});
   }
 
   ++m_next_exchange;
-  if (const auto* error = std::get_if<backend::BackendError>(&exchange.outcome)) {
+  if (const auto* error =
+          std::get_if<backend::BackendError>(&exchange.outcome)) {
     return std::unexpected(*error);
   }
 
-  auto stream = std::make_unique<ScriptedStream>(std::get<StreamScript>(exchange.outcome));
+  auto stream = std::make_unique<ScriptedStream>(
+      std::get<StreamScript>(exchange.outcome));
   return std::unique_ptr<backend::BackendStream>{std::move(stream)};
 }
 
@@ -91,4 +98,4 @@ auto ScriptedBackend::remaining_exchanges() const noexcept -> std::size_t {
   return m_exchanges.size() - m_next_exchange;
 }
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

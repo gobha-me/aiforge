@@ -22,15 +22,14 @@ Overloaded(Visitors...) -> Overloaded<Visitors...>;
   return std::unexpected(UsageLedgerError{code, std::move(message)});
 }
 
-[[nodiscard]] auto add_checked(std::uint64_t &total, const std::uint64_t amount)
+[[nodiscard]] auto add_checked(std::uint64_t& total, const std::uint64_t amount)
     -> bool {
-  if (amount > std::numeric_limits<std::uint64_t>::max() - total)
-    return false;
+  if (amount > std::numeric_limits<std::uint64_t>::max() - total) return false;
   total += amount;
   return true;
 }
 
-[[nodiscard]] auto add_usage(Usage &total, const Usage &addition) -> bool {
+[[nodiscard]] auto add_usage(Usage& total, const Usage& addition) -> bool {
   return add_checked(total.input_tokens, addition.input_tokens) &&
          add_checked(total.output_tokens, addition.output_tokens) &&
          add_checked(total.cached_input_tokens, addition.cached_input_tokens) &&
@@ -42,11 +41,11 @@ Overloaded(Visitors...) -> Overloaded<Visitors...>;
   constexpr std::uint64_t base = 1'000'000'000;
   std::array<std::uint64_t, 3> left_parts{};
   std::array<std::uint64_t, 3> right_parts{};
-  for (auto &part : left_parts) {
+  for (auto& part : left_parts) {
     part = left % base;
     left /= base;
   }
-  for (auto &part : right_parts) {
+  for (auto& part : right_parts) {
     part = right % base;
     right /= base;
   }
@@ -64,7 +63,8 @@ Overloaded(Visitors...) -> Overloaded<Visitors...>;
     result_parts[index] %= base;
   }
   auto highest = result_parts.size() - 1;
-  while (highest > 0 && result_parts[highest] == 0) --highest;
+  while (highest > 0 && result_parts[highest] == 0)
+    --highest;
   auto result = std::to_string(result_parts[highest]);
   while (highest > 0) {
     --highest;
@@ -74,7 +74,7 @@ Overloaded(Visitors...) -> Overloaded<Visitors...>;
   return result;
 }
 
-[[nodiscard]] auto scaled_amount(const DecimalAmount &rate,
+[[nodiscard]] auto scaled_amount(const DecimalAmount& rate,
                                  const std::uint64_t tokens)
     -> std::expected<DecimalAmount, CostEstimateUnavailable> {
   auto scale = static_cast<std::size_t>(rate.scale()) + 6U;
@@ -98,24 +98,23 @@ Overloaded(Visitors...) -> Overloaded<Visitors...>;
   return *amount;
 }
 
-[[nodiscard]] auto price_for_unit(const PriceRate &price,
+[[nodiscard]] auto price_for_unit(const PriceRate& price,
                                   const CostEstimateUnit unit)
-    -> const std::optional<DecimalAmount> & {
+    -> const std::optional<DecimalAmount>& {
   return unit == CostEstimateUnit::usd ? price.usd : price.diem;
 }
 
-[[nodiscard]] auto unit_present(const TextPriceTier &tier,
+[[nodiscard]] auto unit_present(const TextPriceTier& tier,
                                 const CostEstimateUnit unit) -> bool {
-  const auto present = [unit](const std::optional<PriceRate> &price) {
+  const auto present = [unit](const std::optional<PriceRate>& price) {
     return price && price_for_unit(*price, unit).has_value();
   };
   return present(tier.input) || present(tier.output) ||
          present(tier.cache_input) || present(tier.cache_write);
 }
 
-[[nodiscard]] auto select_tier(const Usage &usage,
-                               const TextPricing &pricing)
-    -> std::expected<std::pair<const TextPriceTier *, PricingTierSelection>,
+[[nodiscard]] auto select_tier(const Usage& usage, const TextPricing& pricing)
+    -> std::expected<std::pair<const TextPriceTier*, PricingTierSelection>,
                      CostEstimateUnavailable> {
   if (!pricing.extended || !pricing.extended_threshold_tokens) {
     return std::pair{&pricing.base, PricingTierSelection::base};
@@ -136,19 +135,19 @@ Overloaded(Visitors...) -> Overloaded<Visitors...>;
       CostEstimateUnavailableReason::ambiguous_extended_tier});
 }
 
-[[nodiscard]] auto bucket_amount(const std::optional<PriceRate> &price,
+[[nodiscard]] auto bucket_amount(const std::optional<PriceRate>& price,
                                  const CostEstimateUnit unit,
                                  const std::uint64_t tokens)
     -> std::expected<DecimalAmount, CostEstimateUnavailable> {
   if (tokens == 0) return DecimalAmount::from("0").value();
   if (!price || !price_for_unit(*price, unit)) {
-    return std::unexpected(CostEstimateUnavailable{
-        CostEstimateUnavailableReason::missing_rate});
+    return std::unexpected(
+        CostEstimateUnavailable{CostEstimateUnavailableReason::missing_rate});
   }
   return scaled_amount(*price_for_unit(*price, unit), tokens);
 }
 
-auto add_failure(SessionCostEstimate &summary,
+auto add_failure(SessionCostEstimate& summary,
                  const CostEstimateUnavailableReason reason) -> void {
   const auto found = std::ranges::find(summary.unavailable, reason,
                                        &CostEstimateFailureCount::reason);
@@ -159,7 +158,7 @@ auto add_failure(SessionCostEstimate &summary,
   }
 }
 
-auto add_failure(SessionSpendSummary &summary,
+auto add_failure(SessionSpendSummary& summary,
                  const CostEstimateUnavailableReason reason) -> void {
   const auto found = std::ranges::find(summary.unavailable, reason,
                                        &CostEstimateFailureCount::reason);
@@ -170,8 +169,8 @@ auto add_failure(SessionSpendSummary &summary,
   }
 }
 
-[[nodiscard]] auto reported_usd(const ReportedCost &cost)
-    -> const MonetaryAmount * {
+[[nodiscard]] auto reported_usd(const ReportedCost& cost)
+    -> const MonetaryAmount* {
   const auto found = std::ranges::find(cost.amounts(), std::string_view{"USD"},
                                        &MonetaryAmount::unit);
   return found == cost.amounts().end() ? nullptr : &*found;
@@ -182,8 +181,8 @@ auto add_failure(SessionSpendSummary &summary,
 auto cost_estimate_unit_name(const CostEstimateUnit unit) noexcept
     -> std::string_view {
   switch (unit) {
-  case CostEstimateUnit::usd: return "USD";
-  case CostEstimateUnit::venice_diem: return "venice.diem";
+    case CostEstimateUnit::usd: return "USD";
+    case CostEstimateUnit::venice_diem: return "venice.diem";
   }
   return "unknown";
 }
@@ -191,26 +190,26 @@ auto cost_estimate_unit_name(const CostEstimateUnit unit) noexcept
 auto cost_estimate_reason_name(
     const CostEstimateUnavailableReason reason) noexcept -> std::string_view {
   switch (reason) {
-  case CostEstimateUnavailableReason::usage_unobserved:
-    return "usage unavailable";
-  case CostEstimateUnavailableReason::pricing_unobserved:
-    return "pricing unavailable";
-  case CostEstimateUnavailableReason::invalid_pricing:
-    return "pricing invalid";
-  case CostEstimateUnavailableReason::inconsistent_usage:
-    return "usage inconsistent";
-  case CostEstimateUnavailableReason::ambiguous_extended_tier:
-    return "pricing tier ambiguous";
-  case CostEstimateUnavailableReason::cache_write_usage_unavailable:
-    return "cache-write usage unavailable";
-  case CostEstimateUnavailableReason::missing_rate: return "rate unavailable";
-  case CostEstimateUnavailableReason::arithmetic_overflow:
-    return "arithmetic unavailable";
+    case CostEstimateUnavailableReason::usage_unobserved:
+      return "usage unavailable";
+    case CostEstimateUnavailableReason::pricing_unobserved:
+      return "pricing unavailable";
+    case CostEstimateUnavailableReason::invalid_pricing:
+      return "pricing invalid";
+    case CostEstimateUnavailableReason::inconsistent_usage:
+      return "usage inconsistent";
+    case CostEstimateUnavailableReason::ambiguous_extended_tier:
+      return "pricing tier ambiguous";
+    case CostEstimateUnavailableReason::cache_write_usage_unavailable:
+      return "cache-write usage unavailable";
+    case CostEstimateUnavailableReason::missing_rate: return "rate unavailable";
+    case CostEstimateUnavailableReason::arithmetic_overflow:
+      return "arithmetic unavailable";
   }
   return "unknown";
 }
 
-auto estimate_inference_cost(const InferenceUsageRecord &record,
+auto estimate_inference_cost(const InferenceUsageRecord& record,
                              const CostEstimateUnit unit)
     -> std::expected<InferenceCostEstimate, CostEstimateUnavailable> {
   if (!record.usage_observed) {
@@ -230,26 +229,25 @@ auto estimate_inference_cost(const InferenceUsageRecord &record,
     return std::unexpected(CostEstimateUnavailable{
         CostEstimateUnavailableReason::inconsistent_usage});
   }
-  auto selected = select_tier(record.usage,
-                              record.pricing_observation->pricing);
+  auto selected =
+      select_tier(record.usage, record.pricing_observation->pricing);
   if (!selected) return std::unexpected(selected.error());
-  const auto &[tier, selection] = *selected;
+  const auto& [tier, selection] = *selected;
   if (tier->cache_write) {
     return std::unexpected(CostEstimateUnavailable{
         CostEstimateUnavailableReason::cache_write_usage_unavailable});
   }
   if (!unit_present(*tier, unit)) {
-    return std::unexpected(CostEstimateUnavailable{
-        CostEstimateUnavailableReason::missing_rate});
+    return std::unexpected(
+        CostEstimateUnavailable{CostEstimateUnavailableReason::missing_rate});
   }
 
-  const auto uncached = record.usage.input_tokens -
-                        record.usage.cached_input_tokens;
+  const auto uncached =
+      record.usage.input_tokens - record.usage.cached_input_tokens;
   auto input = bucket_amount(tier->input, unit, uncached);
-  auto cached = bucket_amount(tier->cache_input, unit,
-                              record.usage.cached_input_tokens);
-  auto output = bucket_amount(tier->output, unit,
-                              record.usage.output_tokens);
+  auto cached =
+      bucket_amount(tier->cache_input, unit, record.usage.cached_input_tokens);
+  auto output = bucket_amount(tier->output, unit, record.usage.output_tokens);
   if (!input) return std::unexpected(input.error());
   if (!cached) return std::unexpected(cached.error());
   if (!output) return std::unexpected(output.error());
@@ -280,7 +278,7 @@ auto summarize_cost_estimates(
   result.unit = unit;
   result.total_inferences = records.size();
   std::optional<DecimalAmount> total;
-  for (const auto &record : records) {
+  for (const auto& record : records) {
     auto estimate = estimate_inference_cost(record, unit);
     if (!estimate) {
       add_failure(result, estimate.error().reason);
@@ -315,15 +313,15 @@ auto summarize_cost_estimates(
 
 auto summarize_session_spend(
     const std::span<const InferenceUsageRecord> records,
-    const SessionSpendCeiling &ceiling) -> SessionSpendSummary {
+    const SessionSpendCeiling& ceiling) -> SessionSpendSummary {
   SessionSpendSummary result{ceiling, std::nullopt, std::nullopt, 0,    0,
                              0,       {},           std::nullopt, false};
   result.total_inferences = records.size();
   std::optional<DecimalAmount> total{DecimalAmount::from("0").value()};
-  for (const auto &record : records) {
+  for (const auto& record : records) {
     std::optional<DecimalAmount> amount;
     if (record.reported_cost) {
-      if (const auto *reported = reported_usd(*record.reported_cost)) {
+      if (const auto* reported = reported_usd(*record.reported_cost)) {
         amount = reported->amount();
         ++result.reported_inferences;
       }
@@ -382,14 +380,14 @@ auto summarize_session_spend(
   return result;
 }
 
-auto UsageLedgerProjection::find_record(const InferenceId &inference_id)
-    -> InferenceUsageRecord * {
+auto UsageLedgerProjection::find_record(const InferenceId& inference_id)
+    -> InferenceUsageRecord* {
   const auto found = std::ranges::find(m_records, inference_id,
                                        &InferenceUsageRecord::inference_id);
   return found == m_records.end() ? nullptr : &*found;
 }
 
-auto UsageLedgerProjection::apply(const RunEvent &event)
+auto UsageLedgerProjection::apply(const RunEvent& event)
     -> std::expected<void, UsageLedgerError> {
   if (event.metadata.sequence == 0 || event.metadata.schema_version == 0) {
     return error(UsageLedgerErrorCode::invalid_envelope,
@@ -404,10 +402,10 @@ auto UsageLedgerProjection::apply(const RunEvent &event)
                  "event sequence must increase");
   }
 
-  const auto finish = [&](const InferenceId &inference_id,
+  const auto finish = [&](const InferenceId& inference_id,
                           const InferenceUsageStatus status)
       -> std::expected<void, UsageLedgerError> {
-    auto *record = find_record(inference_id);
+    auto* record = find_record(inference_id);
     if (record == nullptr) {
       return error(UsageLedgerErrorCode::unknown_inference,
                    "inference terminal event has no matching start");
@@ -427,7 +425,7 @@ auto UsageLedgerProjection::apply(const RunEvent &event)
 
   const auto result = std::visit(
       Overloaded{
-          [&](const InferenceStarted &started)
+          [&](const InferenceStarted& started)
               -> std::expected<void, UsageLedgerError> {
             if (find_record(started.inference_id) != nullptr) {
               return error(
@@ -446,9 +444,9 @@ auto UsageLedgerProjection::apply(const RunEvent &event)
                                  {}});
             return {};
           },
-          [&](const InferencePricingObserved &observed)
+          [&](const InferencePricingObserved& observed)
               -> std::expected<void, UsageLedgerError> {
-            auto *record = find_record(observed.inference_id);
+            auto* record = find_record(observed.inference_id);
             if (record == nullptr) {
               return error(UsageLedgerErrorCode::unknown_inference,
                            "pricing has no matching inference start");
@@ -471,9 +469,9 @@ auto UsageLedgerProjection::apply(const RunEvent &event)
             record->pricing_observation = observed.observation;
             return {};
           },
-          [&](const UsageRecorded &recorded)
+          [&](const UsageRecorded& recorded)
               -> std::expected<void, UsageLedgerError> {
-            auto *record = find_record(recorded.inference_id);
+            auto* record = find_record(recorded.inference_id);
             if (record == nullptr) {
               return error(UsageLedgerErrorCode::unknown_inference,
                            "usage event has no matching inference start");
@@ -499,9 +497,9 @@ auto UsageLedgerProjection::apply(const RunEvent &event)
             m_total_usage = next_total_usage;
             return {};
           },
-          [&](const InferenceCostRecorded &recorded)
+          [&](const InferenceCostRecorded& recorded)
               -> std::expected<void, UsageLedgerError> {
-            auto *record = find_record(recorded.inference_id);
+            auto* record = find_record(recorded.inference_id);
             if (record == nullptr) {
               return error(UsageLedgerErrorCode::unknown_inference,
                            "cost event has no matching inference start");
@@ -531,18 +529,18 @@ auto UsageLedgerProjection::apply(const RunEvent &event)
             m_total_reported_cost = std::move(next_total);
             return {};
           },
-          [&](const InferenceFinished &finished) {
+          [&](const InferenceFinished& finished) {
             return finish(finished.inference_id,
                           InferenceUsageStatus::completed);
           },
-          [&](const InferenceFailed &failed) {
+          [&](const InferenceFailed& failed) {
             return finish(failed.inference_id, InferenceUsageStatus::failed);
           },
-          [&](const InferenceCancelled &cancelled) {
+          [&](const InferenceCancelled& cancelled) {
             return finish(cancelled.inference_id,
                           InferenceUsageStatus::cancelled);
           },
-          [&](const auto &) -> std::expected<void, UsageLedgerError> {
+          [&](const auto&) -> std::expected<void, UsageLedgerError> {
             return {};
           },
       },
@@ -555,7 +553,7 @@ auto UsageLedgerProjection::apply(const RunEvent &event)
   return result;
 }
 
-auto SessionSpendCeilingProjection::apply(const RunEvent &event)
+auto SessionSpendCeilingProjection::apply(const RunEvent& event)
     -> std::expected<void, UsageLedgerError> {
   if (event.metadata.sequence == 0 || event.metadata.schema_version == 0) {
     return error(UsageLedgerErrorCode::invalid_envelope,
@@ -570,7 +568,7 @@ auto SessionSpendCeilingProjection::apply(const RunEvent &event)
                  "event sequence must increase");
   }
 
-  if (const auto *set = std::get_if<SessionSpendCeilingSet>(&event.payload)) {
+  if (const auto* set = std::get_if<SessionSpendCeilingSet>(&event.payload)) {
     if (set->source != SessionSpendCeilingSource::command_line ||
         !SessionSpendCeiling::create(set->ceiling.amount())) {
       return error(UsageLedgerErrorCode::invalid_ceiling,

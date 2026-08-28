@@ -36,4 +36,4 @@ class TermForgeRunBridge final : public runtime::RunWakeSink {
   std::function<void()> m_wake_observer;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

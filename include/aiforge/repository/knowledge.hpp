@@ -44,7 +44,8 @@ enum class RepositoryKnowledgeErrorCode {
 };
 
 struct RepositoryKnowledgeError {
-  RepositoryKnowledgeErrorCode code{RepositoryKnowledgeErrorCode::internal_failure};
+  RepositoryKnowledgeErrorCode code{
+      RepositoryKnowledgeErrorCode::internal_failure};
   std::string message;
   std::optional<domain::KnowledgeRecordId> record_id;
   auto operator==(const RepositoryKnowledgeError&) const -> bool = default;
@@ -75,7 +76,8 @@ struct KnowledgeDependencyObservation {
   domain::KnowledgeRecordId record_id;
   std::optional<std::uint64_t> revision;
   KnowledgeInputAvailability availability{KnowledgeInputAvailability::unknown};
-  auto operator==(const KnowledgeDependencyObservation&) const -> bool = default;
+  auto operator==(const KnowledgeDependencyObservation&) const
+      -> bool = default;
 };
 
 struct RepositoryKnowledgeEnvironment {
@@ -86,12 +88,14 @@ struct RepositoryKnowledgeEnvironment {
   bool dependency_observation_complete{};
   std::optional<domain::KnowledgeProducer> producer;
   std::optional<domain::ContentDigest> build_configuration;
-  auto operator==(const RepositoryKnowledgeEnvironment&) const -> bool = default;
+  auto operator==(const RepositoryKnowledgeEnvironment&) const
+      -> bool = default;
 };
 
 struct RepositoryKnowledgeAssessment {
   domain::KnowledgeRecordId record_id;
-  domain::KnowledgeFreshness freshness{domain::KnowledgeFreshness::possibly_stale};
+  domain::KnowledgeFreshness freshness{
+      domain::KnowledgeFreshness::possibly_stale};
   std::vector<domain::KnowledgeInvalidationTrigger> affected_triggers;
   auto operator==(const RepositoryKnowledgeAssessment&) const -> bool = default;
 };
@@ -99,7 +103,8 @@ struct RepositoryKnowledgeAssessment {
 struct RepositoryKnowledgeReplacement {
   std::optional<std::uint64_t> expected_revision;
   domain::RepositoryKnowledgeRecord record;
-  auto operator==(const RepositoryKnowledgeReplacement&) const -> bool = default;
+  auto operator==(const RepositoryKnowledgeReplacement&) const
+      -> bool = default;
 };
 
 struct RepositoryKnowledgeUpdate {
@@ -127,4 +132,4 @@ struct RepositoryKnowledgeUpdate {
     -> std::expected<domain::RepositoryKnowledgeGraph,
                      RepositoryKnowledgeError>;
 
-}  // namespace aiforge::repository
+} // namespace aiforge::repository

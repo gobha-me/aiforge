@@ -24,9 +24,8 @@ class ScriptedRepositorySnapshotSource final
   explicit ScriptedRepositorySnapshotSource(
       std::vector<RepositorySnapshotExchange> exchanges = {});
 
-  [[nodiscard]] auto observe(
-      repository::RepositorySnapshotRequest request,
-      std::stop_token stop_token = {})
+  [[nodiscard]] auto observe(repository::RepositorySnapshotRequest request,
+                             std::stop_token stop_token = {})
       -> std::expected<domain::RepositorySnapshot,
                        repository::RepositorySnapshotError> override;
 
@@ -40,4 +39,4 @@ class ScriptedRepositorySnapshotSource final
   std::size_t m_next_exchange{};
 };
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

@@ -8,9 +8,8 @@
 
 namespace aiforge::testing {
 
-using ExactSourceReadOutcome =
-    std::variant<repository::ExactSourceReadResult,
-                 repository::ExactSourceEditError>;
+using ExactSourceReadOutcome = std::variant<repository::ExactSourceReadResult,
+                                            repository::ExactSourceEditError>;
 
 struct ExactSourceReadExchange {
   repository::ExactSourceReadRequest expected_request;
@@ -18,9 +17,8 @@ struct ExactSourceReadExchange {
   auto operator==(const ExactSourceReadExchange&) const -> bool = default;
 };
 
-using ExactSourceEditOutcome =
-    std::variant<repository::ExactSourceEditReceipt,
-                 repository::ExactSourceEditError>;
+using ExactSourceEditOutcome = std::variant<repository::ExactSourceEditReceipt,
+                                            repository::ExactSourceEditError>;
 
 struct ExactSourceEditExchange {
   repository::ExactSourceEditRequest expected_request;
@@ -28,8 +26,7 @@ struct ExactSourceEditExchange {
   auto operator==(const ExactSourceEditExchange&) const -> bool = default;
 };
 
-class ScriptedExactSourceEditor final
-    : public repository::ExactSourceEditor {
+class ScriptedExactSourceEditor final : public repository::ExactSourceEditor {
  public:
   explicit ScriptedExactSourceEditor(
       std::vector<ExactSourceReadExchange> read_exchanges = {},
@@ -61,4 +58,4 @@ class ScriptedExactSourceEditor final
   std::size_t m_next_edit_exchange{};
 };
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

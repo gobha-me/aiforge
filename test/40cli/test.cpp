@@ -15,7 +15,9 @@ namespace {
 
 using namespace aiforge::cli;
 
-[[nodiscard]] auto limits() -> ParseLimits { return {64, 1024, 4096}; }
+[[nodiscard]] auto limits() -> ParseLimits {
+  return {64, 1024, 4096};
+}
 
 [[nodiscard]] auto controls() -> std::vector<ControlOptionSchema> {
   return {{ControlRequestKind::help, {"-h", "--help"}},
@@ -77,8 +79,10 @@ using namespace aiforge::cli;
 }
 
 [[nodiscard]] auto argument(const ParsedInvocation& parsed,
-                            const std::string_view id) -> const ParsedArgument& {
-  const auto found = std::ranges::find(parsed.arguments, id, &ParsedArgument::id);
+                            const std::string_view id)
+    -> const ParsedArgument& {
+  const auto found =
+      std::ranges::find(parsed.arguments, id, &ParsedArgument::id);
   REQUIRE(found != parsed.arguments.end());
   return *found;
 }
@@ -107,7 +111,7 @@ class StreamCapture final {
   std::streambuf* m_old_error;
 };
 
-}  // namespace
+} // namespace
 
 TEST_CASE("parser rejects invalid limits before schema construction",
           "[cli][failure]") {
@@ -128,9 +132,8 @@ TEST_CASE("malformed schemas fail without leaking construction exceptions",
   REQUIRE(code(schema, {}) == ParseDiagnosticCode::invalid_schema);
 
   schema = base_schema();
-  schema.root.options = {
-      option("first", {"--same"}, ArgumentValueKind::text),
-      option("second", {"--same"}, ArgumentValueKind::text)};
+  schema.root.options = {option("first", {"--same"}, ArgumentValueKind::text),
+                         option("second", {"--same"}, ArgumentValueKind::text)};
   REQUIRE(code(schema, {}) == ParseDiagnosticCode::invalid_schema);
 
   schema = base_schema();
@@ -181,11 +184,11 @@ TEST_CASE("typed options preserve explicit default-like and repeated values",
        << (repeated ? -1 : static_cast<int>(repeated.error().code)));
   REQUIRE(repeated);
 
-  const auto result = parse(schema, {"--count", "0", "--enabled", "false",
-                                     "--label=", "--tag", "one", "--tag",
-                                     "two", "-v"});
-  INFO("diagnostic code: "
-       << (result ? -1 : static_cast<int>(result.error().code)));
+  const auto result =
+      parse(schema, {"--count", "0", "--enabled", "false", "--label=", "--tag",
+                     "one", "--tag", "two", "-v"});
+  INFO("diagnostic code: " << (result ? -1
+                                      : static_cast<int>(result.error().code)));
   REQUIRE(result);
   const auto& parsed = invocation(*result);
   REQUIRE(argument(parsed, "count").values ==
@@ -196,15 +199,13 @@ TEST_CASE("typed options preserve explicit default-like and repeated values",
           std::vector<ParsedValue>{std::string{}});
   REQUIRE(argument(parsed, "tag").values ==
           std::vector<ParsedValue>{std::string{"one"}, std::string{"two"}});
-  REQUIRE(argument(parsed, "verbose").values ==
-          std::vector<ParsedValue>{true});
+  REQUIRE(argument(parsed, "verbose").values == std::vector<ParsedValue>{true});
 }
 
 TEST_CASE("named and nested commands return stable command paths", "[cli]") {
   auto schema = base_schema();
   auto chat = command("chat", "chat");
-  chat.positionals = {
-      positional("prompt", "prompt", ArgumentValueKind::text)};
+  chat.positionals = {positional("prompt", "prompt", ArgumentValueKind::text)};
   auto show = command("config-show", "show");
   show.options = {
       option("limit", {"--limit"}, ArgumentValueKind::unsigned_integer)};
@@ -228,10 +229,8 @@ TEST_CASE("named and nested commands return stable command paths", "[cli]") {
 TEST_CASE("repeatable options cannot greedily consume a positional", "[cli]") {
   auto schema = base_schema();
   auto chat = command("chat", "chat");
-  chat.options = {
-      option("tag", {"--tag"}, ArgumentValueKind::text, 0, 4)};
-  chat.positionals = {
-      positional("prompt", "prompt", ArgumentValueKind::text)};
+  chat.options = {option("tag", {"--tag"}, ArgumentValueKind::text, 0, 4)};
+  chat.positionals = {positional("prompt", "prompt", ArgumentValueKind::text)};
   schema.root.subcommands.push_back(chat);
 
   const auto result =
@@ -249,8 +248,7 @@ TEST_CASE("option aliases remain scoped to the selected command", "[cli]") {
   schema.root.options = {
       option("root-mode", {"--mode"}, ArgumentValueKind::text)};
   auto child = command("child", "child");
-  child.options = {
-      option("child-mode", {"--mode"}, ArgumentValueKind::flag)};
+  child.options = {option("child-mode", {"--mode"}, ArgumentValueKind::flag)};
   schema.root.subcommands.push_back(child);
 
   auto result = parse(schema, {"--mode="});
@@ -296,13 +294,11 @@ TEST_CASE("missing invalid and excessive values retain distinct failures",
       parse(schema, {"--count", "secret-value", "--required", "yes"});
   REQUIRE_FALSE(secret);
   REQUIRE(secret.error().message.find("secret-value") == std::string::npos);
-  REQUIRE(code(schema,
-               {"--count", "999999999999999999999999", "--required", "yes"}) ==
-          ParseDiagnosticCode::invalid_value);
-  REQUIRE(code(schema, {}) ==
-          ParseDiagnosticCode::missing_required_argument);
-  REQUIRE(code(schema, {"--required", "yes", "--tag", "one", "--tag",
-                        "two", "--tag", "three"}) ==
+  REQUIRE(code(schema, {"--count", "999999999999999999999999", "--required",
+                        "yes"}) == ParseDiagnosticCode::invalid_value);
+  REQUIRE(code(schema, {}) == ParseDiagnosticCode::missing_required_argument);
+  REQUIRE(code(schema, {"--required", "yes", "--tag", "one", "--tag", "two",
+                        "--tag", "three"}) ==
           ParseDiagnosticCode::cardinality_violation);
 }
 

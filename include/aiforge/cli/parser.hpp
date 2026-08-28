@@ -16,10 +16,12 @@ enum class ArgumentValueKind {
   flag,
   // Boolean values accept true/false, 1/0, on/off, and yes/no without case.
   boolean,
-  // Integer values are complete base-10 strings in the corresponding 64-bit range.
+  // Integer values are complete base-10 strings in the corresponding 64-bit
+  // range.
   signed_integer,
   unsigned_integer,
-  // Text values are preserved exactly, including an explicitly supplied empty value.
+  // Text values are preserved exactly, including an explicitly supplied empty
+  // value.
   text,
 };
 
@@ -57,7 +59,8 @@ struct ControlOptionSchema {
 
 struct CommandSchema {
   std::string id;
-  // The root command has an empty name. Every nested command has one token name.
+  // The root command has an empty name. Every nested command has one token
+  // name.
   std::string name;
   bool subcommand_required{};
   std::vector<OptionSchema> options;
@@ -69,7 +72,8 @@ struct CommandSchema {
 
 struct ParserSchema {
   CommandSchema root;
-  // Controls are recognized at every command level and never render or dispatch.
+  // Controls are recognized at every command level and never render or
+  // dispatch.
   std::vector<ControlOptionSchema> controls;
 
   auto operator==(const ParserSchema&) const -> bool = default;
@@ -149,4 +153,4 @@ class ArgumentParser final {
       -> std::expected<ParseOutcome, ParseDiagnostic>;
 };
 
-}  // namespace aiforge::cli
+} // namespace aiforge::cli

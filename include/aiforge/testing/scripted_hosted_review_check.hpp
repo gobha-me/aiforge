@@ -18,14 +18,12 @@ struct ScriptedHostedReviewCheckExchange {
   ScriptedHostedReviewCheckOutcome outcome;
 };
 
-class ScriptedHostedReviewCheck final
-    : public runtime::HostedReviewCheckPort {
+class ScriptedHostedReviewCheck final : public runtime::HostedReviewCheckPort {
  public:
   explicit ScriptedHostedReviewCheck(
       std::vector<ScriptedHostedReviewCheckExchange> exchanges = {});
 
-  [[nodiscard]] auto publish(
-      const runtime::HostedReviewCheckUpdate& update)
+  [[nodiscard]] auto publish(const runtime::HostedReviewCheckUpdate& update)
       -> std::expected<runtime::HostedReviewCheckConfirmation,
                        runtime::HostedReviewCheckError> override;
 
@@ -41,4 +39,4 @@ class ScriptedHostedReviewCheck final
   std::size_t m_next{};
 };
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

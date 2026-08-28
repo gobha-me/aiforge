@@ -12,4 +12,4 @@ class ProcessInteractiveCommand final : public cli::InteractiveCommand {
       -> std::expected<void, cli::CommandFailure> override;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

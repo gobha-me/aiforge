@@ -64,27 +64,25 @@ class SessionStore {
  public:
   virtual ~SessionStore() = default;
 
-  [[nodiscard]] virtual auto create_session(
-      SessionCreate session, std::stop_token stop_token = {})
+  [[nodiscard]] virtual auto create_session(SessionCreate session,
+                                            std::stop_token stop_token = {})
       -> std::expected<void, SessionStoreError> = 0;
-  [[nodiscard]] virtual auto open_session(
-      const domain::SessionId& session_id, std::stop_token stop_token = {})
+  [[nodiscard]] virtual auto open_session(const domain::SessionId& session_id,
+                                          std::stop_token stop_token = {})
       -> std::expected<SessionInfo, SessionStoreError> = 0;
-  [[nodiscard]] virtual auto list_sessions(
-      std::size_t limit, std::stop_token stop_token = {})
+  [[nodiscard]] virtual auto list_sessions(std::size_t limit,
+                                           std::stop_token stop_token = {})
       -> std::expected<std::vector<SessionInfo>, SessionStoreError> = 0;
   [[nodiscard]] virtual auto append_events(
       const domain::SessionId& session_id,
-      std::span<const domain::RunEvent> events,
-      std::stop_token stop_token = {})
+      std::span<const domain::RunEvent> events, std::stop_token stop_token = {})
       -> std::expected<void, SessionStoreError> = 0;
-  [[nodiscard]] virtual auto replay_events(
-      const domain::SessionId& session_id, std::stop_token stop_token = {})
+  [[nodiscard]] virtual auto replay_events(const domain::SessionId& session_id,
+                                           std::stop_token stop_token = {})
       -> std::expected<std::vector<domain::RunEvent>, SessionStoreError> = 0;
-  [[nodiscard]] virtual auto
-  replay_project_backlog(const domain::RepositoryId &repository_id,
-                         std::size_t maximum_sessions,
-                         std::stop_token stop_token = {})
+  [[nodiscard]] virtual auto replay_project_backlog(
+      const domain::RepositoryId& repository_id, std::size_t maximum_sessions,
+      std::stop_token stop_token = {})
       -> std::expected<std::vector<domain::ProjectBacklogSessionEvents>,
                        SessionStoreError> {
     static_cast<void>(repository_id);
@@ -96,4 +94,4 @@ class SessionStore {
   }
 };
 
-}  // namespace aiforge::storage
+} // namespace aiforge::storage

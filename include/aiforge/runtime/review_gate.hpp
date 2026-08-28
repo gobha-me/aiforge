@@ -108,14 +108,20 @@ class HostedReviewCheckPort {
 class MergeAuthorization final {
  public:
   [[nodiscard]] auto receipt_id() const noexcept
-      -> const domain::ReviewReceiptId& { return m_receipt_id; }
+      -> const domain::ReviewReceiptId& {
+    return m_receipt_id;
+  }
   [[nodiscard]] auto candidate() const noexcept
-      -> const domain::ReviewCandidate& { return m_candidate; }
+      -> const domain::ReviewCandidate& {
+    return m_candidate;
+  }
   [[nodiscard]] auto source() const noexcept -> ReviewAuthorizationSource {
     return m_source;
   }
   [[nodiscard]] auto decision_digest() const noexcept
-      -> const domain::ContentDigest& { return m_decision_digest; }
+      -> const domain::ContentDigest& {
+    return m_decision_digest;
+  }
 
   auto operator==(const MergeAuthorization&) const -> bool = default;
 
@@ -125,10 +131,8 @@ class MergeAuthorization final {
                      domain::ReviewCandidate candidate,
                      ReviewAuthorizationSource source,
                      domain::ContentDigest decision_digest)
-      : m_receipt_id(std::move(receipt_id)),
-        m_candidate(std::move(candidate)),
-        m_source(source),
-        m_decision_digest(std::move(decision_digest)) {}
+      : m_receipt_id(std::move(receipt_id)), m_candidate(std::move(candidate)),
+        m_source(source), m_decision_digest(std::move(decision_digest)) {}
 
   domain::ReviewReceiptId m_receipt_id;
   domain::ReviewCandidate m_candidate;
@@ -169,4 +173,4 @@ class ReviewMergeGate final {
       -> std::expected<ReviewGateDecision, ReviewGateError>;
 };
 
-}  // namespace aiforge::runtime
+} // namespace aiforge::runtime

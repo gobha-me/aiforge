@@ -13,4 +13,4 @@ namespace aiforge::adapters {
 [[nodiscard]] auto resolve_process_credential(std::ostream& diagnostics)
     -> std::expected<credentials::CredentialResolution, cli::CommandFailure>;
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

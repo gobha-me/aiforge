@@ -111,4 +111,4 @@ struct CredentialResolution {
     std::optional<std::string> environment_value, CredentialStore& store)
     -> std::expected<CredentialResolution, CredentialError>;
 
-}  // namespace aiforge::credentials
+} // namespace aiforge::credentials

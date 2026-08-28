@@ -12,16 +12,17 @@ namespace {
   std::string result;
   result.reserve(value.size());
   for (const auto character : value) {
-    result.push_back(static_cast<char>(
-        std::tolower(static_cast<unsigned char>(character))));
+    result.push_back(
+        static_cast<char>(std::tolower(static_cast<unsigned char>(character))));
   }
   return result;
 }
 
-}  // namespace
+} // namespace
 
 ModelPickerDialog::ModelPickerDialog() : Dialog("Select model") {
-  set_text("Filter available text models. Tab moves to the list; Enter selects; Escape cancels.");
+  set_text("Filter available text models. Tab moves to the list; Enter "
+           "selects; Escape cancels.");
   set_max_width(76);
   m_filter.set_placeholder("Filter by model ID or name");
   m_filter.on_change([this](const std::string&) { apply_filter(); });
@@ -44,8 +45,8 @@ auto ModelPickerDialog::set_models(const model::CatalogSnapshot& snapshot,
     if (entry.id == current) label += " [current]";
     auto searchable = lower_ascii(entry.id.value());
     if (entry.name) searchable += " " + lower_ascii(*entry.name);
-    m_all.push_back(
-        Choice{entry.id, std::move(label), std::move(searchable), entry.offline});
+    m_all.push_back(Choice{entry.id, std::move(label), std::move(searchable),
+                           entry.offline});
   }
   std::ranges::sort(m_all, {}, [](const Choice& choice) {
     return std::string{choice.id.value()};
@@ -66,8 +67,7 @@ auto ModelPickerDialog::layout_content(const termforge::Rect area) -> void {
     return;
   }
   m_filter.set_geometry({area.x, area.y, area.w, 1});
-  m_list.set_geometry(
-      {area.x, area.y + 2, area.w, std::max(0, area.h - 2)});
+  m_list.set_geometry({area.x, area.y + 2, area.w, std::max(0, area.h - 2)});
 }
 
 auto ModelPickerDialog::draw_content(termforge::Screen& screen) -> void {
@@ -85,8 +85,9 @@ auto ModelPickerDialog::apply_filter() -> void {
   std::optional<std::string> selected;
   if (m_list.selected() >= 0 &&
       static_cast<std::size_t>(m_list.selected()) < m_visible.size()) {
-    selected = std::string{m_all[m_visible[static_cast<std::size_t>(
-        m_list.selected())]].id.value()};
+    selected = std::string{
+        m_all[m_visible[static_cast<std::size_t>(m_list.selected())]]
+            .id.value()};
   }
   m_visible.clear();
   std::vector<std::string> labels;
@@ -117,4 +118,4 @@ auto ModelPickerDialog::choose(const int index) -> void {
   close();
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

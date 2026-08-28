@@ -46,13 +46,13 @@ struct PlanTaskState {
 };
 
 class PlanTaskController final {
-public:
+ public:
   PlanTaskController(RunKernel& kernel, storage::SessionStore* session_store,
                      PlanTaskControllerLimits limits = {})
       : m_kernel(kernel), m_session_store(session_store), m_limits(limits) {}
 
-  [[nodiscard]] auto
-  inspect(std::optional<domain::RepositoryId> repository_id = std::nullopt)
+  [[nodiscard]] auto inspect(
+      std::optional<domain::RepositoryId> repository_id = std::nullopt)
       -> std::expected<PlanTaskState, PlanTaskControllerError>;
   [[nodiscard]] auto decide(const domain::RunId& run_id,
                             domain::PlanRevisionDecision decision,
@@ -63,7 +63,7 @@ public:
   [[nodiscard]] auto set_backlog_status(ProjectTaskStatusUpdate update)
       -> std::expected<void, PlanTaskControllerError>;
 
-private:
+ private:
   RunKernel& m_kernel;
   storage::SessionStore* m_session_store{};
   PlanTaskControllerLimits m_limits;

@@ -14,8 +14,7 @@ auto provenance_source(const ConfigSource source) -> domain::ProvenanceSource {
       return domain::ProvenanceSource::command_line;
     case ConfigSource::environment:
       return domain::ProvenanceSource::environment;
-    case ConfigSource::file:
-      return domain::ProvenanceSource::file;
+    case ConfigSource::file: return domain::ProvenanceSource::file;
     case ConfigSource::compiled_default:
       return domain::ProvenanceSource::compiled_default;
   }
@@ -91,4 +90,4 @@ auto configuration_provenance(const ResolvedConfig& resolved)
   return result;
 }
 
-}  // namespace aiforge::config
+} // namespace aiforge::config

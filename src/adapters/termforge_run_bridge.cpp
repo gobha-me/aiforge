@@ -20,7 +20,7 @@ constexpr std::string_view kWakeMessage{"events-ready"};
          key->action == termforge::KeyAction::Press;
 }
 
-}  // namespace
+} // namespace
 
 auto TermForgeRunBridge::wake() noexcept -> void {
   try {
@@ -64,4 +64,4 @@ auto TermForgeRunBridge::handle(const termforge::Event& event,
   return std::vector<domain::RunEvent>{};
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

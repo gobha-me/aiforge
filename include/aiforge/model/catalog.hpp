@@ -134,8 +134,8 @@ class CatalogCache {
       -> std::expected<void, CatalogError> = 0;
 };
 
-using CatalogClock = std::function<
-    std::chrono::sys_time<std::chrono::milliseconds>()>;
+using CatalogClock =
+    std::function<std::chrono::sys_time<std::chrono::milliseconds>()>;
 
 class CatalogService final : public backend::ModelContextProvider {
  public:
@@ -176,4 +176,4 @@ class CatalogService final : public backend::ModelContextProvider {
 [[nodiscard]] auto capability_name(Capability capability) noexcept
     -> std::string_view;
 
-}  // namespace aiforge::model
+} // namespace aiforge::model

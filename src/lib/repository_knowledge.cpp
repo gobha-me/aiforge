@@ -84,10 +84,12 @@ using namespace domain;
       !bounded_text(digest.value, 512) || digest.byte_size > maximum_bytes) {
     return false;
   }
-  return std::ranges::all_of(digest.algorithm, [](const unsigned char value) {
-           return std::isalnum(value) != 0 || value == '-' || value == '_' ||
-                  value == '.';
-         }) &&
+  return std::ranges::all_of(digest.algorithm,
+                             [](const unsigned char value) {
+                               return std::isalnum(value) != 0 ||
+                                      value == '-' || value == '_' ||
+                                      value == '.';
+                             }) &&
          std::ranges::all_of(digest.value, [](const unsigned char value) {
            return std::isxdigit(value) != 0;
          });
@@ -111,8 +113,8 @@ using namespace domain;
   return path.generic_string() == value;
 }
 
-[[nodiscard]] auto add_checked(std::uint64_t& total,
-                               const std::uint64_t value) -> bool {
+[[nodiscard]] auto add_checked(std::uint64_t& total, const std::uint64_t value)
+    -> bool {
   if (value > std::numeric_limits<std::uint64_t>::max() - total) return false;
   total += value;
   return true;
@@ -135,10 +137,8 @@ using namespace domain;
     case KnowledgeEntityKind::test:
     case KnowledgeEntityKind::diagnostic:
     case KnowledgeEntityKind::configuration:
-    case KnowledgeEntityKind::artifact:
-      return true;
-    case KnowledgeEntityKind::unknown:
-      return false;
+    case KnowledgeEntityKind::artifact: return true;
+    case KnowledgeEntityKind::unknown: return false;
   }
   return false;
 }
@@ -160,10 +160,8 @@ using namespace domain;
     case KnowledgeRelationshipKind::generated_from:
     case KnowledgeRelationshipKind::tests:
     case KnowledgeRelationshipKind::diagnoses:
-    case KnowledgeRelationshipKind::changed_by:
-      return true;
-    case KnowledgeRelationshipKind::unknown:
-      return false;
+    case KnowledgeRelationshipKind::changed_by: return true;
+    case KnowledgeRelationshipKind::unknown: return false;
   }
   return false;
 }
@@ -175,8 +173,7 @@ using namespace domain;
     case KnowledgeDiagnosticSeverity::warning:
     case KnowledgeDiagnosticSeverity::error:
     case KnowledgeDiagnosticSeverity::fatal:
-    case KnowledgeDiagnosticSeverity::unknown:
-      return true;
+    case KnowledgeDiagnosticSeverity::unknown: return true;
   }
   return false;
 }
@@ -186,8 +183,7 @@ using namespace domain;
   switch (availability) {
     case KnowledgeInputAvailability::available:
     case KnowledgeInputAvailability::unavailable:
-    case KnowledgeInputAvailability::unknown:
-      return true;
+    case KnowledgeInputAvailability::unknown: return true;
   }
   return false;
 }
@@ -213,8 +209,7 @@ using namespace domain;
     case KnowledgeFreshness::current:
     case KnowledgeFreshness::possibly_stale:
     case KnowledgeFreshness::stale:
-    case KnowledgeFreshness::unavailable:
-      return true;
+    case KnowledgeFreshness::unavailable: return true;
   }
   return false;
 }
@@ -226,32 +221,28 @@ using namespace domain;
     case KnowledgeInvalidationTrigger::source_digest_changed:
     case KnowledgeInvalidationTrigger::dependency_changed:
     case KnowledgeInvalidationTrigger::producer_version_changed:
-    case KnowledgeInvalidationTrigger::build_configuration_changed:
-      return true;
-    case KnowledgeInvalidationTrigger::unknown:
-      return false;
+    case KnowledgeInvalidationTrigger::build_configuration_changed: return true;
+    case KnowledgeInvalidationTrigger::unknown: return false;
   }
   return false;
 }
 
-[[nodiscard]] auto validate_source(
-    const RepositorySourceIdentity& source, const RepositoryId& repository_id,
-    const RepositoryKnowledgeLimits& limits,
-    const KnowledgeRecordId& record_id)
+[[nodiscard]] auto validate_source(const RepositorySourceIdentity& source,
+                                   const RepositoryId& repository_id,
+                                   const RepositoryKnowledgeLimits& limits,
+                                   const KnowledgeRecordId& record_id)
     -> std::expected<void, RepositoryKnowledgeError> {
   if (source.snapshot.repository_id != repository_id ||
       !valid_snapshot(source.snapshot, limits.maximum_total_inline_bytes) ||
       !valid_relative_path(source.relative_path,
                            limits.maximum_metadata_bytes) ||
-      !valid_digest(source.content_digest,
-                    limits.maximum_total_inline_bytes)) {
+      !valid_digest(source.content_digest, limits.maximum_total_inline_bytes)) {
     return failure(RepositoryKnowledgeErrorCode::invalid_source,
                    "repository knowledge source identity is invalid",
                    record_id);
   }
-  if (source.range &&
-      (source.range->begin >= source.range->end ||
-       source.range->end > source.content_digest.byte_size)) {
+  if (source.range && (source.range->begin >= source.range->end ||
+                       source.range->end > source.content_digest.byte_size)) {
     return failure(RepositoryKnowledgeErrorCode::invalid_source,
                    "repository knowledge source range is invalid", record_id);
   }
@@ -318,10 +309,11 @@ using namespace domain;
       payload);
 }
 
-[[nodiscard]] auto validate_entity(
-    const KnowledgeEntity& entity, const RepositoryId& repository_id,
-    const RepositoryKnowledgeLimits& limits,
-    const KnowledgeRecordId& record_id, const bool allow_unknown)
+[[nodiscard]] auto validate_entity(const KnowledgeEntity& entity,
+                                   const RepositoryId& repository_id,
+                                   const RepositoryKnowledgeLimits& limits,
+                                   const KnowledgeRecordId& record_id,
+                                   const bool allow_unknown)
     -> std::expected<void, RepositoryKnowledgeError> {
   if ((!known_entity_kind(entity.kind) &&
        !(allow_unknown && entity.kind == KnowledgeEntityKind::unknown)) ||
@@ -337,8 +329,7 @@ using namespace domain;
 
 [[nodiscard]] auto payload_inline_bytes(
     const RepositoryKnowledgePayload& payload,
-    const RepositoryKnowledgeLimits& limits,
-    const KnowledgeRecordId& record_id)
+    const RepositoryKnowledgeLimits& limits, const KnowledgeRecordId& record_id)
     -> std::expected<std::uint64_t, RepositoryKnowledgeError> {
   return std::visit(
       [&](const auto& value)
@@ -355,8 +346,7 @@ using namespace domain;
                !bounded_text(*value.qualified_name,
                              limits.maximum_metadata_bytes)) ||
               (value.signature &&
-               !bounded_text(*value.signature,
-                             limits.maximum_summary_bytes)) ||
+               !bounded_text(*value.signature, limits.maximum_summary_bytes)) ||
               value.declarations.size() >
                   limits.maximum_declarations_per_symbol ||
               (value.declarations.empty() && !value.definition &&
@@ -370,8 +360,7 @@ using namespace domain;
             return failure(RepositoryKnowledgeErrorCode::overflow,
                            "symbol knowledge size overflowed", record_id);
           }
-        } else if constexpr (std::is_same_v<Payload,
-                                            RelationshipKnowledge>) {
+        } else if constexpr (std::is_same_v<Payload, RelationshipKnowledge>) {
           if (!known_relationship_kind(value.kind)) {
             return failure(RepositoryKnowledgeErrorCode::invalid_record,
                            "repository relationship kind is invalid",
@@ -422,10 +411,9 @@ using namespace domain;
       payload);
 }
 
-[[nodiscard]] auto validate_record(
-    const RepositoryKnowledgeRecord& record,
-    const RepositoryId& repository_id,
-    const RepositoryKnowledgeLimits& limits)
+[[nodiscard]] auto validate_record(const RepositoryKnowledgeRecord& record,
+                                   const RepositoryId& repository_id,
+                                   const RepositoryKnowledgeLimits& limits)
     -> std::expected<std::uint64_t, RepositoryKnowledgeError> {
   if (record.revision == 0 ||
       !valid_snapshot(record.provenance.source_snapshot,
@@ -451,9 +439,8 @@ using namespace domain;
 
   const bool unknown_payload =
       std::holds_alternative<UnknownRepositoryKnowledge>(record.payload);
-  if ((!unknown_payload &&
-       (!known_derivation(record.provenance.derivation) ||
-        !known_confidence(record.provenance.confidence))) ||
+  if ((!unknown_payload && (!known_derivation(record.provenance.derivation) ||
+                            !known_confidence(record.provenance.confidence))) ||
       (unknown_payload &&
        record.provenance.derivation != KnowledgeDerivation::unknown)) {
     return failure(RepositoryKnowledgeErrorCode::invalid_provenance,
@@ -473,8 +460,7 @@ using namespace domain;
 
   std::set<KnowledgeRecordId> dependency_ids;
   for (const auto& dependency : record.provenance.derivation_inputs) {
-    if (dependency.revision == 0 ||
-        dependency.record_id == record.record_id ||
+    if (dependency.revision == 0 || dependency.record_id == record.record_id ||
         !dependency_ids.insert(dependency.record_id).second) {
       return failure(RepositoryKnowledgeErrorCode::invalid_provenance,
                      "repository knowledge dependency is invalid",
@@ -484,8 +470,8 @@ using namespace domain;
 
   std::set<std::string> source_ids;
   for (const auto& source : record.provenance.sources) {
-    auto valid = validate_source(source, repository_id, limits,
-                                 record.record_id);
+    auto valid =
+        validate_source(source, repository_id, limits, record.record_id);
     if (!valid) return std::unexpected(valid.error());
     if (!same_source_state(source.snapshot,
                            record.provenance.source_snapshot) ||
@@ -517,8 +503,7 @@ using namespace domain;
                      record.record_id);
     }
   }
-  if ((triggers.contains(
-           KnowledgeInvalidationTrigger::source_digest_changed) &&
+  if ((triggers.contains(KnowledgeInvalidationTrigger::source_digest_changed) &&
        record.provenance.sources.empty()) ||
       (triggers.contains(KnowledgeInvalidationTrigger::dependency_changed) &&
        record.provenance.derivation_inputs.empty()) ||
@@ -537,8 +522,8 @@ using namespace domain;
   }
 
   for (const auto* source : entity_sources(record.payload)) {
-    auto valid = validate_source(*source, repository_id, limits,
-                                 record.record_id);
+    auto valid =
+        validate_source(*source, repository_id, limits, record.record_id);
     if (!valid) return std::unexpected(valid.error());
     if (!source_ids.contains(source_key(*source))) {
       return failure(RepositoryKnowledgeErrorCode::invalid_provenance,
@@ -563,8 +548,8 @@ using namespace domain;
 }
 
 [[nodiscard]] auto has_dependency_cycle(
-    const std::map<KnowledgeRecordId, const RepositoryKnowledgeRecord*>& records)
-    -> bool {
+    const std::map<KnowledgeRecordId, const RepositoryKnowledgeRecord*>&
+        records) -> bool {
   enum class VisitState { visiting, visited };
   std::map<KnowledgeRecordId, VisitState> states;
   const auto visit = [&](const auto& self,
@@ -581,14 +566,12 @@ using namespace domain;
     states[record.record_id] = VisitState::visited;
     return false;
   };
-  return std::ranges::any_of(records, [&](const auto& entry) {
-    return visit(visit, *entry.second);
-  });
+  return std::ranges::any_of(
+      records, [&](const auto& entry) { return visit(visit, *entry.second); });
 }
 
-[[nodiscard]] auto validate_graph_impl(
-    const RepositoryKnowledgeGraph& graph,
-    const RepositoryKnowledgeLimits& limits)
+[[nodiscard]] auto validate_graph_impl(const RepositoryKnowledgeGraph& graph,
+                                       const RepositoryKnowledgeLimits& limits)
     -> std::expected<RepositoryKnowledgeEstimate, RepositoryKnowledgeError> {
   if (!validate_limits(limits)) {
     return failure(RepositoryKnowledgeErrorCode::invalid_limits,
@@ -633,9 +616,8 @@ using namespace domain;
       ++estimate.relationship_count;
     }
     for (const auto* entity : entities(record.payload)) {
-      const auto [found, inserted] =
-          known_entities.emplace(entity->entity_id,
-                                 EntityState{*entity, record.freshness});
+      const auto [found, inserted] = known_entities.emplace(
+          entity->entity_id, EntityState{*entity, record.freshness});
       if (!inserted && found->second.entity != *entity &&
           found->second.freshness == KnowledgeFreshness::current &&
           record.freshness == KnowledgeFreshness::current) {
@@ -683,14 +665,10 @@ using namespace domain;
     -> KnowledgeFreshness {
   const auto rank = [](const KnowledgeFreshness value) {
     switch (value) {
-      case KnowledgeFreshness::current:
-        return 0;
-      case KnowledgeFreshness::possibly_stale:
-        return 1;
-      case KnowledgeFreshness::stale:
-        return 2;
-      case KnowledgeFreshness::unavailable:
-        return 3;
+      case KnowledgeFreshness::current: return 0;
+      case KnowledgeFreshness::possibly_stale: return 1;
+      case KnowledgeFreshness::stale: return 2;
+      case KnowledgeFreshness::unavailable: return 3;
     }
     return 3;
   };
@@ -699,8 +677,7 @@ using namespace domain;
 
 [[nodiscard]] auto validate_environment(
     const RepositoryKnowledgeEnvironment& environment,
-    const RepositoryKnowledgeLimits& limits,
-    const KnowledgeRecordId& record_id)
+    const RepositoryKnowledgeLimits& limits, const KnowledgeRecordId& record_id)
     -> std::expected<void, RepositoryKnowledgeError> {
   if (environment.sources.size() > limits.maximum_sources_per_record ||
       environment.dependencies.size() >
@@ -740,15 +717,13 @@ using namespace domain;
         (dependency.availability != KnowledgeInputAvailability::available &&
          dependency.revision)) {
       return failure(RepositoryKnowledgeErrorCode::invalid_provenance,
-                     "repository dependency observation is invalid",
-                     record_id);
+                     "repository dependency observation is invalid", record_id);
     }
   }
-  if (environment.producer &&
-      (!bounded_text(environment.producer->name,
-                     limits.maximum_metadata_bytes) ||
-       !bounded_text(environment.producer->version,
-                     limits.maximum_metadata_bytes))) {
+  if (environment.producer && (!bounded_text(environment.producer->name,
+                                             limits.maximum_metadata_bytes) ||
+                               !bounded_text(environment.producer->version,
+                                             limits.maximum_metadata_bytes))) {
     return failure(RepositoryKnowledgeErrorCode::invalid_provenance,
                    "repository producer observation is invalid", record_id);
   }
@@ -766,8 +741,7 @@ using namespace domain;
     const RepositoryKnowledgeRecord& record,
     const RepositoryKnowledgeEnvironment& environment,
     const RepositoryKnowledgeLimits& limits)
-    -> std::expected<RepositoryKnowledgeAssessment,
-                     RepositoryKnowledgeError> {
+    -> std::expected<RepositoryKnowledgeAssessment, RepositoryKnowledgeError> {
   if (!validate_limits(limits)) {
     return failure(RepositoryKnowledgeErrorCode::invalid_limits,
                    "repository knowledge limits are invalid");
@@ -775,12 +749,12 @@ using namespace domain;
   auto valid_record = validate_record(
       record, record.provenance.source_snapshot.repository_id, limits);
   if (!valid_record) return std::unexpected(valid_record.error());
-  auto valid_environment = validate_environment(environment, limits,
-                                                record.record_id);
+  auto valid_environment =
+      validate_environment(environment, limits, record.record_id);
   if (!valid_environment) return std::unexpected(valid_environment.error());
 
-  RepositoryKnowledgeAssessment result{record.record_id,
-                                       KnowledgeFreshness::current, {}};
+  RepositoryKnowledgeAssessment result{
+      record.record_id, KnowledgeFreshness::current, {}};
   const auto affect = [&](const KnowledgeInvalidationTrigger trigger,
                           const KnowledgeFreshness freshness) {
     result.freshness = worse_freshness(result.freshness, freshness);
@@ -803,9 +777,9 @@ using namespace domain;
         break;
       case KnowledgeInvalidationTrigger::source_digest_changed:
         for (const auto& baseline : record.provenance.sources) {
-          const auto found = std::ranges::find(
-              environment.sources, baseline.relative_path,
-              &KnowledgeSourceObservation::relative_path);
+          const auto found =
+              std::ranges::find(environment.sources, baseline.relative_path,
+                                &KnowledgeSourceObservation::relative_path);
           if (found == environment.sources.end()) {
             affect(trigger, environment.source_observation_complete
                                 ? KnowledgeFreshness::unavailable
@@ -813,7 +787,8 @@ using namespace domain;
           } else if (found->availability ==
                      KnowledgeInputAvailability::unavailable) {
             affect(trigger, KnowledgeFreshness::unavailable);
-          } else if (found->availability == KnowledgeInputAvailability::unknown) {
+          } else if (found->availability ==
+                     KnowledgeInputAvailability::unknown) {
             affect(trigger, KnowledgeFreshness::possibly_stale);
           } else if (*found->content_digest != baseline.content_digest) {
             affect(trigger, KnowledgeFreshness::stale);
@@ -822,9 +797,9 @@ using namespace domain;
         break;
       case KnowledgeInvalidationTrigger::dependency_changed:
         for (const auto& baseline : record.provenance.derivation_inputs) {
-          const auto found = std::ranges::find(
-              environment.dependencies, baseline.record_id,
-              &KnowledgeDependencyObservation::record_id);
+          const auto found =
+              std::ranges::find(environment.dependencies, baseline.record_id,
+                                &KnowledgeDependencyObservation::record_id);
           if (found == environment.dependencies.end()) {
             affect(trigger, environment.dependency_observation_complete
                                 ? KnowledgeFreshness::unavailable
@@ -832,7 +807,8 @@ using namespace domain;
           } else if (found->availability ==
                      KnowledgeInputAvailability::unavailable) {
             affect(trigger, KnowledgeFreshness::unavailable);
-          } else if (found->availability == KnowledgeInputAvailability::unknown) {
+          } else if (found->availability ==
+                     KnowledgeInputAvailability::unknown) {
             affect(trigger, KnowledgeFreshness::possibly_stale);
           } else if (*found->revision != baseline.revision) {
             affect(trigger, KnowledgeFreshness::stale);
@@ -855,19 +831,17 @@ using namespace domain;
         }
         break;
       case KnowledgeInvalidationTrigger::unknown:
-        return failure(
-            RepositoryKnowledgeErrorCode::invalid_invalidation_rule,
-            "repository knowledge invalidation trigger is unknown",
-            record.record_id);
+        return failure(RepositoryKnowledgeErrorCode::invalid_invalidation_rule,
+                       "repository knowledge invalidation trigger is unknown",
+                       record.record_id);
     }
   }
   return result;
 }
 
-[[nodiscard]] auto apply_update_impl(
-    const RepositoryKnowledgeGraph& graph,
-    const RepositoryKnowledgeUpdate& update,
-    const RepositoryKnowledgeLimits& limits)
+[[nodiscard]] auto apply_update_impl(const RepositoryKnowledgeGraph& graph,
+                                     const RepositoryKnowledgeUpdate& update,
+                                     const RepositoryKnowledgeLimits& limits)
     -> std::expected<RepositoryKnowledgeGraph, RepositoryKnowledgeError> {
   auto valid = validate_graph_impl(graph, limits);
   if (!valid) return std::unexpected(valid.error());
@@ -908,9 +882,9 @@ using namespace domain;
   std::set<KnowledgeRecordId> changed;
   std::set<KnowledgeRecordId> removed;
   for (const auto& replacement : update.replacements) {
-    const auto found = std::ranges::find(
-        result.records, replacement.record.record_id,
-        &RepositoryKnowledgeRecord::record_id);
+    const auto found =
+        std::ranges::find(result.records, replacement.record.record_id,
+                          &RepositoryKnowledgeRecord::record_id);
     if (!replacement.expected_revision) {
       if (found != result.records.end() || replacement.record.revision != 1) {
         return failure(RepositoryKnowledgeErrorCode::revision_conflict,
@@ -934,8 +908,8 @@ using namespace domain;
   }
 
   for (const auto& removal : update.removals) {
-    const auto found = std::ranges::find(
-        result.records, removal, &RepositoryKnowledgeRecord::record_id);
+    const auto found = std::ranges::find(result.records, removal,
+                                         &RepositoryKnowledgeRecord::record_id);
     if (found == result.records.end()) {
       return failure(RepositoryKnowledgeErrorCode::revision_conflict,
                      "repository knowledge removal target is missing", removal);
@@ -959,11 +933,10 @@ using namespace domain;
       for (const auto& dependency : record.provenance.derivation_inputs) {
         if (!changed.contains(dependency.record_id)) continue;
         depends_on_change = true;
-        next_freshness = worse_freshness(
-            next_freshness,
-            removed.contains(dependency.record_id)
-                ? KnowledgeFreshness::unavailable
-                : KnowledgeFreshness::stale);
+        next_freshness = worse_freshness(next_freshness,
+                                         removed.contains(dependency.record_id)
+                                             ? KnowledgeFreshness::unavailable
+                                             : KnowledgeFreshness::stale);
       }
       if (!depends_on_change) continue;
       if (record.revision == std::numeric_limits<std::uint64_t>::max()) {
@@ -986,7 +959,7 @@ using namespace domain;
   return result;
 }
 
-}  // namespace
+} // namespace
 
 auto validate_repository_knowledge_graph(
     const domain::RepositoryKnowledgeGraph& graph,
@@ -1004,8 +977,7 @@ auto assess_repository_knowledge_freshness(
     const domain::RepositoryKnowledgeRecord& record,
     const RepositoryKnowledgeEnvironment& environment,
     const RepositoryKnowledgeLimits& limits)
-    -> std::expected<RepositoryKnowledgeAssessment,
-                     RepositoryKnowledgeError> {
+    -> std::expected<RepositoryKnowledgeAssessment, RepositoryKnowledgeError> {
   try {
     return assess_impl(record, environment, limits);
   } catch (...) {
@@ -1029,4 +1001,4 @@ auto apply_repository_knowledge_update(
   }
 }
 
-}  // namespace aiforge::repository
+} // namespace aiforge::repository

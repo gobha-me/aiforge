@@ -88,8 +88,8 @@ class EnvironmentGuard final {
   return {{
       {"model", ConfigValueKind::text, "AIFORGE_MODEL", ConfigValue{"default"},
        false, true, 32, 4},
-      {"enabled", ConfigValueKind::boolean, "AIFORGE_ENABLED", ConfigValue{true},
-       false, true, 32, 4},
+      {"enabled", ConfigValueKind::boolean, "AIFORGE_ENABLED",
+       ConfigValue{true}, false, true, 32, 4},
       {"count", ConfigValueKind::signed_integer, std::nullopt,
        ConfigValue{std::int64_t{9}}, false, true, 32, 4},
       {"tags", ConfigValueKind::text_list, std::nullopt,
@@ -126,7 +126,8 @@ auto write_file(const std::filesystem::path& path, const std::string_view value)
 [[nodiscard]] auto read_file(const std::filesystem::path& path) -> std::string {
   std::ifstream input{path, std::ios::binary};
   REQUIRE(input);
-  return {std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+  return {std::istreambuf_iterator<char>{input},
+          std::istreambuf_iterator<char>{}};
 }
 
 [[nodiscard]] auto run_cli(std::vector<std::string_view> arguments,
@@ -140,7 +141,7 @@ auto write_file(const std::filesystem::path& path, const std::string_view value)
   return result;
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("configuration registries reject ambiguous or unsafe schemas",
           "[config][failure]") {
@@ -176,16 +177,18 @@ TEST_CASE("all present-layer permutations resolve by fixed precedence",
   for (unsigned mask = 0; mask < 8; ++mask) {
     std::vector<ConfigLayer> layers;
     if ((mask & 1U) != 0U) {
-      layers.push_back({ConfigSource::file,
-                        {candidate("model", std::string{"file"})}, {}});
+      layers.push_back(
+          {ConfigSource::file, {candidate("model", std::string{"file"})}, {}});
     }
     if ((mask & 2U) != 0U) {
       layers.push_back({ConfigSource::environment,
-                        {candidate("model", std::string{"environment"})}, {}});
+                        {candidate("model", std::string{"environment"})},
+                        {}});
     }
     if ((mask & 4U) != 0U) {
       layers.push_back({ConfigSource::command_line,
-                        {candidate("model", std::string{"command"})}, {}});
+                        {candidate("model", std::string{"command"})},
+                        {}});
     }
     const auto resolved = resolve_config(registry, layers);
     REQUIRE(resolved);
@@ -194,7 +197,7 @@ TEST_CASE("all present-layer permutations resolve by fixed precedence",
     const auto expected = (mask & 4U) != 0U   ? "command"
                           : (mask & 2U) != 0U ? "environment"
                           : (mask & 1U) != 0U ? "file"
-                                             : "default";
+                                              : "default";
     REQUIRE(std::get<std::string>(*model->value) == expected);
   }
 }
@@ -209,7 +212,8 @@ TEST_CASE("default-like values remain explicit and invalid sources are visible",
                     candidate("tags", std::vector<std::string>{})},
                    {}};
   ConfigLayer environment{ConfigSource::environment,
-                          {rejected("model", ConfigSource::environment)}, {}};
+                          {rejected("model", ConfigSource::environment)},
+                          {}};
   auto resolved = resolve_config(registry, {&file, 1});
   REQUIRE(resolved);
   REQUIRE(std::get<bool>(*resolved->find("enabled")->value) == false);
@@ -231,7 +235,8 @@ TEST_CASE("default-like values remain explicit and invalid sources are visible",
           std::string::npos);
 
   const ConfigLayer command{ConfigSource::command_line,
-                            {rejected("model", ConfigSource::command_line)}, {}};
+                            {rejected("model", ConfigSource::command_line)},
+                            {}};
   resolved = resolve_config(registry, {&command, 1});
   REQUIRE_FALSE(resolved);
   REQUIRE(resolved.error().code == ConfigDiagnosticCode::invalid_value);
@@ -241,8 +246,9 @@ TEST_CASE("value parsing enforces type cardinality and byte limits",
           "[config][failure]") {
   const auto registry = test_registry();
   const auto& enabled = registry.keys[1];
-  auto value = parse_config_value(enabled, std::array<std::string_view, 1>{"false"},
-                                  ConfigSource::command_line);
+  auto value =
+      parse_config_value(enabled, std::array<std::string_view, 1>{"false"},
+                         ConfigSource::command_line);
   REQUIRE(value);
   REQUIRE(std::get<bool>(*value) == false);
 
@@ -313,9 +319,8 @@ TEST_CASE("configuration provenance keeps decisions and drops sensitive values",
   REQUIRE(provenance.size() == resolved->entries.size());
 
   const auto find = [&](const std::string_view key) {
-    const auto found = std::ranges::find(provenance, key,
-                                         &aiforge::domain::
-                                             ConfigurationProvenanceEntry::key);
+    const auto found = std::ranges::find(
+        provenance, key, &aiforge::domain::ConfigurationProvenanceEntry::key);
     REQUIRE(found != provenance.end());
     return *found;
   };
@@ -371,8 +376,9 @@ TEST_CASE("configuration path resolution follows XDG without relative escape",
   REQUIRE(result.error().code == ConfigFileErrorCode::missing_home);
 }
 
-TEST_CASE("JSON adapter rejects malformed duplicate oversized and symlink inputs",
-          "[config][file][failure]") {
+TEST_CASE(
+    "JSON adapter rejects malformed duplicate oversized and symlink inputs",
+    "[config][file][failure]") {
   TemporaryDirectory temporary;
   const auto app = temporary.path() / "aiforge";
   REQUIRE(std::filesystem::create_directory(app));
@@ -426,8 +432,8 @@ TEST_CASE("atomic mutations preserve unknown JSON and restrictive permissions",
   auto changed = store.set(builtin_config_registry(), "model",
                            ConfigValue{std::string{"first"}});
   REQUIRE(changed);
-  struct stat directory_info {};
-  struct stat file_info {};
+  struct stat directory_info{};
+  struct stat file_info{};
   REQUIRE(::stat(path.parent_path().c_str(), &directory_info) == 0);
   REQUIRE(::stat(path.c_str(), &file_info) == 0);
   REQUIRE((directory_info.st_mode & 0777) == 0700);
@@ -447,7 +453,8 @@ TEST_CASE("atomic mutations preserve unknown JSON and restrictive permissions",
   REQUIRE(loaded);
   REQUIRE(loaded->candidates.size() == 1);
   REQUIRE_FALSE(loaded->diagnostics.empty());
-  REQUIRE(loaded->diagnostics.front().code == ConfigDiagnosticCode::unknown_key);
+  REQUIRE(loaded->diagnostics.front().code ==
+          ConfigDiagnosticCode::unknown_key);
 
   changed = store.unset(builtin_config_registry(), "model");
   REQUIRE(changed);
@@ -555,12 +562,12 @@ TEST_CASE("config CLI keeps content and diagnostics on their streams",
   std::string output;
   std::string error;
 
-  const auto schema =
-      aiforge::cli::make_parser_schema(aiforge::cli::builtin_command_registry());
+  const auto schema = aiforge::cli::make_parser_schema(
+      aiforge::cli::builtin_command_registry());
   REQUIRE(schema);
   const auto parsed = aiforge::cli::ArgumentParser{}.parse(
-      *schema, std::array<std::string_view, 4>{"config", "set", "model",
-                                              "test-model"},
+      *schema,
+      std::array<std::string_view, 4>{"config", "set", "model", "test-model"},
       {32, 256, 1024});
   REQUIRE(parsed);
 
@@ -568,7 +575,8 @@ TEST_CASE("config CLI keeps content and diagnostics on their streams",
   REQUIRE(output == "model\t<unset>\tunset\n");
   REQUIRE(error.empty());
 
-  REQUIRE(run_cli({"config", "set", "model", "test-model"}, output, error) == 0);
+  REQUIRE(run_cli({"config", "set", "model", "test-model"}, output, error) ==
+          0);
   REQUIRE(output.empty());
   REQUIRE(error.empty());
 
@@ -604,7 +612,8 @@ TEST_CASE("malformed files are diagnostic for reads but never overwritten",
   REQUIRE(output == "model\t<unset>\tunset\n");
   REQUIRE(error.find("warning") != std::string::npos);
 
-  REQUIRE(run_cli({"config", "set", "model", "replacement"}, output, error) == 1);
+  REQUIRE(run_cli({"config", "set", "model", "replacement"}, output, error) ==
+          1);
   REQUIRE(output.empty());
   REQUIRE(error.find("strict UTF-8 JSON") != std::string::npos);
   REQUIRE(read_file(path) == "broken");

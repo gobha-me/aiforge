@@ -14,19 +14,19 @@ namespace {
 
 using namespace aiforge::domain;
 
-template <typename IdType> auto id(const std::string &value) -> IdType {
+template <typename IdType> auto id(const std::string& value) -> IdType {
   return IdType::from(value).value();
 }
 
-auto amount(const std::string &value) -> DecimalAmount {
+auto amount(const std::string& value) -> DecimalAmount {
   return DecimalAmount::from(value).value();
 }
 
-auto ceiling(const std::string &value) -> SessionSpendCeiling {
+auto ceiling(const std::string& value) -> SessionSpendCeiling {
   return SessionSpendCeiling::from(value).value();
 }
 
-auto money(std::string unit, const std::string &value) -> MonetaryAmount {
+auto money(std::string unit, const std::string& value) -> MonetaryAmount {
   return MonetaryAmount::create(std::move(unit), amount(value)).value();
 }
 
@@ -44,7 +44,7 @@ auto observation() -> PricingObservation {
       .value();
 }
 
-auto record(const std::string &inference, Usage usage,
+auto record(const std::string& inference, Usage usage,
             std::optional<ReportedCost> cost,
             std::optional<PricingObservation> pricing) -> InferenceUsageRecord {
   return {id<RunId>("run-" + inference),
@@ -72,7 +72,7 @@ auto event(const std::uint64_t sequence, Payload payload, std::string event_id)
 
 TEST_CASE("session spend ceilings reject ambiguous or unsafe amounts",
           "[spend][failure]") {
-  for (const auto *value : {"", "0", "-1", "+1", ".1", "1.", "1e2", "0.0000001",
+  for (const auto* value : {"", "0", "-1", "+1", ".1", "1.", "1e2", "0.0000001",
                             "1.0000000", "18446744073709551616"}) {
     CAPTURE(value);
     REQUIRE_FALSE(SessionSpendCeiling::from(value));

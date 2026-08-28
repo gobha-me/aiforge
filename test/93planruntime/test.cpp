@@ -36,9 +36,8 @@ auto revision(std::string revision_id = "revision-1",
       supersedes ? std::optional{id<domain::PlanRevisionId>(*supersedes)}
                  : std::nullopt,
       "Implement the approved runtime plan",
-      domain::RepositorySnapshotIdentity{
-          id<domain::RepositoryId>("repository"),
-          {"sha256", "aaaaaaaaaaaaaaaa", 64}},
+      domain::RepositorySnapshotIdentity{id<domain::RepositoryId>("repository"),
+                                         {"sha256", "aaaaaaaaaaaaaaaa", 64}},
       {{id<domain::PlanTaskId>("contract"),
         std::nullopt,
         {},
@@ -58,11 +57,11 @@ auto revision(std::string revision_id = "revision-1",
 }
 
 auto environment() -> runtime::PlanApprovalEnvironment {
-  return {domain::RepositorySnapshotIdentity{
-              id<domain::RepositoryId>("repository"),
-              {"sha256", "aaaaaaaaaaaaaaaa", 64}},
-          {{id<domain::EvidenceId>("evidence"),
-            {"sha256", "bbbbbbbbbbbbbbbb", 32}}}};
+  return {
+      domain::RepositorySnapshotIdentity{id<domain::RepositoryId>("repository"),
+                                         {"sha256", "aaaaaaaaaaaaaaaa", 64}},
+      {{id<domain::EvidenceId>("evidence"),
+        {"sha256", "bbbbbbbbbbbbbbbb", 32}}}};
 }
 
 auto decision(const domain::PlanRevision& value,
@@ -84,7 +83,7 @@ auto event(const std::uint64_t sequence, Payload payload,
 }
 
 class MemorySessionStore final : public storage::SessionStore {
-public:
+ public:
   auto create_session(storage::SessionCreate session, std::stop_token)
       -> std::expected<void, storage::SessionStoreError> override {
     if (m_session_id) return std::unexpected(error("session already exists"));
@@ -114,8 +113,7 @@ public:
   }
 
   auto append_events(const domain::SessionId& session_id,
-                     std::span<const domain::RunEvent> events,
-                     std::stop_token)
+                     std::span<const domain::RunEvent> events, std::stop_token)
       -> std::expected<void, storage::SessionStoreError> override {
     if (m_fail_next_append) {
       m_fail_next_append = false;
@@ -145,11 +143,10 @@ public:
     return m_events;
   }
 
-private:
-  [[nodiscard]] static auto
-  error(std::string message,
-        const storage::SessionStoreErrorCode code =
-            storage::SessionStoreErrorCode::invalid_argument)
+ private:
+  [[nodiscard]] static auto error(
+      std::string message, const storage::SessionStoreErrorCode code =
+                               storage::SessionStoreErrorCode::invalid_argument)
       -> storage::SessionStoreError {
     return {code, std::move(message), false};
   }
@@ -168,8 +165,7 @@ private:
   bool m_fail_next_append{};
 };
 
-auto open_session(MemorySessionStore& store,
-                  testing::ScriptedBackend& backend,
+auto open_session(MemorySessionStore& store, testing::ScriptedBackend& backend,
                   const runtime::DurableSessionMode mode)
     -> std::unique_ptr<runtime::RunKernel> {
   auto opened = runtime::RunKernel::open_durable(
@@ -188,14 +184,15 @@ TEST_CASE("plan projection rejects duplicate materialization and skips futures",
   const auto value = revision();
   domain::PlanGraphProjection projection;
   REQUIRE(projection.apply(event(1, domain::PlanRevisionProposed{value})));
-  REQUIRE(projection.apply(event(
-      2, domain::PlanRevisionDecisionRecorded{
-             decision(value, domain::PlanDecision::approved)})));
+  REQUIRE(
+      projection.apply(event(2, domain::PlanRevisionDecisionRecorded{decision(
+                                    value, domain::PlanDecision::approved)})));
   REQUIRE(projection.apply(event(
       3, domain::SessionTasksMaterialized{value.plan_id, value.revision_id})));
   REQUIRE(projection.active_tasks().size() == value.tasks.size());
-  REQUIRE(projection.apply(event(
-      4, domain::UnknownEvent{"future.session_task", {"application/json", "{}"}})));
+  REQUIRE(projection.apply(
+      event(4, domain::UnknownEvent{"future.session_task",
+                                    {"application/json", "{}"}})));
 
   const auto duplicate = projection.apply(event(
       5, domain::SessionTasksMaterialized{value.plan_id, value.revision_id}));
@@ -235,9 +232,9 @@ TEST_CASE("approval materializes exact tasks and later drift invalidates them",
   const auto active_tasks = kernel.active_session_tasks();
   REQUIRE(active_tasks.size() == value.tasks.size());
   for (std::size_t index = 0; index < value.tasks.size(); ++index) {
-    REQUIRE(active_tasks[index] == runtime::ActiveSessionTask{
-                                        value.plan_id, value.revision_id,
-                                        value.tasks[index],
+    REQUIRE(active_tasks[index] ==
+            runtime::ActiveSessionTask{value.plan_id, value.revision_id,
+                                       value.tasks[index],
                                        runtime::SessionTaskState::pending,
                                        std::nullopt, std::nullopt});
   }
@@ -249,9 +246,9 @@ TEST_CASE("approval materializes exact tasks and later drift invalidates them",
   REQUIRE(duplicate == runtime::PlanDecisionOutcome::already_recorded);
   REQUIRE(kernel.event_log().events().size() == 5);
 
-  REQUIRE(kernel.revalidate_plan_approval(
-              {id<domain::RunId>("unused-run"), attributes(), value.plan_id,
-               value.revision_id, environment()}) ==
+  REQUIRE(kernel.revalidate_plan_approval({id<domain::RunId>("unused-run"),
+                                           attributes(), value.plan_id,
+                                           value.revision_id, environment()}) ==
           runtime::PlanRevalidationOutcome::current);
   REQUIRE(kernel.event_log().events().size() == 5);
 
@@ -287,9 +284,8 @@ TEST_CASE("stale approval records invalidation before any decision",
   auto stale = environment();
   stale.evidence.clear();
   REQUIRE(kernel.decide_plan(
-              planning_run,
-              decision(first, domain::PlanDecision::approved), stale) ==
-          runtime::PlanDecisionOutcome::invalidated);
+              planning_run, decision(first, domain::PlanDecision::approved),
+              stale) == runtime::PlanDecisionOutcome::invalidated);
   REQUIRE(kernel.projection(planning_run)->status() ==
           domain::RunStatus::awaiting_plan_revision);
   REQUIRE(kernel.active_session_tasks().empty());
@@ -299,8 +295,7 @@ TEST_CASE("stale approval records invalidation before any decision",
   REQUIRE(kernel.revise_plan(planning_run, second));
   REQUIRE(kernel.pending_plan_decision()->revision_id == second.revision_id);
   REQUIRE(kernel.decide_plan(
-              planning_run,
-              decision(second, domain::PlanDecision::approved),
+              planning_run, decision(second, domain::PlanDecision::approved),
               environment()) == runtime::PlanDecisionOutcome::recorded);
   REQUIRE(kernel.active_session_tasks().size() == second.tasks.size());
 }
@@ -320,9 +315,8 @@ TEST_CASE("rejected plans complete without session tasks",
   REQUIRE(kernel.active_session_tasks().empty());
   REQUIRE(kernel.plan_projection(value.plan_id)->state() ==
           domain::PlanGraphState::rejected);
-  REQUIRE(kernel.decide_plan(
-              planning_run,
-              decision(value, domain::PlanDecision::rejected)) ==
+  REQUIRE(kernel.decide_plan(planning_run,
+                             decision(value, domain::PlanDecision::rejected)) ==
           runtime::PlanDecisionOutcome::already_recorded);
 }
 
@@ -334,13 +328,13 @@ TEST_CASE("pending plan revisions resume without execution",
   const auto planning_run = id<domain::RunId>("planning-run");
 
   {
-    auto kernel = open_session(store, backend,
-                               runtime::DurableSessionMode::create);
+    auto kernel =
+        open_session(store, backend, runtime::DurableSessionMode::create);
     REQUIRE(kernel->start_plan({planning_run, attributes(), first}));
   }
   {
-    auto kernel = open_session(store, backend,
-                               runtime::DurableSessionMode::resume);
+    auto kernel =
+        open_session(store, backend, runtime::DurableSessionMode::resume);
     REQUIRE(kernel->pending_plan_decision());
     REQUIRE(kernel->decide_plan(
                 planning_run,
@@ -351,20 +345,19 @@ TEST_CASE("pending plan revisions resume without execution",
   }
   const auto second = revision("revision-2", "revision-1");
   {
-    auto kernel = open_session(store, backend,
-                               runtime::DurableSessionMode::resume);
+    auto kernel =
+        open_session(store, backend, runtime::DurableSessionMode::resume);
     REQUIRE(kernel->active_run_id() == planning_run);
     REQUIRE_FALSE(kernel->pending_plan_decision());
     REQUIRE(kernel->revise_plan(planning_run, second));
     REQUIRE(kernel->pending_plan_decision());
     REQUIRE(kernel->decide_plan(
-                planning_run,
-                decision(second, domain::PlanDecision::approved),
+                planning_run, decision(second, domain::PlanDecision::approved),
                 environment()) == runtime::PlanDecisionOutcome::recorded);
   }
   {
-    auto kernel = open_session(store, backend,
-                               runtime::DurableSessionMode::resume);
+    auto kernel =
+        open_session(store, backend, runtime::DurableSessionMode::resume);
     REQUIRE_FALSE(kernel->active_run_id());
     REQUIRE(kernel->active_session_tasks().size() == second.tasks.size());
   }
@@ -395,8 +388,7 @@ TEST_CASE("approval persistence failure materializes no partial tasks",
   kernel.reset();
   kernel = open_session(store, backend, runtime::DurableSessionMode::resume);
   REQUIRE(kernel->decide_plan(
-              planning_run,
-              decision(value, domain::PlanDecision::approved),
+              planning_run, decision(value, domain::PlanDecision::approved),
               environment()) == runtime::PlanDecisionOutcome::recorded);
   REQUIRE(kernel->active_session_tasks().size() == value.tasks.size());
 }

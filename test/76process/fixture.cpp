@@ -19,7 +19,7 @@ auto environment(const char* name) -> std::string_view {
                           : std::string_view{value};
 }
 
-}  // namespace
+} // namespace
 
 auto main(const int argc, char* argv[]) -> int {
   if (argc < 2) return 64;
@@ -33,8 +33,7 @@ auto main(const int argc, char* argv[]) -> int {
       std::cout << "arg" << index - 1 << '=' << argv[index] << '\n';
     }
     char input{};
-    std::cout << "stdin="
-              << (std::cin.get(input) ? "data" : "eof") << '\n';
+    std::cout << "stdin=" << (std::cin.get(input) ? "data" : "eof") << '\n';
     std::cerr << "stderr=separate\n";
     return 7;
   }
@@ -85,7 +84,8 @@ auto main(const int argc, char* argv[]) -> int {
       }
     }
     std::cout << "descendant=" << child << '\n' << std::flush;
-    for (;;) ::pause();
+    for (;;)
+      ::pause();
   }
 #endif
   return 64;

@@ -67,4 +67,4 @@ class ScriptedChildRunner final : public runtime::ChildRunner {
   mutable std::mutex m_mutex;
 };
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

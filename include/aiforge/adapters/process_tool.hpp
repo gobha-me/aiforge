@@ -23,8 +23,7 @@ struct ProcessToolLimits {
   std::size_t inline_output_bytes{std::size_t{32} * 1024U};
   std::size_t progress_chunk_bytes{std::size_t{4} * 1024U};
   std::size_t progress_events{64};
-  std::chrono::milliseconds termination_grace{
-      std::chrono::milliseconds{100}};
+  std::chrono::milliseconds termination_grace{std::chrono::milliseconds{100}};
   auto operator==(const ProcessToolLimits&) const -> bool = default;
 };
 
@@ -49,9 +48,9 @@ struct ProcessToolConfiguration {
     const ProcessToolConfiguration& configuration)
     -> std::expected<backend::ToolDeclaration, runtime::ToolRegistryError>;
 
-[[nodiscard]] auto register_process_tool(
-    runtime::ToolRegistry& registry, storage::ArtifactStore& artifact_store,
-    ProcessToolConfiguration configuration)
+[[nodiscard]] auto register_process_tool(runtime::ToolRegistry& registry,
+                                         storage::ArtifactStore& artifact_store,
+                                         ProcessToolConfiguration configuration)
     -> std::expected<void, runtime::ToolRegistryError>;
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

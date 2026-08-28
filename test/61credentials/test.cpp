@@ -46,7 +46,8 @@ class TemporaryDirectory final {
 
 class ScriptedStore final : public CredentialStore {
  public:
-  auto load() -> std::expected<std::optional<Secret>, CredentialError> override {
+  auto load()
+      -> std::expected<std::optional<Secret>, CredentialError> override {
     ++loads;
     if (error) return std::unexpected(*error);
     if (!value) return std::optional<Secret>{};
@@ -68,12 +69,12 @@ class ScriptedStore final : public CredentialStore {
 };
 
 [[nodiscard]] auto mode(const std::filesystem::path& path) -> mode_t {
-  struct stat info {};
+  struct stat info{};
   REQUIRE(::stat(path.c_str(), &info) == 0);
   return info.st_mode & 0777;
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("credential path resolution follows XDG precedence",
           "[credentials][path][failure]") {
@@ -116,7 +117,8 @@ TEST_CASE("explicit environment credentials are authoritative",
           "[credentials][resolution][failure]") {
   ScriptedStore store;
   store.value = "stored-secret";
-  auto resolution = resolve_credential(std::string{"environment-secret"}, store);
+  auto resolution =
+      resolve_credential(std::string{"environment-secret"}, store);
   REQUIRE(resolution);
   REQUIRE(store.loads == 0);
   REQUIRE(resolution->credential);
@@ -134,7 +136,8 @@ TEST_CASE("explicit environment credentials are authoritative",
 TEST_CASE("stored credential failures degrade to bounded warnings",
           "[credentials][resolution][failure]") {
   ScriptedStore store;
-  store.error = CredentialError{CredentialErrorCode::insecure_permissions, {},
+  store.error = CredentialError{CredentialErrorCode::insecure_permissions,
+                                {},
                                 "credential permissions are unsafe"};
   auto resolution = resolve_credential(std::nullopt, store);
   REQUIRE(resolution);

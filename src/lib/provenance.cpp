@@ -10,7 +10,7 @@ namespace aiforge::domain {
 namespace {
 
 [[nodiscard]] auto failure(const RunProvenanceErrorCode code,
-                          std::string message)
+                           std::string message)
     -> std::unexpected<RunProvenanceError> {
   return std::unexpected(RunProvenanceError{code, std::move(message)});
 }
@@ -111,7 +111,8 @@ namespace {
 
 [[nodiscard]] auto validate_configuration(
     const std::vector<ConfigurationProvenanceEntry>& configuration,
-    const RunProvenanceLimits& limits) -> std::expected<void, RunProvenanceError> {
+    const RunProvenanceLimits& limits)
+    -> std::expected<void, RunProvenanceError> {
   if (configuration.size() > limits.maximum_configuration_entries) {
     return failure(RunProvenanceErrorCode::too_many_entries,
                    "the configuration entry count exceeds its limit");
@@ -182,16 +183,16 @@ namespace {
                          "' exceeds its declared effect limit");
     }
     if (tool.capability_scopes.size() > limits.maximum_scopes_per_tool) {
-      return failure(
-          RunProvenanceErrorCode::invalid_tool,
-          "tool '" + tool.tool_name + "' exceeds its capability scope limit");
+      return failure(RunProvenanceErrorCode::invalid_tool,
+                     "tool '" + tool.tool_name +
+                         "' exceeds its capability scope limit");
     }
     for (const auto& scope : tool.capability_scopes) {
       if (!bounded_text(scope.kind, limits.maximum_identity_bytes) ||
           !bounded_text(scope.value, limits.maximum_value_bytes)) {
-        return failure(
-            RunProvenanceErrorCode::invalid_tool,
-            "tool '" + tool.tool_name + "' declares a malformed scope");
+        return failure(RunProvenanceErrorCode::invalid_tool,
+                       "tool '" + tool.tool_name +
+                           "' declares a malformed scope");
       }
     }
   }
@@ -222,16 +223,16 @@ namespace {
   return total;
 }
 
-}  // namespace
+} // namespace
 
 auto validate_run_provenance(const RunProvenance& provenance,
                              const RunProvenanceLimits limits)
     -> std::expected<void, RunProvenanceError> {
   if (limits.maximum_configuration_entries == 0 ||
-      limits.maximum_decisions_per_entry == 0 || limits.maximum_key_bytes == 0 ||
-      limits.maximum_value_bytes == 0 || limits.maximum_identity_bytes == 0 ||
-      limits.maximum_components == 0 || limits.maximum_tools == 0 ||
-      limits.maximum_effects_per_tool == 0 ||
+      limits.maximum_decisions_per_entry == 0 ||
+      limits.maximum_key_bytes == 0 || limits.maximum_value_bytes == 0 ||
+      limits.maximum_identity_bytes == 0 || limits.maximum_components == 0 ||
+      limits.maximum_tools == 0 || limits.maximum_effects_per_tool == 0 ||
       limits.maximum_scopes_per_tool == 0 || limits.maximum_total_bytes == 0) {
     return failure(RunProvenanceErrorCode::invalid_limits,
                    "a provenance limit is zero");
@@ -283,4 +284,4 @@ auto validate_run_provenance(const RunProvenance& provenance,
   return {};
 }
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

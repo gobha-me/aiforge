@@ -24,9 +24,8 @@ class ScriptedProjectInstructionSource final
   explicit ScriptedProjectInstructionSource(
       std::vector<ProjectInstructionExchange> exchanges = {});
 
-  [[nodiscard]] auto discover(
-      repository::ProjectInstructionRequest request,
-      std::stop_token stop_token = {})
+  [[nodiscard]] auto discover(repository::ProjectInstructionRequest request,
+                              std::stop_token stop_token = {})
       -> std::expected<domain::ProjectInstructionDiscovery,
                        repository::ProjectInstructionError> override;
 
@@ -40,4 +39,4 @@ class ScriptedProjectInstructionSource final
   std::size_t m_next_exchange{};
 };
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

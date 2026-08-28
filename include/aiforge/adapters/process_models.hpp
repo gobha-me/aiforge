@@ -11,4 +11,4 @@ class ProcessModelsCommand final : public cli::ModelsCommand {
       -> std::expected<void, cli::CommandFailure> override;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

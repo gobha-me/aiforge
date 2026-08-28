@@ -26,9 +26,8 @@ class GitRepositorySnapshotSource final
   auto operator=(const GitRepositorySnapshotSource&)
       -> GitRepositorySnapshotSource& = delete;
 
-  [[nodiscard]] auto observe(
-      repository::RepositorySnapshotRequest request,
-      std::stop_token stop_token = {})
+  [[nodiscard]] auto observe(repository::RepositorySnapshotRequest request,
+                             std::stop_token stop_token = {})
       -> std::expected<domain::RepositorySnapshot,
                        repository::RepositorySnapshotError> override;
 
@@ -40,4 +39,4 @@ class GitRepositorySnapshotSource final
   std::unique_ptr<Impl> m_impl;
 };
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

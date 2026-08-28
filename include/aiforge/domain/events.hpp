@@ -120,7 +120,7 @@ struct InferenceStarted {
 struct InferencePricingObserved {
   InferenceId inference_id;
   PricingObservation observation;
-  auto operator==(const InferencePricingObserved &) const -> bool = default;
+  auto operator==(const InferencePricingObserved&) const -> bool = default;
 };
 
 struct ReasoningMetadataAdded {
@@ -404,12 +404,12 @@ struct SessionTaskResultRecorded {
 
 struct ProjectBacklogItemPromoted {
   ProjectBacklogItem item;
-  auto operator==(const ProjectBacklogItemPromoted &) const -> bool = default;
+  auto operator==(const ProjectBacklogItemPromoted&) const -> bool = default;
 };
 
 struct ProjectBacklogItemStatusChanged {
   ProjectBacklogStatusChange change;
-  auto operator==(const ProjectBacklogItemStatusChanged &) const
+  auto operator==(const ProjectBacklogItemStatusChanged&) const
       -> bool = default;
 };
 
@@ -430,27 +430,23 @@ struct UnknownEvent {
 
 using RunEventPayload = std::variant<
     RunStarted, RunProvenanceRecorded, PersonaSelectionRecorded,
-    SessionSpendCeilingSet,
-    RunAwaitingInput, RunResumed,
-    RunCompletionRequested, RunCompleted,
-    RunFailed, RunCancelRequested, RunCancelled, UserContentAdded,
-    AssistantContentStarted, AssistantContentDeltaAdded,
-    AssistantContentFinished, InferenceStarted, InferencePricingObserved,
-    ReasoningMetadataAdded, UsageRecorded, InferenceCostRecorded,
-    InferenceFinished, InferenceFailed, InferenceCancelled, ToolProposed,
-    ToolPolicyDecided, ToolApprovalRequested, ToolApprovalDecided,
-    ToolPolicyFailed, ToolStarted, ToolProgressed, ToolResultRecorded,
-    ToolErrored, QuestionRequested, QuestionAnswered, QuestionCancelled,
-    ArtifactCreated, ArtifactReferenced, ArtifactDisplayed,
+    SessionSpendCeilingSet, RunAwaitingInput, RunResumed,
+    RunCompletionRequested, RunCompleted, RunFailed, RunCancelRequested,
+    RunCancelled, UserContentAdded, AssistantContentStarted,
+    AssistantContentDeltaAdded, AssistantContentFinished, InferenceStarted,
+    InferencePricingObserved, ReasoningMetadataAdded, UsageRecorded,
+    InferenceCostRecorded, InferenceFinished, InferenceFailed,
+    InferenceCancelled, ToolProposed, ToolPolicyDecided, ToolApprovalRequested,
+    ToolApprovalDecided, ToolPolicyFailed, ToolStarted, ToolProgressed,
+    ToolResultRecorded, ToolErrored, QuestionRequested, QuestionAnswered,
+    QuestionCancelled, ArtifactCreated, ArtifactReferenced, ArtifactDisplayed,
     ArtifactRemovedFromView, VerificationEvidenceRecorded, ReviewReceiptDrafted,
     ReviewRequested, ReviewFindingOpened, ReviewFindingResolved,
     ReviewVerdictRecorded, ReviewVerdictRevoked, ReviewOverrideRecorded,
-    ReviewOverrideRevoked, PlanRevisionProposed,
-    PlanRevisionDecisionRecorded, PlanRevisionInvalidated,
-    SessionTasksMaterialized, ChildRunCreated,
+    ReviewOverrideRevoked, PlanRevisionProposed, PlanRevisionDecisionRecorded,
+    PlanRevisionInvalidated, SessionTasksMaterialized, ChildRunCreated,
     SessionTaskResultRecorded, ProjectBacklogItemPromoted,
-    ProjectBacklogItemStatusChanged, InterRunMessageSent,
-    UnknownEvent>;
+    ProjectBacklogItemStatusChanged, InterRunMessageSent, UnknownEvent>;
 
 struct EventMetadata {
   EventId event_id;
@@ -470,4 +466,4 @@ struct RunEvent {
   auto operator==(const RunEvent&) const -> bool = default;
 };
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

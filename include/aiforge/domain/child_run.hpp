@@ -91,11 +91,11 @@ struct ChildRunContractError {
 };
 
 [[nodiscard]] auto validate_child_run_descriptor(
-    const ChildRunDescriptor &descriptor)
+    const ChildRunDescriptor& descriptor)
     -> std::expected<void, ChildRunContractError>;
 
 [[nodiscard]] auto validate_session_task_result(const SessionTaskResult& result,
                                                 const ChildRunBudget& budget)
     -> std::expected<void, ChildRunContractError>;
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

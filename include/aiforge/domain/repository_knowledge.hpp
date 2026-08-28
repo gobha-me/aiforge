@@ -188,4 +188,4 @@ struct RepositoryKnowledgeGraph {
   auto operator==(const RepositoryKnowledgeGraph&) const -> bool = default;
 };
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

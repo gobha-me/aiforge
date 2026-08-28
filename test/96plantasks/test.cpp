@@ -15,8 +15,7 @@ namespace {
 
 using namespace aiforge;
 
-template <typename Id>
-auto id(std::string value) -> Id {
+template <typename Id> auto id(std::string value) -> Id {
   return Id::from(std::move(value)).value();
 }
 

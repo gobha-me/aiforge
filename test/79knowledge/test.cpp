@@ -14,8 +14,7 @@ namespace {
 namespace domain = aiforge::domain;
 namespace repository = aiforge::repository;
 
-template <typename Id>
-auto id(std::string value) -> Id {
+template <typename Id> auto id(std::string value) -> Id {
   auto parsed = Id::from(std::move(value));
   REQUIRE(parsed);
   return std::move(*parsed);
@@ -42,10 +41,10 @@ auto source(std::string path = "src/main.cpp",
           domain::SourceByteRange{0, 16}};
 }
 
-auto entity(std::string name = "function-1",
-            domain::KnowledgeEntityKind kind =
-                domain::KnowledgeEntityKind::function,
-            std::string path = "src/main.cpp") -> domain::KnowledgeEntity {
+auto entity(
+    std::string name = "function-1",
+    domain::KnowledgeEntityKind kind = domain::KnowledgeEntityKind::function,
+    std::string path = "src/main.cpp") -> domain::KnowledgeEntity {
   return {id<domain::KnowledgeEntityId>(std::move(name)), kind, "Widget::run",
           source(std::move(path))};
 }
@@ -58,27 +57,28 @@ auto symbol_record(std::string record_name = "symbol-record",
                    const std::uint64_t revision = 1)
     -> domain::RepositoryKnowledgeRecord {
   const auto symbol_source = source();
-  return {
-      id<domain::KnowledgeRecordId>(std::move(record_name)),
-      revision,
-      domain::SymbolKnowledge{
-          entity(), "cpp", std::string{"Widget::run"},
-          std::string{"auto Widget::run() -> void"}, {symbol_source},
-          symbol_source},
-      {snapshot(),
-       {symbol_source},
-       producer(),
-       std::chrono::sys_time<std::chrono::milliseconds>{
-           std::chrono::milliseconds{100}},
-       {},
-       digest("cccccccccccccccc", 24),
-       domain::KnowledgeDerivation::observed,
-       domain::KnowledgeConfidence::certain},
-      {{domain::KnowledgeInvalidationTrigger::source_snapshot_changed,
-        domain::KnowledgeInvalidationTrigger::source_digest_changed,
-        domain::KnowledgeInvalidationTrigger::producer_version_changed,
-        domain::KnowledgeInvalidationTrigger::build_configuration_changed}},
-      domain::KnowledgeFreshness::current};
+  return {id<domain::KnowledgeRecordId>(std::move(record_name)),
+          revision,
+          domain::SymbolKnowledge{entity(),
+                                  "cpp",
+                                  std::string{"Widget::run"},
+                                  std::string{"auto Widget::run() -> void"},
+                                  {symbol_source},
+                                  symbol_source},
+          {snapshot(),
+           {symbol_source},
+           producer(),
+           std::chrono::sys_time<std::chrono::milliseconds>{
+               std::chrono::milliseconds{100}},
+           {},
+           digest("cccccccccccccccc", 24),
+           domain::KnowledgeDerivation::observed,
+           domain::KnowledgeConfidence::certain},
+          {{domain::KnowledgeInvalidationTrigger::source_snapshot_changed,
+            domain::KnowledgeInvalidationTrigger::source_digest_changed,
+            domain::KnowledgeInvalidationTrigger::producer_version_changed,
+            domain::KnowledgeInvalidationTrigger::build_configuration_changed}},
+          domain::KnowledgeFreshness::current};
 }
 
 auto summary_record(std::string record_name = "summary-record",
@@ -113,8 +113,8 @@ auto summary_record(std::string record_name = "summary-record",
 }
 
 auto graph(std::vector<domain::RepositoryKnowledgeRecord> records = {
-               symbol_record(), summary_record()})
-    -> domain::RepositoryKnowledgeGraph {
+               symbol_record(),
+               summary_record()}) -> domain::RepositoryKnowledgeGraph {
   return {repository_id(), records.empty() ? 0U : 1U, std::move(records)};
 }
 
@@ -144,13 +144,14 @@ auto error_code(const domain::RepositoryKnowledgeGraph& value)
   return result.error().code;
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("knowledge graphs reject invalid limits, generations, and records",
           "[knowledge][failure]") {
   auto limits = repository::RepositoryKnowledgeLimits{};
   limits.maximum_records = 0;
-  auto result = repository::validate_repository_knowledge_graph(graph(), limits);
+  auto result =
+      repository::validate_repository_knowledge_graph(graph(), limits);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code ==
           repository::RepositoryKnowledgeErrorCode::invalid_limits);
@@ -166,8 +167,7 @@ TEST_CASE("knowledge graphs reject invalid limits, generations, and records",
           repository::RepositoryKnowledgeErrorCode::invalid_provenance);
 
   value = graph();
-  value.records.front().freshness =
-      static_cast<domain::KnowledgeFreshness>(99);
+  value.records.front().freshness = static_cast<domain::KnowledgeFreshness>(99);
   REQUIRE(error_code(value) ==
           repository::RepositoryKnowledgeErrorCode::invalid_freshness);
 
@@ -187,7 +187,8 @@ TEST_CASE("knowledge graphs reject invalid limits, generations, and records",
 TEST_CASE("knowledge provenance and invalidation baselines fail closed",
           "[knowledge][provenance][failure]") {
   auto value = graph();
-  value.records.front().provenance.sources.front().relative_path = "../escape.cpp";
+  value.records.front().provenance.sources.front().relative_path =
+      "../escape.cpp";
   REQUIRE(error_code(value) ==
           repository::RepositoryKnowledgeErrorCode::invalid_source);
 
@@ -215,9 +216,9 @@ TEST_CASE("knowledge provenance and invalidation baselines fail closed",
           repository::RepositoryKnowledgeErrorCode::invalid_invalidation_rule);
 
   value = graph();
-  auto& definition = *std::get<domain::SymbolKnowledge>(
-                           value.records.front().payload)
-                           .definition;
+  auto& definition =
+      *std::get<domain::SymbolKnowledge>(value.records.front().payload)
+           .definition;
   definition.content_digest = digest("dddddddddddddddd", 32);
   REQUIRE(error_code(value) ==
           repository::RepositoryKnowledgeErrorCode::invalid_provenance);
@@ -251,8 +252,7 @@ TEST_CASE("derivation cycles fail while semantic relationship cycles are valid",
   const auto second_entity = domain::KnowledgeEntity{
       id<domain::KnowledgeEntityId>("second-function"),
       domain::KnowledgeEntityKind::function, "second", second_source};
-  const auto relationship = [&](std::string name,
-                                domain::KnowledgeEntity from,
+  const auto relationship = [&](std::string name, domain::KnowledgeEntity from,
                                 domain::KnowledgeEntity to) {
     return domain::RepositoryKnowledgeRecord{
         id<domain::KnowledgeRecordId>(std::move(name)),
@@ -273,9 +273,9 @@ TEST_CASE("derivation cycles fail while semantic relationship cycles are valid",
           domain::KnowledgeInvalidationTrigger::source_digest_changed}},
         domain::KnowledgeFreshness::current};
   };
-  const auto result = repository::validate_repository_knowledge_graph(graph(
-      {relationship("first-calls-second", first_entity, second_entity),
-       relationship("second-calls-first", second_entity, first_entity)}));
+  const auto result = repository::validate_repository_knowledge_graph(
+      graph({relationship("first-calls-second", first_entity, second_entity),
+             relationship("second-calls-first", second_entity, first_entity)}));
   REQUIRE(result);
   REQUIRE(result->relationship_count == 2);
   REQUIRE(result->entity_count == 2);
@@ -299,28 +299,28 @@ TEST_CASE("missing dependencies require explicit unavailable freshness",
       graph({symbol_record(), stale_revision})));
 }
 
-TEST_CASE("freshness assessment distinguishes current, uncertain, stale, and unavailable",
+TEST_CASE("freshness assessment distinguishes current, uncertain, stale, and "
+          "unavailable",
           "[knowledge][freshness]") {
   const auto record = summary_record();
   auto environment = current_environment();
-  auto result = repository::assess_repository_knowledge_freshness(
-      record, environment);
+  auto result =
+      repository::assess_repository_knowledge_freshness(record, environment);
   REQUIRE(result);
   REQUIRE(result->freshness == domain::KnowledgeFreshness::current);
   REQUIRE(result->affected_triggers.empty());
 
   environment.sources.clear();
   environment.source_observation_complete = false;
-  result = repository::assess_repository_knowledge_freshness(record,
-                                                              environment);
+  result =
+      repository::assess_repository_knowledge_freshness(record, environment);
   REQUIRE(result);
   REQUIRE(result->freshness == domain::KnowledgeFreshness::possibly_stale);
 
   environment = current_environment();
-  environment.sources.front().content_digest =
-      digest("dddddddddddddddd", 32);
-  result = repository::assess_repository_knowledge_freshness(record,
-                                                              environment);
+  environment.sources.front().content_digest = digest("dddddddddddddddd", 32);
+  result =
+      repository::assess_repository_knowledge_freshness(record, environment);
   REQUIRE(result);
   REQUIRE(result->freshness == domain::KnowledgeFreshness::stale);
 
@@ -328,26 +328,27 @@ TEST_CASE("freshness assessment distinguishes current, uncertain, stale, and una
   environment.dependencies.front().availability =
       repository::KnowledgeInputAvailability::unavailable;
   environment.dependencies.front().revision.reset();
-  result = repository::assess_repository_knowledge_freshness(record,
-                                                              environment);
+  result =
+      repository::assess_repository_knowledge_freshness(record, environment);
   REQUIRE(result);
   REQUIRE(result->freshness == domain::KnowledgeFreshness::unavailable);
 
   environment = current_environment();
   environment.producer = producer("2");
   environment.build_configuration = digest("eeeeeeeeeeeeeeee", 24);
-  result = repository::assess_repository_knowledge_freshness(record,
-                                                              environment);
+  result =
+      repository::assess_repository_knowledge_freshness(record, environment);
   REQUIRE(result);
   REQUIRE(result->freshness == domain::KnowledgeFreshness::stale);
   REQUIRE(std::ranges::find(
               result->affected_triggers,
               domain::KnowledgeInvalidationTrigger::producer_version_changed) !=
           result->affected_triggers.end());
-  REQUIRE(std::ranges::find(
-              result->affected_triggers,
-              domain::KnowledgeInvalidationTrigger::build_configuration_changed) !=
-          result->affected_triggers.end());
+  REQUIRE(
+      std::ranges::find(
+          result->affected_triggers,
+          domain::KnowledgeInvalidationTrigger::build_configuration_changed) !=
+      result->affected_triggers.end());
 }
 
 TEST_CASE("freshness observations reject duplicates and malformed availability",
@@ -364,7 +365,7 @@ TEST_CASE("freshness observations reject duplicates and malformed availability",
   environment.dependencies.front().availability =
       repository::KnowledgeInputAvailability::unavailable;
   result = repository::assess_repository_knowledge_freshness(summary_record(),
-                                                              environment);
+                                                             environment);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code ==
           repository::RepositoryKnowledgeErrorCode::invalid_provenance);
@@ -374,7 +375,7 @@ TEST_CASE("freshness observations reject duplicates and malformed availability",
       static_cast<repository::KnowledgeInputAvailability>(99);
   environment.sources.front().content_digest.reset();
   result = repository::assess_repository_knowledge_freshness(summary_record(),
-                                                              environment);
+                                                             environment);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code ==
           repository::RepositoryKnowledgeErrorCode::invalid_source);
@@ -386,8 +387,8 @@ TEST_CASE("atomic updates reject races and invalidate dependent records",
   auto replacement = symbol_record("symbol-record", 2);
   std::get<domain::SymbolKnowledge>(replacement.payload).signature =
       "auto Widget::run(int attempts) -> void";
-  auto update = repository::RepositoryKnowledgeUpdate{
-      1, {{1, replacement}}, {}};
+  auto update =
+      repository::RepositoryKnowledgeUpdate{1, {{1, replacement}}, {}};
   auto result = repository::apply_repository_knowledge_update(original, update);
   REQUIRE(result);
   REQUIRE(result->generation == 2);
@@ -404,9 +405,8 @@ TEST_CASE("atomic updates reject races and invalidate dependent records",
   REQUIRE(original == graph());
 
   const auto removed = repository::apply_repository_knowledge_update(
-      *result,
-      repository::RepositoryKnowledgeUpdate{
-          2, {}, {id<domain::KnowledgeRecordId>("symbol-record")}});
+      *result, repository::RepositoryKnowledgeUpdate{
+                   2, {}, {id<domain::KnowledgeRecordId>("symbol-record")}});
   REQUIRE(removed);
   REQUIRE(removed->records.size() == 1);
   REQUIRE(removed->records.front().revision == 3);
@@ -451,8 +451,8 @@ TEST_CASE("source-changing replacements retain stale derived interpretations",
   replacement.provenance.sources = {next_source};
 
   const auto result = repository::apply_repository_knowledge_update(
-      graph(), repository::RepositoryKnowledgeUpdate{
-                   1, {{1, replacement}}, {}});
+      graph(),
+      repository::RepositoryKnowledgeUpdate{1, {{1, replacement}}, {}});
   REQUIRE(result);
   const auto summary = std::ranges::find(
       result->records, id<domain::KnowledgeRecordId>("summary-record"),
@@ -467,8 +467,7 @@ TEST_CASE("failed updates are atomic and revisions are exact",
   const auto original = graph();
   auto invalid = symbol_record("symbol-record", 3);
   auto result = repository::apply_repository_knowledge_update(
-      original,
-      repository::RepositoryKnowledgeUpdate{1, {{1, invalid}}, {}});
+      original, repository::RepositoryKnowledgeUpdate{1, {{1, invalid}}, {}});
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code ==
           repository::RepositoryKnowledgeErrorCode::revision_conflict);
@@ -497,7 +496,8 @@ TEST_CASE("unknown future records remain opaque and bounded",
       domain::UnknownRepositoryKnowledge{
           {id<domain::KnowledgeEntityId>("future-entity"),
            domain::KnowledgeEntityKind::unknown, "future entity", std::nullopt},
-          "future.semantic-record", std::nullopt},
+          "future.semantic-record",
+          std::nullopt},
       {snapshot(),
        {},
        producer(),
@@ -509,7 +509,8 @@ TEST_CASE("unknown future records remain opaque and bounded",
        domain::KnowledgeConfidence::unknown},
       {{domain::KnowledgeInvalidationTrigger::source_snapshot_changed}},
       domain::KnowledgeFreshness::current};
-  auto result = repository::validate_repository_knowledge_graph(graph({unknown}));
+  auto result =
+      repository::validate_repository_knowledge_graph(graph({unknown}));
   REQUIRE(result);
   REQUIRE(result->record_count == 1);
 

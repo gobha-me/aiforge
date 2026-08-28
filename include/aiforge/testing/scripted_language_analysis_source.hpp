@@ -65,4 +65,4 @@ class ScriptedLanguageAnalysisSource final
   std::size_t m_next_analysis_exchange{};
 };
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing

@@ -38,7 +38,7 @@ extern "C" auto handle_interrupt(int) -> void {
 #endif
 }
 
-}  // namespace
+} // namespace
 
 auto main(const int argc, char* argv[]) -> int {
   std::vector<std::string_view> arguments;
@@ -74,13 +74,13 @@ auto main(const int argc, char* argv[]) -> int {
   aiforge::cli::InteractiveCommand* interactive_service = &interactive;
   aiforge::cli::ModelsCommand* models_service = &models;
   aiforge::cli::LoginCommand* login_service = &login;
-  aiforge::cli::PlanCommand *plan_service = &plan;
+  aiforge::cli::PlanCommand* plan_service = &plan;
 #else
   aiforge::cli::OneShotCommand* one_shot_service = nullptr;
   aiforge::cli::InteractiveCommand* interactive_service = nullptr;
   aiforge::cli::ModelsCommand* models_service = nullptr;
   aiforge::cli::LoginCommand* login_service = nullptr;
-  aiforge::cli::PlanCommand *plan_service = nullptr;
+  aiforge::cli::PlanCommand* plan_service = nullptr;
 #endif
   aiforge::cli::CommandEnvironment environment{std::cin,
 #ifdef _WIN32

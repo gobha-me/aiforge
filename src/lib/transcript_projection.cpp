@@ -10,8 +10,7 @@
 namespace aiforge::domain {
 namespace {
 
-template <typename... Callables>
-struct Overloaded : Callables... {
+template <typename... Callables> struct Overloaded : Callables... {
   using Callables::operator()...;
 };
 
@@ -36,8 +35,8 @@ Overloaded(Callables...) -> Overloaded<Callables...>;
       return {TranscriptProjectionErrorCode::usage_overflow, error.message};
     case ProjectionErrorCode::cost_overflow:
       return {TranscriptProjectionErrorCode::cost_overflow, error.message};
-  case ProjectionErrorCode::invalid_pricing:
-    return {TranscriptProjectionErrorCode::invalid_transition, error.message};
+    case ProjectionErrorCode::invalid_pricing:
+      return {TranscriptProjectionErrorCode::invalid_transition, error.message};
     case ProjectionErrorCode::invalid_transition:
       return {TranscriptProjectionErrorCode::invalid_transition, error.message};
   }
@@ -48,8 +47,7 @@ Overloaded(Callables...) -> Overloaded<Callables...>;
 [[nodiscard]] auto error(const TranscriptProjectionErrorCode code,
                          std::string message)
     -> std::unexpected<TranscriptProjectionError> {
-  return std::unexpected(
-      TranscriptProjectionError{code, std::move(message)});
+  return std::unexpected(TranscriptProjectionError{code, std::move(message)});
 }
 
 [[nodiscard]] auto add_checked(std::uint64_t& value,
@@ -85,9 +83,8 @@ Overloaded(Callables...) -> Overloaded<Callables...>;
     }
   }
   const bool has_free_form = answer.free_form && !answer.free_form->empty();
-  if (has_free_form &&
-      (!question.other ||
-       answer.free_form->size() > question.other->maximum_bytes)) {
+  if (has_free_form && (!question.other || answer.free_form->size() >
+                                               question.other->maximum_bytes)) {
     return false;
   }
   const auto answer_count =
@@ -112,7 +109,7 @@ template <typename Payload>
          *event.metadata.invocation_id == payload.invocation_id;
 }
 
-}  // namespace
+} // namespace
 
 auto TranscriptProjection::message(const MessageId& id) -> TranscriptMessage* {
   for (auto& item : m_items) {
@@ -141,8 +138,7 @@ auto TranscriptProjection::tool(const InvocationId& id)
 }
 
 auto TranscriptProjection::question(
-    const QuestionId& id,
-    const std::optional<InvocationId>& invocation_id)
+    const QuestionId& id, const std::optional<InvocationId>& invocation_id)
     -> TranscriptQuestionSummary* {
   for (auto& item : m_items) {
     auto* value = std::get_if<TranscriptQuestionSummary>(&item);
@@ -202,27 +198,38 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
       Overloaded{
           [&](const UserContentAdded& added)
               -> std::expected<void, TranscriptProjectionError> {
-            m_items.emplace_back(TranscriptMessage{
-                added.message.message_id, added.message.role,
-                added.message.content, TranscriptMessageState::complete,
-                std::nullopt, {}, std::nullopt, {}});
+            m_items.emplace_back(
+                TranscriptMessage{added.message.message_id,
+                                  added.message.role,
+                                  added.message.content,
+                                  TranscriptMessageState::complete,
+                                  std::nullopt,
+                                  {},
+                                  std::nullopt,
+                                  {}});
             return {};
           },
           [&](const AssistantContentStarted& started)
               -> std::expected<void, TranscriptProjectionError> {
             auto usage = m_inference_usage[started.inference_id];
-            m_items.emplace_back(TranscriptMessage{
-                started.message_id, Role::assistant, {},
-                TranscriptMessageState::streaming, started.inference_id,
-                usage, std::nullopt, {}});
+            m_items.emplace_back(
+                TranscriptMessage{started.message_id,
+                                  Role::assistant,
+                                  {},
+                                  TranscriptMessageState::streaming,
+                                  started.inference_id,
+                                  usage,
+                                  std::nullopt,
+                                  {}});
             return {};
           },
           [&](const AssistantContentDeltaAdded& added)
               -> std::expected<void, TranscriptProjectionError> {
             auto* target = message(added.message_id);
             if (target == nullptr) {
-              return error(TranscriptProjectionErrorCode::unknown_message,
-                           "content delta refers to an unknown transcript message");
+              return error(
+                  TranscriptProjectionErrorCode::unknown_message,
+                  "content delta refers to an unknown transcript message");
             }
             target->content.push_back(added.delta);
             return {};
@@ -231,8 +238,9 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
               -> std::expected<void, TranscriptProjectionError> {
             auto* target = message(finished.message_id);
             if (target == nullptr) {
-              return error(TranscriptProjectionErrorCode::unknown_message,
-                           "content finish refers to an unknown transcript message");
+              return error(
+                  TranscriptProjectionErrorCode::unknown_message,
+                  "content finish refers to an unknown transcript message");
             }
             target->state = TranscriptMessageState::complete;
             return {};
@@ -273,13 +281,15 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
           },
           [&](const RunFailed& failed)
               -> std::expected<void, TranscriptProjectionError> {
-            const bool represented = std::ranges::any_of(
-                m_items, [&](const TranscriptItem& item) {
-                  if (const auto* message = std::get_if<TranscriptMessage>(&item)) {
+            const bool represented =
+                std::ranges::any_of(m_items, [&](const TranscriptItem& item) {
+                  if (const auto* message =
+                          std::get_if<TranscriptMessage>(&item)) {
                     return message->state == TranscriptMessageState::failed &&
                            message->error == failed.error;
                   }
-                  if (const auto* notice = std::get_if<TranscriptNotice>(&item)) {
+                  if (const auto* notice =
+                          std::get_if<TranscriptNotice>(&item)) {
                     return notice->kind == TranscriptNoticeKind::failed &&
                            notice->message == failed.error.message;
                   }
@@ -293,16 +303,16 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
           },
           [&](const RunCancelled& cancelled)
               -> std::expected<void, TranscriptProjectionError> {
-            const bool represented = std::ranges::any_of(
-                m_items, [](const TranscriptItem& item) {
+            const bool represented =
+                std::ranges::any_of(m_items, [](const TranscriptItem& item) {
                   const auto* message = std::get_if<TranscriptMessage>(&item);
                   return message != nullptr &&
                          message->state == TranscriptMessageState::cancelled;
                 });
             if (!represented) {
-              m_items.emplace_back(TranscriptNotice{
-                  TranscriptNoticeKind::cancelled,
-                  cancelled.reason.value_or("run cancelled")});
+              m_items.emplace_back(
+                  TranscriptNotice{TranscriptNoticeKind::cancelled,
+                                   cancelled.reason.value_or("run cancelled")});
             }
             return {};
           },
@@ -315,9 +325,13 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
             if (tool(proposed.invocation_id) != nullptr) {
               return transition_error("tool invocation is already present");
             }
-            m_items.emplace_back(TranscriptToolSummary{
-                proposed.invocation_id, proposed.tool_name,
-                TranscriptToolState::proposed, {}, {}, std::nullopt});
+            m_items.emplace_back(
+                TranscriptToolSummary{proposed.invocation_id,
+                                      proposed.tool_name,
+                                      TranscriptToolState::proposed,
+                                      {},
+                                      {},
+                                      std::nullopt});
             return {};
           },
           [&](const ToolPolicyDecided& decided)
@@ -433,7 +447,8 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
                            "tool progress refers to an unknown invocation");
             }
             if (target->state != TranscriptToolState::running) {
-              return transition_error("tool progress requires a running invocation");
+              return transition_error(
+                  "tool progress requires a running invocation");
             }
             target->progress.insert(target->progress.end(),
                                     progressed.content.begin(),
@@ -452,7 +467,8 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
                            "tool result refers to an unknown invocation");
             }
             if (target->state != TranscriptToolState::running) {
-              return transition_error("tool result requires a running invocation");
+              return transition_error(
+                  "tool result requires a running invocation");
             }
             target->result = recorded.content;
             target->state = TranscriptToolState::complete;
@@ -470,8 +486,7 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
                            "tool error refers to an unknown invocation");
             }
             if (target->state == TranscriptToolState::complete ||
-                target->state == TranscriptToolState::failed ||
-                target->error) {
+                target->state == TranscriptToolState::failed || target->error) {
               return transition_error("tool invocation is already terminal");
             }
             if (failed.error.code == ErrorCode::cancelled) {
@@ -490,8 +505,7 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
             }
             m_items.emplace_back(TranscriptQuestionSummary{
                 requested.question, TranscriptQuestionState::awaiting_answer,
-                std::nullopt, std::nullopt,
-                event.metadata.invocation_id});
+                std::nullopt, std::nullopt, event.metadata.invocation_id});
             return {};
           },
           [&](const QuestionAnswered& answered)
@@ -504,7 +518,8 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
             }
             if (target->state != TranscriptQuestionState::awaiting_answer ||
                 !answer_is_valid(target->question, answered.answer)) {
-              return transition_error("question answer is invalid or duplicated");
+              return transition_error(
+                  "question answer is invalid or duplicated");
             }
             target->state = TranscriptQuestionState::answered;
             target->answer = answered.answer;
@@ -512,8 +527,8 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
           },
           [&](const QuestionCancelled& cancelled)
               -> std::expected<void, TranscriptProjectionError> {
-            auto* target = question(cancelled.question_id,
-                                    event.metadata.invocation_id);
+            auto* target =
+                question(cancelled.question_id, event.metadata.invocation_id);
             if (target == nullptr) {
               return error(TranscriptProjectionErrorCode::unknown_question,
                            "cancellation refers to an unknown question");
@@ -527,8 +542,8 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
           },
           [&](const ArtifactCreated& created)
               -> std::expected<void, TranscriptProjectionError> {
-            if (!m_artifacts.emplace(created.artifact.artifact_id,
-                                     created.artifact)
+            if (!m_artifacts
+                     .emplace(created.artifact.artifact_id, created.artifact)
                      .second) {
               return transition_error("artifact ID is already present");
             }
@@ -549,8 +564,8 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
               }
               target->artifacts.push_back(found->second);
             }
-            m_items.emplace_back(
-                TranscriptArtifactReference{found->second, referenced.message_id});
+            m_items.emplace_back(TranscriptArtifactReference{
+                found->second, referenced.message_id});
             return {};
           },
           [&](const VerificationEvidenceRecorded& recorded)
@@ -565,8 +580,9 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
             const auto* invocation = tool(evidence.producer.invocation_id);
             if (invocation == nullptr ||
                 invocation->tool_name != evidence.producer.tool_name) {
-              return error(TranscriptProjectionErrorCode::unknown_invocation,
-                           "verification evidence has no matching tool invocation");
+              return error(
+                  TranscriptProjectionErrorCode::unknown_invocation,
+                  "verification evidence has no matching tool invocation");
             }
             if (invocation->state != TranscriptToolState::complete &&
                 invocation->state != TranscriptToolState::failed &&
@@ -582,23 +598,25 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
             if (m_verification_ids.contains(evidence.evidence_id) ||
                 m_verification_invocations.contains(
                     evidence.producer.invocation_id)) {
-              return transition_error(
-                  "verification evidence or producing invocation is duplicated");
+              return transition_error("verification evidence or producing "
+                                      "invocation is duplicated");
             }
             auto artifact_exists = [&](const ArtifactId& id) {
               return m_artifacts.contains(id);
             };
             for (const auto& artifact : evidence.artifacts) {
               if (!artifact_exists(artifact)) {
-                return error(TranscriptProjectionErrorCode::unknown_artifact,
-                             "verification evidence references an unknown artifact");
+                return error(
+                    TranscriptProjectionErrorCode::unknown_artifact,
+                    "verification evidence references an unknown artifact");
               }
             }
             for (const auto& output : evidence.output) {
               if (output.complete_artifact_id &&
                   !artifact_exists(*output.complete_artifact_id)) {
-                return error(TranscriptProjectionErrorCode::unknown_artifact,
-                             "verification output references an unknown artifact");
+                return error(
+                    TranscriptProjectionErrorCode::unknown_artifact,
+                    "verification output references an unknown artifact");
               }
             }
             m_verification_ids.insert(evidence.evidence_id);
@@ -608,8 +626,9 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
           },
           [&](const UnknownEvent&)
               -> std::expected<void, TranscriptProjectionError> { return {}; },
-          [&](const auto&)
-              -> std::expected<void, TranscriptProjectionError> { return {}; },
+          [&](const auto&) -> std::expected<void, TranscriptProjectionError> {
+            return {};
+          },
       },
       event.payload);
 
@@ -633,8 +652,7 @@ auto SessionTranscriptProjection::apply(const RunEvent& event)
 
 auto SessionTranscriptProjection::rebuild(
     const std::span<const RunEvent> events)
-    -> std::expected<SessionTranscriptProjection,
-                     TranscriptProjectionError> {
+    -> std::expected<SessionTranscriptProjection, TranscriptProjectionError> {
   try {
     SessionTranscriptProjection result;
     for (const auto& event : events) {
@@ -679,4 +697,4 @@ auto SessionTranscriptProjection::apply_in_place(const RunEvent& event)
   return {};
 }
 
-}  // namespace aiforge::domain
+} // namespace aiforge::domain

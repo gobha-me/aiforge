@@ -48,8 +48,7 @@ struct Decoded {
     const auto next = static_cast<unsigned char>(text[position + offset]);
     if ((next & 0xC0U) != 0x80U) return std::nullopt;
     if (offset == 1 &&
-        ((first == 0xE0U && next < 0xA0U) ||
-         (first == 0xEDU && next > 0x9FU) ||
+        ((first == 0xE0U && next < 0xA0U) || (first == 0xEDU && next > 0x9FU) ||
          (first == 0xF0U && next < 0x90U) ||
          (first == 0xF4U && next > 0x8FU))) {
       return std::nullopt;
@@ -97,8 +96,7 @@ auto append_span(StyledLine& line, std::string text,
 }
 
 [[nodiscard]] auto marker_end(const std::string_view line,
-                              const std::size_t position,
-                              const char marker,
+                              const std::size_t position, const char marker,
                               const std::size_t count) -> std::size_t {
   const std::string needle(count, marker);
   auto found = line.find(needle, position);
@@ -115,7 +113,8 @@ auto parse_inline(const std::string_view line, StyledLine& output,
   std::size_t plain_start{};
   const auto flush_plain = [&](const std::size_t end) {
     if (end > plain_start) {
-      append_span(output, std::string{line.substr(plain_start, end - plain_start)},
+      append_span(output,
+                  std::string{line.substr(plain_start, end - plain_start)},
                   base);
     }
   };
@@ -123,8 +122,7 @@ auto parse_inline(const std::string_view line, StyledLine& output,
   while (position < line.size()) {
     if (line[position] == '`') {
       std::size_t ticks{1};
-      while (position + ticks < line.size() &&
-             line[position + ticks] == '`') {
+      while (position + ticks < line.size() && line[position + ticks] == '`') {
         ++ticks;
       }
       const auto close = marker_end(line, position + ticks, '`', ticks);
@@ -146,10 +144,10 @@ auto parse_inline(const std::string_view line, StyledLine& output,
       const auto close = marker_end(line, position + 2, marker, 2);
       if (close != std::string_view::npos && close > position + 2) {
         flush_plain(position);
-        append_span(output,
-                    std::string{line.substr(position + 2,
-                                            close - position - 2)},
-                    base | TextSemantic::strong);
+        append_span(
+            output,
+            std::string{line.substr(position + 2, close - position - 2)},
+            base | TextSemantic::strong);
         position = close + 2;
         plain_start = position;
         continue;
@@ -161,10 +159,10 @@ auto parse_inline(const std::string_view line, StyledLine& output,
       const auto close = line.find(marker, position + 1);
       if (close != std::string_view::npos && close > position + 1) {
         flush_plain(position);
-        append_span(output,
-                    std::string{line.substr(position + 1,
-                                            close - position - 1)},
-                    base | TextSemantic::emphasis);
+        append_span(
+            output,
+            std::string{line.substr(position + 1, close - position - 1)},
+            base | TextSemantic::emphasis);
         position = close + 1;
         plain_start = position;
         continue;
@@ -179,7 +177,7 @@ auto parse_inline(const std::string_view line, StyledLine& output,
   return line.starts_with("```");
 }
 
-}  // namespace
+} // namespace
 
 auto sanitize_untrusted_text(const std::string_view text)
     -> std::expected<std::string, TextError> {
@@ -263,7 +261,8 @@ auto tokenize_markdown_lite(const std::string_view text,
       const auto line = lines[index];
       if (fence(line)) {
         std::size_t closing = index + 1;
-        while (closing < lines.size() && !fence(lines[closing])) ++closing;
+        while (closing < lines.size() && !fence(lines[closing]))
+          ++closing;
         if (closing < lines.size()) {
           for (std::size_t code_line = index + 1; code_line < closing;
                ++code_line) {
@@ -332,7 +331,8 @@ auto flatten(const StyledDocument& document)
     std::string output;
     for (std::size_t line = 0; line < document.size(); ++line) {
       if (line != 0) output.push_back('\n');
-      for (const auto& span : document[line]) output += span.text;
+      for (const auto& span : document[line])
+        output += span.text;
     }
     return output;
   } catch (...) {
@@ -341,4 +341,4 @@ auto flatten(const StyledDocument& document)
   }
 }
 
-}  // namespace aiforge::presentation
+} // namespace aiforge::presentation

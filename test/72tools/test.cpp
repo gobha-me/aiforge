@@ -262,8 +262,7 @@ class ImmediateExecutor final : public runtime::ToolExecutor {
   ImmediateExecutor(std::vector<domain::CapabilityScope> scopes,
                     std::vector<domain::Effect> effects,
                     runtime::ToolResult result)
-      : m_scopes(std::move(scopes)),
-        m_effects(std::move(effects)),
+      : m_scopes(std::move(scopes)), m_effects(std::move(effects)),
         m_result(std::move(result)) {}
 
   auto validate(const domain::StructuredDataBlock& arguments) const
@@ -305,9 +304,9 @@ class RecordingPolicy final : public runtime::ToolPolicy {
   auto approve(const runtime::ToolPolicyRequest&, runtime::ToolPolicyApproval)
       -> std::expected<runtime::ToolPolicyResolution,
                        runtime::ToolPolicyError> override {
-    return std::unexpected(runtime::ToolPolicyError{
-        runtime::ToolPolicyErrorCode::invalid_request,
-        "approval is not expected", false});
+    return std::unexpected(
+        runtime::ToolPolicyError{runtime::ToolPolicyErrorCode::invalid_request,
+                                 "approval is not expected", false});
   }
 
   std::vector<runtime::ToolPolicyRequest> requests;
@@ -346,17 +345,21 @@ auto scope() -> domain::CapabilityScope {
 }
 
 auto allow_policy() -> std::shared_ptr<runtime::ToolPolicy> {
-  return std::make_shared<runtime::CapabilityPolicy>(
-      runtime::PermissionProfile{
-          make_id<domain::PermissionProfileId>("observe"),
-          {domain::Effect::read}, {scope()}, {}, {}});
+  return std::make_shared<runtime::CapabilityPolicy>(runtime::PermissionProfile{
+      make_id<domain::PermissionProfileId>("observe"),
+      {domain::Effect::read},
+      {scope()},
+      {},
+      {}});
 }
 
 auto approval_policy() -> std::shared_ptr<runtime::ToolPolicy> {
-  return std::make_shared<runtime::CapabilityPolicy>(
-      runtime::PermissionProfile{
-          make_id<domain::PermissionProfileId>("observe"), {}, {},
-          {domain::Effect::read}, {scope()}});
+  return std::make_shared<runtime::CapabilityPolicy>(runtime::PermissionProfile{
+      make_id<domain::PermissionProfileId>("observe"),
+      {},
+      {},
+      {domain::Effect::read},
+      {scope()}});
 }
 
 class OrderedPolicy final : public runtime::ToolPolicy {
@@ -366,7 +369,9 @@ class OrderedPolicy final : public runtime::ToolPolicy {
                        runtime::ToolPolicyError> override {
     if (request.tool_name == "first") {
       return runtime::ToolPolicyResolution{
-          domain::PolicyDecision::deny, {}, "first is denied",
+          domain::PolicyDecision::deny,
+          {},
+          "first is denied",
           domain::PolicyDecisionSource::permission_profile};
     }
     return runtime::ToolPolicyResolution{
@@ -377,13 +382,13 @@ class OrderedPolicy final : public runtime::ToolPolicy {
   auto approve(const runtime::ToolPolicyRequest&, runtime::ToolPolicyApproval)
       -> std::expected<runtime::ToolPolicyResolution,
                        runtime::ToolPolicyError> override {
-    return std::unexpected(runtime::ToolPolicyError{
-        runtime::ToolPolicyErrorCode::invalid_request,
-        "approval is not expected", false});
+    return std::unexpected(
+        runtime::ToolPolicyError{runtime::ToolPolicyErrorCode::invalid_request,
+                                 "approval is not expected", false});
   }
 };
 
-}  // namespace
+} // namespace
 
 TEST_CASE(
     "tool registry rejects malformed declarations and snapshots are stable",
@@ -426,7 +431,8 @@ TEST_CASE(
 TEST_CASE("allowed tool results continue the same run in registry order",
           "[tools][runtime]") {
   const auto invocation = make_id<domain::InvocationId>("call");
-  const domain::CapabilityScope scope{domain::Effect::read, "filesystem.root", "/repo"};
+  const domain::CapabilityScope scope{domain::Effect::read, "filesystem.root",
+                                      "/repo"};
   const runtime::ToolExecutionLimits limits{4096, 8, 1s};
   const auto tool = declaration();
   auto expected_invocation = runtime::ToolInvocation{
@@ -465,9 +471,13 @@ TEST_CASE("allowed tool results continue the same run in registry order",
        }}},
   }};
   WakeCounter wake;
-  runtime::RunKernel kernel{
-      make_id<domain::SessionId>("session"), backend, &wake, {}, {}, snapshot,
-      allow_policy()};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            snapshot,
+                            allow_policy()};
 
   auto start = run_start(initial);
   start.pricing_observation = pricing_observation();
@@ -507,7 +517,7 @@ TEST_CASE("allowed tool results continue the same run in registry order",
   const auto result = std::ranges::find_if(events, [](const auto& event) {
     return std::holds_alternative<domain::ToolResultRecorded>(event.payload);
   });
-  REQUIRE(std::ranges::count_if(events, [](const auto &event) {
+  REQUIRE(std::ranges::count_if(events, [](const auto& event) {
             return std::holds_alternative<domain::InferencePricingObserved>(
                 event.payload);
           }) == 2);
@@ -520,7 +530,8 @@ TEST_CASE("allowed tool results continue the same run in registry order",
 TEST_CASE("policy and approval decisions are one-shot and cannot widen scope",
           "[tools][policy][failure]") {
   const auto invocation = make_id<domain::InvocationId>("call");
-  const domain::CapabilityScope scope{domain::Effect::read, "filesystem.root", "/repo"};
+  const domain::CapabilityScope scope{domain::Effect::read, "filesystem.root",
+                                      "/repo"};
   const auto tool = declaration();
   auto executor = std::make_shared<testing::ScriptedToolExecutor>(
       std::vector<testing::ScriptedToolExchange>{});
@@ -532,18 +543,23 @@ TEST_CASE("policy and approval decisions are one-shot and cannot widen scope",
       {initial, tool_call_script(invocation)},
   }};
   WakeCounter wake;
-  runtime::RunKernel kernel{
-      make_id<domain::SessionId>("session"), backend, &wake, {}, {}, snapshot,
-      approval_policy()};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            snapshot,
+                            approval_policy()};
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
 
   const domain::CapabilityScope widened{domain::Effect::read, "filesystem.root",
                                         "/outside"};
-  auto decision = kernel.decide_approval(
-      make_id<domain::RunId>("run"), invocation,
-      {domain::ApprovalDecision::approved, {widened},
-       domain::ApprovalGrantLifetime::invocation});
+  auto decision =
+      kernel.decide_approval(make_id<domain::RunId>("run"), invocation,
+                             {domain::ApprovalDecision::approved,
+                              {widened},
+                              domain::ApprovalGrantLifetime::invocation});
   REQUIRE_FALSE(decision);
   REQUIRE(decision.error().code ==
           runtime::RunKernelErrorCode::policy_scope_widening);
@@ -610,19 +626,28 @@ TEST_CASE("saved approval failure is durable and does not start the tool",
                     "secret-bearing storage detail", false});
   auto policy = std::make_shared<runtime::CapabilityPolicy>(
       runtime::PermissionProfile{
-          make_id<domain::PermissionProfileId>("observe"), {}, {},
-          {domain::Effect::read}, {scope()}},
+          make_id<domain::PermissionProfileId>("observe"),
+          {},
+          {},
+          {domain::Effect::read},
+          {scope()}},
       &grants);
   WakeCounter wake;
-  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
-                            &wake, {}, {}, snapshot, policy};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            snapshot,
+                            policy};
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
 
-  auto result = kernel.decide_approval(
-      make_id<domain::RunId>("run"), invocation,
-      {domain::ApprovalDecision::approved, {scope()},
-       domain::ApprovalGrantLifetime::saved});
+  auto result =
+      kernel.decide_approval(make_id<domain::RunId>("run"), invocation,
+                             {domain::ApprovalDecision::approved,
+                              {scope()},
+                              domain::ApprovalGrantLifetime::saved});
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code == runtime::RunKernelErrorCode::policy_failure);
   REQUIRE(executor->starts == 0);
@@ -807,7 +832,8 @@ TEST_CASE("durable replay rebuilds tool state without validation or execution",
   const auto assistant = make_id<domain::MessageId>("assistant");
   const auto result_message = make_id<domain::MessageId>("tool-message");
   const auto tool = declaration();
-  const domain::CapabilityScope scope{domain::Effect::read, "filesystem.root", "/repo"};
+  const domain::CapabilityScope scope{domain::Effect::read, "filesystem.root",
+                                      "/repo"};
   const std::vector<domain::RunEvent> events{
       persisted_event(
           1, domain::RunStarted{make_id<domain::SurfaceId>("test"),
@@ -876,14 +902,14 @@ TEST_CASE("durable replay rejects duplicate invocation identity",
           "[tools][replay][failure]") {
   const auto session = make_id<domain::SessionId>("session");
   const auto invocation = make_id<domain::InvocationId>("call");
-  const auto run_started =
-      domain::RunStarted{make_id<domain::SurfaceId>("test"),
-                         make_id<domain::WorkspaceId>("chat"),
-                         make_id<domain::PermissionProfileId>("observe"),
-                         std::nullopt};
-  const auto proposed = domain::ToolProposed{
-      invocation, "lookup", {"application/json", "{}"},
-      {domain::Effect::read}, std::nullopt};
+  const auto run_started = domain::RunStarted{
+      make_id<domain::SurfaceId>("test"), make_id<domain::WorkspaceId>("chat"),
+      make_id<domain::PermissionProfileId>("observe"), std::nullopt};
+  const auto proposed = domain::ToolProposed{invocation,
+                                             "lookup",
+                                             {"application/json", "{}"},
+                                             {domain::Effect::read},
+                                             std::nullopt};
   const std::vector<domain::RunEvent> events{
       persisted_event(1, run_started),
       persisted_event(2, proposed, invocation),
@@ -913,14 +939,18 @@ TEST_CASE("run cancellation before execution never starts the executor",
   runtime::ToolRegistry registry;
   REQUIRE(registry.register_tool(declaration(), executor));
   const auto snapshot = snapshot_of(registry);
-  auto initial =
-      request("inference-1", "assistant-1", snapshot.declarations());
+  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
   testing::ScriptedBackend backend{{
       {initial, tool_call_script(invocation)},
   }};
   WakeCounter wake;
-  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
-                            &wake, {}, {}, snapshot, approval_policy()};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            snapshot,
+                            approval_policy()};
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
 
@@ -945,14 +975,18 @@ TEST_CASE("run cancellation terminates tool work exactly once",
   REQUIRE(registry.register_tool(declaration(),
                                  std::make_shared<BlockingExecutor>(), limits));
   const auto snapshot = snapshot_of(registry);
-  auto initial = request("inference-1", "assistant-1",
-                         snapshot.declarations());
+  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
   testing::ScriptedBackend backend{{
       {initial, tool_call_script(invocation)},
   }};
   WakeCounter wake;
-  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
-                            &wake, {}, {}, snapshot, allow_policy()};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            snapshot,
+                            allow_policy()};
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
   REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "user cancelled"));
@@ -978,9 +1012,12 @@ TEST_CASE("multiple tool calls cannot execute ahead of provider order",
   auto executor = std::make_shared<testing::ScriptedToolExecutor>(
       std::vector<testing::ScriptedToolExchange>{
           {runtime::ToolInvocation{
-               second, std::nullopt, "second",
+               second,
+               std::nullopt,
+               "second",
                runtime::ValidatedToolArguments{{"application/json", "{}"}},
-               {scope()}, limits},
+               {scope()},
+               limits},
            testing::ToolStreamScript{{
                tool_step(runtime::ToolResult{{domain::TextBlock{"done"}}}),
                testing::ToolEndOfStream{},
@@ -989,8 +1026,7 @@ TEST_CASE("multiple tool calls cannot execute ahead of provider order",
   REQUIRE(registry.register_tool(declaration("first"), executor, limits));
   REQUIRE(registry.register_tool(declaration("second"), executor, limits));
   const auto snapshot = snapshot_of(registry);
-  auto initial = request("inference-1", "assistant-1",
-                         snapshot.declarations());
+  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
   testing::ScriptedBackend backend{{
       {initial,
        testing::StreamScript{{
@@ -1002,9 +1038,9 @@ TEST_CASE("multiple tool calls cannot execute ahead of provider order",
        }}},
   }};
   WakeCounter wake;
-  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
-                            &wake, {}, {}, snapshot,
-                            std::make_shared<OrderedPolicy>()};
+  runtime::RunKernel kernel{
+      make_id<domain::SessionId>("session"), backend, &wake, {}, {}, snapshot,
+      std::make_shared<OrderedPolicy>()};
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
 
@@ -1028,7 +1064,7 @@ TEST_CASE("argument validation can narrow a declaration's effects",
   const auto invocation = make_id<domain::InvocationId>("narrow-call");
   const auto read_scope = scope();
   const domain::CapabilityScope write_scope{domain::Effect::write,
-                                             "filesystem.root", "/repo"};
+                                            "filesystem.root", "/repo"};
   auto tool = declaration("narrow");
   tool.effects.push_back(domain::Effect::write);
   tool.capability_scopes.push_back(write_scope);
@@ -1040,8 +1076,7 @@ TEST_CASE("argument validation can narrow a declaration's effects",
   REQUIRE(registry.register_tool(tool, executor,
                                  runtime::ToolExecutionLimits{128, 2, 1s}));
   const auto snapshot = snapshot_of(registry);
-  auto initial = request("inference-1", "assistant-1",
-                         snapshot.declarations());
+  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
   testing::ScriptedBackend backend{{
       {initial,
        testing::StreamScript{{
@@ -1053,8 +1088,13 @@ TEST_CASE("argument validation can narrow a declaration's effects",
   }};
   auto policy = std::make_shared<RecordingPolicy>();
   WakeCounter wake;
-  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
-                            &wake, {}, {}, snapshot, policy};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            snapshot,
+                            policy};
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
   for (int attempt = 0; attempt < 100 && executor->invocations().empty();
@@ -1067,8 +1107,8 @@ TEST_CASE("argument validation can narrow a declaration's effects",
           std::vector<domain::Effect>{domain::Effect::read});
   REQUIRE(policy->requests.front().scopes ==
           std::vector<domain::CapabilityScope>{read_scope});
-  const auto proposed = std::ranges::find_if(
-      kernel.event_log().events(), [](const auto& event) {
+  const auto proposed =
+      std::ranges::find_if(kernel.event_log().events(), [](const auto& event) {
         return std::holds_alternative<domain::ToolProposed>(event.payload);
       });
   REQUIRE(proposed != kernel.event_log().events().end());
@@ -1081,7 +1121,7 @@ TEST_CASE("argument validation cannot widen a declaration's effects",
           "[tools][policy][effects][failure]") {
   const auto invocation = make_id<domain::InvocationId>("widen-call");
   const domain::CapabilityScope write_scope{domain::Effect::write,
-                                             "filesystem.root", "/repo"};
+                                            "filesystem.root", "/repo"};
   auto executor = std::make_shared<ImmediateExecutor>(
       std::vector<domain::CapabilityScope>{write_scope},
       std::vector<domain::Effect>{domain::Effect::write},
@@ -1090,22 +1130,27 @@ TEST_CASE("argument validation cannot widen a declaration's effects",
   REQUIRE(registry.register_tool(declaration(), executor,
                                  runtime::ToolExecutionLimits{128, 2, 1s}));
   const auto snapshot = snapshot_of(registry);
-  auto initial = request("inference-1", "assistant-1",
-                         snapshot.declarations());
+  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
   testing::ScriptedBackend backend{{
       {initial, tool_call_script(invocation)},
   }};
   auto policy = std::make_shared<RecordingPolicy>();
   WakeCounter wake;
-  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
-                            &wake, {}, {}, snapshot, policy};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            snapshot,
+                            policy};
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
   REQUIRE(policy->requests.empty());
   REQUIRE(executor->invocations().empty());
-  REQUIRE(std::ranges::count_if(kernel.event_log().events(), [](const auto& event) {
-            return std::holds_alternative<domain::ToolErrored>(event.payload);
-          }) == 1);
+  REQUIRE(
+      std::ranges::count_if(kernel.event_log().events(), [](const auto& event) {
+        return std::holds_alternative<domain::ToolErrored>(event.payload);
+      }) == 1);
   REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
 }
 
@@ -1114,11 +1159,12 @@ TEST_CASE("tool-created artifacts are recorded before their terminal result",
   const auto invocation = make_id<domain::InvocationId>("artifact-call");
   const auto artifact = make_id<domain::ArtifactId>("artifact-output");
   const domain::ArtifactMetadata metadata{
-      artifact, "application/octet-stream", 4, "sha256:test", invocation,
-      std::nullopt, std::nullopt};
+      artifact,    "application/octet-stream",
+      4,           "sha256:test",
+      invocation,  std::nullopt,
+      std::nullopt};
   auto executor = std::make_shared<ImmediateExecutor>(
-      std::vector<domain::CapabilityScope>{},
-      std::vector<domain::Effect>{},
+      std::vector<domain::CapabilityScope>{}, std::vector<domain::Effect>{},
       runtime::ToolResult{
           {domain::StructuredDataBlock{"application/json", "{}"},
            domain::ArtifactReferenceBlock{artifact, std::string{"stdout"}}},
@@ -1127,14 +1173,18 @@ TEST_CASE("tool-created artifacts are recorded before their terminal result",
   REQUIRE(registry.register_tool(declaration(), executor,
                                  runtime::ToolExecutionLimits{1024, 2, 1s}));
   const auto snapshot = snapshot_of(registry);
-  auto initial = request("inference-1", "assistant-1",
-                         snapshot.declarations());
+  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
   testing::ScriptedBackend backend{{
       {initial, tool_call_script(invocation)},
   }};
   WakeCounter wake;
-  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
-                            &wake, {}, {}, snapshot, allow_policy()};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            snapshot,
+                            allow_policy()};
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
   for (int attempt = 0; attempt < 100; ++attempt) {
@@ -1163,11 +1213,12 @@ TEST_CASE("tool-created artifacts are recorded before their terminal result",
       runtime::tool_result_messages(kernel.event_log().events());
   REQUIRE(messages);
   REQUIRE(messages->size() == 1);
-  REQUIRE(std::ranges::any_of(messages->front().content, [&](const auto& block) {
-    const auto* reference =
-        std::get_if<domain::ArtifactReferenceBlock>(&block);
-    return reference != nullptr && reference->artifact_id == artifact;
-  }));
+  REQUIRE(
+      std::ranges::any_of(messages->front().content, [&](const auto& block) {
+        const auto* reference =
+            std::get_if<domain::ArtifactReferenceBlock>(&block);
+        return reference != nullptr && reference->artifact_id == artifact;
+      }));
   REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
 }
 
@@ -1176,34 +1227,40 @@ TEST_CASE("invalid tool artifact metadata fails the run without a reference",
   const auto invocation = make_id<domain::InvocationId>("artifact-call");
   const auto artifact = make_id<domain::ArtifactId>("artifact-output");
   auto executor = std::make_shared<ImmediateExecutor>(
-      std::vector<domain::CapabilityScope>{},
-      std::vector<domain::Effect>{},
+      std::vector<domain::CapabilityScope>{}, std::vector<domain::Effect>{},
       runtime::ToolResult{
           {domain::ArtifactReferenceBlock{artifact, std::string{"stdout"}}},
-          {domain::ArtifactMetadata{
-              artifact, "application/octet-stream", 4, "sha256:test",
-              make_id<domain::InvocationId>("wrong-call"), std::nullopt,
-              std::nullopt}}});
+          {domain::ArtifactMetadata{artifact, "application/octet-stream", 4,
+                                    "sha256:test",
+                                    make_id<domain::InvocationId>("wrong-call"),
+                                    std::nullopt, std::nullopt}}});
   runtime::ToolRegistry registry;
   REQUIRE(registry.register_tool(declaration(), executor,
                                  runtime::ToolExecutionLimits{1024, 2, 1s}));
   const auto snapshot = snapshot_of(registry);
-  auto initial = request("inference-1", "assistant-1",
-                         snapshot.declarations());
+  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
   testing::ScriptedBackend backend{{
       {initial, tool_call_script(invocation)},
   }};
   WakeCounter wake;
-  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
-                            &wake, {}, {}, snapshot, allow_policy()};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            snapshot,
+                            allow_policy()};
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
   drain_to_run_end(kernel, wake);
-  REQUIRE(std::ranges::none_of(kernel.event_log().events(), [](const auto& event) {
-    return std::holds_alternative<domain::ArtifactCreated>(event.payload) ||
-           std::holds_alternative<domain::ArtifactReferenced>(event.payload);
-  }));
-  REQUIRE(std::ranges::any_of(kernel.event_log().events(), [](const auto& event) {
-    return std::holds_alternative<domain::RunFailed>(event.payload);
-  }));
+  REQUIRE(
+      std::ranges::none_of(kernel.event_log().events(), [](const auto& event) {
+        return std::holds_alternative<domain::ArtifactCreated>(event.payload) ||
+               std::holds_alternative<domain::ArtifactReferenced>(
+                   event.payload);
+      }));
+  REQUIRE(
+      std::ranges::any_of(kernel.event_log().events(), [](const auto& event) {
+        return std::holds_alternative<domain::RunFailed>(event.payload);
+      }));
 }

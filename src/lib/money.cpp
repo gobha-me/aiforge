@@ -18,7 +18,7 @@ constexpr std::size_t kMaximumUnits = 16;
   return {code, std::move(message)};
 }
 
-[[nodiscard]] auto checked_multiply(std::uint64_t &value,
+[[nodiscard]] auto checked_multiply(std::uint64_t& value,
                                     const std::uint64_t multiplier) -> bool {
   if (value != 0 &&
       multiplier > std::numeric_limits<std::uint64_t>::max() / value) {
@@ -53,21 +53,19 @@ constexpr std::size_t kMaximumUnits = 16;
   return character >= '0' && character <= '9';
 }
 
-[[nodiscard]] auto aligned_digits(const DecimalAmount &amount,
+[[nodiscard]] auto aligned_digits(const DecimalAmount& amount,
                                   const std::uint8_t scale) -> std::string {
   auto result = std::to_string(amount.coefficient());
   result.append(scale - amount.scale(), '0');
   return result;
 }
 
-auto left_pad(std::string &value, const std::size_t size) -> void {
-  if (value.size() < size)
-    value.insert(0, size - value.size(), '0');
+auto left_pad(std::string& value, const std::size_t size) -> void {
+  if (value.size() < size) value.insert(0, size - value.size(), '0');
 }
 
 [[nodiscard]] auto plain_decimal(const std::string_view text) -> bool {
-  if (text.empty())
-    return false;
+  if (text.empty()) return false;
   bool saw_dot{};
   bool saw_digit{};
   for (const auto character : text) {
@@ -148,8 +146,7 @@ auto DecimalAmount::from(const std::string_view text)
       return std::unexpected(money_error(MoneyErrorCode::invalid_amount,
                                          "amount exponent is empty"));
     }
-    if (negative_exponent)
-      exponent = -exponent;
+    if (negative_exponent) exponent = -exponent;
   }
   if (position != text.size()) {
     return std::unexpected(money_error(MoneyErrorCode::invalid_amount,
@@ -157,8 +154,7 @@ auto DecimalAmount::from(const std::string_view text)
   }
 
   const auto first_nonzero = digits.find_first_not_of('0');
-  if (first_nonzero == std::string::npos)
-    return DecimalAmount{0, 0};
+  if (first_nonzero == std::string::npos) return DecimalAmount{0, 0};
   digits.erase(0, first_nonzero);
 
   auto scale = static_cast<long long>(fraction_digits) - exponent;
@@ -200,8 +196,7 @@ auto DecimalAmount::from(const std::string_view text)
 
 auto DecimalAmount::to_string() const -> std::string {
   auto digits = std::to_string(m_coefficient);
-  if (m_scale == 0)
-    return digits;
+  if (m_scale == 0) return digits;
   if (digits.size() <= m_scale) {
     return "0." + std::string(m_scale - digits.size(), '0') + digits;
   }
@@ -209,7 +204,7 @@ auto DecimalAmount::to_string() const -> std::string {
   return digits;
 }
 
-auto add(const DecimalAmount &left, const DecimalAmount &right)
+auto add(const DecimalAmount& left, const DecimalAmount& right)
     -> std::expected<DecimalAmount, MoneyError> {
   const auto scale = std::max(left.m_scale, right.m_scale);
   auto left_coefficient = left.m_coefficient;
@@ -231,7 +226,7 @@ auto add(const DecimalAmount &left, const DecimalAmount &right)
   return DecimalAmount{coefficient, normalized_scale};
 }
 
-auto compare(const DecimalAmount &left, const DecimalAmount &right)
+auto compare(const DecimalAmount& left, const DecimalAmount& right)
     -> std::strong_ordering {
   const auto scale = std::max(left.scale(), right.scale());
   auto left_digits = aligned_digits(left, scale);
@@ -239,14 +234,12 @@ auto compare(const DecimalAmount &left, const DecimalAmount &right)
   const auto width = std::max(left_digits.size(), right_digits.size());
   left_pad(left_digits, width);
   left_pad(right_digits, width);
-  if (left_digits < right_digits)
-    return std::strong_ordering::less;
-  if (left_digits > right_digits)
-    return std::strong_ordering::greater;
+  if (left_digits < right_digits) return std::strong_ordering::less;
+  if (left_digits > right_digits) return std::strong_ordering::greater;
   return std::strong_ordering::equal;
 }
 
-auto subtract(const DecimalAmount &left, const DecimalAmount &right)
+auto subtract(const DecimalAmount& left, const DecimalAmount& right)
     -> std::expected<DecimalAmount, MoneyError> {
   if (compare(left, right) == std::strong_ordering::less) {
     return std::unexpected(money_error(MoneyErrorCode::negative_result,
@@ -292,8 +285,7 @@ auto SessionSpendCeiling::from(const std::string_view text)
                     "session spend ceiling must be a plain positive decimal"));
   }
   auto amount = DecimalAmount::from(text);
-  if (!amount)
-    return std::unexpected(std::move(amount.error()));
+  if (!amount) return std::unexpected(std::move(amount.error()));
   return create(*amount);
 }
 
@@ -341,7 +333,7 @@ auto ReportedCost::create(std::vector<MonetaryAmount> amounts)
   return ReportedCost{std::move(amounts)};
 }
 
-auto add(const ReportedCost &left, const ReportedCost &right)
+auto add(const ReportedCost& left, const ReportedCost& right)
     -> std::expected<ReportedCost, MoneyError> {
   std::vector<MonetaryAmount> result;
   result.reserve(left.amounts().size() + right.amounts().size());
@@ -364,12 +356,10 @@ auto add(const ReportedCost &left, const ReportedCost &right)
     }
     auto amount = add(left.amounts()[left_index].amount(),
                       right.amounts()[right_index].amount());
-    if (!amount)
-      return std::unexpected(amount.error());
+    if (!amount) return std::unexpected(amount.error());
     auto combined = MonetaryAmount::create(
         std::string{left.amounts()[left_index].unit()}, *amount);
-    if (!combined)
-      return std::unexpected(combined.error());
+    if (!combined) return std::unexpected(combined.error());
     result.push_back(std::move(*combined));
     ++left_index;
     ++right_index;

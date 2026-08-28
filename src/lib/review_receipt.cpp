@@ -82,10 +82,12 @@ using namespace domain;
 [[nodiscard]] auto valid_digest(const ContentDigest& digest) -> bool {
   return bounded_text(digest.algorithm, 128) &&
          bounded_text(digest.value, 512) &&
-         std::ranges::all_of(digest.algorithm, [](const unsigned char value) {
-           return std::isalnum(value) != 0 || value == '-' || value == '_' ||
-                  value == '.';
-         }) &&
+         std::ranges::all_of(digest.algorithm,
+                             [](const unsigned char value) {
+                               return std::isalnum(value) != 0 ||
+                                      value == '-' || value == '_' ||
+                                      value == '.';
+                             }) &&
          std::ranges::all_of(digest.value, [](const unsigned char value) {
            return std::isxdigit(value) != 0;
          });
@@ -113,7 +115,8 @@ using namespace domain;
          limits.maximum_findings > 0 &&
          limits.maximum_findings <= maximums.maximum_findings &&
          limits.maximum_finding_artifacts > 0 &&
-         limits.maximum_finding_artifacts <= maximums.maximum_finding_artifacts &&
+         limits.maximum_finding_artifacts <=
+             maximums.maximum_finding_artifacts &&
          limits.maximum_text_bytes > 0 &&
          limits.maximum_text_bytes <= maximums.maximum_text_bytes &&
          limits.maximum_metadata_bytes > 0 &&
@@ -145,8 +148,8 @@ template <typename Value>
 }
 
 [[nodiscard]] auto valid_participant(
-    const ReviewParticipantProvenance &participant,
-    const ReviewReceiptLimits &limits) -> bool {
+    const ReviewParticipantProvenance& participant,
+    const ReviewReceiptLimits& limits) -> bool {
   if (!valid_actor(participant.actor, limits)) return false;
   const bool model_authored = participant.model_id.has_value();
   if (model_authored != participant.run_id.has_value() ||
@@ -165,8 +168,8 @@ template <typename Value>
                            limits.maximum_metadata_bytes));
 }
 
-[[nodiscard]] auto valid_source(const RepositorySourceIdentity &source,
-                                const ReviewReceiptLimits &limits) -> bool {
+[[nodiscard]] auto valid_source(const RepositorySourceIdentity& source,
+                                const ReviewReceiptLimits& limits) -> bool {
   if (!valid_digest(source.snapshot.fingerprint) ||
       !valid_digest(source.content_digest) ||
       !bounded_identity(source.relative_path, limits.maximum_metadata_bytes) ||
@@ -216,10 +219,10 @@ template <typename Value>
   return nullptr;
 }
 
-}  // namespace
+} // namespace
 
-auto validate_review_evidence_binding(const ReviewEvidenceBinding &binding,
-    const ReviewReceiptLimits &limits)
+auto validate_review_evidence_binding(const ReviewEvidenceBinding& binding,
+                                      const ReviewReceiptLimits& limits)
     -> std::expected<void, ReviewReceiptError> {
   if (!valid_limits(limits)) {
     return failure(ReviewReceiptErrorCode::invalid_limits,
@@ -303,8 +306,8 @@ auto validate_review_actor(const ReviewActor& actor,
 }
 
 auto validate_review_participant_provenance(
-    const ReviewParticipantProvenance &participant,
-    const ReviewReceiptLimits &limits)
+    const ReviewParticipantProvenance& participant,
+    const ReviewReceiptLimits& limits)
     -> std::expected<void, ReviewReceiptError> {
   if (!valid_limits(limits)) {
     return failure(ReviewReceiptErrorCode::invalid_limits,
@@ -337,10 +340,10 @@ auto validate_review_finding(const ReviewFinding& finding,
 }
 
 auto validate_review_child_result(
-    const ReviewChildResult &result, const ReviewReceiptDraft &draft,
+    const ReviewChildResult& result, const ReviewReceiptDraft& draft,
     const std::span<const EvidenceId> returned_evidence,
     const std::span<const ArtifactId> returned_artifacts,
-    const ReviewReceiptLimits &limits)
+    const ReviewReceiptLimits& limits)
     -> std::expected<void, ReviewReceiptError> {
   static_cast<void>(returned_evidence);
   if (!valid_limits(limits) || result.receipt_id != draft.receipt_id ||
@@ -360,7 +363,7 @@ auto validate_review_child_result(
   }
   std::vector<ReviewFindingId> finding_ids;
   finding_ids.reserve(result.findings.size());
-  for (const auto &finding : result.findings) {
+  for (const auto& finding : result.findings) {
     if (auto valid = validate_review_finding(finding, limits); !valid) {
       auto error = std::move(valid.error());
       error.receipt_id = draft.receipt_id;
@@ -371,7 +374,7 @@ auto validate_review_child_result(
          finding.artifacts.empty()) ||
         (finding.source && !same_source_state(finding.source->snapshot,
                                               result.candidate.snapshot)) ||
-        std::ranges::any_of(finding.artifacts, [&](const auto &artifact) {
+        std::ranges::any_of(finding.artifacts, [&](const auto& artifact) {
           return std::ranges::find(returned_artifacts, artifact) ==
                  returned_artifacts.end();
         })) {
@@ -379,8 +382,8 @@ auto validate_review_child_result(
                      "review finding lacks candidate-bound support",
                      draft.receipt_id);
     }
-    const auto known_verification = [&](const VerificationEvidenceId &id) {
-      return std::ranges::any_of(draft.evidence, [&](const auto &evidence) {
+    const auto known_verification = [&](const VerificationEvidenceId& id) {
+      return std::ranges::any_of(draft.evidence, [&](const auto& evidence) {
         return evidence.verification_evidence_id == id;
       });
     };
@@ -388,7 +391,7 @@ auto validate_review_child_result(
          !known_verification(*finding.verification_evidence_id)) ||
         std::ranges::any_of(
             finding.reproduction_evidence_ids,
-            [&](const auto &id) { return !known_verification(id); })) {
+            [&](const auto& id) { return !known_verification(id); })) {
       return failure(ReviewReceiptErrorCode::invalid_finding,
                      "review finding references unknown evidence",
                      draft.receipt_id);
@@ -440,7 +443,8 @@ auto validate_review_receipt_draft(const ReviewReceiptDraft& draft,
       return std::unexpected(std::move(error));
     }
   }
-  if (draft.evidence.empty() || draft.evidence.size() > limits.maximum_evidence) {
+  if (draft.evidence.empty() ||
+      draft.evidence.size() > limits.maximum_evidence) {
     return failure(ReviewReceiptErrorCode::resource_exhausted,
                    "review evidence count is outside its bounds",
                    draft.receipt_id);
@@ -448,7 +452,8 @@ auto validate_review_receipt_draft(const ReviewReceiptDraft& draft,
   std::vector<ReviewRequirementId> requirement_ids;
   requirement_ids.reserve(draft.evidence.size());
   for (const auto& binding : draft.evidence) {
-    if (auto valid = validate_review_evidence_binding(binding, limits); !valid) {
+    if (auto valid = validate_review_evidence_binding(binding, limits);
+        !valid) {
       auto error = std::move(valid.error());
       error.receipt_id = draft.receipt_id;
       return std::unexpected(std::move(error));
@@ -457,8 +462,8 @@ auto validate_review_receipt_draft(const ReviewReceiptDraft& draft,
         binding.scenario_application_revision != draft.candidate.revision) {
       return failure(
           ReviewReceiptErrorCode::invalid_evidence,
-                     "review scenario was not recorded for the candidate revision",
-                     draft.receipt_id);
+          "review scenario was not recorded for the candidate revision",
+          draft.receipt_id);
     }
     requirement_ids.push_back(binding.requirement_id);
   }
@@ -522,8 +527,8 @@ auto ReviewReceiptProjection::rebuild(std::span<const RunEvent> events,
   return result;
 }
 
-auto ReviewReceiptProjection::apply_in_place(const RunEvent &event,
-    const ReviewReceiptLimits &limits)
+auto ReviewReceiptProjection::apply_in_place(const RunEvent& event,
+                                             const ReviewReceiptLimits& limits)
     -> std::expected<void, ReviewReceiptError> {
   if (!valid_limits(limits)) {
     return failure(ReviewReceiptErrorCode::invalid_limits,
@@ -562,7 +567,8 @@ auto ReviewReceiptProjection::apply_in_place(const RunEvent &event,
   } else if (payload_receipt) {
     if (!m_draft) {
       return failure(ReviewReceiptErrorCode::invalid_transition,
-                     "review facts require a drafted receipt", *payload_receipt);
+                     "review facts require a drafted receipt",
+                     *payload_receipt);
     }
     if (const auto* requested = std::get_if<ReviewRequested>(&event.payload)) {
       if (m_review_requested ||
@@ -592,7 +598,7 @@ auto ReviewReceiptProjection::apply_in_place(const RunEvent &event,
                        "review finding resolution is invalid", m_receipt_id);
       }
       const auto finding =
-          std::ranges::find_if(m_findings, [&](const auto &value) {
+          std::ranges::find_if(m_findings, [&](const auto& value) {
             return value.finding.finding_id == resolved->finding_id;
           });
       if (finding == m_findings.end() || !finding->open) {
@@ -611,7 +617,9 @@ auto ReviewReceiptProjection::apply_in_place(const RunEvent &event,
         return failure(ReviewReceiptErrorCode::invalid_transition,
                        "review verdict is invalid", m_receipt_id);
       }
-      m_verdicts.push_back({event.metadata.event_id, recorded->verdict, recorded->reviewer, recorded->reviewer_provenance, true});
+      m_verdicts.push_back({event.metadata.event_id, recorded->verdict,
+                            recorded->reviewer, recorded->reviewer_provenance,
+                            true});
     } else if (const auto* revoked =
                    std::get_if<ReviewVerdictRevoked>(&event.payload)) {
       if (!valid_actor(revoked->revoked_by, limits) ||
@@ -621,13 +629,14 @@ auto ReviewReceiptProjection::apply_in_place(const RunEvent &event,
       }
       const auto verdict =
           std::ranges::find(m_verdicts, revoked->verdict_event_id,
-          &ProjectedReviewVerdict::event_id);
+                            &ProjectedReviewVerdict::event_id);
       if (verdict == m_verdicts.end() || !verdict->active) {
         return failure(ReviewReceiptErrorCode::unknown_verdict,
                        "review verdict is unknown or already revoked",
                        m_receipt_id);
       }
-      if (verdict->verdict == ReviewVerdict::approved) m_approval_revoked = true;
+      if (verdict->verdict == ReviewVerdict::approved)
+        m_approval_revoked = true;
       verdict->active = false;
     } else if (const auto* recorded =
                    std::get_if<ReviewOverrideRecorded>(&event.payload)) {
@@ -637,7 +646,8 @@ auto ReviewReceiptProjection::apply_in_place(const RunEvent &event,
             return value.value.override_id == recorded->override.override_id;
           })) {
         return failure(ReviewReceiptErrorCode::invalid_transition,
-                       "review override is invalid or duplicated", m_receipt_id);
+                       "review override is invalid or duplicated",
+                       m_receipt_id);
       }
       m_overrides.push_back({recorded->override, true});
     } else if (const auto* revoked =
@@ -648,7 +658,7 @@ auto ReviewReceiptProjection::apply_in_place(const RunEvent &event,
                        "review override revocation is invalid", m_receipt_id);
       }
       const auto override =
-          std::ranges::find_if(m_overrides, [&](const auto &value) {
+          std::ranges::find_if(m_overrides, [&](const auto& value) {
             return value.value.override_id == revoked->override_id;
           });
       if (override == m_overrides.end() || !override->active) {
@@ -665,4 +675,4 @@ auto ReviewReceiptProjection::apply_in_place(const RunEvent &event,
   return {};
 }
 
-}  // namespace aiforge::repository
+} // namespace aiforge::repository

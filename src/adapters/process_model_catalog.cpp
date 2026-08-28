@@ -5,7 +5,8 @@
 namespace aiforge::adapters {
 
 ProcessModelCatalog::ProcessModelCatalog(std::filesystem::path cache_path)
-    : m_cache(std::move(cache_path)), m_service(m_source, &m_cache) {}
+    : m_cache(std::move(cache_path)), m_service(m_source, &m_cache) {
+}
 
 auto ProcessModelCatalog::create()
     -> std::expected<std::unique_ptr<ProcessModelCatalog>,
@@ -22,4 +23,4 @@ auto ProcessModelCatalog::create()
   }
 }
 
-}  // namespace aiforge::adapters
+} // namespace aiforge::adapters

@@ -20,13 +20,12 @@ namespace {
 using namespace aiforge;
 using Json = nlohmann::json;
 
-template <typename Id>
-auto id(std::string value) -> Id {
+template <typename Id> auto id(std::string value) -> Id {
   return Id::from(std::move(value)).value();
 }
 
 class TemporaryDirectory final {
-public:
+ public:
   TemporaryDirectory() {
     auto pattern =
         (std::filesystem::temp_directory_path() / "aiforge-plan-XXXXXX")
@@ -47,12 +46,12 @@ public:
     return m_path;
   }
 
-private:
+ private:
   std::filesystem::path m_path;
 };
 
 class StateEnvironment final {
-public:
+ public:
   explicit StateEnvironment(const std::filesystem::path& path) {
     if (const auto* existing = std::getenv("XDG_STATE_HOME")) {
       m_previous = existing;
@@ -68,7 +67,7 @@ public:
     }
   }
 
-private:
+ private:
   std::optional<std::string> m_previous;
 };
 
@@ -217,13 +216,13 @@ TEST_CASE("process plan durably approves promotes and resolves an exact task",
   std::istringstream approval_input{
       R"({"schema_version":1,"request_id":"approve","operation":"decide","plan_id":"plan","revision_id":"revision","decision":"approved"})"
       "\n"};
-  cli::CommandEnvironment approval_environment{approval_input, false, false,
-                                                false, {}};
+  cli::CommandEnvironment approval_environment{
+      approval_input, false, false, false, {}};
   std::ostringstream approval_output;
   std::ostringstream error;
-  auto result = command.execute(
-      {cli::PlanCommand::SessionMode::resume, session_id}, approval_environment,
-      approval_output, error);
+  auto result =
+      command.execute({cli::PlanCommand::SessionMode::resume, session_id},
+                      approval_environment, approval_output, error);
   REQUIRE(result);
   auto lines = output_lines(approval_output.str());
   REQUIRE(lines.size() == 1);
@@ -233,30 +232,26 @@ TEST_CASE("process plan durably approves promotes and resolves an exact task",
   const auto repository_id =
       lines.front()["state"]["repository_id"].get<std::string>();
 
-  const Json promotion{{"schema_version", 1},
-                       {"request_id", "promote"},
-                       {"operation", "promote"},
-                       {"run_id", "promotion-run"},
-                       {"item_id", "backlog-item"},
-                       {"repository_id", repository_id},
-                       {"plan_id", "plan"},
-                       {"revision_id", "revision"},
-                       {"task_id", "task"}};
+  const Json promotion{
+      {"schema_version", 1},       {"request_id", "promote"},
+      {"operation", "promote"},    {"run_id", "promotion-run"},
+      {"item_id", "backlog-item"}, {"repository_id", repository_id},
+      {"plan_id", "plan"},         {"revision_id", "revision"},
+      {"task_id", "task"}};
   std::istringstream promotion_input{promotion.dump() + '\n'};
-  cli::CommandEnvironment promotion_environment{promotion_input, false, false,
-                                                 false, {}};
+  cli::CommandEnvironment promotion_environment{
+      promotion_input, false, false, false, {}};
   std::ostringstream promotion_output;
-  result = command.execute(
-      {cli::PlanCommand::SessionMode::resume, session_id},
-      promotion_environment, promotion_output, error);
+  result = command.execute({cli::PlanCommand::SessionMode::resume, session_id},
+                           promotion_environment, promotion_output, error);
   REQUIRE(result);
   lines = output_lines(promotion_output.str());
   REQUIRE(lines.size() == 1);
   REQUIRE(lines.front()["state"]["project_backlog"].size() == 1);
   REQUIRE(lines.front()["state"]["project_backlog"][0]["status"] == "open");
-  const auto status_event_id = lines.front()["state"]["project_backlog"][0]
-                                     ["status_event_id"]
-                                         .get<std::string>();
+  const auto status_event_id =
+      lines.front()["state"]["project_backlog"][0]["status_event_id"]
+          .get<std::string>();
 
   const Json resolution{{"schema_version", 1},
                         {"request_id", "resolve"},
@@ -268,18 +263,16 @@ TEST_CASE("process plan durably approves promotes and resolves an exact task",
                         {"reason", "implemented"},
                         {"expected_status_event_id", status_event_id}};
   std::istringstream resolution_input{resolution.dump() + '\n'};
-  cli::CommandEnvironment resolution_environment{resolution_input, false,
-                                                  false, false, {}};
+  cli::CommandEnvironment resolution_environment{
+      resolution_input, false, false, false, {}};
   std::ostringstream resolution_output;
-  result = command.execute(
-      {cli::PlanCommand::SessionMode::resume, session_id},
-      resolution_environment, resolution_output, error);
+  result = command.execute({cli::PlanCommand::SessionMode::resume, session_id},
+                           resolution_environment, resolution_output, error);
   REQUIRE(result);
   lines = output_lines(resolution_output.str());
   REQUIRE(lines.size() == 1);
   REQUIRE(lines.front()["state"]["project_backlog"].size() == 1);
-  REQUIRE(lines.front()["state"]["project_backlog"][0]["status"] ==
-          "resolved");
+  REQUIRE(lines.front()["state"]["project_backlog"][0]["status"] == "resolved");
   REQUIRE(lines.front()["state"]["project_backlog"][0]["reason"] ==
           "implemented");
   REQUIRE(error.str().empty());

@@ -5,7 +5,7 @@
 namespace aiforge::adapters {
 
 class ProcessPlanCommand final : public cli::PlanCommand {
-public:
+ public:
   [[nodiscard]] auto execute(Request request,
                              cli::CommandEnvironment& environment,
                              std::ostream& output, std::ostream& error)

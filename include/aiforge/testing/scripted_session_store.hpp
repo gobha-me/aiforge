@@ -38,7 +38,7 @@ struct ReplayEventsCall {
 struct ReplayProjectBacklogCall {
   domain::RepositoryId repository_id;
   std::size_t maximum_sessions{};
-  auto operator==(const ReplayProjectBacklogCall &) const -> bool = default;
+  auto operator==(const ReplayProjectBacklogCall&) const -> bool = default;
 };
 
 using SessionStoreCall =
@@ -53,7 +53,8 @@ using SessionStoreOutcome =
     std::variant<VoidSessionStoreResult, storage::SessionInfo,
                  std::vector<storage::SessionInfo>,
                  std::vector<domain::RunEvent>,
-                 std::vector<domain::ProjectBacklogSessionEvents>, storage::SessionStoreError>;
+                 std::vector<domain::ProjectBacklogSessionEvents>,
+                 storage::SessionStoreError>;
 
 struct SessionStoreExchange {
   SessionStoreCall expected_call;
@@ -65,31 +66,29 @@ class ScriptedSessionStore final : public storage::SessionStore {
  public:
   explicit ScriptedSessionStore(std::vector<SessionStoreExchange> exchanges);
 
-  [[nodiscard]] auto create_session(
-      storage::SessionCreate session, std::stop_token stop_token = {})
+  [[nodiscard]] auto create_session(storage::SessionCreate session,
+                                    std::stop_token stop_token = {})
       -> std::expected<void, storage::SessionStoreError> override;
-  [[nodiscard]] auto open_session(
-      const domain::SessionId& session_id, std::stop_token stop_token = {})
+  [[nodiscard]] auto open_session(const domain::SessionId& session_id,
+                                  std::stop_token stop_token = {})
       -> std::expected<storage::SessionInfo,
                        storage::SessionStoreError> override;
-  [[nodiscard]] auto list_sessions(
-      std::size_t limit, std::stop_token stop_token = {})
+  [[nodiscard]] auto list_sessions(std::size_t limit,
+                                   std::stop_token stop_token = {})
       -> std::expected<std::vector<storage::SessionInfo>,
                        storage::SessionStoreError> override;
-  [[nodiscard]] auto append_events(
-      const domain::SessionId& session_id,
-      std::span<const domain::RunEvent> events,
-      std::stop_token stop_token = {})
+  [[nodiscard]] auto append_events(const domain::SessionId& session_id,
+                                   std::span<const domain::RunEvent> events,
+                                   std::stop_token stop_token = {})
       -> std::expected<void, storage::SessionStoreError> override;
-  [[nodiscard]] auto replay_events(
-      const domain::SessionId& session_id, std::stop_token stop_token = {})
+  [[nodiscard]] auto replay_events(const domain::SessionId& session_id,
+                                   std::stop_token stop_token = {})
       -> std::expected<std::vector<domain::RunEvent>,
                        storage::SessionStoreError> override;
 
-  [[nodiscard]] auto
-  replay_project_backlog(const domain::RepositoryId &repository_id,
-                         std::size_t maximum_sessions,
-                         std::stop_token stop_token = {})
+  [[nodiscard]] auto replay_project_backlog(
+      const domain::RepositoryId& repository_id, std::size_t maximum_sessions,
+      std::stop_token stop_token = {})
       -> std::expected<std::vector<domain::ProjectBacklogSessionEvents>,
                        storage::SessionStoreError> override;
 
@@ -106,4 +105,4 @@ class ScriptedSessionStore final : public storage::SessionStore {
   std::size_t m_next_exchange{};
 };
 
-}  // namespace aiforge::testing
+} // namespace aiforge::testing
