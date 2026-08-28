@@ -1,13 +1,5 @@
 #pragma once
 
-#include <cstddef>
-#include <expected>
-#include <functional>
-#include <memory>
-#include <optional>
-#include <string>
-#include <vector>
-
 #include <aiforge/backend/backend.hpp>
 #include <aiforge/domain/event_log.hpp>
 #include <aiforge/domain/plan_projection.hpp>
@@ -18,6 +10,13 @@
 #include <aiforge/runtime/tool_policy.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/storage/session_store.hpp>
+#include <cstddef>
+#include <expected>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
 namespace aiforge::runtime {
 
@@ -175,6 +174,12 @@ struct ChildRunStart {
   std::vector<domain::Effect> requested_effects;
   std::vector<domain::CapabilityScope> requested_scopes;
   std::uint32_t attempt{1};
+  struct ReviewRequest {
+    domain::ReviewReceiptDraft draft;
+    domain::ReviewActor requested_by;
+    auto operator==(const ReviewRequest &) const -> bool = default;
+  };
+  std::optional<ReviewRequest> review;
   auto operator==(const ChildRunStart&) const -> bool = default;
 };
 
@@ -257,8 +262,7 @@ class RunKernel final {
   [[nodiscard]] auto revise_plan(const domain::RunId& run_id,
                                  domain::PlanRevision revision)
       -> std::expected<void, RunKernelError>;
-  [[nodiscard]] auto decide_plan(
-      const domain::RunId& run_id, domain::PlanRevisionDecision decision,
+  [[nodiscard]] auto decide_plan(const domain::RunId &run_id, domain::PlanRevisionDecision decision,
       PlanApprovalEnvironment environment = {})
       -> std::expected<PlanDecisionOutcome, RunKernelError>;
   [[nodiscard]] auto revalidate_plan_approval(
@@ -278,23 +282,22 @@ class RunKernel final {
       const domain::RunId& run_id,
       std::optional<std::string> reason = std::nullopt)
       -> std::expected<void, RunKernelError>;
-  [[nodiscard]] auto decide_approval(
-      const domain::RunId& run_id,
+  [[nodiscard]] auto decide_approval(const domain::RunId &run_id,
       const domain::InvocationId& invocation_id,
       ToolApprovalResolution resolution)
       -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto answer_questions(
-      const domain::RunId& run_id,
-      const domain::InvocationId& invocation_id,
+      const domain::RunId &run_id,
+      const domain::InvocationId &invocation_id,
       std::vector<domain::QuestionAnswer> answers)
       -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto cancel_questions(
-      const domain::RunId& run_id,
-      const domain::InvocationId& invocation_id,
+      const domain::RunId &run_id,
+      const domain::InvocationId &invocation_id,
       std::optional<std::string> reason = std::nullopt)
       -> std::expected<void, RunKernelError>;
-  [[nodiscard]] auto
-  continue_run(const domain::RunId &run_id, backend::BackendRequest request,
+  [[nodiscard]] auto continue_run(
+      const domain::RunId &run_id, backend::BackendRequest request,
                std::optional<domain::PricingObservation> pricing_observation =
                    std::nullopt) -> std::expected<void, RunKernelError>;
 
@@ -317,9 +320,8 @@ class RunKernel final {
       -> std::optional<PendingQuestionInput>;
   [[nodiscard]] auto pending_plan_decision() const
       -> std::optional<PendingPlanDecision>;
-  [[nodiscard]] auto plan_projection(
-      const domain::PlanId& plan_id) const noexcept
-      -> const domain::PlanGraphProjection*;
+  [[nodiscard]] auto plan_projection(const domain::PlanId &plan_id) const noexcept
+      -> const domain::PlanGraphProjection *;
   [[nodiscard]] auto active_session_tasks() const
       -> std::vector<ActiveSessionTask>;
   [[nodiscard]] auto

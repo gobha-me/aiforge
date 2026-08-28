@@ -1,5 +1,7 @@
 #pragma once
 
+#include <aiforge/domain/events.hpp>
+
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -8,8 +10,6 @@
 #include <span>
 #include <string>
 #include <vector>
-
-#include <aiforge/domain/events.hpp>
 
 namespace aiforge::repository {
 
@@ -72,6 +72,7 @@ struct ProjectedReviewVerdict {
   domain::EventId event_id;
   domain::ReviewVerdict verdict{domain::ReviewVerdict::rejected};
   domain::ReviewActor reviewer;
+  std::optional<domain::ReviewParticipantProvenance> reviewer_provenance;
   bool active{true};
   auto operator==(const ProjectedReviewVerdict&) const -> bool = default;
 };
@@ -92,19 +93,31 @@ struct ProjectedReviewOverride {
     const ReviewReceiptLimits& limits = {})
     -> std::expected<void, ReviewReceiptError>;
 
-[[nodiscard]] auto validate_review_actor(
-    const domain::ReviewActor& actor,
+[[nodiscard]] auto validate_review_actor(const domain::ReviewActor &actor,
     const ReviewReceiptLimits& limits = {})
+    -> std::expected<void, ReviewReceiptError>;
+
+[[nodiscard]] auto validate_review_participant_provenance(
+    const domain::ReviewParticipantProvenance &participant,
+    const ReviewReceiptLimits &limits = {})
     -> std::expected<void, ReviewReceiptError>;
 
 [[nodiscard]] auto validate_review_finding(
     const domain::ReviewFinding& finding,
+    const ReviewReceiptLimits &limits = {})
+    -> std::expected<void, ReviewReceiptError>;
+
+[[nodiscard]] auto validate_review_child_result(
+    const domain::ReviewChildResult &result,
+    const domain::ReviewReceiptDraft &draft,
+    std::span<const domain::EvidenceId> returned_evidence,
+    std::span<const domain::ArtifactId> returned_artifacts,
     const ReviewReceiptLimits& limits = {})
     -> std::expected<void, ReviewReceiptError>;
 
 [[nodiscard]] auto validate_review_override(
-    const domain::ReviewOverride& value,
-    const ReviewReceiptLimits& limits = {})
+    const domain::ReviewOverride &value,
+    const ReviewReceiptLimits &limits = {})
     -> std::expected<void, ReviewReceiptError>;
 
 [[nodiscard]] auto validate_review_evidence_binding(
@@ -114,34 +127,31 @@ struct ProjectedReviewOverride {
 
 class ReviewReceiptProjection final {
  public:
-  [[nodiscard]] auto apply(
-      const domain::RunEvent& event,
+  [[nodiscard]] auto apply(const domain::RunEvent &event,
       const ReviewReceiptLimits& limits = {})
       -> std::expected<void, ReviewReceiptError>;
 
-  [[nodiscard]] static auto rebuild(
-      std::span<const domain::RunEvent> events,
+  [[nodiscard]] static auto rebuild(std::span<const domain::RunEvent> events,
       const ReviewReceiptLimits& limits = {})
       -> std::expected<ReviewReceiptProjection, ReviewReceiptError>;
 
   [[nodiscard]] auto receipt_id() const noexcept
-      -> const std::optional<domain::ReviewReceiptId>& { return m_receipt_id; }
+      -> const std::optional<domain::ReviewReceiptId> & { return m_receipt_id; }
   [[nodiscard]] auto draft() const noexcept
-      -> const std::optional<domain::ReviewReceiptDraft>& { return m_draft; }
+      -> const std::optional<domain::ReviewReceiptDraft> & { return m_draft; }
   [[nodiscard]] auto state() const noexcept -> ReviewReceiptState;
   [[nodiscard]] auto findings() const noexcept
-      -> const std::vector<ProjectedReviewFinding>& { return m_findings; }
+      -> const std::vector<ProjectedReviewFinding> & { return m_findings; }
   [[nodiscard]] auto verdicts() const noexcept
-      -> const std::vector<ProjectedReviewVerdict>& { return m_verdicts; }
+      -> const std::vector<ProjectedReviewVerdict> & { return m_verdicts; }
   [[nodiscard]] auto overrides() const noexcept
-      -> const std::vector<ProjectedReviewOverride>& { return m_overrides; }
+      -> const std::vector<ProjectedReviewOverride> & { return m_overrides; }
   [[nodiscard]] auto last_sequence() const noexcept -> std::uint64_t {
     return m_last_sequence;
   }
 
  private:
-  [[nodiscard]] auto apply_in_place(
-      const domain::RunEvent& event,
+  [[nodiscard]] auto apply_in_place(const domain::RunEvent &event,
       const ReviewReceiptLimits& limits)
       -> std::expected<void, ReviewReceiptError>;
 

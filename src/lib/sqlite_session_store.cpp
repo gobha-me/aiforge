@@ -1,3 +1,9 @@
+#include <fcntl.h>
+#include <sqlite3.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/domain/plan_projection.hpp>
 #include <aiforge/repository/review_receipt.hpp>
@@ -10,7 +16,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
-#include <fcntl.h>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -18,12 +23,8 @@
 #include <optional>
 #include <ranges>
 #include <set>
-#include <sqlite3.h>
 #include <string>
 #include <string_view>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -120,9 +121,9 @@ template <typename IdType>
 }
 
 template <typename Enum>
-[[nodiscard]] auto enum_value(const std::string_view name,
-                              const std::initializer_list<
-                                  std::pair<std::string_view, Enum>> values)
+[[nodiscard]] auto enum_value(
+    const std::string_view name,
+                              const std::initializer_list<std::pair<std::string_view, Enum>> values)
     -> Enum {
   for (const auto& [candidate, value] : values) {
     if (candidate == name) return value;
@@ -143,8 +144,7 @@ template <typename Enum>
 
 [[nodiscard]] auto parse_role(const Json& value) -> domain::Role {
   const auto name = value.get<std::string>();
-  return enum_value<domain::Role>(
-      name, {{"system", domain::Role::system}, {"user", domain::Role::user},
+  return enum_value<domain::Role>(name, {{"system", domain::Role::system}, {"user", domain::Role::user},
              {"assistant", domain::Role::assistant}, {"tool", domain::Role::tool},
              {"evidence", domain::Role::evidence}});
 }
@@ -241,8 +241,7 @@ template <typename Enum>
              {"require_approval", domain::PolicyDecision::require_approval}});
 }
 
-[[nodiscard]] auto policy_source_name(
-    const domain::PolicyDecisionSource value) -> std::string_view {
+[[nodiscard]] auto policy_source_name(const domain::PolicyDecisionSource value) -> std::string_view {
   switch (value) {
     case domain::PolicyDecisionSource::fallback: return "fallback";
     case domain::PolicyDecisionSource::permission_profile:
@@ -352,8 +351,7 @@ template <typename Enum>
 
 [[nodiscard]] auto content_json(const domain::ContentBlock& block) -> Json {
   return std::visit(
-      Overloaded{
-          [](const domain::TextBlock& value) -> Json {
+      Overloaded{[](const domain::TextBlock &value) -> Json {
             return {{"kind", "text"}, {"text", value.text}};
           },
           [](const domain::StructuredDataBlock& value) -> Json {
@@ -380,7 +378,8 @@ template <typename Enum>
   const auto kind = value.at("kind").get<std::string>();
   if (kind == "text") return domain::TextBlock{value.at("text").get<std::string>()};
   if (kind == "structured") {
-    return domain::StructuredDataBlock{value.at("media_type").get<std::string>(),
+    return domain::StructuredDataBlock{
+        value.at("media_type").get<std::string>(),
                                        value.at("data").get<std::string>()};
   }
   if (kind == "citation") {
@@ -393,12 +392,14 @@ template <typename Enum>
         parse_optional_string(value.at("label"))};
   }
   if (kind == "unknown") {
-    return domain::UnknownContentBlock{value.at("type_name").get<std::string>()};
+    return domain::UnknownContentBlock{
+        value.at("type_name").get<std::string>()};
   }
   throw CodecFailure{"unknown content block kind"};
 }
 
-[[nodiscard]] auto content_list_json(const std::vector<domain::ContentBlock>& values)
+[[nodiscard]] auto content_list_json(
+    const std::vector<domain::ContentBlock> &values)
     -> Json {
   auto result = Json::array();
   for (const auto& value : values) result.push_back(content_json(value));
@@ -433,7 +434,7 @@ template <typename Enum>
           {"retryable", error.retryable}};
 }
 
-[[nodiscard]] auto parse_domain_error(const Json& value) -> domain::DomainError {
+[[nodiscard]] auto parse_domain_error(const Json &value) -> domain::DomainError {
   return {parse_error_code(value.at("code")),
           value.at("message").get<std::string>(),
           value.at("retryable").get<bool>()};
@@ -470,8 +471,8 @@ template <typename Enum>
   std::vector<domain::MonetaryAmount> amounts;
   amounts.reserve(values.size());
   for (const auto& item : values) {
-    auto decimal = domain::DecimalAmount::from(
-        item.at("amount").get<std::string>());
+    auto decimal =
+        domain::DecimalAmount::from(item.at("amount").get<std::string>());
     if (!decimal) throw CodecFailure{"reported cost amount is invalid"};
     auto amount = domain::MonetaryAmount::create(
         item.at("unit").get<std::string>(), *decimal);
@@ -520,13 +521,13 @@ template <typename Enum>
   return result;
 }
 
-[[nodiscard]] auto effects_json(const std::vector<domain::Effect>& effects) -> Json {
+[[nodiscard]] auto effects_json(const std::vector<domain::Effect> &effects) -> Json {
   auto result = Json::array();
   for (const auto effect : effects) result.push_back(effect_name(effect));
   return result;
 }
 
-[[nodiscard]] auto parse_effects(const Json& values) -> std::vector<domain::Effect> {
+[[nodiscard]] auto parse_effects(const Json &values) -> std::vector<domain::Effect> {
   if (!values.is_array()) throw CodecFailure{"effect list is invalid"};
   std::vector<domain::Effect> result;
   result.reserve(values.size());
@@ -539,7 +540,8 @@ template <typename Enum>
           {"value", scope.value}};
 }
 
-[[nodiscard]] auto scopes_json(const std::vector<domain::CapabilityScope>& scopes)
+[[nodiscard]] auto scopes_json(
+    const std::vector<domain::CapabilityScope> &scopes)
     -> Json {
   auto result = Json::array();
   for (const auto& scope : scopes) result.push_back(scope_json(scope));
@@ -563,7 +565,8 @@ template <typename Enum>
     -> Json {
   auto options = Json::array();
   for (const auto& option : question.options) {
-    options.push_back({{"option_id", option.option_id}, {"label", option.label},
+    options.push_back(
+        {{"option_id", option.option_id}, {"label", option.label},
                        {"description", optional_string_json(option.description)},
                        {"recommended", option.recommended}});
   }
@@ -606,8 +609,9 @@ template <typename Enum>
                 ? std::optional<std::size_t>{1}
                 : std::optional<std::size_t>{},
             free_form
-                ? std::optional<domain::QuestionOtherInput>{
-                      domain::QuestionOtherInput{"Other", std::nullopt, 4096}}
+                ? std::optional<
+                      domain::QuestionOtherInput>{domain::QuestionOtherInput{
+                      "Other", std::nullopt, 4096}}
                 : std::nullopt};
   }
   std::optional<std::size_t> maximum;
@@ -672,8 +676,8 @@ template <typename Enum>
           value.at("byte_size").get<std::uint64_t>()};
 }
 
-[[nodiscard]] auto
-optional_decimal_json(const std::optional<domain::DecimalAmount> &value)
+[[nodiscard]] auto optional_decimal_json(
+    const std::optional<domain::DecimalAmount> &value)
     -> Json {
   return value ? Json(value->to_string()) : Json(nullptr);
 }
@@ -698,8 +702,8 @@ optional_decimal_json(const std::optional<domain::DecimalAmount> &value)
           parse_optional_decimal(value.at("diem"))};
 }
 
-[[nodiscard]] auto
-optional_price_rate_json(const std::optional<domain::PriceRate> &rate) -> Json {
+[[nodiscard]] auto optional_price_rate_json(
+    const std::optional<domain::PriceRate> &rate) -> Json {
   return rate ? price_rate_json(*rate) : Json(nullptr);
 }
 
@@ -726,8 +730,8 @@ optional_price_rate_json(const std::optional<domain::PriceRate> &rate) -> Json {
           parse_optional_price_rate(value.at("cache_write"))};
 }
 
-[[nodiscard]] auto
-pricing_origin_name(const domain::PricingCatalogOrigin origin)
+[[nodiscard]] auto pricing_origin_name(
+    const domain::PricingCatalogOrigin origin)
     -> std::string_view {
   switch (origin) {
   case domain::PricingCatalogOrigin::live:
@@ -752,8 +756,8 @@ pricing_origin_name(const domain::PricingCatalogOrigin origin)
   throw CodecFailure{"pricing catalog origin is invalid"};
 }
 
-[[nodiscard]] auto
-pricing_observation_json(const domain::PricingObservation &observation)
+[[nodiscard]] auto pricing_observation_json(
+    const domain::PricingObservation &observation)
     -> Json {
   Json extended = nullptr;
   if (observation.pricing.extended) {
@@ -956,7 +960,8 @@ pricing_observation_json(const domain::PricingObservation &observation)
 [[nodiscard]] auto parse_plan_decision_source(const Json& value)
     -> domain::PlanDecisionSource {
   using Source = domain::PlanDecisionSource;
-  return enum_value<Source>(value.get<std::string>(),
+  return enum_value<Source>(
+      value.get<std::string>(),
                             {{"user", Source::user},
                              {"policy", Source::policy}});
 }
@@ -1007,8 +1012,8 @@ pricing_observation_json(const domain::PricingObservation &observation)
           value.at("value").get<std::string>()};
 }
 
-[[nodiscard]] auto
-session_task_outcome_name(const domain::SessionTaskOutcome outcome)
+[[nodiscard]] auto session_task_outcome_name(
+    const domain::SessionTaskOutcome outcome)
     -> std::string_view {
   using Outcome = domain::SessionTaskOutcome;
   switch (outcome) {
@@ -1043,7 +1048,7 @@ session_task_outcome_name(const domain::SessionTaskOutcome outcome)
 template <typename IdType>
 [[nodiscard]] auto id_list_json(const std::vector<IdType>& values) -> Json {
   auto result = Json::array();
-  for (const auto& value : values)
+  for (const auto &value : values)
     result.push_back(id_text(value));
   return result;
 }
@@ -1054,7 +1059,7 @@ template <typename IdType>
     throw CodecFailure{"identity list is invalid"};
   std::vector<IdType> result;
   result.reserve(values.size());
-  for (const auto& value : values)
+  for (const auto &value : values)
     result.push_back(parse_id<IdType>(value));
   return result;
 }
@@ -1078,8 +1083,8 @@ template <typename IdType>
       std::chrono::milliseconds{value.at("timeout_ms").get<std::int64_t>()}};
 }
 
-[[nodiscard]] auto
-child_run_context_json(const domain::ChildRunContextBinding& context) -> Json {
+[[nodiscard]] auto child_run_context_json(
+    const domain::ChildRunContextBinding &context) -> Json {
   return {{"parcel_id", id_text(context.parcel_id)},
           {"target_snapshot", snapshot_json(context.target_snapshot)},
           {"evidence_ids", id_list_json(context.evidence_ids)},
@@ -1096,8 +1101,8 @@ child_run_context_json(const domain::ChildRunContextBinding& context) -> Json {
           value.at("estimated_tokens").get<std::uint64_t>()};
 }
 
-[[nodiscard]] auto
-child_run_descriptor_json(const domain::ChildRunDescriptor& descriptor,
+[[nodiscard]] auto child_run_descriptor_json(
+    const domain::ChildRunDescriptor &descriptor,
                           const bool include_attempt)
     -> Json {
   if (!domain::validate_child_run_descriptor(descriptor)) {
@@ -1112,6 +1117,9 @@ child_run_descriptor_json(const domain::ChildRunDescriptor& descriptor,
               {"effects", effects_json(descriptor.effects)},
               {"capability_scopes", scopes_json(descriptor.capability_scopes)}};
   if (include_attempt) result["attempt"] = descriptor.attempt;
+  if (descriptor.review_receipt_id) {
+    result["review_receipt_id"] = id_text(*descriptor.review_receipt_id);
+  }
   return result;
 }
 
@@ -1127,15 +1135,19 @@ child_run_descriptor_json(const domain::ChildRunDescriptor& descriptor,
       parse_effects(value.at("effects")),
       parse_scopes(value.at("capability_scopes")),
       value.contains("attempt") ? value.at("attempt").get<std::uint32_t>()
-                                : 1U};
+                                : 1U,
+      value.contains("review_receipt_id")
+          ? parse_optional_id<domain::ReviewReceiptId>(
+                value.at("review_receipt_id"))
+          : std::nullopt};
   if (!domain::validate_child_run_descriptor(result)) {
     throw CodecFailure{"child-run descriptor is invalid"};
   }
   return result;
 }
 
-[[nodiscard]] auto
-session_task_result_json(const domain::SessionTaskResult& result) -> Json {
+[[nodiscard]] auto session_task_result_json(
+    const domain::SessionTaskResult &result) -> Json {
   const domain::ChildRunBudget shape_budget{
       std::numeric_limits<std::uint32_t>::max(),
       std::numeric_limits<std::uint32_t>::max(),
@@ -1235,8 +1247,8 @@ session_task_result_json(const domain::SessionTaskResult& result) -> Json {
   return task;
 }
 
-[[nodiscard]] auto
-project_backlog_source_name(const domain::ProjectBacklogDecisionSource source)
+[[nodiscard]] auto project_backlog_source_name(
+    const domain::ProjectBacklogDecisionSource source)
     -> std::string_view {
   switch (source) {
   case domain::ProjectBacklogDecisionSource::user:
@@ -1255,8 +1267,8 @@ project_backlog_source_name(const domain::ProjectBacklogDecisionSource source)
       {{"user", Source::user}, {"policy", Source::policy}});
 }
 
-[[nodiscard]] auto
-project_backlog_status_name(const domain::ProjectBacklogItemStatus status)
+[[nodiscard]] auto project_backlog_status_name(
+    const domain::ProjectBacklogItemStatus status)
     -> std::string_view {
   switch (status) {
   case domain::ProjectBacklogItemStatus::open:
@@ -1275,8 +1287,8 @@ project_backlog_status_name(const domain::ProjectBacklogItemStatus status)
       {{"open", Status::open}, {"resolved", Status::resolved}});
 }
 
-[[nodiscard]] auto
-project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
+[[nodiscard]] auto project_backlog_item_json(
+    const domain::ProjectBacklogItem &item) -> Json {
   if (!domain::validate_project_backlog_item(item)) {
     throw CodecFailure{"project-backlog item is invalid"};
   }
@@ -1348,7 +1360,8 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
   for (const auto& task : revision.tasks) {
     tasks.push_back(plan_task_json(task));
   }
-  Json result{{"plan_id", id_text(revision.plan_id)},
+  Json result{
+      {"plan_id", id_text(revision.plan_id)},
               {"revision_id", id_text(revision.revision_id)},
               {"supersedes_revision_id",
                optional_id_json(revision.supersedes_revision_id)},
@@ -1505,6 +1518,36 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
        {"rejected", domain::ReviewVerdict::rejected}});
 }
 
+[[nodiscard]] auto review_finding_severity_name(
+    const domain::ReviewFindingSeverity value) -> std::string {
+  switch (value) {
+    case domain::ReviewFindingSeverity::low:
+      return "low";
+    case domain::ReviewFindingSeverity::medium:
+      return "medium";
+    case domain::ReviewFindingSeverity::high:
+      return "high";
+    case domain::ReviewFindingSeverity::critical:
+      return "critical";
+  }
+  throw CodecFailure{"invalid review finding severity"};
+}
+
+[[nodiscard]] auto parse_review_finding_severity(const Json &value)
+    -> domain::ReviewFindingSeverity {
+  return enum_value<domain::ReviewFindingSeverity>(
+      value.get<std::string>(),
+      {{"low", domain::ReviewFindingSeverity::low},
+       {"medium", domain::ReviewFindingSeverity::medium},
+       {"high", domain::ReviewFindingSeverity::high},
+       {"critical", domain::ReviewFindingSeverity::critical}});
+}
+
+[[nodiscard]] auto source_json(const domain::RepositorySourceIdentity &source)
+    -> Json;
+[[nodiscard]] auto parse_source(const Json &value)
+    -> domain::RepositorySourceIdentity;
+
 [[nodiscard]] auto review_actor_json(const domain::ReviewActor& actor) -> Json {
   if (!repository::validate_review_actor(actor)) {
     throw CodecFailure{"review actor is invalid"};
@@ -1518,6 +1561,35 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
                              value.at("display_name").get<std::string>()};
   if (!repository::validate_review_actor(result)) {
     throw CodecFailure{"review actor is invalid"};
+  }
+  return result;
+}
+
+[[nodiscard]] auto review_participant_json(
+    const domain::ReviewParticipantProvenance &participant) -> Json {
+  if (!repository::validate_review_participant_provenance(participant)) {
+    throw CodecFailure{"review participant provenance is invalid"};
+  }
+  return {
+      {"actor", review_actor_json(participant.actor)},
+      {"run_id", optional_id_json(participant.run_id)},
+      {"backend_id", optional_string_json(participant.backend_id)},
+      {"backend_version", optional_string_json(participant.backend_version)},
+      {"model_id", optional_id_json(participant.model_id)},
+      {"model_version", optional_string_json(participant.model_version)}};
+}
+
+[[nodiscard]] auto parse_review_participant(const Json &value)
+    -> domain::ReviewParticipantProvenance {
+  domain::ReviewParticipantProvenance result{
+      parse_review_actor(value.at("actor")),
+      parse_optional_id<domain::RunId>(value.at("run_id")),
+      parse_optional_string(value.at("backend_id")),
+      parse_optional_string(value.at("backend_version")),
+      parse_optional_id<domain::ModelId>(value.at("model_id")),
+      parse_optional_string(value.at("model_version"))};
+  if (!repository::validate_review_participant_provenance(result)) {
+    throw CodecFailure{"review participant provenance is invalid"};
   }
   return result;
 }
@@ -1598,8 +1670,7 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
       parse_optional_string(value.at("scenario_corpus_version")),
       parse_optional_string(value.at("scenario_application_revision")),
       parse_optional_digest(value.at("scenario_fake_script_digest")),
-      parse_optional_digest(
-          value.at("scenario_terminal_capabilities_digest")),
+      parse_optional_digest(value.at("scenario_terminal_capabilities_digest")),
       parse_digest(value.at("result_digest")), std::move(artifacts)};
   if (!repository::validate_review_evidence_binding(result)) {
     throw CodecFailure{"review evidence binding is invalid"};
@@ -1607,8 +1678,7 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
   return result;
 }
 
-[[nodiscard]] auto review_draft_json(
-    const domain::ReviewReceiptDraft& draft) -> Json {
+[[nodiscard]] auto review_draft_json(const domain::ReviewReceiptDraft &draft) -> Json {
   if (!repository::validate_review_receipt_draft(draft)) {
     throw CodecFailure{"review receipt draft is invalid"};
   }
@@ -1616,9 +1686,11 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
   for (const auto& binding : draft.evidence) {
     evidence.push_back(review_evidence_json(binding));
   }
-  return {{"receipt_id", id_text(draft.receipt_id)},
+  Json result{{"receipt_id", id_text(draft.receipt_id)},
           {"candidate", review_candidate_json(draft.candidate)},
           {"evidence", std::move(evidence)}};
+  if (draft.author) result["author"] = review_participant_json(*draft.author);
+  return result;
 }
 
 [[nodiscard]] auto parse_review_draft(const Json& value)
@@ -1629,7 +1701,10 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
   }
   domain::ReviewReceiptDraft result{
       parse_id<domain::ReviewReceiptId>(value.at("receipt_id")),
-      parse_review_candidate(value.at("candidate")), std::move(evidence)};
+      parse_review_candidate(value.at("candidate")), std::move(evidence),
+      value.contains("author") && !value.at("author").is_null()
+          ? std::optional{parse_review_participant(value.at("author"))}
+          : std::nullopt};
   if (!repository::validate_review_receipt_draft(result)) {
     throw CodecFailure{"review receipt draft is invalid"};
   }
@@ -1645,11 +1720,23 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
   for (const auto& artifact : finding.artifacts) {
     artifacts.push_back(id_text(artifact));
   }
-  return {{"finding_id", id_text(finding.finding_id)},
+  Json reproduction = Json::array();
+  for (const auto &evidence : finding.reproduction_evidence_ids) {
+    reproduction.push_back(id_text(evidence));
+  }
+  Json result{{"finding_id", id_text(finding.finding_id)},
           {"summary", finding.summary},
           {"verification_evidence_id",
            optional_id_json(finding.verification_evidence_id)},
           {"artifacts", std::move(artifacts)}};
+  if (finding.severity != domain::ReviewFindingSeverity::medium) {
+    result["severity"] = review_finding_severity_name(finding.severity);
+  }
+  if (finding.source) result["source"] = source_json(*finding.source);
+  if (!finding.reproduction_evidence_ids.empty()) {
+    result["reproduction_evidence_ids"] = std::move(reproduction);
+  }
+  return result;
 }
 
 [[nodiscard]] auto parse_review_finding(const Json& value)
@@ -1658,20 +1745,33 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
   for (const auto& artifact : value.at("artifacts")) {
     artifacts.push_back(parse_id<domain::ArtifactId>(artifact));
   }
+  std::vector<domain::VerificationEvidenceId> reproduction;
+  if (value.contains("reproduction_evidence_ids")) {
+    for (const auto &evidence : value.at("reproduction_evidence_ids")) {
+      reproduction.push_back(
+          parse_id<domain::VerificationEvidenceId>(evidence));
+    }
+  }
   domain::ReviewFinding result{
       parse_id<domain::ReviewFindingId>(value.at("finding_id")),
       value.at("summary").get<std::string>(),
       parse_optional_id<domain::VerificationEvidenceId>(
           value.at("verification_evidence_id")),
-      std::move(artifacts)};
+      std::move(artifacts),
+      value.contains("severity")
+          ? parse_review_finding_severity(value.at("severity"))
+          : domain::ReviewFindingSeverity::medium,
+      value.contains("source") && !value.at("source").is_null()
+          ? std::optional{parse_source(value.at("source"))}
+          : std::nullopt,
+      std::move(reproduction)};
   if (!repository::validate_review_finding(result)) {
     throw CodecFailure{"review finding is invalid"};
   }
   return result;
 }
 
-[[nodiscard]] auto review_override_json(
-    const domain::ReviewOverride& value) -> Json {
+[[nodiscard]] auto review_override_json(const domain::ReviewOverride &value) -> Json {
   if (!repository::validate_review_override(value)) {
     throw CodecFailure{"review override is invalid"};
   }
@@ -1822,8 +1922,7 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
   }
   Json output = Json::array();
   for (const auto& excerpt : evidence.output) {
-    output.push_back(
-        {{"stream", verification_stream_name(excerpt.stream)},
+    output.push_back({{"stream", verification_stream_name(excerpt.stream)},
          {"text", excerpt.text},
          {"represented_bytes", excerpt.represented_bytes},
          {"truncated", excerpt.truncated},
@@ -1843,7 +1942,8 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
   for (const auto& artifact : evidence.artifacts) {
     artifacts.push_back(id_text(artifact));
   }
-  return {{"evidence_id", id_text(evidence.evidence_id)},
+  return {
+      {"evidence_id", id_text(evidence.evidence_id)},
           {"kind", verification_kind_name(evidence.kind)},
           {"extension_name", optional_string_json(evidence.extension_name)},
           {"outcome", verification_outcome_name(evidence.outcome)},
@@ -1868,8 +1968,7 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
     -> domain::VerificationEvidence {
   std::vector<domain::VerificationOutputExcerpt> output;
   for (const auto& excerpt : value.at("output")) {
-    output.push_back({
-        parse_verification_stream(excerpt.at("stream")),
+    output.push_back({parse_verification_stream(excerpt.at("stream")),
         excerpt.at("text").get<std::string>(),
         excerpt.at("represented_bytes").get<std::uint64_t>(),
         excerpt.at("truncated").get<bool>(),
@@ -1882,8 +1981,8 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
     if (!diagnostic.at("source").is_null()) {
       source = parse_source(diagnostic.at("source"));
     }
-    diagnostics.push_back({
-        parse_verification_severity(diagnostic.at("severity")),
+    diagnostics.push_back(
+        {parse_verification_severity(diagnostic.at("severity")),
         diagnostic.at("code").get<std::string>(),
         diagnostic.at("message").get<std::string>(), std::move(source)});
   }
@@ -1997,7 +2096,8 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
              {"source_warning", Code::source_warning}});
 }
 
-[[nodiscard]] auto credential_kind_name(const domain::CredentialSourceKind value)
+[[nodiscard]] auto credential_kind_name(
+    const domain::CredentialSourceKind value)
     -> std::string_view {
   switch (value) {
     case domain::CredentialSourceKind::environment: return "environment";
@@ -2079,12 +2179,14 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
   }
   auto components = Json::array();
   for (const auto& component : provenance.components) {
-    components.push_back({{"component", component.component},
+    components.push_back(
+        {{"component", component.component},
                           {"version", component.version}});
   }
   auto tools = Json::array();
   for (const auto& tool : provenance.tools) {
-    tools.push_back({{"tool_name", tool.tool_name},
+    tools.push_back(
+        {{"tool_name", tool.tool_name},
                      {"declared_effects", effects_json(tool.declared_effects)},
                      {"capability_scopes", scopes_json(tool.capability_scopes)}});
   }
@@ -2096,8 +2198,8 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
           {"model_id", id_text(provenance.model_id)},
           {"credential_source",
            provenance.credential_source
-               ? Json{{"kind",
-                       credential_kind_name(provenance.credential_source->kind)},
+               ? Json{{"kind", credential_kind_name(
+                                   provenance.credential_source->kind)},
                       {"identity", provenance.credential_source->identity}}
                : Json(nullptr)},
           {"configuration", std::move(configuration)},
@@ -2126,8 +2228,8 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
   provenance.backend_version = parse_optional_string(value.at("backend_version"));
   if (!value.at("credential_source").is_null()) {
     const auto& source = value.at("credential_source");
-    provenance.credential_source =
-        domain::CredentialSourceReference{parse_credential_kind(source.at("kind")),
+    provenance.credential_source = domain::CredentialSourceReference{
+        parse_credential_kind(source.at("kind")),
                                           source.at("identity").get<std::string>()};
   }
   provenance.configuration.reserve(configuration.size());
@@ -2157,48 +2259,48 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
   return std::visit(
       Overloaded{
           [](const domain::RunStarted&) { return std::string{"run.started"}; },
-          [](const domain::RunProvenanceRecorded&) { return std::string{"run.provenance_recorded"}; },
-          [](const domain::PersonaSelectionRecorded&) { return std::string{"persona.selection_recorded"}; },
-          [](const domain::SessionSpendCeilingSet&) { return std::string{"session.spend_ceiling_set"}; },
-          [](const domain::RunAwaitingInput&) { return std::string{"run.awaiting_input"}; },
+          [](const domain::RunProvenanceRecorded &) { return std::string{"run.provenance_recorded"}; },
+          [](const domain::PersonaSelectionRecorded &) { return std::string{"persona.selection_recorded"}; },
+          [](const domain::SessionSpendCeilingSet &) { return std::string{"session.spend_ceiling_set"}; },
+          [](const domain::RunAwaitingInput &) { return std::string{"run.awaiting_input"}; },
           [](const domain::RunResumed&) { return std::string{"run.resumed"}; },
-          [](const domain::RunCompletionRequested&) { return std::string{"run.completion_requested"}; },
-          [](const domain::RunCompleted&) { return std::string{"run.completed"}; },
+          [](const domain::RunCompletionRequested &) { return std::string{"run.completion_requested"}; },
+          [](const domain::RunCompleted &) { return std::string{"run.completed"}; },
           [](const domain::RunFailed&) { return std::string{"run.failed"}; },
-          [](const domain::RunCancelRequested&) { return std::string{"run.cancel_requested"}; },
-          [](const domain::RunCancelled&) { return std::string{"run.cancelled"}; },
-          [](const domain::UserContentAdded&) { return std::string{"content.user_added"}; },
-          [](const domain::AssistantContentStarted&) { return std::string{"content.assistant_started"}; },
-          [](const domain::AssistantContentDeltaAdded&) { return std::string{"content.assistant_delta_added"}; },
-          [](const domain::AssistantContentFinished&) { return std::string{"content.assistant_finished"}; },
-          [](const domain::InferenceStarted&) { return std::string{"inference.started"}; },
+          [](const domain::RunCancelRequested &) { return std::string{"run.cancel_requested"}; },
+          [](const domain::RunCancelled &) { return std::string{"run.cancelled"}; },
+          [](const domain::UserContentAdded &) { return std::string{"content.user_added"}; },
+          [](const domain::AssistantContentStarted &) { return std::string{"content.assistant_started"}; },
+          [](const domain::AssistantContentDeltaAdded &) { return std::string{"content.assistant_delta_added"}; },
+          [](const domain::AssistantContentFinished &) { return std::string{"content.assistant_finished"}; },
+          [](const domain::InferenceStarted &) { return std::string{"inference.started"}; },
           [](const domain::InferencePricingObserved&) {
             return std::string{"inference.pricing_observed"};
           },
-          [](const domain::ReasoningMetadataAdded&) { return std::string{"inference.reasoning_metadata_added"}; },
-          [](const domain::UsageRecorded&) { return std::string{"inference.usage_recorded"}; },
+          [](const domain::ReasoningMetadataAdded &) { return std::string{"inference.reasoning_metadata_added"}; },
+          [](const domain::UsageRecorded &) { return std::string{"inference.usage_recorded"}; },
           [](const domain::InferenceCostRecorded&) {
             return std::string{"inference.cost_recorded"};
           },
-          [](const domain::InferenceFinished&) { return std::string{"inference.finished"}; },
-          [](const domain::InferenceFailed&) { return std::string{"inference.failed"}; },
-          [](const domain::InferenceCancelled&) { return std::string{"inference.cancelled"}; },
-          [](const domain::ToolProposed&) { return std::string{"tool.proposed"}; },
-          [](const domain::ToolPolicyDecided&) { return std::string{"tool.policy_decided"}; },
-          [](const domain::ToolApprovalRequested&) { return std::string{"tool.approval_requested"}; },
-          [](const domain::ToolApprovalDecided&) { return std::string{"tool.approval_decided"}; },
-          [](const domain::ToolPolicyFailed&) { return std::string{"tool.policy_failed"}; },
-          [](const domain::ToolStarted&) { return std::string{"tool.started"}; },
-          [](const domain::ToolProgressed&) { return std::string{"tool.progressed"}; },
-          [](const domain::ToolResultRecorded&) { return std::string{"tool.result_recorded"}; },
-          [](const domain::ToolErrored&) { return std::string{"tool.errored"}; },
-          [](const domain::QuestionRequested&) { return std::string{"question.requested"}; },
-          [](const domain::QuestionAnswered&) { return std::string{"question.answered"}; },
-          [](const domain::QuestionCancelled&) { return std::string{"question.cancelled"}; },
-          [](const domain::ArtifactCreated&) { return std::string{"artifact.created"}; },
-          [](const domain::ArtifactReferenced&) { return std::string{"artifact.referenced"}; },
-          [](const domain::ArtifactDisplayed&) { return std::string{"artifact.displayed"}; },
-          [](const domain::ArtifactRemovedFromView&) { return std::string{"artifact.removed_from_view"}; },
+          [](const domain::InferenceFinished &) { return std::string{"inference.finished"}; },
+          [](const domain::InferenceFailed &) { return std::string{"inference.failed"}; },
+          [](const domain::InferenceCancelled &) { return std::string{"inference.cancelled"}; },
+          [](const domain::ToolProposed &) { return std::string{"tool.proposed"}; },
+          [](const domain::ToolPolicyDecided &) { return std::string{"tool.policy_decided"}; },
+          [](const domain::ToolApprovalRequested &) { return std::string{"tool.approval_requested"}; },
+          [](const domain::ToolApprovalDecided &) { return std::string{"tool.approval_decided"}; },
+          [](const domain::ToolPolicyFailed &) { return std::string{"tool.policy_failed"}; },
+          [](const domain::ToolStarted &) { return std::string{"tool.started"}; },
+          [](const domain::ToolProgressed &) { return std::string{"tool.progressed"}; },
+          [](const domain::ToolResultRecorded &) { return std::string{"tool.result_recorded"}; },
+          [](const domain::ToolErrored &) { return std::string{"tool.errored"}; },
+          [](const domain::QuestionRequested &) { return std::string{"question.requested"}; },
+          [](const domain::QuestionAnswered &) { return std::string{"question.answered"}; },
+          [](const domain::QuestionCancelled &) { return std::string{"question.cancelled"}; },
+          [](const domain::ArtifactCreated &) { return std::string{"artifact.created"}; },
+          [](const domain::ArtifactReferenced &) { return std::string{"artifact.referenced"}; },
+          [](const domain::ArtifactDisplayed &) { return std::string{"artifact.displayed"}; },
+          [](const domain::ArtifactRemovedFromView &) { return std::string{"artifact.removed_from_view"}; },
           [](const domain::VerificationEvidenceRecorded&) {
             return std::string{"verification.evidence_recorded"};
           },
@@ -2238,7 +2340,7 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
           [](const domain::SessionTasksMaterialized&) {
             return std::string{"session.tasks_materialized"};
           },
-          [](const domain::ChildRunCreated&) { return std::string{"run.child_created"}; },
+          [](const domain::ChildRunCreated &) { return std::string{"run.child_created"}; },
           [](const domain::SessionTaskResultRecorded&) {
             return std::string{"session.task_result_recorded"};
           },
@@ -2248,7 +2350,7 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
           [](const domain::ProjectBacklogItemStatusChanged &) {
             return std::string{"project_backlog.item_status_changed"};
           },
-          [](const domain::InterRunMessageSent&) { return std::string{"run.inter_message_sent"}; },
+          [](const domain::InterRunMessageSent &) { return std::string{"run.inter_message_sent"}; },
           [](const domain::UnknownEvent& value) { return value.type_name; }},
       payload);
 }
@@ -2296,7 +2398,7 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
   return (schema_version == 1 && known_payload_type(type)) ||
          (schema_version == 2 &&
           (type == "plan.revision_proposed" || type == "run.child_created")) ||
-         (schema_version == 3 && type == "run.child_created");
+         ((schema_version == 3 || schema_version == 4) && type == "run.child_created");
 }
 
 [[nodiscard]] auto payload_json(const domain::RunEventPayload& payload,
@@ -2305,7 +2407,8 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
   return std::visit(
       Overloaded{
           [](const domain::RunStarted& value) -> Json {
-            return {{"surface_id", id_text(value.surface_id)},
+            return {
+                {"surface_id", id_text(value.surface_id)},
                     {"workspace_id", id_text(value.workspace_id)},
                     {"permission_profile_id", id_text(value.permission_profile_id)},
                     {"persona_id", optional_id_json(value.persona_id)}};
@@ -2326,7 +2429,7 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
           [](const domain::RunResumed& value) -> Json {
             return {{"question_id", optional_id_json(value.question_id)}};
           },
-          [](const domain::RunCompletionRequested&) -> Json { return Json::object(); },
+          [](const domain::RunCompletionRequested &) -> Json { return Json::object(); },
           [](const domain::RunCompleted&) -> Json { return Json::object(); },
           [](const domain::RunFailed& value) -> Json {
             return {{"error", domain_error_json(value.error)}};
@@ -2446,7 +2549,8 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
             return {{"question", question_json(value.question)}};
           },
           [](const domain::QuestionAnswered& value) -> Json {
-            return {{"question_id", id_text(value.answer.question_id)},
+            return {
+                {"question_id", id_text(value.answer.question_id)},
                     {"selected_option_ids", value.answer.selected_option_ids},
                     {"free_form", optional_string_json(value.answer.free_form)}};
           },
@@ -2491,9 +2595,14 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
                     {"reason", optional_string_json(value.reason)}};
           },
           [](const domain::ReviewVerdictRecorded& value) -> Json {
-            return {{"receipt_id", id_text(value.receipt_id)},
+            Json result{{"receipt_id", id_text(value.receipt_id)},
                     {"verdict", review_verdict_name(value.verdict)},
                     {"reviewer", review_actor_json(value.reviewer)}};
+            if (value.reviewer_provenance) {
+              result["reviewer_provenance"] =
+                  review_participant_json(*value.reviewer_provenance);
+            }
+            return result;
           },
           [](const domain::ReviewVerdictRevoked& value) -> Json {
             return {{"receipt_id", id_text(value.receipt_id)},
@@ -2511,16 +2620,16 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
                     {"reason", value.reason}};
           },
           [schema_version](const domain::PlanRevisionProposed& value) -> Json {
-            return {{"revision", plan_revision_json(
-                                     value.revision, schema_version >= 2)}};
+            return {{"revision",
+                     plan_revision_json(value.revision, schema_version >= 2)}};
           },
           [](const domain::PlanRevisionDecisionRecorded& value) -> Json {
             return {{"decision",
                      plan_revision_decision_json(value.decision)}};
           },
           [](const domain::PlanRevisionInvalidated& value) -> Json {
-            return {{"invalidation", plan_revision_invalidation_json(
-                                         value.invalidation)}};
+            return {{"invalidation",
+                     plan_revision_invalidation_json(value.invalidation)}};
           },
           [](const domain::SessionTasksMaterialized& value) -> Json {
             return {{"plan_id", id_text(value.plan_id)},
@@ -2537,8 +2646,8 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
                 throw CodecFailure{
                     "schema-v2 child run cannot encode a retry attempt"};
               }
-              result["descriptor"] =
-                  child_run_descriptor_json(*value.descriptor,
+              result["descriptor"] = child_run_descriptor_json(
+                  *value.descriptor,
                                             schema_version >= 3);
             }
             return result;
@@ -2592,7 +2701,8 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
     return domain::RunStarted{
         parse_id<domain::SurfaceId>(value.at("surface_id")),
         parse_id<domain::WorkspaceId>(value.at("workspace_id")),
-        parse_id<domain::PermissionProfileId>(value.at("permission_profile_id")),
+        parse_id<domain::PermissionProfileId>(
+            value.at("permission_profile_id")),
         parse_optional_id<domain::PersonaId>(value.at("persona_id"))};
   }
   if (type == "run.provenance_recorded") {
@@ -2622,7 +2732,8 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
     return domain::RunFailed{parse_domain_error(value.at("error"))};
   }
   if (type == "run.cancel_requested") {
-    return domain::RunCancelRequested{parse_optional_string(value.at("reason"))};
+    return domain::RunCancelRequested{
+        parse_optional_string(value.at("reason"))};
   }
   if (type == "run.cancelled") {
     return domain::RunCancelled{parse_optional_string(value.at("reason"))};
@@ -2805,8 +2916,7 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
         parse_verification(value.at("evidence"))};
   }
   if (type == "review.receipt_drafted") {
-    return domain::ReviewReceiptDrafted{
-        parse_review_draft(value.at("draft"))};
+    return domain::ReviewReceiptDrafted{parse_review_draft(value.at("draft"))};
   }
   if (type == "review.requested") {
     return domain::ReviewRequested{
@@ -2829,7 +2939,12 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
     return domain::ReviewVerdictRecorded{
         parse_id<domain::ReviewReceiptId>(value.at("receipt_id")),
         parse_review_verdict(value.at("verdict")),
-        parse_review_actor(value.at("reviewer"))};
+        parse_review_actor(value.at("reviewer")),
+        value.contains("reviewer_provenance") &&
+                !value.at("reviewer_provenance").is_null()
+            ? std::optional{parse_review_participant(
+                  value.at("reviewer_provenance"))}
+            : std::nullopt};
   }
   if (type == "review.verdict_revoked") {
     return domain::ReviewVerdictRevoked{
@@ -2870,9 +2985,14 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
     const auto has_descriptor = value.contains("descriptor");
     const auto has_attempt =
         has_descriptor && value.at("descriptor").contains("attempt");
+    const auto has_review =
+        has_descriptor && value.at("descriptor").contains("review_receipt_id");
     if ((schema_version == 1 && has_descriptor) ||
         (schema_version == 2 && (!has_descriptor || has_attempt)) ||
-        (schema_version == 3 && (!has_descriptor || !has_attempt))) {
+        ((schema_version == 3 || schema_version == 4) &&
+         (!has_descriptor || !has_attempt)) ||
+        (schema_version == 3 && has_review) ||
+        (schema_version == 4 && !has_review)) {
       throw CodecFailure{"child-run dispatch does not match its event schema"};
     }
     return domain::ChildRunCreated{
@@ -2921,16 +3041,18 @@ project_backlog_item_json(const domain::ProjectBacklogItem &item) -> Json {
     };
     auto parsed = Json::parse(text, callback, true, false);
     if (parsed.dump() != text) {
-      return std::unexpected(store_error(
-          SessionStoreErrorCode::corrupt,
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::corrupt,
           "persisted event payload is not in canonical form"));
     }
     return parsed;
   } catch (const DuplicateJsonKey&) {
-    return std::unexpected(store_error(SessionStoreErrorCode::corrupt,
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::corrupt,
                                        "persisted event payload has a duplicate key"));
   } catch (const Json::exception&) {
-    return std::unexpected(store_error(SessionStoreErrorCode::corrupt,
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::corrupt,
                                        "persisted event payload is invalid UTF-8 JSON"));
   }
 }
@@ -2945,7 +3067,8 @@ struct EncodedPayload {
   try {
     const auto type = payload_type(event.payload);
     if (type.empty() || type.size() > 256 || has_control_character(type)) {
-      return std::unexpected(store_error(SessionStoreErrorCode::invalid_argument,
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::invalid_argument,
                                          "event payload type is invalid"));
     }
     if (!known_payload_schema(type, event.metadata.schema_version) &&
@@ -2956,8 +3079,8 @@ struct EncodedPayload {
     }
     if (known_payload_schema(type, event.metadata.schema_version) &&
         std::holds_alternative<domain::UnknownEvent>(event.payload)) {
-      return std::unexpected(store_error(
-          SessionStoreErrorCode::invalid_argument,
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::invalid_argument,
           "known event schema cannot carry an opaque payload"));
     }
     if (event.metadata.schema_version == 1) {
@@ -2971,22 +3094,24 @@ struct EncodedPayload {
       if (const auto* child =
               std::get_if<domain::ChildRunCreated>(&event.payload);
           child != nullptr && child->descriptor) {
-        return std::unexpected(store_error(
-            SessionStoreErrorCode::invalid_argument,
+        return std::unexpected(
+            store_error(SessionStoreErrorCode::invalid_argument,
                         "child-run dispatch metadata requires event schema "
-                        "version 2 or 3"));
+                        "version 2, 3, or 4"));
       }
     }
     return EncodedPayload{
         type, payload_json(event.payload, event.metadata.schema_version).dump()};
   } catch (const DuplicateJsonKey&) {
-    return std::unexpected(store_error(SessionStoreErrorCode::invalid_argument,
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::invalid_argument,
                                        "unknown event payload has a duplicate key"));
   } catch (const CodecFailure&) {
     return std::unexpected(store_error(SessionStoreErrorCode::invalid_argument,
                                        "event payload is invalid"));
   } catch (const Json::exception&) {
-    return std::unexpected(store_error(SessionStoreErrorCode::invalid_argument,
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::invalid_argument,
                                        "event payload cannot be encoded as UTF-8 JSON"));
   }
 }
@@ -3008,7 +3133,7 @@ class Statement final {
   }
   ~Statement() { reset(); }
 
-  [[nodiscard]] auto get() const noexcept -> sqlite3_stmt* { return m_statement; }
+  [[nodiscard]] auto get() const noexcept -> sqlite3_stmt * { return m_statement; }
   auto reset() noexcept -> void {
     if (m_statement != nullptr) static_cast<void>(sqlite3_finalize(m_statement));
     m_statement = nullptr;
@@ -3070,7 +3195,8 @@ class Statement final {
 [[nodiscard]] auto prepare(sqlite3* database, const std::string_view sql)
     -> std::expected<Statement, SessionStoreError> {
   sqlite3_stmt* statement{};
-  const auto result = sqlite3_prepare_v2(database, sql.data(),
+  const auto result = sqlite3_prepare_v2(
+      database, sql.data(),
                                          static_cast<int>(sql.size()),
                                          &statement, nullptr);
   if (result != SQLITE_OK) return std::unexpected(sqlite_error(result));
@@ -3081,7 +3207,8 @@ class Statement final {
                              const std::string_view value)
     -> std::expected<void, SessionStoreError> {
   if (value.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    return std::unexpected(store_error(SessionStoreErrorCode::resource_exhausted,
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::resource_exhausted,
                                        "session-store text value is too large"));
   }
   const auto result = sqlite3_bind_text(statement, index, value.data(),
@@ -3159,7 +3286,8 @@ template <typename IdType>
   if constexpr (sizeof(count) > sizeof(sqlite3_int64)) {
     if (count < std::numeric_limits<sqlite3_int64>::min() ||
         count > std::numeric_limits<sqlite3_int64>::max()) {
-      return std::unexpected(store_error(SessionStoreErrorCode::invalid_argument,
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::invalid_argument,
                                          "event timestamp is outside storage range"));
     }
   }
@@ -3177,25 +3305,30 @@ template <typename IdType>
   std::error_code error;
   const auto status = std::filesystem::symlink_status(directory, error);
   if (error && error != std::errc::no_such_file_or_directory) {
-    return std::unexpected(path_error(SessionStoreErrorCode::io_failure,
+    return std::unexpected(
+        path_error(SessionStoreErrorCode::io_failure,
                                       "cannot inspect the session-state directory"));
   }
   if (std::filesystem::exists(status)) {
     if (std::filesystem::is_symlink(status)) {
-      return std::unexpected(path_error(SessionStoreErrorCode::permission_denied,
+      return std::unexpected(
+          path_error(SessionStoreErrorCode::permission_denied,
                                         "session-state directory cannot be a symlink"));
     }
     if (!std::filesystem::is_directory(status)) {
-      return std::unexpected(path_error(SessionStoreErrorCode::permission_denied,
+      return std::unexpected(
+          path_error(SessionStoreErrorCode::permission_denied,
                                         "session-state path is not a directory"));
     }
     struct stat info {};
     if (::stat(directory.c_str(), &info) != 0) {
-      return std::unexpected(path_error(SessionStoreErrorCode::io_failure,
+      return std::unexpected(
+          path_error(SessionStoreErrorCode::io_failure,
                                         "cannot inspect session-state permissions"));
     }
     if ((info.st_mode & 0777) != 0700) {
-      return std::unexpected(path_error(SessionStoreErrorCode::permission_denied,
+      return std::unexpected(
+          path_error(SessionStoreErrorCode::permission_denied,
                                         "session-state directory must have mode 0700"));
     }
     return false;
@@ -3204,15 +3337,18 @@ template <typename IdType>
 
   std::filesystem::create_directories(directory.parent_path(), error);
   if (error) {
-    return std::unexpected(path_error(SessionStoreErrorCode::io_failure,
+    return std::unexpected(
+        path_error(SessionStoreErrorCode::io_failure,
                                       "cannot create the state base directory"));
   }
   if (::mkdir(directory.c_str(), 0700) != 0 && errno != EEXIST) {
-    return std::unexpected(path_error(SessionStoreErrorCode::io_failure,
+    return std::unexpected(
+        path_error(SessionStoreErrorCode::io_failure,
                                       "cannot create the session-state directory"));
   }
   if (::chmod(directory.c_str(), 0700) != 0) {
-    return std::unexpected(path_error(SessionStoreErrorCode::permission_denied,
+    return std::unexpected(
+        path_error(SessionStoreErrorCode::permission_denied,
                                       "cannot secure the session-state directory"));
   }
   return true;
@@ -3229,12 +3365,14 @@ template <typename IdType>
   if (!std::filesystem::exists(status)) return false;
   if (std::filesystem::is_symlink(status) ||
       !std::filesystem::is_regular_file(status)) {
-    return std::unexpected(path_error(SessionStoreErrorCode::permission_denied,
+    return std::unexpected(
+        path_error(SessionStoreErrorCode::permission_denied,
                                       "session database must be a regular non-symlink file"));
   }
   struct stat info {};
   if (::stat(path.c_str(), &info) != 0) {
-    return std::unexpected(path_error(SessionStoreErrorCode::io_failure,
+    return std::unexpected(
+        path_error(SessionStoreErrorCode::io_failure,
                                       "cannot inspect session database permissions"));
   }
   if ((info.st_mode & 0777) != 0600) {
@@ -3246,12 +3384,13 @@ template <typename IdType>
 
 [[nodiscard]] auto precreate_database(const std::filesystem::path& path)
     -> std::expected<void, SessionStoreError> {
-  const int descriptor = ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL |
+  const int descriptor = ::open(
+      path.c_str(), O_RDWR | O_CREAT | O_EXCL |
                                                   O_CLOEXEC | O_NOFOLLOW,
                                 0600);
   if (descriptor < 0) {
-    return std::unexpected(path_error(
-        errno == EACCES || errno == EPERM ? SessionStoreErrorCode::permission_denied
+    return std::unexpected(
+        path_error(errno == EACCES || errno == EPERM ? SessionStoreErrorCode::permission_denied
                                           : SessionStoreErrorCode::io_failure,
         "cannot create the session database"));
   }
@@ -3265,10 +3404,11 @@ template <typename IdType>
 
 [[nodiscard]] auto sync_directory(const std::filesystem::path& directory)
     -> std::expected<void, SessionStoreError> {
-  const int descriptor =
-      ::open(directory.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
+  const int descriptor = ::open(
+      directory.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
   if (descriptor < 0) {
-    return std::unexpected(path_error(SessionStoreErrorCode::io_failure,
+    return std::unexpected(
+        path_error(SessionStoreErrorCode::io_failure,
                                       "cannot open the session-state directory for sync"));
   }
   const auto synced = ::fsync(descriptor);
@@ -3276,13 +3416,14 @@ template <typename IdType>
   static_cast<void>(::close(descriptor));
   errno = saved_errno;
   if (synced != 0) {
-    return std::unexpected(path_error(SessionStoreErrorCode::io_failure,
+    return std::unexpected(
+        path_error(SessionStoreErrorCode::io_failure,
                                       "cannot sync the session-state directory"));
   }
   return {};
 }
 
-[[nodiscard]] auto valid_limits(const storage::SessionStoreLimits& limits) -> bool {
+[[nodiscard]] auto valid_limits(const storage::SessionStoreLimits &limits) -> bool {
   return limits.maximum_batch_events != 0 && limits.maximum_payload_bytes != 0 &&
          limits.maximum_replay_events != 0 && limits.maximum_replay_bytes != 0 &&
          limits.busy_timeout.count() > 0 &&
@@ -3290,7 +3431,8 @@ template <typename IdType>
 }
 
 auto rollback(sqlite3* database) noexcept -> void {
-  static_cast<void>(sqlite3_exec(database, "ROLLBACK", nullptr, nullptr, nullptr));
+  static_cast<void>(
+      sqlite3_exec(database, "ROLLBACK", nullptr, nullptr, nullptr));
 }
 
 class Transaction final {
@@ -3328,7 +3470,8 @@ class Transaction final {
   if (version_step != SQLITE_ROW) return std::unexpected(sqlite_error(version_step));
   const auto version = sqlite3_column_int(version_statement->get(), 0);
   if (version > storage_format_version) {
-    return std::unexpected(store_error(SessionStoreErrorCode::unsupported_version,
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::unsupported_version,
                                        "session database uses a newer storage version"));
   }
   if (version == storage_format_version) return {};
@@ -3354,7 +3497,8 @@ class Transaction final {
     return commit(database);
   }
   if (version != 0) {
-    return std::unexpected(store_error(SessionStoreErrorCode::unsupported_version,
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::unsupported_version,
                                        "session database version is unsupported"));
   }
 
@@ -3364,7 +3508,8 @@ class Transaction final {
   if (!schema_count) return std::unexpected(std::move(schema_count.error()));
   if (sqlite3_step(schema_count->get()) != SQLITE_ROW ||
       sqlite3_column_int64(schema_count->get(), 0) != 0) {
-    return std::unexpected(store_error(SessionStoreErrorCode::corrupt,
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::corrupt,
                                        "unversioned session database is not empty"));
   }
 
@@ -3422,7 +3567,8 @@ class Transaction final {
     return std::unexpected(store_error(SessionStoreErrorCode::corrupt,
                                        "session summary is invalid"));
   }
-  return storage::SessionInfo{std::move(*session_id), timestamp_from_count(created),
+  return storage::SessionInfo{
+      std::move(*session_id), timestamp_from_count(created),
                               timestamp_from_count(activity),
                               static_cast<std::uint64_t>(sequence),
                               static_cast<std::uint64_t>(run_count)};
@@ -3496,7 +3642,8 @@ auto SqliteSessionStore::open(std::filesystem::path path,
   try {
     if (!valid_limits(limits) || !path.is_absolute() || path.filename().empty() ||
         path.lexically_normal() != path) {
-      return std::unexpected(store_error(SessionStoreErrorCode::invalid_argument,
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::invalid_argument,
                                          "session-store path or limits are invalid"));
     }
     auto directory = check_directory(path.parent_path(), true);
@@ -3518,8 +3665,8 @@ auto SqliteSessionStore::open(std::filesystem::path path,
     }
 
     sqlite3* database{};
-    const auto open_result = sqlite3_open_v2(
-        path.c_str(), &database,
+    const auto open_result =
+        sqlite3_open_v2(path.c_str(), &database,
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX |
             SQLITE_OPEN_NOFOLLOW,
         nullptr);
@@ -3545,12 +3692,14 @@ auto SqliteSessionStore::open(std::filesystem::path path,
     auto journal = prepare(database, "PRAGMA journal_mode=DELETE");
     if (!journal) return std::unexpected(std::move(journal.error()));
     if (sqlite3_step(journal->get()) != SQLITE_ROW) {
-      return std::unexpected(store_error(SessionStoreErrorCode::io_failure,
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::io_failure,
                                          "could not select rollback-journal mode"));
     }
     auto journal_name = column_text(journal->get(), 0);
     if (!journal_name || *journal_name != "delete") {
-      return std::unexpected(store_error(SessionStoreErrorCode::io_failure,
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::io_failure,
                                          "rollback-journal mode is unavailable"));
     }
     journal->reset();
@@ -3563,12 +3712,13 @@ auto SqliteSessionStore::open(std::filesystem::path path,
     return std::unique_ptr<SqliteSessionStore>{
         new SqliteSessionStore{std::move(impl)}};
   } catch (...) {
-    return std::unexpected(store_error(SessionStoreErrorCode::internal_failure,
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::internal_failure,
                                        "session store could not be initialized"));
   }
 }
 
-auto SqliteSessionStore::path() const noexcept -> const std::filesystem::path& {
+auto SqliteSessionStore::path() const noexcept -> const std::filesystem::path & {
   return m_impl->path;
 }
 
@@ -3601,7 +3751,8 @@ auto SqliteSessionStore::create_session(storage::SessionCreate session,
     auto stepped = step_done(statement->get());
     if (!stepped) {
       if (stepped.error().code == SessionStoreErrorCode::conflict) {
-        return std::unexpected(store_error(SessionStoreErrorCode::already_exists,
+        return std::unexpected(store_error(
+            SessionStoreErrorCode::already_exists,
                                            "session already exists"));
       }
       return stepped;
@@ -3618,8 +3769,7 @@ auto SqliteSessionStore::create_session(storage::SessionCreate session,
   }
 }
 
-auto SqliteSessionStore::open_session(
-    const domain::SessionId& session_id, const std::stop_token stop_token)
+auto SqliteSessionStore::open_session(const domain::SessionId &session_id, const std::stop_token stop_token)
     -> std::expected<storage::SessionInfo, storage::SessionStoreError> {
   try {
     if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
@@ -3643,24 +3793,22 @@ auto SqliteSessionStore::open_session(
   }
 }
 
-auto SqliteSessionStore::list_sessions(
-    const std::size_t limit, const std::stop_token stop_token)
+auto SqliteSessionStore::list_sessions(const std::size_t limit, const std::stop_token stop_token)
     -> std::expected<std::vector<storage::SessionInfo>,
                      storage::SessionStoreError> {
   try {
     if (limit == 0 || limit > 1000) {
-      return std::unexpected(store_error(SessionStoreErrorCode::invalid_argument,
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::invalid_argument,
                                          "session-list limit must be between 1 and 1000"));
     }
     if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
     std::lock_guard lock(m_impl->mutex);
-    auto statement = prepare(
-        m_impl->database,
+    auto statement = prepare(m_impl->database,
         std::string{session_info_select} +
             " ORDER BY 3 DESC,s.session_id ASC LIMIT ?1");
     if (!statement) return std::unexpected(std::move(statement.error()));
-    const auto bound = sqlite3_bind_int64(
-        statement->get(), 1, static_cast<sqlite3_int64>(limit));
+    const auto bound = sqlite3_bind_int64(statement->get(), 1, static_cast<sqlite3_int64>(limit));
     if (bound != SQLITE_OK) return std::unexpected(sqlite_error(bound));
     std::vector<storage::SessionInfo> sessions;
     while (true) {
@@ -3699,16 +3847,19 @@ auto SqliteSessionStore::append_events(
     for (const auto& event : events) {
       if (event.metadata.sequence == 0 || event.metadata.schema_version == 0 ||
           event.metadata.sequence >
-              static_cast<std::uint64_t>(std::numeric_limits<sqlite3_int64>::max()) ||
+              static_cast<std::uint64_t>(
+                  std::numeric_limits<sqlite3_int64>::max()) ||
           (!encoded.empty() && event.metadata.sequence <= previous_sequence) ||
           !event_ids.insert(event.metadata.event_id).second) {
-        return std::unexpected(store_error(SessionStoreErrorCode::invalid_argument,
+        return std::unexpected(
+            store_error(SessionStoreErrorCode::invalid_argument,
                                            "event batch envelope is invalid"));
       }
       auto payload = encode_payload(event);
       if (!payload) return std::unexpected(std::move(payload.error()));
       if (payload->document.size() > m_impl->limits.maximum_payload_bytes) {
-        return std::unexpected(store_error(SessionStoreErrorCode::resource_exhausted,
+        return std::unexpected(
+            store_error(SessionStoreErrorCode::resource_exhausted,
                                            "event payload exceeds the configured limit"));
       }
       auto timestamp = timestamp_count(event.metadata.timestamp);
@@ -3722,11 +3873,11 @@ auto SqliteSessionStore::append_events(
     if (!begun) return begun;
     Transaction transaction{m_impl->database};
     const auto fail = [&](SessionStoreError error) {
-      return std::expected<void, SessionStoreError>{std::unexpected(std::move(error))};
+      return std::expected<void, SessionStoreError>{
+          std::unexpected(std::move(error))};
     };
 
-    auto current = prepare(
-        m_impl->database, "SELECT COALESCE((SELECT MAX(sequence) FROM "
+    auto current = prepare(m_impl->database, "SELECT COALESCE((SELECT MAX(sequence) FROM "
                                   "events WHERE session_id=?1),0) "
         "FROM sessions WHERE session_id=?1");
     if (!current) return fail(std::move(current.error()));
@@ -3772,7 +3923,8 @@ auto SqliteSessionStore::append_events(
         return {};
       };
       if (bound) {
-        bound = bind_integer(2, static_cast<sqlite3_int64>(event.metadata.sequence));
+        bound = bind_integer(
+            2, static_cast<sqlite3_int64>(event.metadata.sequence));
       }
       if (bound) bound = bind_text(insert->get(), 3, event.metadata.event_id.value());
       if (bound) bound = bind_text(insert->get(), 4, event.metadata.run_id.value());
@@ -3808,8 +3960,7 @@ auto SqliteSessionStore::append_events(
   }
 }
 
-auto SqliteSessionStore::replay_events(
-    const domain::SessionId& session_id, const std::stop_token stop_token)
+auto SqliteSessionStore::replay_events(const domain::SessionId &session_id, const std::stop_token stop_token)
     -> std::expected<std::vector<domain::RunEvent>,
                      storage::SessionStoreError> {
   try {
@@ -3835,8 +3986,8 @@ auto SqliteSessionStore::replay_events(
     }
     if (exists_step != SQLITE_ROW) return fail(sqlite_error(exists_step));
 
-    auto statement = prepare(
-        m_impl->database,
+    auto statement =
+        prepare(m_impl->database,
         "SELECT sequence,event_id,run_id,schema_version,timestamp_ms,"
                 "caused_by_event_id,parent_run_id,invocation_id,payload_type,"
                 "payload_json "

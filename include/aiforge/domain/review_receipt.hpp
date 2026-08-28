@@ -1,10 +1,10 @@
 #pragma once
 
+#include <aiforge/domain/verification_evidence.hpp>
+
 #include <optional>
 #include <string>
 #include <vector>
-
-#include <aiforge/domain/verification_evidence.hpp>
 
 namespace aiforge::domain {
 
@@ -17,6 +17,16 @@ struct ReviewActor {
   std::string actor_id;
   std::string display_name;
   auto operator==(const ReviewActor&) const -> bool = default;
+};
+
+struct ReviewParticipantProvenance {
+  ReviewActor actor;
+  std::optional<RunId> run_id;
+  std::optional<std::string> backend_id;
+  std::optional<std::string> backend_version;
+  std::optional<ModelId> model_id;
+  std::optional<std::string> model_version;
+  auto operator==(const ReviewParticipantProvenance &) const -> bool = default;
 };
 
 struct ReviewCandidate {
@@ -51,7 +61,15 @@ struct ReviewReceiptDraft {
   ReviewReceiptId receipt_id;
   ReviewCandidate candidate;
   std::vector<ReviewEvidenceBinding> evidence;
+  std::optional<ReviewParticipantProvenance> author;
   auto operator==(const ReviewReceiptDraft&) const -> bool = default;
+};
+
+enum class ReviewFindingSeverity {
+  low,
+  medium,
+  high,
+  critical,
 };
 
 struct ReviewFinding {
@@ -59,6 +77,9 @@ struct ReviewFinding {
   std::string summary;
   std::optional<VerificationEvidenceId> verification_evidence_id;
   std::vector<ArtifactId> artifacts;
+  ReviewFindingSeverity severity{ReviewFindingSeverity::medium};
+  std::optional<RepositorySourceIdentity> source;
+  std::vector<VerificationEvidenceId> reproduction_evidence_ids;
   auto operator==(const ReviewFinding&) const -> bool = default;
 };
 
@@ -66,6 +87,15 @@ enum class ReviewVerdict {
   approved,
   changes_requested,
   rejected,
+};
+
+struct ReviewChildResult {
+  ReviewReceiptId receipt_id;
+  ReviewCandidate candidate;
+  ReviewParticipantProvenance reviewer;
+  std::vector<ReviewFinding> findings;
+  ReviewVerdict verdict{ReviewVerdict::rejected};
+  auto operator==(const ReviewChildResult &) const -> bool = default;
 };
 
 struct ReviewOverride {

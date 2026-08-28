@@ -1,5 +1,7 @@
 #pragma once
 
+#include <aiforge/domain/child_run.hpp>
+
 #include <cstddef>
 #include <expected>
 #include <memory>
@@ -7,8 +9,6 @@
 #include <stop_token>
 #include <string>
 #include <vector>
-
-#include <aiforge/domain/child_run.hpp>
 
 namespace aiforge::runtime {
 
@@ -34,6 +34,7 @@ struct ChildRunResult {
   std::vector<domain::EvidenceId> evidence_ids;
   std::vector<domain::ArtifactId> artifact_ids;
   std::optional<domain::DomainError> error;
+  std::optional<domain::ReviewChildResult> review;
   auto operator==(const ChildRunResult&) const -> bool = default;
 };
 
