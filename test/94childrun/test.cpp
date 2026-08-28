@@ -1,10 +1,10 @@
+#include <aiforge/repository/review_receipt.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
 #include <aiforge/testing/scripted_child_runner.hpp>
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <expected>
 #include <memory>
@@ -117,7 +117,9 @@ auto child_start() -> runtime::ChildRunStart {
           {domain::Effect::read},
           {scope()},
           {domain::Effect::read},
-          {scope()}};
+          {scope()},
+          1,
+          std::nullopt};
 }
 
 auto descriptor() -> domain::ChildRunDescriptor {
@@ -132,7 +134,9 @@ auto descriptor() -> domain::ChildRunDescriptor {
            4},
           budget(),
           {domain::Effect::read},
-          {scope()}};
+          {scope()},
+          1,
+          std::nullopt};
 }
 
 auto invocation() -> runtime::ChildRunInvocation {
@@ -144,7 +148,93 @@ auto success() -> runtime::ChildRunResult {
           {1, 2, {20, 10, 0, 0}},
           {id<domain::EvidenceId>("result-evidence")},
           {id<domain::ArtifactId>("result-artifact")},
+          std::nullopt,
           std::nullopt};
+}
+
+auto review_participant(std::string actor_name = "reviewer")
+    -> domain::ReviewParticipantProvenance {
+  return {{std::move(actor_name), "Repository Reviewer"},
+          id<domain::RunId>("reviewer-run"),
+          std::string{"fake-backend"},
+          std::string{"1"},
+          id<domain::ModelId>("review-model"),
+          std::string{"2026-08-28"}};
+}
+
+auto review_draft() -> domain::ReviewReceiptDraft {
+  return {id<domain::ReviewReceiptId>("review-receipt"),
+          {snapshot(), "candidate-revision"},
+          {{id<domain::ReviewRequirementId>("tests"),
+            domain::ReviewEvidenceKind::verification,
+            "ctest",
+            "3.28",
+            id<domain::VerificationEvidenceId>("verification"),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            {"sha256", "dddddddddddddddd", 64},
+            {}}},
+          review_participant("author")};
+}
+
+auto review_parcel() -> domain::ContextParcel {
+  auto exact = parcel().items.front();
+  exact.evidence_id = id<domain::EvidenceId>("exact-review-source");
+  const auto artifact = id<domain::ArtifactId>("diff-artifact");
+  domain::ContextParcelItem diff{
+      id<domain::EvidenceId>("review-diff"),
+      domain::DiffEvidence{snapshot("eeeeeeeeeeeeeeee"), snapshot(), artifact},
+      domain::EvidenceFreshness::current,
+      {domain::EvidenceDerivation::observed,
+       "git-diff",
+       "1",
+       domain::EventTimestamp{100ms},
+       snapshot(),
+       {},
+       {},
+       std::nullopt},
+      {domain::ArtifactReferenceBlock{artifact, std::nullopt}},
+      64,
+      8};
+  return {id<domain::ContextParcelId>("review-parcel"),
+          "review the exact candidate",
+          domain::TaskPhase::review,
+          snapshot(),
+          {std::move(exact), std::move(diff)}};
+}
+
+auto review_start() -> runtime::ChildRunStart {
+  auto value = child_start();
+  value.context = review_parcel();
+  value.review = runtime::ChildRunStart::ReviewRequest{
+      review_draft(), review_draft().author->actor};
+  return value;
+}
+
+auto review_invocation() -> runtime::ChildRunInvocation {
+  auto value = invocation();
+  value.context = review_parcel();
+  value.descriptor.context = {value.context.parcel_id,
+                              value.context.target_snapshot,
+                              {id<domain::EvidenceId>("exact-review-source"),
+                               id<domain::EvidenceId>("review-diff")},
+                              77,
+                              12};
+  value.descriptor.review_receipt_id = review_draft().receipt_id;
+  return value;
+}
+
+auto approved_review_result() -> runtime::ChildRunResult {
+  auto value = success();
+  value.review = domain::ReviewChildResult{review_draft().receipt_id,
+                                           review_draft().candidate,
+                                           review_participant(),
+                                           {},
+                                           domain::ReviewVerdict::approved};
+  return value;
 }
 
 auto approve(runtime::RunKernel& kernel,
@@ -281,6 +371,196 @@ TEST_CASE("dispatch fails before execution for unavailable or widened children",
   REQUIRE(result.error().code ==
           runtime::RunKernelErrorCode::policy_scope_widening);
   REQUIRE(runner->recorded_invocations().empty());
+}
+
+TEST_CASE("review child dispatch requires bounded read-only review evidence",
+          "[child-run][review][failure]") {
+  testing::ScriptedBackend backend{{}};
+  auto runner = std::make_shared<testing::ScriptedChildRunner>(
+      std::vector<testing::ScriptedChildRunExchange>{});
+  runtime::RunKernel kernel{id<domain::SessionId>("review-failure-session"),
+                            backend,
+                            nullptr,
+                            {},
+                            {},
+                            {},
+                            {},
+                            runner};
+  approve(kernel);
+
+  auto request = review_start();
+  request.context.phase = domain::TaskPhase::editing;
+  REQUIRE_FALSE(kernel.dispatch_child(request));
+  request = review_start();
+  request.context.items.pop_back();
+  REQUIRE_FALSE(kernel.dispatch_child(request));
+  request = review_start();
+  request.requested_effects = {domain::Effect::write};
+  REQUIRE_FALSE(kernel.dispatch_child(request));
+  REQUIRE(runner->recorded_invocations().empty());
+}
+
+TEST_CASE("review child validates structured findings against its receipt",
+          "[child-run][review][contract][failure]") {
+  auto result = domain::ReviewChildResult{
+      review_draft().receipt_id,
+      review_draft().candidate,
+      review_participant(),
+      {{id<domain::ReviewFindingId>("finding"),
+        "The candidate has a reproducible defect",
+        id<domain::VerificationEvidenceId>("verification"),
+        {id<domain::ArtifactId>("result-artifact")},
+        domain::ReviewFindingSeverity::high,
+        std::nullopt,
+        {}}},
+      domain::ReviewVerdict::changes_requested};
+  REQUIRE(repository::validate_review_child_result(
+      result, review_draft(), {},
+      std::vector{id<domain::ArtifactId>("result-artifact")}));
+  result.verdict = domain::ReviewVerdict::approved;
+  REQUIRE_FALSE(repository::validate_review_child_result(
+      result, review_draft(), {},
+      std::vector{id<domain::ArtifactId>("result-artifact")}));
+  result.verdict = domain::ReviewVerdict::changes_requested;
+  result.findings.front().verification_evidence_id =
+      id<domain::VerificationEvidenceId>("unknown");
+  REQUIRE_FALSE(repository::validate_review_child_result(
+      result, review_draft(), {},
+      std::vector{id<domain::ArtifactId>("result-artifact")}));
+}
+
+TEST_CASE("review child records one replayable receipt and verdict",
+          "[child-run][review][runtime]") {
+  auto runner = std::make_shared<testing::ScriptedChildRunner>(
+      std::vector{testing::ScriptedChildRunExchange{
+          review_invocation(),
+          testing::ChildRunStreamScript{
+              {approved_review_result(), testing::ChildRunEndOfStream{}}}}});
+  testing::ScriptedBackend backend{{}};
+  runtime::RunKernel kernel{id<domain::SessionId>("review-session"),
+                            backend,
+                            nullptr,
+                            {},
+                            {},
+                            {},
+                            {},
+                            runner};
+  approve(kernel);
+  REQUIRE(kernel.dispatch_child(review_start()));
+  drain_until_terminal(kernel);
+  REQUIRE(kernel.active_session_tasks().front().state ==
+          runtime::SessionTaskState::completed);
+
+  const auto &events = kernel.event_log().events();
+  REQUIRE(std::ranges::count_if(events, [](const auto &event) {
+            return std::holds_alternative<domain::ReviewReceiptDrafted>(
+                event.payload);
+          }) == 1);
+  REQUIRE(std::ranges::count_if(events, [](const auto &event) {
+            return std::holds_alternative<domain::ReviewVerdictRecorded>(
+                event.payload);
+          }) == 1);
+  const auto created = std::ranges::find_if(events, [](const auto &event) {
+    return std::holds_alternative<domain::ChildRunCreated>(event.payload);
+  });
+  REQUIRE(created != events.end());
+  REQUIRE(created->metadata.schema_version == 4);
+
+  const auto projection = repository::ReviewReceiptProjection::rebuild(events);
+  REQUIRE(projection);
+  REQUIRE(projection->state() == repository::ReviewReceiptState::approved);
+  REQUIRE(projection->verdicts().front().reviewer_provenance ==
+          review_participant());
+}
+
+TEST_CASE("malformed review output records no partial receipt facts",
+          "[child-run][review][protocol][failure]") {
+  auto malformed = approved_review_result();
+  malformed.review->findings.push_back(
+      {id<domain::ReviewFindingId>("finding"),
+       "An approved result cannot contain findings",
+       id<domain::VerificationEvidenceId>("verification"),
+       {id<domain::ArtifactId>("result-artifact")},
+       domain::ReviewFindingSeverity::high,
+       std::nullopt,
+       {}});
+  auto runner = std::make_shared<testing::ScriptedChildRunner>(
+      std::vector{testing::ScriptedChildRunExchange{
+          review_invocation(),
+          testing::ChildRunStreamScript{
+              {malformed, testing::ChildRunEndOfStream{}}}}});
+  testing::ScriptedBackend backend{{}};
+  runtime::RunKernel kernel{id<domain::SessionId>("malformed-review-session"),
+                            backend,
+                            nullptr,
+                            {},
+                            {},
+                            {},
+                            {},
+                            runner};
+  approve(kernel);
+  REQUIRE(kernel.dispatch_child(review_start()));
+  drain_until_terminal(kernel);
+  REQUIRE(kernel.active_session_tasks().front().state ==
+          runtime::SessionTaskState::failed);
+
+  const auto &events = kernel.event_log().events();
+  REQUIRE(std::ranges::none_of(events, [](const auto &event) {
+    return std::holds_alternative<domain::ReviewFindingOpened>(event.payload) ||
+           std::holds_alternative<domain::ReviewVerdictRecorded>(event.payload);
+  }));
+}
+
+TEST_CASE("review retry reuses one receipt",
+          "[child-run][review][retry][runtime]") {
+  auto retry_invocation = review_invocation();
+  retry_invocation.child_run_id = id<domain::RunId>("reviewer-retry");
+  retry_invocation.descriptor.attempt = 2;
+  auto runner = std::make_shared<testing::ScriptedChildRunner>(std::vector{
+      testing::ScriptedChildRunExchange{
+          review_invocation(),
+          runtime::ChildRunError{runtime::ChildRunErrorCode::unavailable,
+                                 "worker unavailable", true}},
+      testing::ScriptedChildRunExchange{
+          retry_invocation,
+          testing::ChildRunStreamScript{
+              {approved_review_result(), testing::ChildRunEndOfStream{}}}}});
+  testing::ScriptedBackend backend{{}};
+  runtime::RunKernel kernel{id<domain::SessionId>("review-retry-session"),
+                            backend,
+                            nullptr,
+                            {},
+                            {256, 8U * 1024U * 1024U, {1, 2}},
+                            {},
+                            {},
+                            runner};
+  approve(kernel);
+  REQUIRE(kernel.dispatch_child(review_start()));
+  drain_until_terminal(kernel);
+  REQUIRE(kernel.active_session_tasks().front().state ==
+          runtime::SessionTaskState::unavailable);
+
+  auto retry = review_start();
+  retry.child_run_id = id<domain::RunId>("reviewer-retry");
+  retry.attempt = 2;
+  REQUIRE(kernel.dispatch_child(std::move(retry)));
+  drain_until_terminal(kernel);
+  REQUIRE(kernel.active_session_tasks().front().state ==
+          runtime::SessionTaskState::completed);
+
+  const auto &events = kernel.event_log().events();
+  REQUIRE(std::ranges::count_if(events, [](const auto &event) {
+            return std::holds_alternative<domain::ReviewReceiptDrafted>(
+                event.payload);
+          }) == 1);
+  REQUIRE(std::ranges::count_if(events, [](const auto &event) {
+            return std::holds_alternative<domain::ReviewRequested>(
+                event.payload);
+          }) == 1);
+  REQUIRE(std::ranges::count_if(events, [](const auto &event) {
+            return std::holds_alternative<domain::ReviewVerdictRecorded>(
+                event.payload);
+          }) == 1);
 }
 
 TEST_CASE("dispatch rejects unknown parents, tasks, and missing context",

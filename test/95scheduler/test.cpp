@@ -3,9 +3,8 @@
 #include <aiforge/testing/scripted_backend.hpp>
 #include <aiforge/testing/scripted_child_runner.hpp>
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <limits>
 #include <memory>
@@ -61,7 +60,8 @@ auto descriptor(const domain::PlanTaskId& task_id, std::string child_id,
           {2, 2, 100, 50, 5s},
           {domain::Effect::write},
           {{domain::Effect::write, "filesystem.root", "/workspace"}},
-          attempt};
+          attempt,
+          std::nullopt};
 }
 
 auto task_result(const domain::PlanTaskId& task_id, std::string child_id,
@@ -177,7 +177,8 @@ auto child_start(std::string task_name, std::string child_name,
           {{domain::Effect::write, "filesystem.root", "/workspace"}},
           {domain::Effect::write},
           {{domain::Effect::write, "filesystem.root", "/workspace"}},
-          attempt_number};
+          attempt_number,
+          std::nullopt};
 }
 
 auto invocation(std::string task_name, std::string child_name,
@@ -196,6 +197,7 @@ auto success() -> runtime::ChildRunResult {
           {1, 1, {10, 5, 0, 0}},
           {id<domain::EvidenceId>("result")},
           {id<domain::ArtifactId>("result")},
+          std::nullopt,
           std::nullopt};
 }
 

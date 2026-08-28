@@ -1,13 +1,5 @@
 #pragma once
 
-#include <chrono>
-#include <cstdint>
-#include <optional>
-#include <string>
-#include <utility>
-#include <variant>
-#include <vector>
-
 #include <aiforge/domain/child_run.hpp>
 #include <aiforge/domain/content.hpp>
 #include <aiforge/domain/money.hpp>
@@ -18,6 +10,13 @@
 #include <aiforge/domain/provenance.hpp>
 #include <aiforge/domain/review_receipt.hpp>
 #include <aiforge/domain/verification_evidence.hpp>
+#include <chrono>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace aiforge::domain {
 
@@ -343,6 +342,7 @@ struct ReviewVerdictRecorded {
   ReviewReceiptId receipt_id;
   ReviewVerdict verdict{ReviewVerdict::rejected};
   ReviewActor reviewer;
+  std::optional<ReviewParticipantProvenance> reviewer_provenance;
   auto operator==(const ReviewVerdictRecorded&) const -> bool = default;
 };
 

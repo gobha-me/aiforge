@@ -1,15 +1,16 @@
 #pragma once
 
+#include <aiforge/domain/content.hpp>
+#include <aiforge/domain/plan.hpp>
+#include <aiforge/domain/repository_evidence.hpp>
+#include <aiforge/domain/review_receipt.hpp>
+
 #include <chrono>
 #include <cstdint>
 #include <expected>
 #include <optional>
 #include <string>
 #include <vector>
-
-#include <aiforge/domain/content.hpp>
-#include <aiforge/domain/plan.hpp>
-#include <aiforge/domain/repository_evidence.hpp>
 
 namespace aiforge::domain {
 
@@ -41,6 +42,7 @@ struct ChildRunDescriptor {
   std::vector<Effect> effects;
   std::vector<CapabilityScope> capability_scopes;
   std::uint32_t attempt{1};
+  std::optional<ReviewReceiptId> review_receipt_id;
   auto operator==(const ChildRunDescriptor&) const -> bool = default;
 };
 
@@ -88,8 +90,8 @@ struct ChildRunContractError {
   auto operator==(const ChildRunContractError&) const -> bool = default;
 };
 
-[[nodiscard]] auto
-validate_child_run_descriptor(const ChildRunDescriptor& descriptor)
+[[nodiscard]] auto validate_child_run_descriptor(
+    const ChildRunDescriptor &descriptor)
     -> std::expected<void, ChildRunContractError>;
 
 [[nodiscard]] auto validate_session_task_result(const SessionTaskResult& result,

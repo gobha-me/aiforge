@@ -1,23 +1,23 @@
-#include <catch2/catch_test_macros.hpp>
+#include <sqlite3.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
+#include <aiforge/adapters/sqlite_session_store.hpp>
+#include <aiforge/testing/scripted_session_store.hpp>
 #include <array>
+
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <optional>
-#include <sqlite3.h>
 #include <stop_token>
 #include <string>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <utility>
 #include <variant>
 #include <vector>
-
-#include <aiforge/adapters/sqlite_session_store.hpp>
-#include <aiforge/testing/scripted_session_store.hpp>
 
 namespace {
 
@@ -45,7 +45,7 @@ class TemporaryDirectory final {
     std::error_code error;
     std::filesystem::remove_all(m_path, error);
   }
-  [[nodiscard]] auto path() const -> const std::filesystem::path& { return m_path; }
+  [[nodiscard]] auto path() const -> const std::filesystem::path & { return m_path; }
 
  private:
   std::filesystem::path m_path;
@@ -70,7 +70,8 @@ auto event(const std::uint64_t sequence, Payload payload, std::string id = {})
   }
   if (const auto* child = std::get_if<domain::ChildRunCreated>(&result.payload);
       child != nullptr && child->descriptor) {
-    result.metadata.schema_version = 3;
+    result.metadata.schema_version =
+        child->descriptor->review_receipt_id ? 4 : 3;
   }
   return result;
 }
@@ -109,8 +110,7 @@ auto review_draft() -> domain::ReviewReceiptDraft {
   const auto requirement =
       make_id<domain::ReviewRequirementId>("review-requirement");
   const auto artifact = make_id<domain::ArtifactId>("review-artifact");
-  return {
-      receipt,
+  return {receipt,
       {{make_id<domain::RepositoryId>("review-repository"),
         {"sha256", "aaaaaaaaaaaaaaaa", 0}},
        "0123456789abcdef"},
@@ -125,12 +125,18 @@ auto review_draft() -> domain::ReviewReceiptDraft {
         std::nullopt,
         std::nullopt,
         {"sha256", "bbbbbbbbbbbbbbbb", 64},
-        {{artifact, {"sha256", "cccccccccccccccc", 128}}}}}};
+        {{artifact, {"sha256", "cccccccccccccccc", 128}}}}},
+          domain::ReviewParticipantProvenance{
+              {"author", "Author"},
+              make_id<domain::RunId>("author-run"),
+              std::string{"fake-backend"},
+              std::string{"1"},
+              make_id<domain::ModelId>("author-model"),
+              std::string{"2026-08-28"}}};
 }
 
 auto plan_revision() -> domain::PlanRevision {
-  return {
-      make_id<domain::PlanId>("plan"),
+  return {make_id<domain::PlanId>("plan"),
       make_id<domain::PlanRevisionId>("revision-1"),
       std::nullopt,
       "Implement the accepted work",
@@ -170,7 +176,9 @@ auto child_run_descriptor() -> domain::ChildRunDescriptor {
            32},
           {2, 3, 256, 128, std::chrono::seconds{30}},
           {domain::Effect::write},
-          {{domain::Effect::write, "filesystem.root", "/workspace"}}};
+          {{domain::Effect::write, "filesystem.root", "/workspace"}},
+          1,
+          review_draft().receipt_id};
 }
 
 auto session_task_result() -> domain::SessionTaskResult {
@@ -262,17 +270,18 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
   const domain::ArtifactMetadata artifact_metadata{
       artifact, "text/plain", 3, "sha256:abc", invocation, 1, 2};
   auto usd = domain::MonetaryAmount::create(
-      "USD", domain::DecimalAmount::from("0").value()).value();
+      "USD", domain::DecimalAmount::from("0").value())
+                 .value();
   auto diem = domain::MonetaryAmount::create(
       "venice.diem", domain::DecimalAmount::from("0.0645375").value())
                   .value();
-  auto reported_cost = domain::ReportedCost::create(
-      {std::move(usd), std::move(diem)}).value();
+  auto reported_cost =
+      domain::ReportedCost::create({std::move(usd), std::move(diem)}).value();
   return {
       started(),
       domain::RunProvenanceRecorded{run_provenance()},
-      domain::PersonaSelectionRecorded{{
-          domain::PersonaSelectionAction::selected,
+      domain::PersonaSelectionRecorded{
+          {domain::PersonaSelectionAction::selected,
           domain::PersonaSelectionSource::command_line,
           domain::PersonaReference{
               make_id<domain::PersonaId>("persona:reviewer"), "reviewer",
@@ -317,7 +326,8 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
       domain::ToolPolicyDecided{invocation, domain::PolicyDecision::allow,
                                 {scope}, std::string{"allowed"},
                                 domain::PolicyDecisionSource::saved_grant},
-      domain::ToolApprovalRequested{invocation, {scope},
+      domain::ToolApprovalRequested{
+          invocation, {scope},
                                     std::string{"runtime-owned reason"}},
       domain::ToolApprovalDecided{invocation,
                                   domain::ApprovalDecision::approved, {scope},
@@ -325,7 +335,8 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
       domain::ToolPolicyFailed{invocation, error},
       domain::ToolStarted{invocation},
       domain::ToolProgressed{invocation, {domain::TextBlock{"working"}}},
-      domain::ToolResultRecorded{invocation, {domain::TextBlock{"done"}},
+      domain::ToolResultRecorded{
+          invocation, {domain::TextBlock{"done"}},
                                  message},
       domain::ToolErrored{invocation, error, message},
       domain::QuestionRequested{definition},
@@ -344,14 +355,25 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
           review_draft().receipt_id,
           {make_id<domain::ReviewFindingId>("review-finding"), "finding",
            make_id<domain::VerificationEvidenceId>("review-verification"),
-           {make_id<domain::ArtifactId>("review-artifact")}}},
+           {make_id<domain::ArtifactId>("review-artifact")},
+           domain::ReviewFindingSeverity::high,
+           std::nullopt,
+           {make_id<domain::VerificationEvidenceId>("review-verification")}}},
       domain::ReviewFindingResolved{
           review_draft().receipt_id,
           make_id<domain::ReviewFindingId>("review-finding"),
           {"reviewer", "Reviewer"}, std::string{"resolved"}},
-      domain::ReviewVerdictRecorded{review_draft().receipt_id,
+      domain::ReviewVerdictRecorded{
+          review_draft().receipt_id,
                                     domain::ReviewVerdict::approved,
-                                    {"reviewer", "Reviewer"}},
+                                    {"reviewer", "Reviewer"},
+          domain::ReviewParticipantProvenance{
+              {"reviewer", "Reviewer"},
+              make_id<domain::RunId>("reviewer-run"),
+              std::string{"fake-backend"},
+              std::string{"1"},
+              make_id<domain::ModelId>("review-model"),
+              std::string{"2026-08-28"}}},
       domain::ReviewVerdictRevoked{
           review_draft().receipt_id,
           make_id<domain::EventId>("review-verdict-event"),
@@ -558,9 +580,10 @@ TEST_CASE("all typed payloads and opaque future payloads round trip",
           storage::SessionStoreErrorCode::invalid_argument);
 
   const auto future_session = create(*store, "future-session", 200);
-  auto future = event(
-      1,
-      domain::UnknownEvent{"run.started",
+  auto future =
+      event(1,
+            domain::UnknownEvent{
+                "run.started",
                            {"application/json", "{\"future_field\":true}"}},
       "future-event");
   future.metadata.schema_version = 2;
@@ -569,8 +592,8 @@ TEST_CASE("all typed payloads and opaque future payloads round trip",
   REQUIRE(future_replay);
   REQUIRE(*future_replay == std::vector<domain::RunEvent>{future});
 
-  auto noncanonical = event(
-      2, domain::UnknownEvent{"future.noncanonical",
+  auto noncanonical =
+      event(2, domain::UnknownEvent{"future.noncanonical",
                               {"application/json", "{ \"value\": 1 }"}},
       "noncanonical");
   const auto rejected =
@@ -578,6 +601,37 @@ TEST_CASE("all typed payloads and opaque future payloads round trip",
   REQUIRE_FALSE(rejected);
   REQUIRE(rejected.error().code ==
           storage::SessionStoreErrorCode::invalid_argument);
+}
+
+TEST_CASE("legacy review payload shapes remain canonical",
+          "[storage][sqlite][codec][review][compatibility]") {
+  TemporaryDirectory temporary;
+  auto store = open_store(temporary.path() / "aiforge" / "sessions.sqlite3");
+  const auto session = create(*store, "legacy-review", 100);
+  auto draft = review_draft();
+  draft.author.reset();
+  const domain::ReviewFinding finding{
+      make_id<domain::ReviewFindingId>("legacy-finding"),
+      "legacy finding",
+      make_id<domain::VerificationEvidenceId>("review-verification"),
+      {make_id<domain::ArtifactId>("review-artifact")},
+      domain::ReviewFindingSeverity::medium,
+      std::nullopt,
+      {}};
+  std::vector<domain::RunEvent> events{
+      event(1, domain::ReviewReceiptDrafted{draft}),
+      event(2, domain::ReviewRequested{draft.receipt_id,
+                                       {"reviewer", "Reviewer"}}),
+      event(3, domain::ReviewFindingOpened{draft.receipt_id, finding}),
+      event(4, domain::ReviewVerdictRecorded{
+                   draft.receipt_id,
+                   domain::ReviewVerdict::changes_requested,
+                   {"reviewer", "Reviewer"},
+                   std::nullopt})};
+  REQUIRE(store->append_events(session, events));
+  const auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  REQUIRE(*replayed == events);
 
 }
 
@@ -588,19 +642,17 @@ TEST_CASE("malformed persisted reported cost fails replay explicitly",
   auto store = open_store(path);
   const auto session = create(*store, "cost-session", 100);
   auto amount = domain::MonetaryAmount::create(
-      "USD", domain::DecimalAmount::from("1").value()).value();
+      "USD", domain::DecimalAmount::from("1").value())
+                    .value();
   auto cost = domain::ReportedCost::create({std::move(amount)}).value();
   REQUIRE(store->append_events(
-      session,
-      std::array{event(
-          1,
+      session, std::array{event(1,
           domain::InferenceCostRecorded{
               make_id<domain::InferenceId>("inference"), std::move(cost)},
           "cost-event")}));
   store.reset();
 
-  execute_sql(
-      path,
+  execute_sql(path,
       "UPDATE events SET payload_json='{"
       "\"inference_id\":\"inference\","
       "\"cost\":{\"amounts\":[{\"unit\":\"USD\",\"amount\":\"-1\"}]}}' "
@@ -642,8 +694,8 @@ TEST_CASE("persisted plan revisions without evidence decode compatibly",
   const auto session = create(*store, "legacy-plan-session", 100);
   auto legacy_revision = plan_revision();
   legacy_revision.evidence.clear();
-  auto legacy_event = event(
-      1, domain::PlanRevisionProposed{std::move(legacy_revision)},
+  auto legacy_event =
+      event(1, domain::PlanRevisionProposed{std::move(legacy_revision)},
       "legacy-plan-event");
   legacy_event.metadata.schema_version = 1;
   REQUIRE(store->append_events(session, std::array{legacy_event}));
@@ -663,8 +715,7 @@ TEST_CASE("schema-v2 child dispatches decode first attempts compatibly",
   const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
   auto store = open_store(path);
   const auto session = create(*store, "legacy-child-session", 100);
-  auto legacy = event(
-      1,
+  auto legacy = event(1,
       domain::ChildRunCreated{make_id<domain::RunId>("child"),
                               child_run_descriptor()},
       "legacy-child-event");
@@ -676,8 +727,8 @@ TEST_CASE("schema-v2 child dispatches decode first attempts compatibly",
 
   auto retry_descriptor = child_run_descriptor();
   retry_descriptor.attempt = 2;
-  auto retry = event(
-      2,
+  auto retry =
+      event(2,
       domain::ChildRunCreated{make_id<domain::RunId>("retry-child"),
                               std::move(retry_descriptor)},
       "legacy-retry-event");
@@ -741,13 +792,13 @@ TEST_CASE("session discovery derives distinct run counts without schema state",
   REQUIRE(empty);
   REQUIRE(empty->run_count == 0);
 
-  auto first = event(1, domain::UnknownEvent{
-                            "future.first", {"application/json", "{}"}});
-  auto second = event(2, domain::UnknownEvent{
-                             "future.second", {"application/json", "{}"}});
+  auto first = event(
+      1, domain::UnknownEvent{"future.first", {"application/json", "{}"}});
+  auto second = event(
+      2, domain::UnknownEvent{"future.second", {"application/json", "{}"}});
   second.metadata.run_id = make_id<domain::RunId>("second-run");
-  auto repeated = event(3, domain::UnknownEvent{
-                               "future.third", {"application/json", "{}"}});
+  auto repeated = event(
+      3, domain::UnknownEvent{"future.third", {"application/json", "{}"}});
   repeated.metadata.run_id = second.metadata.run_id;
   REQUIRE(store->append_events(session, std::array{first, second, repeated}));
 
@@ -793,8 +844,7 @@ TEST_CASE("append validation and constraints leave prior history readable",
   REQUIRE(appended.error().code ==
           storage::SessionStoreErrorCode::invalid_argument);
 
-  const auto oversized = event(
-      2, domain::UserContentAdded{domain::Message{
+  const auto oversized = event(2, domain::UserContentAdded{domain::Message{
              make_id<domain::MessageId>("large"), domain::Role::user,
              {domain::TextBlock{std::string(1024, 'x')}}, std::nullopt}},
       "large-event");
@@ -826,8 +876,7 @@ TEST_CASE("append validation and constraints leave prior history readable",
 
   appended = store->append_events(
       session,
-      std::array{event(
-          2,
+      std::array{event(2,
           domain::ReviewRequested{review_draft().receipt_id,
                                   {"forged\nactor", "Reviewer"}},
           "invalid-review-actor")});
@@ -858,7 +907,8 @@ TEST_CASE("missing sessions malformed JSON and newer stores fail explicitly",
   REQUIRE_FALSE(store->replay_events(missing));
 
   const auto session = create(*store, "session", 100);
-  REQUIRE(store->append_events(session,
+  REQUIRE(
+      store->append_events(session,
                                std::array{event(1, started(), "one")}));
   store.reset();
   execute_sql(path,
@@ -883,7 +933,8 @@ TEST_CASE("run provenance never persists a secret and rejects stored damage",
   const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
   auto store = open_store(path);
   const auto session = create(*store, "session", 100);
-  REQUIRE(store->append_events(session, std::array{event(1, started(), "one")}));
+  REQUIRE(
+      store->append_events(session, std::array{event(1, started(), "one")}));
 
   auto sensitive = run_provenance();
   sensitive.configuration.front().sensitive = true;
@@ -927,8 +978,7 @@ TEST_CASE("run provenance never persists a secret and rejects stored damage",
   // Nothing above reached storage.
   REQUIRE(store->replay_events(session)->size() == 1);
   REQUIRE(store->append_events(
-      session, std::array{event(2, domain::RunProvenanceRecorded{
-                                       run_provenance()},
+      session, std::array{event(2, domain::RunProvenanceRecorded{run_provenance()},
                                 "provenance")}));
   store.reset();
 
@@ -967,8 +1017,8 @@ TEST_CASE("bounded SQLite writer contention is retryable",
   REQUIRE(sqlite3_open(path.c_str(), &competing) == SQLITE_OK);
   REQUIRE(sqlite3_exec(competing, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) ==
           SQLITE_OK);
-  const auto result = store->append_events(
-      session, std::array{event(1, started(), "one")});
+  const auto result =
+      store->append_events(session, std::array{event(1, started(), "one")});
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code == storage::SessionStoreErrorCode::contention);
   REQUIRE(result.error().retryable);
@@ -978,7 +1028,8 @@ TEST_CASE("bounded SQLite writer contention is retryable",
   REQUIRE(store->replay_events(session)->empty());
 }
 
-TEST_CASE("closing an interrupted SQLite transaction preserves committed history",
+TEST_CASE(
+    "closing an interrupted SQLite transaction preserves committed history",
           "[storage][sqlite][crash][failure]") {
   TemporaryDirectory temporary;
   const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
@@ -1001,7 +1052,8 @@ TEST_CASE("closing an interrupted SQLite transaction preserves committed history
   REQUIRE(*replay == std::vector<domain::RunEvent>{first});
 }
 
-TEST_CASE("scripted session store records exact calls and deterministic failures",
+TEST_CASE(
+    "scripted session store records exact calls and deterministic failures",
           "[storage][fake][failure]") {
   const auto session = make_id<domain::SessionId>("session");
   const storage::SessionInfo info{

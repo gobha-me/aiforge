@@ -2,9 +2,8 @@
 #include <aiforge/runtime/review_gate.hpp>
 #include <aiforge/testing/scripted_hosted_review_check.hpp>
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -70,7 +69,8 @@ auto scenario_binding() -> domain::ReviewEvidenceBinding {
 
 auto draft() -> domain::ReviewReceiptDraft {
   return {id<domain::ReviewReceiptId>("receipt"), candidate(),
-          {verification_binding(), scenario_binding()}};
+          {verification_binding(), scenario_binding()},
+          std::nullopt};
 }
 
 auto actor(std::string actor_id = "reviewer") -> domain::ReviewActor {
@@ -90,13 +90,12 @@ auto event(const std::uint64_t sequence, Payload payload,
 
 auto approved_events() -> std::vector<domain::RunEvent> {
   const auto value = draft();
-  return {
-      event(1, domain::ReviewReceiptDrafted{value}),
+  return {event(1, domain::ReviewReceiptDrafted{value}),
       event(2, domain::ReviewRequested{value.receipt_id, actor()}),
       event(3,
             domain::ReviewVerdictRecorded{value.receipt_id,
                                           domain::ReviewVerdict::approved,
-                                          actor()},
+                                              actor(), std::nullopt},
             "approval")};
 }
 
@@ -195,13 +194,17 @@ TEST_CASE("review lifecycle projects findings verdicts revocation and conflict",
   const domain::ReviewFinding finding{
       id<domain::ReviewFindingId>("finding"), "A bounded defect",
       id<domain::VerificationEvidenceId>("verification"),
-      {id<domain::ArtifactId>("test-report")}};
+      {id<domain::ArtifactId>("test-report")},
+      domain::ReviewFindingSeverity::medium,
+      std::nullopt,
+      {}};
   REQUIRE(projection.apply(
       event(3, domain::ReviewFindingOpened{value.receipt_id, finding})));
-  REQUIRE(projection.apply(event(
-      4,
+  REQUIRE(projection.apply(
+      event(4,
       domain::ReviewVerdictRecorded{value.receipt_id,
-                                    domain::ReviewVerdict::approved, actor()},
+                                    domain::ReviewVerdict::approved,
+                                          actor(), std::nullopt},
       "approval")));
   REQUIRE(projection.state() == repository::ReviewReceiptState::findings_open);
   REQUIRE(projection.apply(event(
@@ -214,15 +217,16 @@ TEST_CASE("review lifecycle projects findings verdicts revocation and conflict",
                                       id<domain::EventId>("approval"), actor(),
                                       "candidate requires another pass"})));
   REQUIRE(projection.state() == repository::ReviewReceiptState::revoked);
-  REQUIRE(projection.apply(event(
-      7,
+  REQUIRE(projection.apply(
+      event(7,
       domain::ReviewVerdictRecorded{value.receipt_id,
-                                    domain::ReviewVerdict::approved, actor()},
+                                    domain::ReviewVerdict::approved,
+                                          actor(), std::nullopt},
       "approval-two")));
   REQUIRE(projection.apply(event(
-      8, domain::ReviewVerdictRecorded{
-             value.receipt_id, domain::ReviewVerdict::changes_requested,
-             actor("second-reviewer")},
+      8,
+      domain::ReviewVerdictRecorded{value.receipt_id, domain::ReviewVerdict::changes_requested,
+                                    actor("second-reviewer"), std::nullopt},
       "conflict")));
   REQUIRE(projection.state() == repository::ReviewReceiptState::conflicted);
 
@@ -423,8 +427,8 @@ TEST_CASE("required hosted checks confirm the exact candidate and decision",
   REQUIRE(decision.error().code ==
           runtime::ReviewGateErrorCode::hosted_check_failure);
 
-  testing::ScriptedHostedReviewCheck unavailable{{{
-      expected,
+  testing::ScriptedHostedReviewCheck unavailable{
+      {{expected,
       runtime::HostedReviewCheckError{
           runtime::HostedReviewCheckErrorCode::unavailable, "offline", true}}}};
   decision = gate.evaluate(*projection, hosted_policy, environment(),

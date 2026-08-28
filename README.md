@@ -708,6 +708,22 @@ explicitly configured trusted actor. A provider-neutral hosted-check port can
 make successful publication part of authorization without exposing GitHub or
 another forge's types through the domain API.
 
+Reviewer tasks use the same accepted-plan child-run lifecycle. A review child
+must receive a current `TaskPhase::review` parcel containing both diff and exact
+source evidence, and its task, effects, and capability scopes must remain
+read-only. The first attempt records the candidate-bound receipt and request
+with the child dispatch; retryable runner unavailability may use the same
+receipt on a bounded later attempt.
+
+A successful reviewer result carries bounded findings with actionable severity,
+exact source or recorded reproduction evidence, returned artifact references,
+and reviewer run/backend/model provenance. The kernel validates the entire
+result before appending any finding or verdict. Approval cannot accompany open
+findings, candidate drift and unsupported references fail closed, and replay
+rebuilds the receipt without redispatching a reviewer. This is a neutral runtime
+boundary with a deterministic fake; selecting a production reviewer executor or
+surface remains separate work.
+
 ## Project instruction discovery
 
 `aiforge::repository::ProjectInstructionSource` discovers bounded `AGENTS.md`
