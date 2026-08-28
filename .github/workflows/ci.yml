@@ -14,6 +14,24 @@ permissions:
   contents: read
 
 jobs:
+  format:
+    name: Clang Format 20
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Clang Format 20
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 20
+          sudo apt-get install --no-install-recommends clang-format-20
+
+      - name: Check formatting
+        run: tools/format.sh --check
+
   build-and-test:
     name: ${{ matrix.compiler }}
     runs-on: ubuntu-24.04
