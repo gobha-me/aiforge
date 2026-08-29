@@ -10,6 +10,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "run_metadata.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -138,22 +140,6 @@ class MatrixLock final {
     return value;
   } catch (const std::exception&) {
     return std::unexpected("could not parse " + path.string());
-  }
-}
-
-[[nodiscard]] auto write_json(const fs::path& path, const Json& value)
-    -> std::expected<void, std::string> {
-  try {
-    const auto temporary = path.string() + ".new";
-    {
-      std::ofstream output{temporary, std::ios::trunc};
-      output << value.dump(2) << '\n';
-      if (!output) return std::unexpected("could not write run metadata");
-    }
-    fs::rename(temporary, path);
-    return {};
-  } catch (const fs::filesystem_error&) {
-    return std::unexpected("could not replace run metadata");
   }
 }
 
@@ -499,24 +485,14 @@ auto main(const int argc, char** argv) -> int {
       std::cerr << "aiforge-drawforge-eval: " << cost.error() << '\n';
       return 1;
     }
-    auto refreshed = read_json(arguments->run / "run.json");
-    if (!refreshed) {
-      std::cerr << "aiforge-drawforge-eval: run metadata disappeared\n";
-      return 1;
-    }
-    (*refreshed)["usage"]["input_tokens"] = result->usage.input_tokens;
-    (*refreshed)["usage"]["output_tokens"] = result->usage.output_tokens;
-    (*refreshed)["usage"]["cost_usd"] = std::stod(*cost);
-    auto written = write_json(arguments->run / "run.json", *refreshed);
-    if (!written) {
-      std::cerr << "aiforge-drawforge-eval: " << written.error() << '\n';
-      return 1;
-    }
-    const auto& events = (*refreshed)["events"];
-    if (!events.is_array() ||
-        std::find(events.begin(), events.end(), "submission_accepted") ==
-            events.end()) {
-      std::cerr << "aiforge-drawforge-eval: no submission was accepted\n";
+    auto finalized = aiforge::evaluation::drawforge::
+        record_accounting_and_validate_submission(arguments->run / "run.json",
+                                                  {result->usage.input_tokens,
+                                                   result->usage.output_tokens,
+                                                   std::stod(*cost)});
+    if (!finalized) {
+      std::cerr << "aiforge-drawforge-eval: " << finalized.error().message
+                << '\n';
       return 1;
     }
     std::cout << assistant.str();
