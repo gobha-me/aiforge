@@ -539,6 +539,37 @@ TEST_CASE("allowed tool results continue the same run in registry order",
           domain::RunStatus::completed);
 }
 
+TEST_CASE("continuation projection withholds incomplete assistant tool turns",
+          "[tools][runtime][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("blocking-call");
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(declaration(),
+                                 std::make_shared<BlockingExecutor>(),
+                                 runtime::ToolExecutionLimits{1024, 2, 30s}));
+  const auto snapshot = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
+  testing::ScriptedBackend backend{{
+      {initial, tool_call_script(invocation)},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            snapshot,
+                            allow_policy()};
+
+  REQUIRE(kernel.start(run_start(initial)));
+  drain_to_inference_boundary(kernel, wake);
+
+  const auto continuation =
+      runtime::tool_continuation_messages(kernel.event_log().events());
+  REQUIRE(continuation);
+  REQUIRE(continuation->empty());
+  REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "test cleanup"));
+}
+
 TEST_CASE("policy and approval decisions are one-shot and cannot widen scope",
           "[tools][policy][failure]") {
   const auto invocation = make_id<domain::InvocationId>("call");
