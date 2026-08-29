@@ -63,7 +63,9 @@ jobs:
           sudo apt-get install --no-install-recommends libc++-18-dev libc++abi-18-dev
 
       - name: Configure
-        run: cmake -B "${{ matrix.build_dir }}" ${{ matrix.toolchain }}
+        run: >-
+          cmake -B "${{ matrix.build_dir }}" ${{ matrix.toolchain }}
+          -Daiforge_DRAWFORGE_EVALUATION=ON
 
       - name: Build
         run: cmake --build "${{ matrix.build_dir }}" --parallel 2
