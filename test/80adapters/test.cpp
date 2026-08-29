@@ -756,7 +756,7 @@ TEST_CASE("Venice adapter replays assistant tool calls before tool results",
   const auto sent = nlohmann::json::parse(server.body());
   REQUIRE(sent.at("messages").size() == 2);
   REQUIRE(sent.at("messages").at(0).at("role") == "assistant");
-  REQUIRE(sent.at("messages").at(0).at("content").is_null());
+  REQUIRE(sent.at("messages").at(0).at("content") == "");
   REQUIRE(sent.at("messages").at(0).at("tool_calls").at(0).at("id") ==
           "ask-call");
   REQUIRE(sent.at("messages")
