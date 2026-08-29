@@ -18,8 +18,11 @@ The runner reads the frozen model and sampling identity from `run.json`. It
 allows only the bundled bridge executable through AIForge's bounded process
 tool, requires provider-reported USD cost, and refuses a new inference when a
 started run lacks cost evidence or the matrix's conservative spend reaches the
-USD 3 ceiling. A matrix-wide lock prevents concurrent runners from racing that
-accounting check; an interrupted process can leave the empty
+USD 3 ceiling. Provider-reported usage and cost are persisted before the runner
+checks whether the model produced an accepted submission, so an unsuccessful
+paid run remains accounted and does not wedge the rest of the matrix. A
+matrix-wide lock prevents concurrent runners from racing that accounting
+check; an interrupted process can leave the empty
 `.aiforge-drawforge-eval.lock` directory for the operator to inspect and remove.
 
 The bridge accepts only `tool.py submit PAYLOAD`. It reconstructs semantic
