@@ -9,8 +9,10 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <ostream>
+#include <span>
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -161,6 +163,43 @@ template <typename IdType>
   const auto tick = static_cast<std::uint64_t>(
       std::chrono::steady_clock::now().time_since_epoch().count());
   return tick ^ count;
+}
+
+[[nodiscard]] auto estimated_message_tokens(const domain::Message& message)
+    -> std::expected<std::uint64_t, OneShotError> {
+  std::uint64_t total{};
+  const auto add = [&](const std::size_t size) -> bool {
+    if (size > std::numeric_limits<std::uint64_t>::max() - total) return false;
+    total += static_cast<std::uint64_t>(size);
+    return true;
+  };
+  for (const auto& block : message.content) {
+    const auto admitted = std::visit(
+        [&](const auto& value) -> bool {
+          using Value = std::remove_cvref_t<decltype(value)>;
+          if constexpr (std::same_as<Value, domain::TextBlock>) {
+            return add(value.text.size());
+          } else if constexpr (std::same_as<Value,
+                                            domain::StructuredDataBlock>) {
+            return add(value.media_type.size()) && add(value.data.size());
+          } else if constexpr (std::same_as<Value, domain::CitationBlock>) {
+            return add(value.uri.size()) &&
+                   (!value.title || add(value.title->size()));
+          } else if constexpr (std::same_as<Value,
+                                            domain::ArtifactReferenceBlock>) {
+            return add(value.artifact_id.value().size()) &&
+                   (!value.label || add(value.label->size()));
+          } else {
+            return false;
+          }
+        },
+        block);
+    if (!admitted) {
+      return one_shot_error(OneShotErrorCode::context_failed,
+                            "tool result cannot enter one-shot context");
+    }
+  }
+  return std::max<std::uint64_t>(total, 1);
 }
 
 struct SpendState {
@@ -681,7 +720,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
            evidence_size});
     }
 
-    auto context = runtime::ContextBuilder{}.build(std::move(build_input));
+    auto context = runtime::ContextBuilder{}.build(build_input);
     if (!context) {
       return one_shot_error(OneShotErrorCode::context_failed,
                             "one-shot input exceeds model context capacity");
@@ -694,6 +733,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
         std::move(*context),
         m_dependencies.tools.declarations(),
         {std::nullopt, output_tokens, std::nullopt, {}}};
+    const auto run_event_offset = kernel->event_log().events().size();
     auto started = kernel->start(
         {*run_id,
          {*surface_id, *workspace_id, *permission_id,
@@ -723,14 +763,17 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
 
     bool cancellation_sent{};
     std::optional<domain::DomainError> run_error;
+    std::size_t appended_tool_results{};
     auto generation = wake.generation();
     while (kernel->active_run_id()) {
       if (stop_token.stop_requested() && !cancellation_sent) {
         const auto active_run = kernel->active_run_id();
         const auto active_inference = kernel->active_inference_id();
-        if (active_run && active_inference) {
+        if (active_run) {
           auto cancelled =
-              kernel->cancel(*active_run, *active_inference, "interrupt");
+              active_inference
+                  ? kernel->cancel(*active_run, *active_inference, "interrupt")
+                  : kernel->cancel_run(*active_run, "interrupt");
           if (!cancelled) {
             return one_shot_error(OneShotErrorCode::run_failed,
                                   "one-shot cancellation failed");
@@ -752,6 +795,71 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
           }
         }
         return std::unexpected(std::move(rendered.error()));
+      }
+      if (kernel->active_run_id() && !kernel->active_inference_id()) {
+        const auto& history_events = kernel->event_log().events();
+        auto tool_messages = runtime::tool_result_messages(
+            std::span{history_events.data() + run_event_offset,
+                      history_events.size() - run_event_offset});
+        if (!tool_messages || tool_messages->size() < appended_tool_results) {
+          return one_shot_error(OneShotErrorCode::run_failed,
+                                "one-shot tool history is invalid");
+        }
+        if (tool_messages->size() > appended_tool_results) {
+          for (auto index = appended_tool_results;
+               index < tool_messages->size(); ++index) {
+            const auto continuation_suffix = next_suffix();
+            auto entry_id = make_id<domain::ContextEntryId>(
+                "tool-result-entry", continuation_suffix);
+            auto source_id = make_id<domain::ContextSourceId>(
+                "tool-result-source", continuation_suffix);
+            auto estimated = estimated_message_tokens((*tool_messages)[index]);
+            if (!entry_id || !source_id || !estimated) {
+              return one_shot_error(OneShotErrorCode::context_failed,
+                                    "tool result context could not be built");
+            }
+            build_input.content.push_back(
+                {*entry_id,
+                 domain::ContextContentKind::tool_result,
+                 std::move((*tool_messages)[index]),
+                 {*source_id, std::string{"one-shot:tool"}, std::nullopt},
+                 static_cast<std::uint64_t>(build_input.content.size()) + 1,
+                 *estimated});
+          }
+          appended_tool_results = tool_messages->size();
+
+          auto continuation_context =
+              runtime::ContextBuilder{}.build(build_input);
+          if (!continuation_context) {
+            return one_shot_error(OneShotErrorCode::context_failed,
+                                  "tool results exceed model context capacity");
+          }
+          const auto continuation_suffix = next_suffix();
+          auto continuation_inference =
+              make_id<domain::InferenceId>("inference", continuation_suffix);
+          auto continuation_assistant =
+              make_id<domain::MessageId>("assistant", continuation_suffix);
+          if (!continuation_inference || !continuation_assistant) {
+            return one_shot_error(
+                OneShotErrorCode::internal_failure,
+                "could not create one-shot continuation identities");
+          }
+          auto continued = kernel->continue_run(
+              *run_id,
+              {*continuation_inference,
+               *continuation_assistant,
+               request.model_id,
+               std::move(*continuation_context),
+               m_dependencies.tools.declarations(),
+               {std::nullopt, output_tokens, std::nullopt, {}}},
+              model->pricing_observation);
+          if (!continued &&
+              continued.error().code !=
+                  runtime::RunKernelErrorCode::continuation_not_ready) {
+            return one_shot_error(OneShotErrorCode::run_failed,
+                                  "one-shot continuation failed");
+          }
+        }
       }
       if (kernel->active_run_id() && events->empty()) {
         wake.wait(generation, stop_token);
