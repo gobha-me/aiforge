@@ -39,11 +39,12 @@ AIForge uses CMake only for dependencies. A configured package is preferred,
 then a sibling checkout, with `FetchContent` as the fallback. Adapter builds use
 TermForge and venice-cpp; consumed core-only builds may set
 `aiforge_BUILD_ADAPTERS=OFF`. Their fallbacks are pinned to compatible stable
-baselines: TermForge v0.55.0 for cross-thread posting, styled word wrapping,
-bounded mutable transcript streaming, multiline composition, history recall,
-and multi-page choice dialogs; and
-venice-cpp v0.23.0 for transport cancellation, structured deltas, tool
-declarations, explicit public authentication, and typed model metadata.
+baselines: TermForge v0.57.20 for the existing interactive seams plus bounded
+input, output-refusal, resize, and image-route hardening; and venice-cpp v0.29.2
+for the existing chat and model-catalogue seams plus current request shapes,
+redirect refusal, and header-injection guards. A RasterForge v0.5.0 recipe
+establishes the bounded raster compatibility baseline but remains inactive until
+an owning media feature names it in `${PROJECT_NAME}_DEPS`.
 
 Durable session storage uses SQLite 3 behind a neutral storage port. CMake
 prefers an installed SQLite 3.45.1 or newer and otherwise builds the pinned
