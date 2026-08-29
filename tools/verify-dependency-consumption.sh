@@ -71,6 +71,13 @@ for dependency in termforge venice_cpp rasterforge; do
   build_and_run_probe "fetched-${dependency}"
 done
 
+configure_probe "system-sqlite3" sqlite3
+build_and_run_probe "system-sqlite3"
+
+configure_probe "fetched-sqlite3" sqlite3 \
+  -DCMAKE_DISABLE_FIND_PACKAGE_SQLite3=TRUE
+build_and_run_probe "fetched-sqlite3"
+
 PREFIX="${WORK_DIR}/installed"
 
 cmake -S "${WORK_DIR}/fetched-termforge/_deps/termforge-src" \

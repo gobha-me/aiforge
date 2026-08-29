@@ -11,5 +11,5 @@ target_include_directories(65storage-test
 target_link_libraries(65storage-test
   PRIVATE Catch2::Catch2
   PRIVATE ${PROJECT_NAME}::lib
-  PRIVATE SQLite::SQLite3
+  PRIVATE SQLite3::SQLite3
 )

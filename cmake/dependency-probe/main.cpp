@@ -20,6 +20,12 @@ auto main() -> int {
   const auto image = rasterforge::Image::create({1, 1});
   return image && image->size_bytes() == 4 ? 0 : 1;
 }
+#elif defined(PROBE_SQLITE3)
+#include <sqlite3.h>
+
+auto main() -> int {
+  return sqlite3_libversion_number() >= 3045001 ? 0 : 1;
+}
 #else
 #error "No dependency probe was selected"
 #endif
