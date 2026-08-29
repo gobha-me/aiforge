@@ -71,5 +71,5 @@ target_compile_features(${PROJECT_NAME}_lib PUBLIC cxx_std_23)
 target_link_libraries(${PROJECT_NAME}_lib
   PRIVATE CLI11::CLI11
   PRIVATE nlohmann_json::nlohmann_json
-  PRIVATE SQLite::SQLite3
+  PRIVATE SQLite3::SQLite3
 )
