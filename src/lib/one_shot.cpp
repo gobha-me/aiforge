@@ -692,7 +692,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
         *assistant_message_id,
         request.model_id,
         std::move(*context),
-        {},
+        m_dependencies.tools.declarations(),
         {std::nullopt, output_tokens, std::nullopt, {}}};
     auto started = kernel->start(
         {*run_id,
