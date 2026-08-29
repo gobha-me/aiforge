@@ -70,3 +70,6 @@ jobs:
 
       - name: Test
         run: ctest --test-dir "${{ matrix.build_dir }}" --output-on-failure
+
+      - name: Verify dependency consumption
+        run: tools/verify-dependency-consumption.sh "${{ matrix.build_dir }}"
