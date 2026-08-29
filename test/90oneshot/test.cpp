@@ -18,6 +18,7 @@
 
 #include <aiforge/surfaces/one_shot.hpp>
 #include <aiforge/testing/scripted_persona_source.hpp>
+#include <aiforge/testing/scripted_tool_executor.hpp>
 
 namespace {
 
@@ -356,7 +357,22 @@ TEST_CASE("one-shot streams only sanitized text and builds neutral evidence",
     std::optional<backend::BackendRequest> captured;
   } rewriting;
 
-  surfaces::OneShotSurface surface{rewriting, models};
+  const backend::ToolDeclaration tool{
+      "lookup",
+      "Look up a value",
+      {"application/schema+json", R"({"type":"object"})"},
+      {domain::Effect::read},
+      {{domain::Effect::read, "filesystem.root", "/repo"}}};
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      tool, std::make_shared<testing::ScriptedToolExecutor>(
+                std::vector<testing::ScriptedToolExchange>{})));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  surfaces::OneShotDependencies dependencies;
+  dependencies.tools = std::move(*tools);
+  surfaces::OneShotSurface surface{
+      rewriting, models, {}, nullptr, std::move(dependencies)};
   std::ostringstream output;
   std::ostringstream error;
   const auto result = surface.run({"explain", std::string{"file contents"},
@@ -385,7 +401,8 @@ TEST_CASE("one-shot streams only sanitized text and builds neutral evidence",
           "estimate: USD=0.0000065 venice.diem=0.0000065 (catalog-derived)") !=
       std::string::npos);
   REQUIRE(rewriting.captured);
-  REQUIRE(rewriting.captured->tools.empty());
+  REQUIRE(rewriting.captured->tools ==
+          std::vector<backend::ToolDeclaration>{tool});
   REQUIRE(rewriting.captured->context.entries.size() == 3);
   REQUIRE(rewriting.captured->context.entries.back().kind ==
           domain::ContextEntryKind::evidence);
