@@ -495,6 +495,17 @@ TEST_CASE("one-shot continues after a rejected tool result",
   REQUIRE(executor->starts == 0);
   REQUIRE(backend.captured.size() == 2);
   const auto& continuation = backend.captured.back();
+  REQUIRE(continuation.context.entries.size() >= 4);
+  const auto& tool_call =
+      continuation.context.entries[continuation.context.entries.size() - 2];
+  REQUIRE(tool_call.kind == domain::ContextEntryKind::conversation);
+  REQUIRE(tool_call.message.role == domain::Role::assistant);
+  REQUIRE(tool_call.message.tool_calls ==
+          std::vector<domain::ToolCall>{{
+              make_id<domain::InvocationId>("lookup-call"),
+              "lookup",
+              {"application/json", "{"},
+          }});
   REQUIRE(continuation.context.entries.back().kind ==
           domain::ContextEntryKind::tool_result);
   REQUIRE(continuation.context.entries.back().message.role ==
@@ -547,6 +558,14 @@ TEST_CASE("one-shot continues after a successful tool result",
   REQUIRE(executor->remaining_exchanges() == 0);
   REQUIRE(backend.captured.size() == 2);
   const auto& continuation = backend.captured.back();
+  REQUIRE(continuation.context.entries.size() >= 4);
+  const auto& tool_call =
+      continuation.context.entries[continuation.context.entries.size() - 2];
+  REQUIRE(tool_call.kind == domain::ContextEntryKind::conversation);
+  REQUIRE(tool_call.message.role == domain::Role::assistant);
+  REQUIRE(tool_call.message.tool_calls ==
+          std::vector<domain::ToolCall>{
+              {invocation, "lookup", {"application/json", "{}"}}});
   REQUIRE(continuation.context.entries.back().kind ==
           domain::ContextEntryKind::tool_result);
   REQUIRE(

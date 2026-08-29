@@ -507,6 +507,18 @@ TEST_CASE("allowed tool results continue the same run in registry order",
       runtime::tool_result_messages(kernel.event_log().events());
   REQUIRE(messages);
   REQUIRE(*messages == std::vector<domain::Message>{tool_message});
+  const auto continuation_messages =
+      runtime::tool_continuation_messages(kernel.event_log().events());
+  REQUIRE(continuation_messages);
+  REQUIRE(continuation_messages->size() == 2);
+  REQUIRE(
+      continuation_messages->front() ==
+      domain::Message{initial.assistant_message_id,
+                      domain::Role::assistant,
+                      {},
+                      std::nullopt,
+                      {{invocation, "lookup", {"application/json", "{}"}}}});
+  REQUIRE(continuation_messages->back() == tool_message);
   const auto& events = kernel.event_log().events();
   const auto policy = std::ranges::find_if(events, [](const auto& event) {
     return std::holds_alternative<domain::ToolPolicyDecided>(event.payload);
@@ -525,6 +537,37 @@ TEST_CASE("allowed tool results continue the same run in registry order",
   REQUIRE(started < result);
   REQUIRE(kernel.projection(make_id<domain::RunId>("run"))->status() ==
           domain::RunStatus::completed);
+}
+
+TEST_CASE("continuation projection withholds incomplete assistant tool turns",
+          "[tools][runtime][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("blocking-call");
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(declaration(),
+                                 std::make_shared<BlockingExecutor>(),
+                                 runtime::ToolExecutionLimits{1024, 2, 30s}));
+  const auto snapshot = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
+  testing::ScriptedBackend backend{{
+      {initial, tool_call_script(invocation)},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            snapshot,
+                            allow_policy()};
+
+  REQUIRE(kernel.start(run_start(initial)));
+  drain_to_inference_boundary(kernel, wake);
+
+  const auto continuation =
+      runtime::tool_continuation_messages(kernel.event_log().events());
+  REQUIRE(continuation);
+  REQUIRE(continuation->empty());
+  REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "test cleanup"));
 }
 
 TEST_CASE("policy and approval decisions are one-shot and cannot widen scope",
@@ -607,6 +650,13 @@ TEST_CASE("invalid arguments fail before policy without leaking validator text",
       std::get<domain::TextBlock>(messages->front().content.front()).text;
   REQUIRE(text == "tool arguments are invalid");
   REQUIRE(text.find("secret-bearing") == std::string::npos);
+  const auto continuation_messages =
+      runtime::tool_continuation_messages(kernel.event_log().events());
+  REQUIRE(continuation_messages);
+  REQUIRE(continuation_messages->size() == 2);
+  REQUIRE(continuation_messages->front().role == domain::Role::assistant);
+  REQUIRE(continuation_messages->front().tool_calls.size() == 1);
+  REQUIRE(continuation_messages->back() == messages->front());
   REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "test cleanup"));
 }
 

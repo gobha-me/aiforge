@@ -229,6 +229,59 @@ TEST_CASE("message roles preserve instruction and evidence trust boundaries",
           runtime::ContextBuildErrorCode::unsupported_content);
 }
 
+TEST_CASE("assistant tool-call context rejects malformed and ambiguous calls",
+          "[context][tools][failure]") {
+  auto tool_turn =
+      content("assistant-tool", domain::ContextContentKind::conversation, 2,
+              domain::Role::assistant, "");
+  tool_turn.message.content.clear();
+  tool_turn.message.tool_calls.push_back({make_id<domain::InvocationId>("call"),
+                                          "lookup",
+                                          {"application/json", "{}"}});
+
+  auto value = input_with_runtime();
+  auto wrong_role = tool_turn;
+  wrong_role.message.role = domain::Role::user;
+  value.content.push_back(std::move(wrong_role));
+  REQUIRE(build_error(std::move(value)) ==
+          runtime::ContextBuildErrorCode::invalid_content);
+
+  value = input_with_runtime();
+  auto malformed = tool_turn;
+  malformed.message.tool_calls.front().tool_name.clear();
+  value.content.push_back(std::move(malformed));
+  REQUIRE(build_error(std::move(value)) ==
+          runtime::ContextBuildErrorCode::invalid_content);
+
+  value = input_with_runtime();
+  value.content.push_back(tool_turn);
+  auto duplicate = tool_turn;
+  duplicate.entry_id = make_id<domain::ContextEntryId>("assistant-tool-2");
+  duplicate.message.message_id = make_id<domain::MessageId>("message-tool-2");
+  duplicate.order = 3;
+  value.content.push_back(std::move(duplicate));
+  REQUIRE(build_error(std::move(value)) ==
+          runtime::ContextBuildErrorCode::invalid_content);
+}
+
+TEST_CASE("assistant tool calls form a neutral conversation entry",
+          "[context][tools]") {
+  auto value = input_with_runtime();
+  auto tool_turn =
+      content("assistant-tool", domain::ContextContentKind::conversation, 2,
+              domain::Role::assistant, "");
+  tool_turn.message.content.clear();
+  tool_turn.message.tool_calls.push_back({make_id<domain::InvocationId>("call"),
+                                          "lookup",
+                                          {"application/json", "{}"}});
+  value.content.push_back(tool_turn);
+
+  const auto built = runtime::ContextBuilder{}.build(std::move(value));
+
+  REQUIRE(built);
+  REQUIRE(built->entries.back().message == tool_turn.message);
+}
+
 TEST_CASE("preselected context fails rather than truncating or overflowing",
           "[context][failure]") {
   auto value = input_with_runtime();

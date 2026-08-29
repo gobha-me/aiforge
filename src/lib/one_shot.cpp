@@ -199,6 +199,14 @@ template <typename IdType>
                             "tool result cannot enter one-shot context");
     }
   }
+  for (const auto& call : message.tool_calls) {
+    if (!add(call.invocation_id.value().size()) ||
+        !add(call.tool_name.size()) || !add(call.arguments.media_type.size()) ||
+        !add(call.arguments.data.size())) {
+      return one_shot_error(OneShotErrorCode::context_failed,
+                            "tool call cannot enter one-shot context");
+    }
+  }
   return std::max<std::uint64_t>(total, 1);
 }
 
@@ -763,7 +771,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
 
     bool cancellation_sent{};
     std::optional<domain::DomainError> run_error;
-    std::size_t appended_tool_results{};
+    std::size_t appended_tool_messages{};
     auto generation = wake.generation();
     while (kernel->active_run_id()) {
       if (stop_token.stop_requested() && !cancellation_sent) {
@@ -798,15 +806,15 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       }
       if (kernel->active_run_id() && !kernel->active_inference_id()) {
         const auto& history_events = kernel->event_log().events();
-        auto tool_messages = runtime::tool_result_messages(
+        auto tool_messages = runtime::tool_continuation_messages(
             std::span{history_events.data() + run_event_offset,
                       history_events.size() - run_event_offset});
-        if (!tool_messages || tool_messages->size() < appended_tool_results) {
+        if (!tool_messages || tool_messages->size() < appended_tool_messages) {
           return one_shot_error(OneShotErrorCode::run_failed,
                                 "one-shot tool history is invalid");
         }
-        if (tool_messages->size() > appended_tool_results) {
-          for (auto index = appended_tool_results;
+        if (tool_messages->size() > appended_tool_messages) {
+          for (auto index = appended_tool_messages;
                index < tool_messages->size(); ++index) {
             const auto continuation_suffix = next_suffix();
             auto entry_id = make_id<domain::ContextEntryId>(
@@ -820,13 +828,16 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
             }
             build_input.content.push_back(
                 {*entry_id,
-                 domain::ContextContentKind::tool_result,
+                 (*tool_messages)[index].role == domain::Role::assistant
+                     ? domain::ContextContentKind::conversation
+                     : domain::ContextContentKind::tool_result,
                  std::move((*tool_messages)[index]),
-                 {*source_id, std::string{"one-shot:tool"}, std::nullopt},
+                 {*source_id, std::string{"one-shot:tool-continuation"},
+                  std::nullopt},
                  static_cast<std::uint64_t>(build_input.content.size()) + 1,
                  *estimated});
           }
-          appended_tool_results = tool_messages->size();
+          appended_tool_messages = tool_messages->size();
 
           auto continuation_context =
               runtime::ContextBuilder{}.build(build_input);

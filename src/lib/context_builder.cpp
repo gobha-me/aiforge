@@ -10,6 +10,7 @@
 #include <ranges>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -50,6 +51,12 @@ using namespace domain;
 [[nodiscard]] auto contains_unknown(const Message& message) -> bool {
   return std::ranges::any_of(message.content, [](const ContentBlock& block) {
     return std::holds_alternative<UnknownContentBlock>(block);
+  });
+}
+
+[[nodiscard]] auto has_control_character(const std::string_view value) -> bool {
+  return std::ranges::any_of(value, [](const unsigned char character) {
+    return character < 0x20U || character == 0x7FU;
   });
 }
 
@@ -151,6 +158,7 @@ auto ContextBuilder::build(ContextBuildInput input) const
     if (instruction.message) {
       if (instruction.message->role != Role::system ||
           instruction.message->invocation_id ||
+          !instruction.message->tool_calls.empty() ||
           instruction.message->content.empty()) {
         return error(ContextBuildErrorCode::invalid_instruction,
                      "instruction messages must be nonempty system messages "
@@ -171,6 +179,7 @@ auto ContextBuilder::build(ContextBuildInput input) const
     }
   }
 
+  std::set<InvocationId> tool_call_ids;
   for (const auto& content : input.content) {
     if (!entry_ids.insert(content.entry_id).second) {
       return error(ContextBuildErrorCode::duplicate_entry_id,
@@ -186,7 +195,8 @@ auto ContextBuilder::build(ContextBuildInput input) const
                    content.entry_id);
     }
     if (content.order == 0 || content.estimated_tokens == 0 ||
-        content.message.content.empty()) {
+        (content.message.content.empty() &&
+         content.message.tool_calls.empty())) {
       return error(ContextBuildErrorCode::invalid_content,
                    "context content must have positive order and size and "
                    "nonempty blocks",
@@ -197,16 +207,31 @@ auto ContextBuilder::build(ContextBuildInput input) const
                    "unknown content cannot enter a backend request",
                    content.entry_id);
     }
+    if (std::ranges::any_of(
+            content.message.tool_calls, [&](const ToolCall& call) {
+              return !tool_call_ids.insert(call.invocation_id).second ||
+                     call.tool_name.empty() || call.tool_name.size() > 128 ||
+                     has_control_character(call.tool_name) ||
+                     call.arguments.media_type != "application/json" ||
+                     call.arguments.data.empty();
+            })) {
+      return error(ContextBuildErrorCode::invalid_content,
+                   "assistant tool calls are malformed or ambiguous",
+                   content.entry_id);
+    }
     const bool role_is_valid =
         (content.kind == ContextContentKind::conversation &&
-         (content.message.role == Role::user ||
+         ((content.message.role == Role::user &&
+           content.message.tool_calls.empty()) ||
           content.message.role == Role::assistant) &&
          !content.message.invocation_id) ||
         (content.kind == ContextContentKind::evidence &&
          content.message.role == Role::evidence &&
-         !content.message.invocation_id) ||
+         !content.message.invocation_id &&
+         content.message.tool_calls.empty()) ||
         (content.kind == ContextContentKind::tool_result &&
-         content.message.role == Role::tool && content.message.invocation_id);
+         content.message.role == Role::tool && content.message.invocation_id &&
+         content.message.tool_calls.empty());
     if (!role_is_valid) {
       return error(content.kind == ContextContentKind::unknown
                        ? ContextBuildErrorCode::unsupported_content

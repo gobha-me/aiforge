@@ -2,6 +2,7 @@
 #include <aiforge/runtime/tool_registry.hpp>
 
 #include <algorithm>
+#include <iterator>
 #include <ranges>
 #include <set>
 #include <utility>
@@ -195,6 +196,160 @@ auto tool_result_messages(std::span<const domain::RunEvent> events)
     return std::unexpected(
         ToolExecutionError{ToolExecutionErrorCode::internal_failure,
                            "tool result projection failed internally", false});
+  }
+}
+
+auto tool_continuation_messages(std::span<const domain::RunEvent> events)
+    -> std::expected<std::vector<domain::Message>, ToolExecutionError> {
+  try {
+    std::vector<domain::Message> result;
+    std::optional<domain::Message> assistant;
+    std::optional<domain::InferenceId> assistant_inference;
+    bool assistant_finished{};
+    std::vector<domain::Message> pending_terminal;
+    std::set<domain::InvocationId> proposed_invocations;
+    std::set<domain::InvocationId> terminal_invocations;
+
+    const auto terminal_message =
+        [&](const domain::InvocationId& invocation_id,
+            const std::optional<domain::MessageId>& message_id,
+            std::vector<domain::ContentBlock> content)
+        -> std::expected<domain::Message, ToolExecutionError> {
+      if (!message_id || !proposed_invocations.contains(invocation_id) ||
+          !terminal_invocations.insert(invocation_id).second) {
+        return std::unexpected(ToolExecutionError{
+            ToolExecutionErrorCode::protocol_failure,
+            "tool continuation history is incomplete or ambiguous", false});
+      }
+      if (content.empty()) {
+        content.emplace_back(
+            domain::TextBlock{"tool completed without output"});
+      }
+      return domain::Message{*message_id, domain::Role::tool,
+                             std::move(content), invocation_id};
+    };
+
+    const auto flush_complete_turn =
+        [&]() -> std::expected<void, ToolExecutionError> {
+      if (!assistant || !assistant_finished) return {};
+      if (pending_terminal.size() > assistant->tool_calls.size()) {
+        return std::unexpected(ToolExecutionError{
+            ToolExecutionErrorCode::protocol_failure,
+            "assistant tool-call history has excess terminal results", false});
+      }
+      if (pending_terminal.size() < assistant->tool_calls.size()) return {};
+
+      result.push_back(std::move(*assistant));
+      result.insert(result.end(),
+                    std::make_move_iterator(pending_terminal.begin()),
+                    std::make_move_iterator(pending_terminal.end()));
+      assistant.reset();
+      assistant_inference.reset();
+      assistant_finished = false;
+      pending_terminal.clear();
+      return {};
+    };
+
+    for (const auto& event : events) {
+      if (const auto* started =
+              std::get_if<domain::AssistantContentStarted>(&event.payload)) {
+        if (assistant) {
+          return std::unexpected(ToolExecutionError{
+              ToolExecutionErrorCode::protocol_failure,
+              "assistant tool-call history overlaps inference turns", false});
+        }
+        assistant = domain::Message{
+            started->message_id, domain::Role::assistant, {}, std::nullopt, {}};
+        assistant_inference = started->inference_id;
+        assistant_finished = false;
+      } else if (const auto* delta =
+                     std::get_if<domain::AssistantContentDeltaAdded>(
+                         &event.payload)) {
+        if (!assistant || !assistant_inference || assistant_finished ||
+            delta->message_id != assistant->message_id ||
+            delta->inference_id != *assistant_inference) {
+          return std::unexpected(ToolExecutionError{
+              ToolExecutionErrorCode::protocol_failure,
+              "assistant tool-call content has no active inference", false});
+        }
+        assistant->content.push_back(delta->delta);
+      } else if (const auto* proposed =
+                     std::get_if<domain::ToolProposed>(&event.payload)) {
+        if (!assistant || assistant_finished ||
+            !proposed_invocations.insert(proposed->invocation_id).second) {
+          return std::unexpected(ToolExecutionError{
+              ToolExecutionErrorCode::protocol_failure,
+              "tool proposal has no unique assistant turn", false});
+        }
+        assistant->tool_calls.push_back(domain::ToolCall{
+            proposed->invocation_id, proposed->tool_name, proposed->arguments});
+      } else if (const auto* recorded =
+                     std::get_if<domain::ToolResultRecorded>(&event.payload)) {
+        auto message =
+            terminal_message(recorded->invocation_id,
+                             recorded->result_message_id, recorded->content);
+        if (!message) return std::unexpected(std::move(message.error()));
+        if (!assistant) {
+          return std::unexpected(ToolExecutionError{
+              ToolExecutionErrorCode::protocol_failure,
+              "tool result has no assistant tool-call turn", false});
+        }
+        pending_terminal.push_back(std::move(*message));
+        if (auto flushed = flush_complete_turn(); !flushed) {
+          return std::unexpected(std::move(flushed.error()));
+        }
+      } else if (const auto* failed =
+                     std::get_if<domain::ToolErrored>(&event.payload)) {
+        auto message =
+            terminal_message(failed->invocation_id, failed->result_message_id,
+                             {domain::TextBlock{failed->error.message.empty()
+                                                    ? "tool invocation failed"
+                                                    : failed->error.message}});
+        if (!message) return std::unexpected(std::move(message.error()));
+        if (!assistant) {
+          return std::unexpected(ToolExecutionError{
+              ToolExecutionErrorCode::protocol_failure,
+              "tool error has no assistant tool-call turn", false});
+        }
+        pending_terminal.push_back(std::move(*message));
+        if (auto flushed = flush_complete_turn(); !flushed) {
+          return std::unexpected(std::move(flushed.error()));
+        }
+      } else if (const auto* finished =
+                     std::get_if<domain::AssistantContentFinished>(
+                         &event.payload)) {
+        if (!assistant || !assistant_inference || assistant_finished ||
+            finished->message_id != assistant->message_id ||
+            finished->inference_id != *assistant_inference) {
+          return std::unexpected(ToolExecutionError{
+              ToolExecutionErrorCode::protocol_failure,
+              "assistant tool-call finish has no active inference", false});
+        }
+        assistant_finished = true;
+        if (assistant->tool_calls.empty() && !pending_terminal.empty()) {
+          return std::unexpected(ToolExecutionError{
+              ToolExecutionErrorCode::protocol_failure,
+              "tool results have no assistant tool calls", false});
+        }
+        if (assistant->tool_calls.empty()) {
+          assistant.reset();
+          assistant_inference.reset();
+          assistant_finished = false;
+        } else if (auto flushed = flush_complete_turn(); !flushed) {
+          return std::unexpected(std::move(flushed.error()));
+        }
+      }
+    }
+    if (assistant && !assistant_finished) {
+      return std::unexpected(ToolExecutionError{
+          ToolExecutionErrorCode::protocol_failure,
+          "tool continuation history ends inside an inference", false});
+    }
+    return result;
+  } catch (...) {
+    return std::unexpected(ToolExecutionError{
+        ToolExecutionErrorCode::internal_failure,
+        "tool continuation projection failed internally", false});
   }
 }
 

@@ -42,6 +42,13 @@ struct UnknownContentBlock {
 using ContentBlock = std::variant<TextBlock, StructuredDataBlock, CitationBlock,
                                   ArtifactReferenceBlock, UnknownContentBlock>;
 
+struct ToolCall {
+  InvocationId invocation_id;
+  std::string tool_name;
+  StructuredDataBlock arguments;
+  auto operator==(const ToolCall&) const -> bool = default;
+};
+
 enum class Role {
   system,
   user,
@@ -55,6 +62,7 @@ struct Message {
   Role role;
   std::vector<ContentBlock> content;
   std::optional<InvocationId> invocation_id;
+  std::vector<ToolCall> tool_calls{};
   auto operator==(const Message&) const -> bool = default;
 };
 

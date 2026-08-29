@@ -406,11 +406,12 @@ Policy explanations and storage failures are redacted before becoming durable
 events.
 
 Tool progress and exactly one bounded result or redacted error are appended as
-run events. A subsequent inference is explicit and must include every terminal
-tool result as a tool-role context message. Replay rebuilds the same state
-without running validation, policy, tools, or inference again. Validators may
-narrow a declaration's effect set for a specific invocation, and tool-created
-artifact metadata is committed before the terminal result that references it.
+run events. A subsequent inference is explicit and must replay the neutral
+assistant tool-call turn followed by every terminal result as a tool-role
+context message. Replay rebuilds the same state without running validation,
+policy, tools, or inference again. Validators may narrow a declaration's effect
+set for a specific invocation, and tool-created artifact metadata is committed
+before the terminal result that references it.
 
 ## Bounded process execution
 
