@@ -171,9 +171,7 @@ using AdapterItem =
     if (!tool_calls) return std::unexpected(std::move(tool_calls.error()));
     venice::Message message;
     message.role = std::string{role_name(entry.message.role)};
-    message.content = tool_calls->empty() || !text->empty()
-                          ? nlohmann::json(std::move(*text))
-                          : nlohmann::json(nullptr);
+    message.content = nlohmann::json(std::move(*text));
     if (!tool_calls->empty()) message.tool_calls = std::move(*tool_calls);
     if (entry.message.invocation_id) {
       message.tool_call_id = std::string{entry.message.invocation_id->value()};
