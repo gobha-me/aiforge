@@ -504,19 +504,19 @@ auto main(const int argc, char** argv) -> int {
       std::cerr << "aiforge-drawforge-eval: run metadata disappeared\n";
       return 1;
     }
-    const auto& events = (*refreshed)["events"];
-    if (!events.is_array() ||
-        std::find(events.begin(), events.end(), "submission_accepted") ==
-            events.end()) {
-      std::cerr << "aiforge-drawforge-eval: no submission was accepted\n";
-      return 1;
-    }
     (*refreshed)["usage"]["input_tokens"] = result->usage.input_tokens;
     (*refreshed)["usage"]["output_tokens"] = result->usage.output_tokens;
     (*refreshed)["usage"]["cost_usd"] = std::stod(*cost);
     auto written = write_json(arguments->run / "run.json", *refreshed);
     if (!written) {
       std::cerr << "aiforge-drawforge-eval: " << written.error() << '\n';
+      return 1;
+    }
+    const auto& events = (*refreshed)["events"];
+    if (!events.is_array() ||
+        std::find(events.begin(), events.end(), "submission_accepted") ==
+            events.end()) {
+      std::cerr << "aiforge-drawforge-eval: no submission was accepted\n";
       return 1;
     }
     std::cout << assistant.str();
