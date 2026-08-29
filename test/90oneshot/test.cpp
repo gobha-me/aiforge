@@ -131,6 +131,61 @@ class CapturingBackend final : public backend::Backend {
   std::vector<Item> m_items;
 };
 
+auto success_items(const domain::MessageId& message_id,
+                   const std::string& usd_value = "0") -> std::vector<Item>;
+
+class ToolLoopBackend final : public backend::Backend {
+ public:
+  explicit ToolLoopBackend(std::string arguments = "{}")
+      : m_arguments(std::move(arguments)) {}
+
+  auto start(backend::BackendRequest request, std::stop_token)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    const auto assistant = request.assistant_message_id;
+    captured.push_back(std::move(request));
+    if (captured.size() == 1) {
+      return std::make_unique<VectorStream>(std::vector<Item>{
+          backend::BackendEvent{backend::ResponseStarted{"tool-response"}},
+          backend::BackendEvent{backend::ToolCallDelta{
+              make_id<domain::InvocationId>("lookup-call"), "lookup",
+              m_arguments}},
+          backend::BackendEvent{
+              backend::ResponseFinished{domain::FinishReason::tool_call}},
+          End{},
+      });
+    }
+    return std::make_unique<VectorStream>(success_items(assistant));
+  }
+
+  std::vector<backend::BackendRequest> captured;
+
+ private:
+  std::string m_arguments;
+};
+
+class RejectingToolExecutor final : public runtime::ToolExecutor {
+ public:
+  auto validate(const domain::StructuredDataBlock&) const
+      -> std::expected<runtime::ValidatedToolArguments,
+                       runtime::ToolExecutionError> override {
+    return std::unexpected(runtime::ToolExecutionError{
+        runtime::ToolExecutionErrorCode::invalid_arguments,
+        "arguments rejected", false});
+  }
+
+  auto start(runtime::ToolInvocation, std::stop_token)
+      -> std::expected<std::unique_ptr<runtime::ToolExecutionStream>,
+                       runtime::ToolExecutionError> override {
+    ++starts;
+    return std::unexpected(runtime::ToolExecutionError{
+        runtime::ToolExecutionErrorCode::internal_failure,
+        "rejected tool unexpectedly started", false});
+  }
+
+  std::size_t starts{};
+};
+
 class FakeModels final : public backend::ModelContextProvider {
  public:
   auto lookup(const domain::ModelId& model_id, std::stop_token stop_token)
@@ -151,9 +206,6 @@ class FakeModels final : public backend::ModelContextProvider {
   std::optional<backend::BackendError> failure;
   std::size_t lookups{};
 };
-
-auto success_items(const domain::MessageId& message_id,
-                   const std::string& usd_value = "0") -> std::vector<Item>;
 
 auto persona_document(std::string text = "Review carefully.")
     -> domain::PersonaDocument {
@@ -411,6 +463,98 @@ TEST_CASE("one-shot streams only sanitized text and builds neutral evidence",
   REQUIRE(
       rewriting.captured->context.entries.back().provenance.source_location ==
       "stdin");
+}
+
+TEST_CASE("one-shot continues after a rejected tool result",
+          "[one-shot][tools][failure]") {
+  FakeModels models;
+  ToolLoopBackend backend{"{"};
+  auto executor = std::make_shared<RejectingToolExecutor>();
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      {"lookup",
+       "Look up a value",
+       {"application/schema+json", R"({"type":"object"})"},
+       {},
+       {}},
+      executor));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  surfaces::OneShotDependencies dependencies;
+  dependencies.tools = std::move(*tools);
+  surfaces::OneShotSurface surface{
+      backend, models, {}, nullptr, std::move(dependencies)};
+  std::ostringstream output;
+  std::ostringstream error;
+
+  const auto result = surface.run(
+      {"use the lookup", std::nullopt, make_id<domain::ModelId>("model")},
+      output, error);
+
+  REQUIRE(result);
+  REQUIRE(executor->starts == 0);
+  REQUIRE(backend.captured.size() == 2);
+  const auto& continuation = backend.captured.back();
+  REQUIRE(continuation.context.entries.back().kind ==
+          domain::ContextEntryKind::tool_result);
+  REQUIRE(continuation.context.entries.back().message.role ==
+          domain::Role::tool);
+  REQUIRE(continuation.context.entries.back().message.invocation_id ==
+          make_id<domain::InvocationId>("lookup-call"));
+}
+
+TEST_CASE("one-shot continues after a successful tool result",
+          "[one-shot][tools]") {
+  FakeModels models;
+  ToolLoopBackend backend;
+  const auto invocation = make_id<domain::InvocationId>("lookup-call");
+  auto executor = std::make_shared<testing::ScriptedToolExecutor>(
+      std::vector<testing::ScriptedToolExchange>{
+          {{invocation,
+            std::nullopt,
+            "lookup",
+            runtime::ValidatedToolArguments{{"application/json", "{}"}},
+            {},
+            {}},
+           testing::ToolStreamScript{{
+               runtime::ToolExecutionEvent{
+                   runtime::ToolResult{{domain::TextBlock{"done"}}}},
+               testing::ToolEndOfStream{},
+           }}},
+      });
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      {"lookup",
+       "Look up a value",
+       {"application/schema+json", R"({"type":"object"})"},
+       {},
+       {}},
+      executor));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  surfaces::OneShotDependencies dependencies;
+  dependencies.tools = std::move(*tools);
+  surfaces::OneShotSurface surface{
+      backend, models, {}, nullptr, std::move(dependencies)};
+  std::ostringstream output;
+  std::ostringstream error;
+
+  const auto result = surface.run(
+      {"use the lookup", std::nullopt, make_id<domain::ModelId>("model")},
+      output, error);
+
+  REQUIRE(result);
+  REQUIRE(executor->remaining_exchanges() == 0);
+  REQUIRE(backend.captured.size() == 2);
+  const auto& continuation = backend.captured.back();
+  REQUIRE(continuation.context.entries.back().kind ==
+          domain::ContextEntryKind::tool_result);
+  REQUIRE(
+      continuation.context.entries.back().message ==
+      domain::Message{continuation.context.entries.back().message.message_id,
+                      domain::Role::tool,
+                      {domain::TextBlock{"done"}},
+                      invocation});
 }
 
 TEST_CASE("invalid and oversized one-shot input never reaches a backend",
