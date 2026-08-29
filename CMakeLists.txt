@@ -22,6 +22,12 @@ configure_file(${VERSION_HEADER_IN} ${VERSION_HEADER} @ONLY)
 option(${PROJECT_NAME}_BUILD_BIN "Build the AIForge executable" ${PROJECT_IS_TOP_LEVEL})
 option(${PROJECT_NAME}_TESTS "Build the AIForge test suite" ${PROJECT_IS_TOP_LEVEL})
 option(${PROJECT_NAME}_BUILD_ADAPTERS "Build TermForge and Venice adapters" ${PROJECT_IS_TOP_LEVEL})
+option(${PROJECT_NAME}_DRAWFORGE_EVALUATION
+  "Build the noninstalled DrawForge evaluation consumer" OFF)
+
+if (${PROJECT_NAME}_DRAWFORGE_EVALUATION AND NOT ${PROJECT_NAME}_BUILD_ADAPTERS)
+  message(FATAL_ERROR "aiforge_DRAWFORGE_EVALUATION requires aiforge_BUILD_ADAPTERS")
+endif ()
 
 # This is the dependency activation point. Recipes not named here are inert.
 set(${PROJECT_NAME}_DEPS
@@ -55,4 +61,8 @@ if (${PROJECT_NAME}_TESTS)
   include(CTest)
   enable_testing()
   add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/test)
+endif ()
+
+if (${PROJECT_NAME}_DRAWFORGE_EVALUATION)
+  add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/evaluation/drawforge)
 endif ()
