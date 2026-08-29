@@ -28,4 +28,5 @@ check; an interrupted process can leave the empty
 The bridge accepts only `tool.py submit PAYLOAD`. It reconstructs semantic
 state by replaying immutable source frames plus committed requests through the
 released DrawForge CLI. Direct-SVG attempts and semantic apply attempts share
-the corpus limits of three submissions and twelve tool interactions.
+the corpus limits of three submissions and twelve tool interactions. Each
+submission also remains inside AIForge's 256 KiB hard process-argument ceiling.

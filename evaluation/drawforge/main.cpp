@@ -442,7 +442,7 @@ auto main(const int argc, char** argv) -> int {
         {"DRAWFORGE_EVAL_BINARY", arguments->drawforge.string()},
         {"DRAWFORGE_EVAL_RUN", arguments->run.string()}};
     configuration.limits.timeout = std::chrono::seconds{30};
-    configuration.limits.argument_bytes = std::size_t{1088} * 1024U;
+    configuration.limits.argument_bytes = std::size_t{256} * 1024U;
     configuration.limits.output_bytes = 8192;
     configuration.limits.inline_output_bytes = 8192;
     auto registered = aiforge::adapters::register_process_tool(

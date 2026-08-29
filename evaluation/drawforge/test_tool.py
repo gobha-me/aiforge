@@ -182,6 +182,45 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("another matrix runner is active", result.stderr)
 
+    def test_runner_reaches_credential_resolution_with_valid_process_limits(self) -> None:
+        self.assertIsNotNone(RUNNER)
+        run = self.prepare("direct-svg", "revise-named-sun")
+        metadata = self.metadata(run)
+        metadata.update(
+            schema_version=2,
+            corpus_id="drawforge-semantic-svg-v2",
+            model={"id": "offline-test"},
+            sampling={"seed": 1001, "temperature": 0.0},
+        )
+        metadata["usage"]["cost_usd"] = None
+        (run / "run.json").write_text(json.dumps(metadata), encoding="utf-8")
+        (run / "prompt.md").write_text("offline test", encoding="utf-8")
+        empty_config = self.root / "empty-config"
+        empty_config.mkdir()
+        environment = os.environ.copy()
+        environment.pop("VENICE_API_KEY", None)
+        environment["XDG_CONFIG_HOME"] = str(empty_config)
+        result = subprocess.run(
+            [
+                str(RUNNER),
+                "--run",
+                str(run),
+                "--matrix-root",
+                str(self.root),
+                "--drawforge",
+                str(self.binary),
+                "--helper",
+                str(TOOL),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Venice credential is unavailable", result.stderr)
+
 
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--runner":
