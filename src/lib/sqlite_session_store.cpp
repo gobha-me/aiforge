@@ -419,17 +419,55 @@ template <typename Enum>
   return result;
 }
 
+[[nodiscard]] auto tool_call_json(const domain::ToolCall& call) -> Json {
+  return {{"invocation_id", id_text(call.invocation_id)},
+          {"tool_name", call.tool_name},
+          {"arguments", structured_json(call.arguments)}};
+}
+
+[[nodiscard]] auto parse_tool_call(const Json& value) -> domain::ToolCall {
+  return {parse_id<domain::InvocationId>(value.at("invocation_id")),
+          value.at("tool_name").get<std::string>(),
+          parse_structured(value.at("arguments"))};
+}
+
+[[nodiscard]] auto tool_call_list_json(
+    const std::vector<domain::ToolCall>& values) -> Json {
+  auto result = Json::array();
+  for (const auto& value : values)
+    result.push_back(tool_call_json(value));
+  return result;
+}
+
+[[nodiscard]] auto parse_tool_call_list(const Json& value)
+    -> std::vector<domain::ToolCall> {
+  if (!value.is_array()) throw CodecFailure{"tool calls are invalid"};
+  std::vector<domain::ToolCall> result;
+  result.reserve(value.size());
+  for (const auto& item : value)
+    result.push_back(parse_tool_call(item));
+  return result;
+}
+
 [[nodiscard]] auto message_json(const domain::Message& message) -> Json {
-  return {{"message_id", id_text(message.message_id)},
-          {"role", role_name(message.role)},
-          {"content", content_list_json(message.content)},
-          {"invocation_id", optional_id_json(message.invocation_id)}};
+  auto result =
+      Json{{"message_id", id_text(message.message_id)},
+           {"role", role_name(message.role)},
+           {"content", content_list_json(message.content)},
+           {"invocation_id", optional_id_json(message.invocation_id)}};
+  if (!message.tool_calls.empty()) {
+    result["tool_calls"] = tool_call_list_json(message.tool_calls);
+  }
+  return result;
 }
 
 [[nodiscard]] auto parse_message(const Json& value) -> domain::Message {
   return {parse_id<domain::MessageId>(value.at("message_id")),
           parse_role(value.at("role")), parse_content_list(value.at("content")),
-          parse_optional_id<domain::InvocationId>(value.at("invocation_id"))};
+          parse_optional_id<domain::InvocationId>(value.at("invocation_id")),
+          value.contains("tool_calls")
+              ? parse_tool_call_list(value.at("tool_calls"))
+              : std::vector<domain::ToolCall>{}};
 }
 
 [[nodiscard]] auto domain_error_json(const domain::DomainError& error) -> Json {

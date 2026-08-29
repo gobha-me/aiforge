@@ -2531,6 +2531,7 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
           RunKernelErrorCode::run_already_active, "another run is active"));
     }
     if (start.user_message.role != domain::Role::user ||
+        !start.user_message.tool_calls.empty() ||
         start.request.assistant_message_id == start.user_message.message_id ||
         start.request.tools != m_impl->tools.declarations() ||
         (start.pricing_observation &&

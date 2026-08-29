@@ -507,6 +507,18 @@ TEST_CASE("allowed tool results continue the same run in registry order",
       runtime::tool_result_messages(kernel.event_log().events());
   REQUIRE(messages);
   REQUIRE(*messages == std::vector<domain::Message>{tool_message});
+  const auto continuation_messages =
+      runtime::tool_continuation_messages(kernel.event_log().events());
+  REQUIRE(continuation_messages);
+  REQUIRE(continuation_messages->size() == 2);
+  REQUIRE(
+      continuation_messages->front() ==
+      domain::Message{initial.assistant_message_id,
+                      domain::Role::assistant,
+                      {},
+                      std::nullopt,
+                      {{invocation, "lookup", {"application/json", "{}"}}}});
+  REQUIRE(continuation_messages->back() == tool_message);
   const auto& events = kernel.event_log().events();
   const auto policy = std::ranges::find_if(events, [](const auto& event) {
     return std::holds_alternative<domain::ToolPolicyDecided>(event.payload);
@@ -607,6 +619,13 @@ TEST_CASE("invalid arguments fail before policy without leaking validator text",
       std::get<domain::TextBlock>(messages->front().content.front()).text;
   REQUIRE(text == "tool arguments are invalid");
   REQUIRE(text.find("secret-bearing") == std::string::npos);
+  const auto continuation_messages =
+      runtime::tool_continuation_messages(kernel.event_log().events());
+  REQUIRE(continuation_messages);
+  REQUIRE(continuation_messages->size() == 2);
+  REQUIRE(continuation_messages->front().role == domain::Role::assistant);
+  REQUIRE(continuation_messages->front().tool_calls.size() == 1);
+  REQUIRE(continuation_messages->back() == messages->front());
   REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "test cleanup"));
 }
 

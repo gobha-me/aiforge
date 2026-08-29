@@ -162,4 +162,10 @@ class ToolRegistry final {
     std::span<const domain::RunEvent> events)
     -> std::expected<std::vector<domain::Message>, ToolExecutionError>;
 
+// Reconstructs provider-neutral assistant tool-call turns and their terminal
+// tool messages in durable event order for a follow-up inference.
+[[nodiscard]] auto tool_continuation_messages(
+    std::span<const domain::RunEvent> events)
+    -> std::expected<std::vector<domain::Message>, ToolExecutionError>;
+
 } // namespace aiforge::runtime

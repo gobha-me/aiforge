@@ -701,6 +701,80 @@ TEST_CASE("Venice adapter sends structured tool results as tool messages",
           R"({"status":"cancelled"})");
 }
 
+TEST_CASE("Venice adapter rejects tool calls outside assistant messages",
+          "[adapter][venice][tools][failure]") {
+  LocalServer server;
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
+  auto built = context();
+  built.entries.front().message.tool_calls.push_back(
+      {make_id<domain::InvocationId>("ask-call"),
+       "ask_user",
+       {"application/json", R"({"question":"Continue?"})"}});
+
+  const auto started = backend.start(request(std::move(built)), {});
+
+  REQUIRE_FALSE(started);
+  REQUIRE(started.error().kind == backend::BackendErrorKind::request_rejected);
+}
+
+TEST_CASE("Venice adapter replays assistant tool calls before tool results",
+          "[adapter][venice][tools]") {
+  LocalServer server;
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
+  auto built = context();
+  built.entries.front().message = {
+      make_id<domain::MessageId>("assistant-tool"),
+      domain::Role::assistant,
+      {},
+      std::nullopt,
+      {{make_id<domain::InvocationId>("ask-call"),
+        "ask_user",
+        {"application/json", R"({"question":"Continue?"})"}}}};
+  built.entries.push_back({make_id<domain::ContextEntryId>("tool-result-entry"),
+                           domain::ContextEntryKind::tool_result,
+                           std::nullopt,
+                           {make_id<domain::MessageId>("tool-result"),
+                            domain::Role::tool,
+                            {domain::StructuredDataBlock{
+                                "application/json", R"({"answer":"yes"})"}},
+                            make_id<domain::InvocationId>("ask-call")},
+                           {make_id<domain::ContextSourceId>("tool-source"),
+                            std::nullopt, std::nullopt},
+                           0,
+                           2,
+                           1});
+  auto started = backend.start(request(std::move(built)), {});
+  REQUIRE(started);
+  while (true) {
+    auto next = (*started)->next({});
+    REQUIRE(next);
+    if (!*next) break;
+  }
+
+  const auto sent = nlohmann::json::parse(server.body());
+  REQUIRE(sent.at("messages").size() == 2);
+  REQUIRE(sent.at("messages").at(0).at("role") == "assistant");
+  REQUIRE(sent.at("messages").at(0).at("content").is_null());
+  REQUIRE(sent.at("messages").at(0).at("tool_calls").at(0).at("id") ==
+          "ask-call");
+  REQUIRE(sent.at("messages")
+              .at(0)
+              .at("tool_calls")
+              .at(0)
+              .at("function")
+              .at("name") == "ask_user");
+  REQUIRE(sent.at("messages")
+              .at(0)
+              .at("tool_calls")
+              .at(0)
+              .at("function")
+              .at("arguments") == R"({"question":"Continue?"})");
+  REQUIRE(sent.at("messages").at(1).at("role") == "tool");
+  REQUIRE(sent.at("messages").at(1).at("tool_call_id") == "ask-call");
+}
+
 TEST_CASE("Venice adapter exposes neutral model context metadata",
           "[adapter][venice][models]") {
   LocalServer server;

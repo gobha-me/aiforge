@@ -110,6 +110,31 @@ using AdapterItem =
   return result;
 }
 
+[[nodiscard]] auto message_tool_calls(const domain::Message& message)
+    -> std::expected<std::vector<venice::ToolCall>, backend::BackendError> {
+  if (!message.tool_calls.empty() && message.role != domain::Role::assistant) {
+    return std::unexpected(
+        request_error("only assistant messages may contain tool calls"));
+  }
+  std::vector<venice::ToolCall> result;
+  result.reserve(message.tool_calls.size());
+  for (const auto& call : message.tool_calls) {
+    if (call.tool_name.empty() ||
+        call.arguments.media_type != "application/json" ||
+        call.arguments.data.empty()) {
+      return std::unexpected(request_error(
+          "Venice adapter received an invalid assistant tool call"));
+    }
+    venice::ToolCall adapted;
+    adapted.id = std::string{call.invocation_id.value()};
+    adapted.type = "function";
+    adapted.name = call.tool_name;
+    adapted.arguments = call.arguments.data;
+    result.push_back(std::move(adapted));
+  }
+  return result;
+}
+
 [[nodiscard]] auto make_request(const backend::BackendRequest& request)
     -> std::expected<venice::ChatRequest, backend::BackendError> {
   if (!request.options.extensions.empty()) {
@@ -142,9 +167,14 @@ using AdapterItem =
   for (const auto& entry : request.context.entries) {
     auto text = message_text(entry.message);
     if (!text) return std::unexpected(std::move(text.error()));
+    auto tool_calls = message_tool_calls(entry.message);
+    if (!tool_calls) return std::unexpected(std::move(tool_calls.error()));
     venice::Message message;
     message.role = std::string{role_name(entry.message.role)};
-    message.content = nlohmann::json(std::move(*text));
+    message.content = tool_calls->empty() || !text->empty()
+                          ? nlohmann::json(std::move(*text))
+                          : nlohmann::json(nullptr);
+    if (!tool_calls->empty()) message.tool_calls = std::move(*tool_calls);
     if (entry.message.invocation_id) {
       message.tool_call_id = std::string{entry.message.invocation_id->value()};
     }
