@@ -2,7 +2,7 @@
 # Prefer an installed package, then the sibling checkout for coordinated
 # development, then the compatible stable release.
 if (NOT TARGET venice-cpp::lib)
-  find_package(venice-cpp CONFIG QUIET)
+  find_package(venice-cpp 0.29.2 CONFIG QUIET)
 endif ()
 
 if (NOT TARGET venice-cpp::lib)
@@ -17,10 +17,9 @@ if (NOT TARGET venice-cpp::lib)
     include(FetchContent)
     FetchContent_Declare(venice-cpp
       GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-      # v0.23.0 retains the neutral chat seam and adds explicit public
-      # authentication plus the complete typed model catalogue needed for
-      # credential-free discovery and the model picker.
-      GIT_TAG v0.23.0
+      # v0.29.2 retains the neutral chat and model-catalogue seams while adding
+      # complete current chat shapes plus redirect and header-injection guards.
+      GIT_TAG v0.29.2
       GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(venice-cpp)
   endif ()
