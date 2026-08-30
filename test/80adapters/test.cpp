@@ -761,31 +761,65 @@ TEST_CASE("Venice adapter bounds provider cost decimal precision",
   REQUIRE(cost->amounts()[1].amount().to_string() == "0.001234567890123457");
 }
 
-TEST_CASE("Venice adapter sends structured tool results as tool messages",
+TEST_CASE("Venice adapter sends JSON structured tool results as tool messages",
           "[adapter][venice][tools]") {
-  LocalServer server;
-  adapters::VeniceBackend backend{secret("test-secret"),
-                                  {server.base_url(), 1s, 1s, 1s, 8}};
-  auto built = context();
-  built.entries.front().kind = domain::ContextEntryKind::tool_result;
-  built.entries.front().message = {
-      make_id<domain::MessageId>("tool-result"),
-      domain::Role::tool,
-      {domain::StructuredDataBlock{"application/json",
-                                   R"({"status":"cancelled"})"}},
-      make_id<domain::InvocationId>("ask-call")};
-  auto started = backend.start(request(std::move(built)), {});
-  REQUIRE(started);
-  while (true) {
-    auto next = (*started)->next({});
-    REQUIRE(next);
-    if (!*next) break;
+  for (const auto* media_type : {
+           "application/json",
+           "application/vnd.aiforge.process-result+json",
+       }) {
+    CAPTURE(media_type);
+    LocalServer server;
+    adapters::VeniceBackend backend{secret("test-secret"),
+                                    {server.base_url(), 1s, 1s, 1s, 8}};
+    auto built = context();
+    built.entries.front().kind = domain::ContextEntryKind::tool_result;
+    built.entries.front().message = {
+        make_id<domain::MessageId>("tool-result"),
+        domain::Role::tool,
+        {domain::StructuredDataBlock{media_type, R"({"status":"cancelled"})"}},
+        make_id<domain::InvocationId>("ask-call")};
+    auto started = backend.start(request(std::move(built)), {});
+    REQUIRE(started);
+    while (true) {
+      auto next = (*started)->next({});
+      REQUIRE(next);
+      if (!*next) break;
+    }
+    const auto sent = nlohmann::json::parse(server.body());
+    REQUIRE(sent.at("messages").at(0).at("role") == "tool");
+    REQUIRE(sent.at("messages").at(0).at("tool_call_id") == "ask-call");
+    REQUIRE(sent.at("messages").at(0).at("content") ==
+            R"({"status":"cancelled"})");
   }
-  const auto sent = nlohmann::json::parse(server.body());
-  REQUIRE(sent.at("messages").at(0).at("role") == "tool");
-  REQUIRE(sent.at("messages").at(0).at("tool_call_id") == "ask-call");
-  REQUIRE(sent.at("messages").at(0).at("content") ==
-          R"({"status":"cancelled"})");
+}
+
+TEST_CASE("Venice adapter rejects unsupported structured tool results",
+          "[adapter][venice][tools][failure]") {
+  const std::vector<std::pair<domain::StructuredDataBlock, std::string>> cases{
+      {{"application/vnd.aiforge.process-result+json", "{"},
+       "Venice adapter received malformed JSON tool content"},
+      {{"text/plain", "complete"},
+       "Venice adapter does not support this input content block"},
+  };
+  for (const auto& [content, expected] : cases) {
+    CAPTURE(content.media_type);
+    adapters::VeniceBackend backend{
+        secret("test-secret"), {"http://127.0.0.1:1", 10ms, 10ms, 10ms, 4}};
+    auto built = context();
+    built.entries.front().kind = domain::ContextEntryKind::tool_result;
+    built.entries.front().message = {
+        make_id<domain::MessageId>("tool-result"),
+        domain::Role::tool,
+        {content},
+        make_id<domain::InvocationId>("process-call")};
+
+    const auto started = backend.start(request(std::move(built)), {});
+
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().kind ==
+            backend::BackendErrorKind::request_rejected);
+    REQUIRE(started.error().redacted_message == expected);
+  }
 }
 
 TEST_CASE("Venice adapter rejects tool calls outside assistant messages",
