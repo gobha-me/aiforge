@@ -35,6 +35,13 @@ struct ToolDeclaration {
   auto operator==(const ToolDeclaration&) const -> bool = default;
 };
 
+struct AssistantContinuationState {
+  domain::MessageId message_id;
+  std::optional<std::string> reasoning_text;
+  domain::Metadata metadata;
+  auto operator==(const AssistantContinuationState&) const -> bool = default;
+};
+
 struct BackendRequest {
   domain::InferenceId inference_id;
   // The runtime owns message identity. Adapters echo this ID on every content
@@ -45,6 +52,9 @@ struct BackendRequest {
   domain::ConstructedContext context;
   std::vector<ToolDeclaration> tools;
   GenerationOptions options;
+  // Opaque, message-bound state reconstructed from prior backend events. The
+  // runtime preserves it without interpreting provider-specific metadata.
+  std::vector<AssistantContinuationState> assistant_continuation_state{};
   auto operator==(const BackendRequest&) const -> bool = default;
 };
 

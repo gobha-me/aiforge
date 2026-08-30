@@ -147,6 +147,13 @@ class ToolLoopBackend final : public backend::Backend {
     if (captured.size() == 1) {
       return std::make_unique<VectorStream>(std::vector<Item>{
           backend::BackendEvent{backend::ResponseStarted{"tool-response"}},
+          backend::BackendEvent{backend::ReasoningDelta{
+              "plan",
+              {{"application/vnd.venice.reasoning-details+json",
+                R"([{"type":"reasoning.text","text":"opaque"}])"},
+               {"application/vnd.venice.thought-signature", "signature"},
+               {"application/vnd.venice.tool-thought-signature+json",
+                R"({"invocation_id":"lookup-call","thought_signature":"tool-signature"})"}}}},
           backend::BackendEvent{backend::ToolCallDelta{
               make_id<domain::InvocationId>("lookup-call"), "lookup",
               m_arguments}},
@@ -574,6 +581,17 @@ TEST_CASE("one-shot continues after a successful tool result",
                       domain::Role::tool,
                       {domain::TextBlock{"done"}},
                       invocation});
+  REQUIRE(
+      continuation.assistant_continuation_state ==
+      std::vector<backend::AssistantContinuationState>{{
+          tool_call.message.message_id,
+          "plan",
+          {{"application/vnd.venice.reasoning-details+json",
+            R"([{"type":"reasoning.text","text":"opaque"}])"},
+           {"application/vnd.venice.thought-signature", "signature"},
+           {"application/vnd.venice.tool-thought-signature+json",
+            R"({"invocation_id":"lookup-call","thought_signature":"tool-signature"})"}},
+      }});
 }
 
 TEST_CASE("invalid and oversized one-shot input never reaches a backend",

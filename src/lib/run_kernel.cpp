@@ -200,6 +200,14 @@ using WorkerUpdate =
       return {domain::ErrorCode::backend, "backend rejected the request",
               false};
     case backend::BackendErrorKind::protocol:
+      if (!error.redacted_message.empty() &&
+          error.redacted_message.size() <= 256 &&
+          !has_control_character(error.redacted_message)) {
+        return {domain::ErrorCode::backend, error.redacted_message,
+                error.retryable};
+      }
+      return {domain::ErrorCode::backend, "backend protocol failure",
+              error.retryable};
     case backend::BackendErrorKind::script_mismatch:
     case backend::BackendErrorKind::script_exhausted:
       return {domain::ErrorCode::backend, "backend protocol failure",
@@ -1088,7 +1096,19 @@ struct RunKernel::Impl {
                 value.message_id, *active->inference_id,
                 std::move(value.delta)});
           } else if constexpr (std::same_as<Value, backend::ReasoningDelta>) {
-            if (!active->response_started) {
+            std::size_t metadata_bytes{};
+            const auto invalid_metadata =
+                std::ranges::any_of(value.metadata, [&](const auto& entry) {
+                  metadata_bytes += entry.first.size() + entry.second.size();
+                  return entry.first.empty() || entry.first.size() > 256 ||
+                         has_control_character(entry.first) ||
+                         entry.second.size() > 1024U * 1024U ||
+                         has_control_character(entry.second) ||
+                         metadata_bytes > 1024U * 1024U;
+                });
+            if (!active->response_started ||
+                (value.text && value.text->size() > 1024U * 1024U) ||
+                value.metadata.size() > 256 || invalid_metadata) {
               return fail_live_run(transaction, protocol_domain_error());
             }
             return record_or_fail(domain::ReasoningMetadataAdded{

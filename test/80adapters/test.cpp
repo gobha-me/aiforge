@@ -86,10 +86,12 @@ class LocalServer final {
                        const bool duplicate_cost = false,
                        std::string cost_value = "0.0645375",
                        const bool duplicate_finish = false,
-                       const bool omit_finish = false)
+                       const bool omit_finish = false,
+                       const bool reasoning_state = false)
       : m_echoed_error(std::move(echoed_error)),
         m_duplicate_cost(duplicate_cost), m_duplicate_finish(duplicate_finish),
-        m_omit_finish(omit_finish), m_cost_value(std::move(cost_value)) {
+        m_omit_finish(omit_finish), m_reasoning_state(reasoning_state),
+        m_cost_value(std::move(cost_value)) {
     m_server.Get("/api/v1/models", [this](const httplib::Request& request,
                                           httplib::Response& response) {
       {
@@ -117,10 +119,27 @@ class LocalServer final {
           std::string stream =
               "data: "
               "{\"id\":\"response\",\"choices\":[{\"delta\":{\"role\":"
-              "\"assistant\"}}]}\n\n"
-              "data: "
-              "{\"id\":\"response\",\"choices\":[{\"delta\":{\"content\":"
-              "\"hello\"}}]}\n\n";
+              "\"assistant\"";
+          if (m_reasoning_state) {
+            stream +=
+                ",\"reasoning_content\":\"plan\",\"reasoning_details\":[{"
+                "\"type\":\"reasoning.text\",\"text\":\"opaque\"}],"
+                "\"thought_signature\":\"\",\"tool_calls\":[{"
+                "\"index\":0,\"id\":\"lookup-call\",\"type\":\"function\","
+                "\"thought_signature\":\"\",\"function\":{"
+                "\"name\":\"lookup\",\"arguments\":\"{}\"}}]";
+          }
+          stream += "}}]}\n\n";
+          if (m_reasoning_state) {
+            stream += "data: "
+                      "{\"id\":\"response\",\"choices\":[{\"delta\":{"
+                      "\"thought_signature\":\"signature\",\"tool_calls\":[{"
+                      "\"index\":0,\"thought_signature\":\"tool-signature\","
+                      "\"function\":{\"arguments\":\"\"}}]}}]}\n\n";
+          }
+          stream += "data: "
+                    "{\"id\":\"response\",\"choices\":[{\"delta\":{\"content\":"
+                    "\"hello\"}}]}\n\n";
           if (!m_omit_finish) {
             stream +=
                 "data: "
@@ -190,6 +209,7 @@ class LocalServer final {
   bool m_duplicate_cost{};
   bool m_duplicate_finish{};
   bool m_omit_finish{};
+  bool m_reasoning_state{};
   std::string m_cost_value;
 };
 
@@ -587,6 +607,41 @@ TEST_CASE("Venice adapter terminates after trailing response accounting",
   REQUIRE(server.body().find("test-secret") == std::string::npos);
 }
 
+TEST_CASE("Venice adapter captures opaque assistant continuation state",
+          "[adapter][venice][reasoning]") {
+  LocalServer server{std::nullopt, false, "0.0645375", false, false, true};
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
+  auto started = backend.start(request(), {});
+  REQUIRE(started);
+
+  std::optional<std::string> reasoning_text;
+  domain::Metadata reasoning_metadata;
+  for (;;) {
+    auto next = (*started)->next({});
+    REQUIRE(next);
+    if (!*next) break;
+    if (const auto* observed = std::get_if<backend::ReasoningDelta>(&**next)) {
+      if (observed->text) reasoning_text = observed->text;
+      reasoning_metadata.insert(reasoning_metadata.end(),
+                                observed->metadata.begin(),
+                                observed->metadata.end());
+    }
+  }
+
+  REQUIRE(reasoning_text == "plan");
+  REQUIRE(
+      reasoning_metadata ==
+      domain::Metadata{
+          {"application/vnd.venice.reasoning-"
+           "details+json",
+           R"([{"text":"opaque","type":"reasoning.text"}])"},
+          {"application/vnd.venice.thought-signature", "signature"},
+          {"application/vnd.venice.tool-thought-signature+json",
+           R"({"invocation_id":"lookup-call","thought_signature":"tool-signature"})"},
+      });
+}
+
 TEST_CASE("Venice adapter rejects duplicate provider cost frames",
           "[adapter][venice][cost][failure]") {
   LocalServer server{std::nullopt, true};
@@ -606,6 +661,7 @@ TEST_CASE("Venice adapter rejects duplicate provider cost frames",
   }
   REQUIRE(failure);
   REQUIRE(failure->kind == backend::BackendErrorKind::protocol);
+  REQUIRE(failure->redacted_message == "Venice stream repeated provider cost");
 }
 
 TEST_CASE("Venice adapter rejects duplicate provider finish frames",
@@ -627,6 +683,8 @@ TEST_CASE("Venice adapter rejects duplicate provider finish frames",
   }
   REQUIRE(failure);
   REQUIRE(failure->kind == backend::BackendErrorKind::protocol);
+  REQUIRE(failure->redacted_message ==
+          "Venice stream repeated its finish marker");
 }
 
 TEST_CASE("Venice adapter rejects streams without a finish marker",
@@ -648,6 +706,8 @@ TEST_CASE("Venice adapter rejects streams without a finish marker",
   }
   REQUIRE(failure);
   REQUIRE(failure->kind == backend::BackendErrorKind::protocol);
+  REQUIRE(failure->redacted_message ==
+          "Venice stream omitted its finish marker");
 }
 
 TEST_CASE("Venice adapter rejects invalid provider cost values",
@@ -671,7 +731,34 @@ TEST_CASE("Venice adapter rejects invalid provider cost values",
     }
     REQUIRE(failure);
     REQUIRE(failure->kind == backend::BackendErrorKind::protocol);
+    REQUIRE(failure->redacted_message ==
+            (std::string_view{value} == "-1"
+                 ? "Venice stream reported an invalid cost amount"
+                 : "Venice stream cost field was not numeric"));
   }
+}
+
+TEST_CASE("Venice adapter bounds provider cost decimal precision",
+          "[adapter][venice][cost]") {
+  LocalServer server{std::nullopt, false, "0.0012345678901234567"};
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
+  auto started = backend.start(request(), {});
+  REQUIRE(started);
+
+  std::optional<domain::ReportedCost> cost;
+  for (;;) {
+    auto next = (*started)->next({});
+    REQUIRE(next);
+    if (!*next) break;
+    if (const auto* observed = std::get_if<backend::CostObserved>(&**next)) {
+      cost = observed->cost;
+    }
+  }
+  REQUIRE(cost);
+  REQUIRE(cost->amounts().size() == 2);
+  REQUIRE(cost->amounts()[1].unit() == "venice.diem");
+  REQUIRE(cost->amounts()[1].amount().to_string() == "0.001234567890123457");
 }
 
 TEST_CASE("Venice adapter sends structured tool results as tool messages",
@@ -703,9 +790,8 @@ TEST_CASE("Venice adapter sends structured tool results as tool messages",
 
 TEST_CASE("Venice adapter rejects tool calls outside assistant messages",
           "[adapter][venice][tools][failure]") {
-  LocalServer server;
   adapters::VeniceBackend backend{secret("test-secret"),
-                                  {server.base_url(), 1s, 1s, 1s, 8}};
+                                  {"http://127.0.0.1:1", 10ms, 10ms, 10ms, 4}};
   auto built = context();
   built.entries.front().message.tool_calls.push_back(
       {make_id<domain::InvocationId>("ask-call"),
@@ -773,6 +859,126 @@ TEST_CASE("Venice adapter replays assistant tool calls before tool results",
               .at("arguments") == R"({"question":"Continue?"})");
   REQUIRE(sent.at("messages").at(1).at("role") == "tool");
   REQUIRE(sent.at("messages").at(1).at("tool_call_id") == "ask-call");
+}
+
+TEST_CASE("Venice adapter replays message-bound reasoning state",
+          "[adapter][venice][reasoning]") {
+  LocalServer server;
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
+  auto built = context();
+  built.entries.front().message.role = domain::Role::assistant;
+  built.entries.front().message.tool_calls.push_back(
+      {make_id<domain::InvocationId>("lookup-call"),
+       "lookup",
+       {"application/json", "{}"}});
+  auto backend_request = request(std::move(built));
+  const auto message_id =
+      backend_request.context.entries.front().message.message_id;
+  backend_request.assistant_continuation_state.push_back({
+      message_id,
+      "plan",
+      {{"application/vnd.venice.reasoning-details+json",
+        R"([{"type":"reasoning.text","text":"opaque"}])"},
+       {"application/vnd.venice.thought-signature", "signature"},
+       {"application/vnd.venice.tool-thought-signature+json",
+        R"({"invocation_id":"lookup-call","thought_signature":"tool-signature"})"}},
+  });
+
+  auto started = backend.start(std::move(backend_request), {});
+  REQUIRE(started);
+  while (true) {
+    auto next = (*started)->next({});
+    REQUIRE(next);
+    if (!*next) break;
+  }
+
+  const auto sent = nlohmann::json::parse(server.body());
+  const auto& message = sent.at("messages").front();
+  REQUIRE(message.at("reasoning_content") == "plan");
+  REQUIRE(message.at("reasoning_details") ==
+          nlohmann::json::array(
+              {{{"type", "reasoning.text"}, {"text", "opaque"}}}));
+  REQUIRE(message.at("thought_signature") == "signature");
+  REQUIRE(message.at("tool_calls").front().at("thought_signature") ==
+          "tool-signature");
+}
+
+TEST_CASE("Venice adapter rejects malformed assistant continuation state",
+          "[adapter][venice][reasoning][failure]") {
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {"http://127.0.0.1:1", 10ms, 10ms, 10ms, 4}};
+  auto make_request = [] {
+    auto built = context();
+    built.entries.front().message.role = domain::Role::assistant;
+    return request(std::move(built));
+  };
+
+  SECTION("orphaned message") {
+    auto value = make_request();
+    value.assistant_continuation_state.push_back(
+        {make_id<domain::MessageId>("missing"), "plan", {}});
+    const auto started = backend.start(std::move(value), {});
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().kind ==
+            backend::BackendErrorKind::request_rejected);
+  }
+  SECTION("duplicate message") {
+    auto value = make_request();
+    const auto message_id = value.context.entries.front().message.message_id;
+    value.assistant_continuation_state.push_back({message_id, "one", {}});
+    value.assistant_continuation_state.push_back({message_id, "two", {}});
+    const auto started = backend.start(std::move(value), {});
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().kind ==
+            backend::BackendErrorKind::request_rejected);
+  }
+  SECTION("malformed reasoning details") {
+    auto value = make_request();
+    value.assistant_continuation_state.push_back(
+        {value.context.entries.front().message.message_id,
+         std::nullopt,
+         {{"application/vnd.venice.reasoning-details+json", "{"}}});
+    const auto started = backend.start(std::move(value), {});
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().kind ==
+            backend::BackendErrorKind::request_rejected);
+  }
+  SECTION("unknown metadata type") {
+    auto value = make_request();
+    value.assistant_continuation_state.push_back(
+        {value.context.entries.front().message.message_id,
+         std::nullopt,
+         {{"application/vnd.example.unknown", "opaque"}}});
+    const auto started = backend.start(std::move(value), {});
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().kind ==
+            backend::BackendErrorKind::request_rejected);
+  }
+  SECTION("duplicate thought signature") {
+    auto value = make_request();
+    value.assistant_continuation_state.push_back(
+        {value.context.entries.front().message.message_id,
+         std::nullopt,
+         {{"application/vnd.venice.thought-signature", "one"},
+          {"application/vnd.venice.thought-signature", "two"}}});
+    const auto started = backend.start(std::move(value), {});
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().kind ==
+            backend::BackendErrorKind::request_rejected);
+  }
+  SECTION("orphaned tool thought signature") {
+    auto value = make_request();
+    value.assistant_continuation_state.push_back(
+        {value.context.entries.front().message.message_id,
+         std::nullopt,
+         {{"application/vnd.venice.tool-thought-signature+json",
+           R"({"invocation_id":"missing","thought_signature":"signature"})"}}});
+    const auto started = backend.start(std::move(value), {});
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().kind ==
+            backend::BackendErrorKind::request_rejected);
+  }
 }
 
 TEST_CASE("Venice adapter exposes neutral model context metadata",
