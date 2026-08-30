@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -22,11 +23,13 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -35,6 +38,10 @@ namespace {
 namespace fs = std::filesystem;
 using Json = nlohmann::json;
 constexpr std::uint64_t budget_microusd{3'000'000};
+constexpr auto connect_timeout = std::chrono::seconds{30};
+constexpr auto read_timeout = std::chrono::minutes{5};
+constexpr auto write_timeout = std::chrono::seconds{30};
+constexpr auto evaluation_deadline = std::chrono::minutes{20};
 
 struct Arguments {
   fs::path run;
@@ -415,7 +422,10 @@ auto main(const int argc, char** argv) -> int {
       return 2;
     }
     auto resolved = std::move(*credential->credential);
-    aiforge::adapters::VeniceBackend venice{std::move(resolved.secret)};
+    aiforge::adapters::VeniceBackend venice{std::move(resolved.secret),
+                                            {"https://api.venice.ai/api/v1",
+                                             connect_timeout, read_timeout,
+                                             write_timeout, 256}};
     EvaluationBackend backend{venice, temperature, seed};
 
     RejectingArtifactStore artifact_store;
@@ -465,7 +475,19 @@ auto main(const int argc, char** argv) -> int {
         *ceiling};
     std::ostringstream assistant;
     std::ostringstream diagnostics;
-    auto result = surface.run(std::move(request), assistant, diagnostics);
+    std::stop_source evaluation_stop;
+    std::condition_variable_any deadline_wake;
+    std::mutex deadline_mutex;
+    std::jthread deadline{[&](const std::stop_token timer_stop) {
+      std::unique_lock lock{deadline_mutex};
+      static_cast<void>(deadline_wake.wait_for(
+          lock, timer_stop, evaluation_deadline, [] { return false; }));
+      if (!timer_stop.stop_requested()) evaluation_stop.request_stop();
+    }};
+    auto result = surface.run(std::move(request), assistant, diagnostics,
+                              evaluation_stop.get_token());
+    deadline.request_stop();
+    deadline_wake.notify_all();
     if (!write_text(arguments->run / "assistant.txt", assistant.str()) ||
         !write_text(arguments->run / "runtime.log",
                     credential_diagnostics.str() + diagnostics.str())) {
