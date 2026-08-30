@@ -520,6 +520,15 @@ TEST_CASE("filesystem artifact store is content addressed and verifies reads") {
         "sha256:"
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 
+  auto conflicting_producers = (*store)->put(
+      {make_id<domain::ArtifactId>("conflicting-producers"),
+       "application/octet-stream", make_id<domain::InvocationId>("tool"),
+       make_id<domain::InferenceId>("inference"), std::nullopt, std::nullopt},
+      abc);
+  REQUIRE_FALSE(conflicting_producers);
+  CHECK(conflicting_producers.error().code ==
+        storage::ArtifactStoreErrorCode::invalid_request);
+
   const auto hex = first->digest.substr(7);
   const auto blob =
       temporary.path() / "artifacts" / "sha256" / hex.substr(0, 2) / hex;

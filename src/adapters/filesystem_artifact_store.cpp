@@ -205,7 +205,7 @@ auto FilesystemArtifactStore::put(storage::ArtifactWrite write,
     if (content.empty() || content.size() > m_limits.maximum_artifact_bytes ||
         write.media_type.empty() || write.media_type.size() > 255 ||
         has_control(write.media_type) ||
-        (write.producing_invocation_id.has_value() ==
+        (write.producing_invocation_id.has_value() &&
          write.producing_inference_id.has_value()) ||
         write.width.has_value() != write.height.has_value() ||
         (write.width && (*write.width == 0 || *write.height == 0))) {
@@ -286,7 +286,7 @@ auto FilesystemArtifactStore::get(const domain::ArtifactMetadata& metadata,
     if (!valid_digest(metadata.digest) || metadata.byte_size == 0 ||
         metadata.media_type.empty() || metadata.media_type.size() > 255 ||
         has_control(metadata.media_type) ||
-        (metadata.producing_invocation_id.has_value() ==
+        (metadata.producing_invocation_id.has_value() &&
          metadata.producing_inference_id.has_value()) ||
         metadata.width.has_value() != metadata.height.has_value() ||
         (metadata.width && (*metadata.width == 0 || *metadata.height == 0)) ||

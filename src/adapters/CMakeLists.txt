@@ -1,4 +1,5 @@
 add_library(${PROJECT_NAME}_adapters STATIC
+  audio_backend.cpp
   ask_user_dialog.cpp
   filesystem_artifact_store.cpp
   filesystem_persona_source.cpp
@@ -6,6 +7,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   json_model_catalog_cache.cpp
   model_picker_dialog.cpp
   process_model_catalog.cpp
+  process_audio.cpp
   process_credentials.cpp
   process_login.cpp
   process_models.cpp
@@ -22,6 +24,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   transcript_view.cpp
   tui_scenario.cpp
   venice_backend.cpp
+  venice_audio_service.cpp
   venice_image_generator.cpp
   image_backend.cpp
   venice_model_catalog_source.cpp

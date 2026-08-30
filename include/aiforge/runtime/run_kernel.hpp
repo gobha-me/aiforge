@@ -89,6 +89,11 @@ struct RunStart {
   // Durable rate-card provenance for the inference, when the selected model
   // catalog supplied pricing. This is runtime metadata, not a backend option.
   std::optional<domain::PricingObservation> pricing_observation{};
+  // Artifacts imported by an explicit surface before inference. Every entry
+  // must be referenced by the user message and have no producing invocation
+  // or inference identity. The kernel records the create/reference facts in
+  // the same durable transaction as run start.
+  std::vector<domain::ArtifactMetadata> imported_artifacts{};
   auto operator==(const RunStart&) const -> bool = default;
 };
 
