@@ -150,10 +150,11 @@ cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-fetched" \
   "${COMMON_CMAKE_ARGS[@]}" \
   -Daiforge_BUILD_BIN=OFF -Daiforge_TESTS=OFF \
   -DCMAKE_DISABLE_FIND_PACKAGE_termforge=TRUE \
-  -DCMAKE_DISABLE_FIND_PACKAGE_venice-cpp=TRUE
+  -DCMAKE_DISABLE_FIND_PACKAGE_venice-cpp=TRUE \
+  -DCMAKE_DISABLE_FIND_PACKAGE_rasterforge=TRUE
 
-if [[ -d "${WORK_DIR}/aiforge-fetched/_deps/rasterforge-src" ]]; then
-  echo "RasterForge was activated by the ordinary AIForge build" >&2
+if [[ ! -d "${WORK_DIR}/aiforge-fetched/_deps/rasterforge-src" ]]; then
+  echo "Ordinary adapter build did not activate RasterForge" >&2
   exit 1
 fi
 
