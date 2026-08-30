@@ -94,6 +94,11 @@ constexpr std::string_view tool_thought_signature_media_type{
   return "user";
 }
 
+[[nodiscard]] auto is_json_media_type(const std::string_view media_type)
+    -> bool {
+  return media_type == "application/json" || media_type.ends_with("+json");
+}
+
 [[nodiscard]] auto message_text(const domain::Message& message)
     -> std::expected<std::string, backend::BackendError> {
   std::string result;
@@ -108,7 +113,12 @@ constexpr std::string_view tool_thought_signature_media_type{
     if (const auto* structured =
             std::get_if<domain::StructuredDataBlock>(&block);
         structured != nullptr && message.role == domain::Role::tool &&
-        structured->media_type == "application/json") {
+        is_json_media_type(structured->media_type)) {
+      if (nlohmann::json::parse(structured->data, nullptr, false)
+              .is_discarded()) {
+        return std::unexpected(request_error(
+            "Venice adapter received malformed JSON tool content"));
+      }
       result.append(structured->data);
       continue;
     }
