@@ -443,6 +443,38 @@ TEST_CASE("bounded redacted backend protocol diagnostics reach run events",
   }
 }
 
+TEST_CASE("bounded redacted request diagnostics reach run events",
+          "[runtime][failure][redaction]") {
+  const std::vector<std::pair<std::string, std::string>> cases{
+      {"Venice continuation state type is unsupported",
+       "Venice continuation state type is unsupported"},
+      {"", "backend rejected the request"},
+      {std::string(257, 'x'), "backend rejected the request"},
+      {std::string{"line\nbreak"}, "backend rejected the request"},
+  };
+  for (const auto& [diagnostic, expected] : cases) {
+    CAPTURE(diagnostic.size());
+    auto backend_request = request();
+    testing::ScriptedBackend fake{{testing::ScriptedExchange{
+        backend_request,
+        backend::BackendError{backend::BackendErrorKind::request_rejected,
+                              diagnostic, false, std::nullopt}}}};
+    WakeCounter wake;
+    runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake,
+                              &wake};
+
+    REQUIRE(kernel.start(run_start(backend_request)));
+    static_cast<void>(drain_to_end(kernel, wake));
+    const auto failed = std::ranges::find_if(
+        kernel.event_log().events(), [](const domain::RunEvent& event) {
+          return std::holds_alternative<domain::RunFailed>(event.payload);
+        });
+    REQUIRE(failed != kernel.event_log().events().end());
+    REQUIRE(std::get<domain::RunFailed>(failed->payload).error.message ==
+            expected);
+  }
+}
+
 TEST_CASE("missing backend credentials use a fixed replayable failure",
           "[runtime][failure][credentials]") {
   auto backend_request = request();

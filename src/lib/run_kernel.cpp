@@ -182,6 +182,13 @@ using WorkerUpdate =
 
 [[nodiscard]] auto backend_domain_error(const backend::BackendError& error)
     -> domain::DomainError {
+  const auto bounded_redacted_message = [&]() -> std::optional<std::string> {
+    if (error.redacted_message.empty() || error.redacted_message.size() > 256 ||
+        has_control_character(error.redacted_message)) {
+      return std::nullopt;
+    }
+    return error.redacted_message;
+  };
   switch (error.kind) {
     case backend::BackendErrorKind::cancelled:
       return {domain::ErrorCode::cancelled, "backend request cancelled", false};
@@ -197,13 +204,14 @@ using WorkerUpdate =
       return {domain::ErrorCode::backend,
               "backend credential is not configured", false};
     case backend::BackendErrorKind::request_rejected:
+      if (auto message = bounded_redacted_message()) {
+        return {domain::ErrorCode::backend, std::move(*message), false};
+      }
       return {domain::ErrorCode::backend, "backend rejected the request",
               false};
     case backend::BackendErrorKind::protocol:
-      if (!error.redacted_message.empty() &&
-          error.redacted_message.size() <= 256 &&
-          !has_control_character(error.redacted_message)) {
-        return {domain::ErrorCode::backend, error.redacted_message,
+      if (auto message = bounded_redacted_message()) {
+        return {domain::ErrorCode::backend, std::move(*message),
                 error.retryable};
       }
       return {domain::ErrorCode::backend, "backend protocol failure",
