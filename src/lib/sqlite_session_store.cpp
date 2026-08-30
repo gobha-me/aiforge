@@ -697,7 +697,9 @@ template <typename Enum>
           {"producing_invocation_id",
            optional_id_json(artifact.producing_invocation_id)},
           {"width", artifact.width ? Json(*artifact.width) : Json(nullptr)},
-          {"height", artifact.height ? Json(*artifact.height) : Json(nullptr)}};
+          {"height", artifact.height ? Json(*artifact.height) : Json(nullptr)},
+          {"producing_inference_id",
+           optional_id_json(artifact.producing_inference_id)}};
 }
 
 [[nodiscard]] auto parse_optional_u32(const Json& value)
@@ -715,7 +717,11 @@ template <typename Enum>
           parse_optional_id<domain::InvocationId>(
               value.at("producing_invocation_id")),
           parse_optional_u32(value.at("width")),
-          parse_optional_u32(value.at("height"))};
+          parse_optional_u32(value.at("height")),
+          value.contains("producing_inference_id")
+              ? parse_optional_id<domain::InferenceId>(
+                    value.at("producing_inference_id"))
+              : std::nullopt};
 }
 
 [[nodiscard]] auto digest_json(const domain::ContentDigest& digest) -> Json {
@@ -4225,6 +4231,74 @@ auto SqliteSessionStore::open(std::filesystem::path path,
     return std::unexpected(
         store_error(SessionStoreErrorCode::internal_failure,
                     "session store could not be initialized"));
+  }
+}
+
+auto SqliteSessionStore::open_existing_read_only(
+    std::filesystem::path path, const storage::SessionStoreLimits limits)
+    -> std::expected<std::unique_ptr<SqliteSessionStore>,
+                     storage::SessionStoreError> {
+  try {
+    if (!valid_limits(limits) || !path.is_absolute() ||
+        path.filename().empty() || path.lexically_normal() != path) {
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::invalid_argument,
+                      "session-store path or limits are invalid"));
+    }
+    auto directory = check_directory(path.parent_path(), false);
+    if (!directory) return std::unexpected(std::move(directory.error()));
+    auto existing = check_regular_secure_file(path);
+    if (!existing) return std::unexpected(std::move(existing.error()));
+    if (!*existing) {
+      return std::unexpected(store_error(SessionStoreErrorCode::not_found,
+                                         "session database does not exist"));
+    }
+    for (const auto suffix :
+         {std::string_view{"-journal"}, std::string_view{"-wal"},
+          std::string_view{"-shm"}}) {
+      auto sidecar = std::filesystem::path{path.string() + std::string{suffix}};
+      auto checked = check_regular_secure_file(sidecar);
+      if (!checked) return std::unexpected(std::move(checked.error()));
+    }
+
+    sqlite3* database{};
+    const auto open_result = sqlite3_open_v2(
+        path.c_str(), &database,
+        SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW,
+        nullptr);
+    if (open_result != SQLITE_OK) {
+      if (database != nullptr) static_cast<void>(sqlite3_close(database));
+      return std::unexpected(sqlite_error(open_result));
+    }
+    auto impl = std::make_unique<Impl>();
+    impl->path = std::move(path);
+    impl->limits = limits;
+    impl->database = database;
+    static_cast<void>(sqlite3_extended_result_codes(database, 1));
+    const auto busy = sqlite3_busy_timeout(
+        database, static_cast<int>(limits.busy_timeout.count()));
+    if (busy != SQLITE_OK) return std::unexpected(sqlite_error(busy));
+    if (sqlite3_db_readonly(database, "main") != 1) {
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::permission_denied,
+                      "session database did not open in read-only mode"));
+    }
+    auto query_only = execute(database, "PRAGMA query_only=ON");
+    if (!query_only) return std::unexpected(std::move(query_only.error()));
+    auto version = prepare(database, "PRAGMA user_version");
+    if (!version) return std::unexpected(std::move(version.error()));
+    if (sqlite3_step(version->get()) != SQLITE_ROW ||
+        sqlite3_column_int64(version->get(), 0) != 3) {
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::unsupported_version,
+                      "session database version is unsupported"));
+    }
+    return std::unique_ptr<SqliteSessionStore>{
+        new SqliteSessionStore{std::move(impl)}};
+  } catch (...) {
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::internal_failure,
+                    "read-only session store could not be initialized"));
   }
 }
 

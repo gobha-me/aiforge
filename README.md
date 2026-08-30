@@ -42,9 +42,9 @@ TermForge and venice-cpp; consumed core-only builds may set
 baselines: TermForge v0.57.20 for the existing interactive seams plus bounded
 input, output-refusal, resize, and image-route hardening; and venice-cpp v0.29.2
 for the existing chat and model-catalogue seams plus current request shapes,
-redirect refusal, and header-injection guards. A RasterForge v0.5.0 recipe
-establishes the bounded raster compatibility baseline but remains inactive until
-an owning media feature names it in `${PROJECT_NAME}_DEPS`.
+redirect refusal, and header-injection guards. RasterForge v0.5.0 supplies
+bounded static PNG, JPEG, and WebP validation for generated-image artifacts. It
+is active with the process adapters through `${PROJECT_NAME}_DEPS`.
 
 Durable session storage uses SQLite 3 behind a neutral storage port. CMake
 prefers an installed SQLite 3.45.1 or newer and otherwise builds the pinned
@@ -89,6 +89,10 @@ export VENICE_API_KEY=your-key      # takes precedence over the stored key
 ./build/src/bin/aiforge --model model-id "Use this model"
 ./build/src/bin/aiforge --session-max-spend 5.00 "Bound this session"
 ./build/src/bin/aiforge models
+./build/src/bin/aiforge image generate --model image-model "A blue square"
+./build/src/bin/aiforge image show --session image-session-id
+./build/src/bin/aiforge image show --session image-session-id \
+  --artifact image-artifact-id --output image.png
 ./build/src/bin/aiforge                 # interactive Chat
 ./build/src/bin/aiforge --continue      # interactive latest session
 printf '%s\n' '{"schema_version":1,"request_id":"inspect-1","operation":"inspect"}' \
@@ -108,6 +112,15 @@ to pipe. Unsafe terminal control sequences are removed from provider text.
 Ctrl-C requests transport cancellation, preserves already-written partial
 output, and returns 130; command-line/input mistakes return 2 and runtime
 failures return 1.
+
+Generated images are stored as owner-only, content-addressed blobs beneath the
+same XDG state root as durable sessions. Session events retain only the stable
+artifact identity, media type, dimensions, byte count, digest, and producing
+inference. Terminal invocations open a TermForge viewer with Kitty transport or
+decoded-RGBA degradation; nonterminal invocations print the same control-free
+artifact metadata. `--output` exports with exclusive creation and never
+overwrites an existing file. See
+[`ADR 0010`](docs/adr/0010-content-addressed-image-artifacts.md).
 
 ## Run kernel
 

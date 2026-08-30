@@ -397,7 +397,8 @@ using WorkerUpdate =
         artifact.width.has_value() == artifact.height.has_value();
     if (!artifact.producing_invocation_id ||
         *artifact.producing_invocation_id != invocation_id ||
-        artifact.media_type.empty() || artifact.media_type.size() > 255 ||
+        artifact.producing_inference_id || artifact.media_type.empty() ||
+        artifact.media_type.size() > 255 ||
         has_control_character(artifact.media_type) || artifact.byte_size == 0 ||
         artifact.digest.empty() || artifact.digest.size() > 512 ||
         has_control_character(artifact.digest) || !dimensions_match ||
@@ -417,6 +418,33 @@ using WorkerUpdate =
   }
   return std::ranges::all_of(
       created_ids, [&](const auto& id) { return referenced.contains(id); });
+}
+
+[[nodiscard]] auto valid_generated_image_artifact(
+    const domain::ArtifactMetadata& artifact,
+    const domain::InferenceId& inference_id,
+    const domain::SessionEventLog& event_log) -> bool {
+  if (artifact.producing_invocation_id || !artifact.producing_inference_id ||
+      *artifact.producing_inference_id != inference_id ||
+      (artifact.media_type != "image/png" &&
+       artifact.media_type != "image/jpeg" &&
+       artifact.media_type != "image/webp") ||
+      artifact.byte_size == 0 || !artifact.digest.starts_with("sha256:") ||
+      artifact.digest.size() != 71 ||
+      !std::ranges::all_of(std::string_view{artifact.digest}.substr(7),
+                           [](const unsigned char byte) {
+                             return (byte >= '0' && byte <= '9') ||
+                                    (byte >= 'a' && byte <= 'f');
+                           }) ||
+      !artifact.width || !artifact.height || *artifact.width == 0 ||
+      *artifact.height == 0) {
+    return false;
+  }
+  return std::ranges::none_of(event_log.events(), [&](const auto& event) {
+    const auto* created = std::get_if<domain::ArtifactCreated>(&event.payload);
+    return created != nullptr &&
+           created->artifact.artifact_id == artifact.artifact_id;
+  });
 }
 
 [[nodiscard]] auto valid_question_definitions(
@@ -1141,6 +1169,29 @@ struct RunKernel::Impl {
             }
             return record_or_fail(domain::InferenceCostRecorded{
                 *active->inference_id, std::move(value.cost)});
+          } else if constexpr (std::same_as<Value,
+                                            backend::ImageArtifactProduced>) {
+            if (!active->response_started ||
+                !valid_generated_image_artifact(value.artifact,
+                                                *active->inference_id,
+                                                transaction.event_log)) {
+              return fail_live_run(transaction, protocol_domain_error());
+            }
+            const auto artifact_id = value.artifact.artifact_id;
+            if (auto result = record_or_fail(
+                    domain::ArtifactCreated{std::move(value.artifact)});
+                !result) {
+              return result;
+            }
+            if (auto result = record_or_fail(domain::ArtifactReferenced{
+                    artifact_id, active->assistant_message_id});
+                !result) {
+              return result;
+            }
+            return record_or_fail(domain::AssistantContentDeltaAdded{
+                *active->assistant_message_id, *active->inference_id,
+                domain::ArtifactReferenceBlock{
+                    artifact_id, std::string{"generated image"}}});
           } else if constexpr (std::same_as<Value, backend::ToolCallDelta>) {
             if (!active->response_started || value.tool_name.size() > 256 ||
                 has_control_character(value.tool_name)) {

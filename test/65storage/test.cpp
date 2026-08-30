@@ -4,6 +4,7 @@
 
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/testing/scripted_session_store.hpp>
+#include <algorithm>
 #include <array>
 
 #include <catch2/catch_test_macros.hpp>
@@ -11,6 +12,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <stop_token>
@@ -283,7 +285,7 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
       1,
       domain::QuestionOtherInput{"Other", std::nullopt, 4096}};
   const domain::ArtifactMetadata artifact_metadata{
-      artifact, "text/plain", 3, "sha256:abc", invocation, 1, 2};
+      artifact, "image/png", 3, "sha256:abc", std::nullopt, 1, 2, inference};
   auto usd = domain::MonetaryAmount::create(
                  "USD", domain::DecimalAmount::from("0").value())
                  .value();
@@ -507,6 +509,23 @@ auto execute_sql(const std::filesystem::path& path, const std::string& sql)
   REQUIRE(sqlite3_close(database) == SQLITE_OK);
 }
 
+auto file_content(const std::filesystem::path& path) -> std::string {
+  std::ifstream input{path, std::ios::binary};
+  REQUIRE(input);
+  return {std::istreambuf_iterator<char>{input},
+          std::istreambuf_iterator<char>{}};
+}
+
+auto directory_entries(const std::filesystem::path& path)
+    -> std::vector<std::string> {
+  std::vector<std::string> entries;
+  for (const auto& entry : std::filesystem::directory_iterator{path}) {
+    entries.push_back(entry.path().filename().string());
+  }
+  std::ranges::sort(entries);
+  return entries;
+}
+
 } // namespace
 
 TEST_CASE("session-store path resolution follows XDG state semantics",
@@ -554,6 +573,34 @@ TEST_CASE("SQLite store creates restrictive state and rejects unsafe paths",
   REQUIRE_FALSE(symlink);
   REQUIRE(symlink.error().code ==
           storage::SessionStoreErrorCode::permission_denied);
+}
+
+TEST_CASE("read-only SQLite replay neither creates nor changes state files",
+          "[storage][sqlite][replay][read-only]") {
+  TemporaryDirectory temporary;
+  const auto missing_path = temporary.path() / "missing" / "sessions.sqlite3";
+  auto missing =
+      adapters::SqliteSessionStore::open_existing_read_only(missing_path);
+  REQUIRE_FALSE(missing);
+  CHECK_FALSE(std::filesystem::exists(missing_path.parent_path()));
+
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto writable = open_store(path);
+  const auto session = create(*writable, "read-only-session", 100);
+  const std::array events{event(1, started(), "read-only-event")};
+  REQUIRE(writable->append_events(session, events));
+  writable.reset();
+
+  const auto before_content = file_content(path);
+  const auto before_entries = directory_entries(path.parent_path());
+  auto read_only = adapters::SqliteSessionStore::open_existing_read_only(path);
+  REQUIRE(read_only);
+  const auto replayed = (*read_only)->replay_events(session);
+  REQUIRE(replayed);
+  CHECK(std::ranges::equal(*replayed, events));
+  read_only->reset();
+  CHECK(file_content(path) == before_content);
+  CHECK(directory_entries(path.parent_path()) == before_entries);
 }
 
 TEST_CASE("SQLite storage version one migrates backlog indexes transactionally",

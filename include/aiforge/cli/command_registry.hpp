@@ -89,6 +89,33 @@ class ModelsCommand {
       -> std::expected<void, CommandFailure> = 0;
 };
 
+class ImageCommand {
+ public:
+  virtual ~ImageCommand() = default;
+
+  struct GenerateRequest {
+    std::string prompt;
+    std::string model;
+    std::optional<std::string> format;
+    std::optional<std::string> output_path;
+  };
+
+  struct ShowRequest {
+    domain::SessionId session_id;
+    std::optional<domain::ArtifactId> artifact_id;
+    std::optional<std::string> output_path;
+  };
+
+  [[nodiscard]] virtual auto generate(GenerateRequest request,
+                                      CommandEnvironment& environment,
+                                      std::ostream& output, std::ostream& error)
+      -> std::expected<void, CommandFailure> = 0;
+  [[nodiscard]] virtual auto show(ShowRequest request,
+                                  CommandEnvironment& environment,
+                                  std::ostream& output, std::ostream& error)
+      -> std::expected<void, CommandFailure> = 0;
+};
+
 class LoginCommand {
  public:
   virtual ~LoginCommand() = default;
@@ -129,6 +156,8 @@ struct CommandEnvironment {
   LoginCommand* login{};
   int input_descriptor{-1};
   PlanCommand* plan{};
+  ImageCommand* image{};
+  int output_descriptor{-1};
 };
 
 struct CommandContext {

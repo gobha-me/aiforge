@@ -391,6 +391,97 @@ auto models_handler(CommandContext& context) -> int {
   return failure_exit_code;
 }
 
+[[nodiscard]] auto command_result(std::expected<void, CommandFailure> result,
+                                  CommandContext& context) -> int {
+  if (result) return success_exit_code;
+  if (!result.error().message.empty()) {
+    context.error << "aiforge: " << result.error().message << '\n';
+  }
+  switch (result.error().kind) {
+    case CommandFailureKind::usage: return usage_exit_code;
+    case CommandFailureKind::cancelled: return 130;
+    case CommandFailureKind::runtime: return failure_exit_code;
+  }
+  return failure_exit_code;
+}
+
+auto image_parent_handler(CommandContext& context) -> int {
+  context.error << "aiforge: an image subcommand is required\n";
+  return usage_exit_code;
+}
+
+auto image_generate_handler(CommandContext& context) -> int {
+  const auto prompt =
+      parsed_text_values(context.invocation, "image.generate.prompt");
+  const auto model =
+      parsed_text_values(context.invocation, "image.generate.model");
+  const auto format =
+      parsed_text_values(context.invocation, "image.generate.format");
+  const auto output =
+      parsed_text_values(context.invocation, "image.generate.output");
+  if (!prompt || prompt->empty() || !model || model->size() != 1 ||
+      model->front().empty() || (format && format->size() != 1) ||
+      (output && output->size() != 1)) {
+    return usage_exit_code;
+  }
+  std::string joined_prompt;
+  for (const auto word : *prompt) {
+    if (!joined_prompt.empty()) joined_prompt.push_back(' ');
+    joined_prompt.append(word);
+  }
+  std::optional<std::string> selected_format;
+  if (format) {
+    if (format->front() != "auto" && format->front() != "png" &&
+        format->front() != "jpeg" && format->front() != "webp") {
+      context.error << "aiforge: --format must be auto, png, jpeg, or webp\n";
+      return usage_exit_code;
+    }
+    selected_format = std::string{format->front()};
+  }
+  if (context.environment.image == nullptr) return unavailable_handler(context);
+  return command_result(
+      context.environment.image->generate(
+          {std::move(joined_prompt), std::string{model->front()},
+           std::move(selected_format),
+           output ? std::optional<std::string>{output->front()} : std::nullopt},
+          context.environment, context.output, context.error),
+      context);
+}
+
+auto image_show_handler(CommandContext& context) -> int {
+  const auto session =
+      parsed_text_values(context.invocation, "image.show.session");
+  const auto artifact =
+      parsed_text_values(context.invocation, "image.show.artifact");
+  const auto output =
+      parsed_text_values(context.invocation, "image.show.output");
+  if (!session || session->size() != 1 || (artifact && artifact->size() != 1) ||
+      (output && output->size() != 1)) {
+    return usage_exit_code;
+  }
+  auto session_id = domain::SessionId::from(std::string{session->front()});
+  if (!session_id) {
+    context.error << "aiforge: session ID is invalid\n";
+    return usage_exit_code;
+  }
+  std::optional<domain::ArtifactId> artifact_id;
+  if (artifact) {
+    auto parsed = domain::ArtifactId::from(std::string{artifact->front()});
+    if (!parsed) {
+      context.error << "aiforge: artifact ID is invalid\n";
+      return usage_exit_code;
+    }
+    artifact_id = std::move(*parsed);
+  }
+  if (context.environment.image == nullptr) return unavailable_handler(context);
+  return command_result(
+      context.environment.image->show(
+          {std::move(*session_id), std::move(artifact_id),
+           output ? std::optional<std::string>{output->front()} : std::nullopt},
+          context.environment, context.output, context.error),
+      context);
+}
+
 auto plan_handler(CommandContext& context) -> int {
   const auto resume =
       parsed_text_values(context.invocation, "plan.session.resume");
@@ -837,6 +928,67 @@ auto builtin_command_registry() -> const CommandRegistry& {
          {},
          {},
          models_handler},
+        {"image",
+         "image",
+         "Generate or redisplay durable image artifacts.",
+         true,
+         {},
+         {},
+         {{"image-generate",
+           "generate",
+           "Generate and store an image.",
+           false,
+           {{{"image.generate.model",
+              {"--model"},
+              ArgumentValueKind::text,
+              1,
+              1},
+             "model-id",
+             "Select and validate an image model."},
+            {{"image.generate.format",
+              {"--format"},
+              ArgumentValueKind::text,
+              0,
+              1},
+             "auto|png|jpeg|webp",
+             "Request an encoded image format."},
+            {{"image.generate.output",
+              {"--output"},
+              ArgumentValueKind::text,
+              0,
+              1},
+             "path",
+             "Export the stored bytes without overwriting an existing file."}},
+           {{{"image.generate.prompt", "prompt", ArgumentValueKind::text, 1,
+              256},
+             "Image prompt text."}},
+           {},
+           image_generate_handler},
+          {"image-show",
+           "show",
+           "Redisplay an image from durable session history.",
+           false,
+           {{{"image.show.session",
+              {"--session"},
+              ArgumentValueKind::text,
+              1,
+              1},
+             "session-id",
+             "Select an exact durable session."},
+            {{"image.show.artifact",
+              {"--artifact"},
+              ArgumentValueKind::text,
+              0,
+              1},
+             "artifact-id",
+             "Select an exact image artifact; the latest is the default."},
+            {{"image.show.output", {"--output"}, ArgumentValueKind::text, 0, 1},
+             "path",
+             "Export the stored bytes without overwriting an existing file."}},
+           {},
+           {},
+           image_show_handler}},
+         image_parent_handler},
         {"login",
          "login",
          "Store a Venice API credential from terminal input.",

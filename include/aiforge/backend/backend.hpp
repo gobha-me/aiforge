@@ -101,6 +101,11 @@ struct CostObserved {
   auto operator==(const CostObserved&) const -> bool = default;
 };
 
+struct ImageArtifactProduced {
+  domain::ArtifactMetadata artifact;
+  auto operator==(const ImageArtifactProduced&) const -> bool = default;
+};
+
 struct ResponseFinished {
   domain::FinishReason reason;
   auto operator==(const ResponseFinished&) const -> bool = default;
@@ -114,7 +119,7 @@ struct ResponseCancelled {
 using BackendEvent =
     std::variant<ResponseStarted, ContentDelta, ReasoningDelta, ToolCallDelta,
                  CitationObserved, UsageObserved, CostObserved,
-                 ResponseFinished, ResponseCancelled>;
+                 ImageArtifactProduced, ResponseFinished, ResponseCancelled>;
 
 enum class BackendErrorKind {
   request_rejected,
