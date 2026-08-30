@@ -353,6 +353,41 @@ TEST_CASE("a delta before response start fails closed", "[runtime][failure]") {
   REQUIRE(projection->messages().size() == 1);
 }
 
+TEST_CASE("reasoning continuation state respects resource and text bounds",
+          "[runtime][reasoning][failure]") {
+  std::vector<backend::ReasoningDelta> cases;
+  cases.push_back({std::string(1024U * 1024U + 1, 'x'), {}});
+  cases.push_back(
+      {std::nullopt, domain::Metadata(257, {"media/type", "value"})});
+  cases.push_back({std::nullopt, {{"", "value"}}});
+  cases.push_back({std::nullopt, {{std::string(257, 'x'), "value"}}});
+  cases.push_back(
+      {std::nullopt, {{"media/type", std::string(1024U * 1024U + 1, 'x')}}});
+  cases.push_back({std::nullopt,
+                   {{"first", std::string(512U * 1024U, 'x')},
+                    {"second", std::string(512U * 1024U, 'x')}}});
+  cases.push_back({std::nullopt, {{"media/type", "line\nbreak"}}});
+
+  for (auto& reasoning : cases) {
+    auto backend_request = request();
+    testing::ScriptedBackend fake{{testing::ScriptedExchange{
+        backend_request, testing::StreamScript{{
+                             step(backend::ResponseStarted{"response"}),
+                             step(std::move(reasoning)),
+                             testing::EndOfStream{},
+                         }}}}};
+    WakeCounter wake;
+    runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake,
+                              &wake};
+
+    REQUIRE(kernel.start(run_start(backend_request)));
+    static_cast<void>(drain_to_end(kernel, wake));
+    const auto* projection = kernel.projection(make_id<domain::RunId>("run"));
+    REQUIRE(projection != nullptr);
+    REQUIRE(projection->status() == domain::RunStatus::failed);
+  }
+}
+
 TEST_CASE("backend failure text is structurally excluded from run events",
           "[runtime][failure][redaction]") {
   auto backend_request = request();
@@ -374,6 +409,38 @@ TEST_CASE("backend failure text is structurally excluded from run events",
     }
   }
   REQUIRE(failures == 1);
+}
+
+TEST_CASE("bounded redacted backend protocol diagnostics reach run events",
+          "[runtime][failure][redaction]") {
+  const std::vector<std::pair<std::string, std::string>> cases{
+      {"Venice stream repeated provider cost",
+       "Venice stream repeated provider cost"},
+      {"", "backend protocol failure"},
+      {std::string(257, 'x'), "backend protocol failure"},
+      {std::string{"line\nbreak"}, "backend protocol failure"},
+  };
+  for (const auto& [diagnostic, expected] : cases) {
+    CAPTURE(diagnostic.size());
+    auto backend_request = request();
+    testing::ScriptedBackend fake{{testing::ScriptedExchange{
+        backend_request,
+        backend::BackendError{backend::BackendErrorKind::protocol, diagnostic,
+                              false, std::nullopt}}}};
+    WakeCounter wake;
+    runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake,
+                              &wake};
+
+    REQUIRE(kernel.start(run_start(backend_request)));
+    static_cast<void>(drain_to_end(kernel, wake));
+    const auto failed = std::ranges::find_if(
+        kernel.event_log().events(), [](const domain::RunEvent& event) {
+          return std::holds_alternative<domain::RunFailed>(event.payload);
+        });
+    REQUIRE(failed != kernel.event_log().events().end());
+    REQUIRE(std::get<domain::RunFailed>(failed->payload).error.message ==
+            expected);
+  }
 }
 
 TEST_CASE("missing backend credentials use a fixed replayable failure",

@@ -97,6 +97,55 @@ auto write(std::ostream& stream, const std::string_view value) -> bool {
   }
 }
 
+[[nodiscard]] auto assistant_continuation_state(
+    const std::span<const domain::RunEvent> events,
+    const domain::ConstructedContext& context)
+    -> std::expected<std::vector<backend::AssistantContinuationState>,
+                     OneShotError> {
+  struct AssistantInference {
+    domain::InferenceId inference_id;
+    domain::MessageId message_id;
+  };
+  std::vector<AssistantInference> assistants;
+  std::vector<backend::AssistantContinuationState> result;
+  for (const auto& event : events) {
+    if (const auto* started =
+            std::get_if<domain::AssistantContentStarted>(&event.payload)) {
+      assistants.push_back({started->inference_id, started->message_id});
+      continue;
+    }
+    const auto* reasoning =
+        std::get_if<domain::ReasoningMetadataAdded>(&event.payload);
+    if (reasoning == nullptr) continue;
+    const auto assistant = std::ranges::find(
+        assistants, reasoning->inference_id, &AssistantInference::inference_id);
+    if (assistant == assistants.end()) {
+      return one_shot_error(OneShotErrorCode::run_failed,
+                            "reasoning continuation has no assistant message");
+    }
+    const auto admitted = std::ranges::find_if(
+        context.entries, [&](const domain::ContextEntry& entry) {
+          return entry.message.message_id == assistant->message_id;
+        });
+    if (admitted == context.entries.end()) continue;
+    auto state =
+        std::ranges::find(result, assistant->message_id,
+                          &backend::AssistantContinuationState::message_id);
+    if (state == result.end()) {
+      result.push_back(
+          {assistant->message_id, std::nullopt, domain::Metadata{}});
+      state = std::prev(result.end());
+    }
+    if (reasoning->text) {
+      if (!state->reasoning_text) state->reasoning_text.emplace();
+      state->reasoning_text->append(*reasoning->text);
+    }
+    state->metadata.insert(state->metadata.end(), reasoning->metadata.begin(),
+                           reasoning->metadata.end());
+  }
+  return result;
+}
+
 [[nodiscard]] auto estimate_line(
     const std::vector<domain::SessionCostEstimate>& estimates) -> std::string {
   std::string result{"estimate:"};
@@ -845,6 +894,13 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
             return one_shot_error(OneShotErrorCode::context_failed,
                                   "tool results exceed model context capacity");
           }
+          auto continuation_state = assistant_continuation_state(
+              std::span{history_events.data() + run_event_offset,
+                        history_events.size() - run_event_offset},
+              *continuation_context);
+          if (!continuation_state) {
+            return std::unexpected(std::move(continuation_state.error()));
+          }
           const auto continuation_suffix = next_suffix();
           auto continuation_inference =
               make_id<domain::InferenceId>("inference", continuation_suffix);
@@ -862,7 +918,8 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                request.model_id,
                std::move(*continuation_context),
                m_dependencies.tools.declarations(),
-               {std::nullopt, output_tokens, std::nullopt, {}}},
+               {std::nullopt, output_tokens, std::nullopt, {}},
+               std::move(*continuation_state)},
               model->pricing_observation);
           if (!continued &&
               continued.error().code !=

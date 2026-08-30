@@ -28,6 +28,12 @@ namespace {
 struct AdapterEnd {};
 using AdapterItem =
     std::variant<backend::BackendEvent, backend::BackendError, AdapterEnd>;
+constexpr std::string_view reasoning_details_media_type{
+    "application/vnd.venice.reasoning-details+json"};
+constexpr std::string_view thought_signature_media_type{
+    "application/vnd.venice.thought-signature"};
+constexpr std::string_view tool_thought_signature_media_type{
+    "application/vnd.venice.tool-thought-signature+json"};
 
 [[nodiscard]] auto adapter_error(const backend::BackendErrorKind kind,
                                  std::string message,
@@ -42,9 +48,10 @@ using AdapterItem =
                        std::move(message));
 }
 
-[[nodiscard]] auto protocol_error() -> backend::BackendError {
-  return adapter_error(backend::BackendErrorKind::protocol,
-                       "Venice returned an invalid stream", false);
+[[nodiscard]] auto protocol_error(std::string message)
+    -> backend::BackendError {
+  return adapter_error(backend::BackendErrorKind::protocol, std::move(message),
+                       false);
 }
 
 [[nodiscard]] auto map_error(const venice::Error& error)
@@ -64,7 +71,8 @@ using AdapterItem =
                            "Venice network request failed", true, error.status);
     case venice::ErrorKind::InvalidArg:
       return request_error("Venice request was invalid");
-    case venice::ErrorKind::Parse: return protocol_error();
+    case venice::ErrorKind::Parse:
+      return protocol_error("Venice response stream could not be parsed");
     case venice::ErrorKind::Http:
       return adapter_error(backend::BackendErrorKind::unavailable,
                            "Venice request failed", error.status >= 500,
@@ -135,6 +143,92 @@ using AdapterItem =
   return result;
 }
 
+[[nodiscard]] auto apply_continuation_state(
+    const backend::BackendRequest& request,
+    std::vector<venice::Message>& messages)
+    -> std::expected<void, backend::BackendError> {
+  if (request.assistant_continuation_state.size() >
+      request.context.entries.size()) {
+    return std::unexpected(
+        request_error("Venice continuation state exceeds context size"));
+  }
+  std::vector<domain::MessageId> seen;
+  for (const auto& state : request.assistant_continuation_state) {
+    if (std::ranges::find(seen, state.message_id) != seen.end()) {
+      return std::unexpected(
+          request_error("Venice continuation state repeats a message"));
+    }
+    seen.push_back(state.message_id);
+    const auto entry = std::ranges::find_if(
+        request.context.entries, [&](const domain::ContextEntry& candidate) {
+          return candidate.message.message_id == state.message_id;
+        });
+    if (entry == request.context.entries.end() ||
+        entry->message.role != domain::Role::assistant) {
+      return std::unexpected(
+          request_error("Venice continuation state has no assistant message"));
+    }
+    const auto index = static_cast<std::size_t>(
+        std::distance(request.context.entries.begin(), entry));
+    auto& message = messages.at(index);
+    if (state.reasoning_text) message.reasoning_content = *state.reasoning_text;
+    std::vector<nlohmann::json> details;
+    bool saw_details{};
+    for (const auto& [media_type, data] : state.metadata) {
+      if (media_type == reasoning_details_media_type) {
+        saw_details = true;
+        try {
+          const auto parsed = nlohmann::json::parse(data);
+          if (!parsed.is_array() || details.size() + parsed.size() > 256) {
+            return std::unexpected(
+                request_error("Venice reasoning details are invalid"));
+          }
+          details.insert(details.end(), parsed.begin(), parsed.end());
+        } catch (...) {
+          return std::unexpected(
+              request_error("Venice reasoning details are invalid"));
+        }
+      } else if (media_type == thought_signature_media_type) {
+        if (message.thought_signature) {
+          return std::unexpected(
+              request_error("Venice thought signature is duplicated"));
+        }
+        message.thought_signature = data;
+      } else if (media_type == tool_thought_signature_media_type) {
+        try {
+          const auto parsed = nlohmann::json::parse(data);
+          if (!parsed.is_object() || !parsed.contains("invocation_id") ||
+              !parsed.at("invocation_id").is_string() ||
+              !parsed.contains("thought_signature") ||
+              !parsed.at("thought_signature").is_string() ||
+              !message.tool_calls) {
+            return std::unexpected(
+                request_error("Venice tool thought signature is invalid"));
+          }
+          const auto invocation_id =
+              parsed.at("invocation_id").get<std::string>();
+          const auto call = std::ranges::find(
+              *message.tool_calls, invocation_id, &venice::ToolCall::id);
+          if (call == message.tool_calls->end() || call->thought_signature) {
+            return std::unexpected(
+                request_error("Venice tool thought signature is invalid"));
+          }
+          call->thought_signature =
+              parsed.at("thought_signature").get<std::string>();
+        } catch (...) {
+          return std::unexpected(
+              request_error("Venice tool thought signature is invalid"));
+        }
+      } else {
+        return std::unexpected(
+            request_error("Venice continuation state type is unsupported"));
+      }
+    }
+    if (saw_details) message.reasoning_details = std::move(details);
+  }
+  return {};
+}
+
 [[nodiscard]] auto make_request(const backend::BackendRequest& request)
     -> std::expected<venice::ChatRequest, backend::BackendError> {
   if (!request.options.extensions.empty()) {
@@ -178,6 +272,10 @@ using AdapterItem =
     }
     result.messages.push_back(std::move(message));
   }
+  if (auto applied = apply_continuation_state(request, result.messages);
+      !applied) {
+    return std::unexpected(std::move(applied.error()));
+  }
   if (result.messages.empty()) {
     return std::unexpected(
         request_error("Venice request has no context messages"));
@@ -216,7 +314,8 @@ using AdapterItem =
   if (usage.prompt_tokens < 0 || usage.completion_tokens < 0 ||
       (usage.cached_tokens && *usage.cached_tokens < 0) ||
       (usage.reasoning_tokens && *usage.reasoning_tokens < 0)) {
-    return std::unexpected(protocol_error());
+    return std::unexpected(
+        protocol_error("Venice stream reported negative usage"));
   }
   const domain::Usage cumulative{
       static_cast<std::uint64_t>(usage.prompt_tokens),
@@ -227,7 +326,8 @@ using AdapterItem =
       cumulative.output_tokens < previous.output_tokens ||
       cumulative.cached_input_tokens < previous.cached_input_tokens ||
       cumulative.reasoning_tokens < previous.reasoning_tokens) {
-    return std::unexpected(protocol_error());
+    return std::unexpected(
+        protocol_error("Venice stream usage counters decreased"));
   }
   return domain::Usage{cumulative.input_tokens - previous.input_tokens,
                        cumulative.output_tokens - previous.output_tokens,
@@ -239,16 +339,32 @@ using AdapterItem =
 [[nodiscard]] auto decimal_amount(const double value)
     -> std::expected<domain::DecimalAmount, backend::BackendError> {
   if (!std::isfinite(value) || value < 0.0) {
-    return std::unexpected(protocol_error());
+    return std::unexpected(
+        protocol_error("Venice stream reported an invalid cost amount"));
   }
+  if (value == 0.0) return domain::DecimalAmount::from("0").value();
   std::array<char, 128> buffer{};
-  const auto converted =
+  auto converted =
       std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
-  if (converted.ec != std::errc{}) return std::unexpected(protocol_error());
+  if (converted.ec != std::errc{}) {
+    return std::unexpected(
+        protocol_error("Venice stream cost could not be represented"));
+  }
   auto amount = domain::DecimalAmount::from(std::string_view{
       buffer.data(), static_cast<std::size_t>(converted.ptr - buffer.data())});
-  if (!amount) return std::unexpected(protocol_error());
-  return *amount;
+  if (amount) return *amount;
+
+  converted = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value,
+                            std::chars_format::fixed, 18);
+  if (converted.ec != std::errc{}) {
+    return std::unexpected(
+        protocol_error("Venice stream cost could not be represented"));
+  }
+  amount = domain::DecimalAmount::from(std::string_view{
+      buffer.data(), static_cast<std::size_t>(converted.ptr - buffer.data())});
+  if (amount) return *amount;
+  return std::unexpected(
+      protocol_error("Venice stream cost amount was invalid"));
 }
 
 [[nodiscard]] auto checked_cost(const nlohmann::json& price)
@@ -259,13 +375,17 @@ using AdapterItem =
       -> std::expected<void, backend::BackendError> {
     if (!price.contains(field) || price.at(field).is_null()) return {};
     if (!price.at(field).is_number()) {
-      return std::unexpected(protocol_error());
+      return std::unexpected(
+          protocol_error("Venice stream cost field was not numeric"));
     }
     const auto value = price.at(field).get<double>();
     auto decimal = decimal_amount(value);
     if (!decimal) return std::unexpected(decimal.error());
     auto amount = domain::MonetaryAmount::create(std::string{unit}, *decimal);
-    if (!amount) return std::unexpected(protocol_error());
+    if (!amount) {
+      return std::unexpected(
+          protocol_error("Venice stream cost currency was invalid"));
+    }
     amounts.push_back(std::move(*amount));
     return {};
   };
@@ -277,7 +397,10 @@ using AdapterItem =
   }
   if (amounts.empty()) return std::optional<domain::ReportedCost>{};
   auto cost = domain::ReportedCost::create(std::move(amounts));
-  if (!cost) return std::unexpected(protocol_error());
+  if (!cost) {
+    return std::unexpected(
+        protocol_error("Venice stream cost currencies were invalid"));
+  }
   return std::optional<domain::ReportedCost>{std::move(*cost)};
 }
 
@@ -362,6 +485,8 @@ class VeniceStream final : public backend::BackendStream {
     bool finish_observed{};
     std::optional<backend::BackendError> local_error;
     std::map<int, domain::InvocationId> invocation_by_index;
+    std::optional<std::string> message_thought_signature;
+    std::map<domain::InvocationId, std::string> tool_thought_signatures;
     domain::Usage cumulative_usage;
     bool cost_emitted{};
 
@@ -373,9 +498,30 @@ class VeniceStream final : public backend::BackendStream {
 
     const auto observe = [&](const venice::StreamDelta& delta) -> bool {
       if (!ensure_started()) return false;
-      if (delta.reasoning_content &&
-          !emit(backend::ReasoningDelta{std::string{*delta.reasoning_content},
-                                        {}})) {
+      domain::Metadata reasoning_metadata;
+      if (delta.reasoning_details != nullptr) {
+        reasoning_metadata.emplace_back(reasoning_details_media_type,
+                                        delta.reasoning_details->dump());
+      }
+      if (delta.thought_signature && !delta.thought_signature->empty()) {
+        if (message_thought_signature &&
+            *message_thought_signature != *delta.thought_signature) {
+          local_error =
+              protocol_error("Venice stream thought signature changed");
+          return false;
+        }
+        if (!message_thought_signature) {
+          message_thought_signature = *delta.thought_signature;
+          reasoning_metadata.emplace_back(thought_signature_media_type,
+                                          *delta.thought_signature);
+        }
+      }
+      if ((delta.reasoning_content || !reasoning_metadata.empty()) &&
+          !emit(backend::ReasoningDelta{
+              delta.reasoning_content
+                  ? std::optional<std::string>{*delta.reasoning_content}
+                  : std::nullopt,
+              std::move(reasoning_metadata)})) {
         return false;
       }
       if (delta.content &&
@@ -397,7 +543,8 @@ class VeniceStream final : public backend::BackendStream {
         if (!tool.id.empty()) {
           auto parsed = domain::InvocationId::from(tool.id);
           if (!parsed) {
-            local_error = protocol_error();
+            local_error =
+                protocol_error("Venice stream tool call ID was invalid");
             return false;
           }
           invocation = std::move(*parsed);
@@ -407,8 +554,31 @@ class VeniceStream final : public backend::BackendStream {
           invocation = invocation_by_index.at(*tool.index);
         }
         if (!invocation) {
-          local_error = protocol_error();
+          local_error = protocol_error(
+              "Venice stream tool call fragment had no identity");
           return false;
+        }
+        if (tool.thought_signature && !tool.thought_signature->empty()) {
+          const auto previous = tool_thought_signatures.find(*invocation);
+          if (previous != tool_thought_signatures.end()) {
+            if (previous->second != *tool.thought_signature) {
+              local_error = protocol_error(
+                  "Venice stream tool thought signature changed");
+              return false;
+            }
+          } else {
+            tool_thought_signatures.emplace(*invocation,
+                                            *tool.thought_signature);
+            const auto metadata = nlohmann::json{
+                {"invocation_id", std::string{invocation->value()}},
+                {"thought_signature", *tool.thought_signature}};
+            if (!emit(backend::ReasoningDelta{
+                    std::nullopt,
+                    {{std::string{tool_thought_signature_media_type},
+                      metadata.dump()}}})) {
+              return false;
+            }
+          }
         }
         if (!emit(backend::ToolCallDelta{std::move(*invocation), tool.name,
                                          tool.arguments})) {
@@ -431,7 +601,8 @@ class VeniceStream final : public backend::BackendStream {
           cumulative_usage.reasoning_tokens += incremental->reasoning_tokens;
           if (!emit(backend::UsageObserved{*incremental})) return false;
         } catch (...) {
-          local_error = protocol_error();
+          local_error =
+              protocol_error("Venice stream usage payload was invalid");
           return false;
         }
       }
@@ -445,14 +616,16 @@ class VeniceStream final : public backend::BackendStream {
           }
           if (*cost) {
             if (cost_emitted) {
-              local_error = protocol_error();
+              local_error =
+                  protocol_error("Venice stream repeated provider cost");
               return false;
             }
             cost_emitted = true;
             if (!emit(backend::CostObserved{std::move(**cost)})) return false;
           }
         } catch (...) {
-          local_error = protocol_error();
+          local_error =
+              protocol_error("Venice stream cost payload was invalid");
           return false;
         }
       }
@@ -462,7 +635,8 @@ class VeniceStream final : public backend::BackendStream {
         // cost frames. ResponseFinished is terminal in the neutral protocol,
         // so observe it here and emit it only after chat_stream returns.
         if (finish_observed) {
-          local_error = protocol_error();
+          local_error =
+              protocol_error("Venice stream repeated its finish marker");
           return false;
         }
         finish_observed = true;
@@ -484,7 +658,8 @@ class VeniceStream final : public backend::BackendStream {
     }
     if (!ensure_started()) return;
     if (!finish_observed || response->finish_reason.empty()) {
-      static_cast<void>(emit(protocol_error()));
+      static_cast<void>(
+          emit(protocol_error("Venice stream omitted its finish marker")));
     } else {
       static_cast<void>(emit(
           backend::ResponseFinished{finish_reason(response->finish_reason)}));
