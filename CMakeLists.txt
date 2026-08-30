@@ -38,7 +38,7 @@ set(${PROJECT_NAME}_DEPS
 )
 
 if (${PROJECT_NAME}_BUILD_ADAPTERS)
-  list(APPEND ${PROJECT_NAME}_DEPS termforge venice_cpp)
+  list(APPEND ${PROJECT_NAME}_DEPS rasterforge termforge venice_cpp)
 endif ()
 
 if (NOT ${PROJECT_NAME}_TESTS)

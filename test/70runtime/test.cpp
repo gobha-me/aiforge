@@ -537,6 +537,88 @@ TEST_CASE("streaming lifecycle preserves content citations reasoning and usage",
           domain::EventTimestamp{1ms});
 }
 
+TEST_CASE("generated artifacts become one typed assistant reference",
+          "[runtime][artifact][image]") {
+  const domain::ArtifactMetadata artifact{
+      make_id<domain::ArtifactId>("image-inference"),
+      "image/png",
+      72,
+      "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      std::nullopt,
+      2,
+      1,
+      make_id<domain::InferenceId>("inference")};
+  testing::ScriptedBackend backend{{
+      {request(),
+       testing::StreamScript{{
+           step(backend::ResponseStarted{"response"}),
+           step(backend::ImageArtifactProduced{artifact}),
+           step(backend::ResponseFinished{domain::FinishReason::stop}),
+           testing::EndOfStream{},
+       }}},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
+                            &wake};
+  REQUIRE(kernel.start(run_start()));
+  const auto events = drain_to_end(kernel, wake);
+  CHECK(std::ranges::count_if(events, [](const domain::RunEvent& event) {
+          return std::holds_alternative<domain::ArtifactCreated>(event.payload);
+        }) == 1);
+  CHECK(std::ranges::count_if(events, [](const domain::RunEvent& event) {
+          return std::holds_alternative<domain::ArtifactReferenced>(
+              event.payload);
+        }) == 1);
+  const auto delta = std::ranges::find_if(events, [](const auto& event) {
+    return std::holds_alternative<domain::AssistantContentDeltaAdded>(
+        event.payload);
+  });
+  REQUIRE(delta != events.end());
+  const auto& content =
+      std::get<domain::AssistantContentDeltaAdded>(delta->payload).delta;
+  REQUIRE(std::holds_alternative<domain::ArtifactReferenceBlock>(content));
+  CHECK(std::get<domain::ArtifactReferenceBlock>(content).artifact_id ==
+        artifact.artifact_id);
+}
+
+TEST_CASE("duplicate generated artifact observations fail closed",
+          "[runtime][artifact][image][failure]") {
+  const domain::ArtifactMetadata artifact{
+      make_id<domain::ArtifactId>("image-inference"),
+      "image/png",
+      72,
+      "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      std::nullopt,
+      2,
+      1,
+      make_id<domain::InferenceId>("inference")};
+  testing::ScriptedBackend backend{{
+      {request(),
+       testing::StreamScript{{
+           step(backend::ResponseStarted{"response"}),
+           step(backend::ImageArtifactProduced{artifact}),
+           step(backend::ImageArtifactProduced{artifact}),
+           step(backend::ResponseFinished{domain::FinishReason::stop}),
+           testing::EndOfStream{},
+       }}},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
+                            &wake};
+  REQUIRE(kernel.start(run_start()));
+  std::optional<runtime::RunKernelError> rejection;
+  for (int attempt = 0; attempt < 100 && kernel.active_run_id(); ++attempt) {
+    auto drained = kernel.drain();
+    if (!drained) {
+      rejection = drained.error();
+      break;
+    }
+    if (drained->empty()) static_cast<void>(wake.wait_for_change(wake.count()));
+  }
+  REQUIRE(rejection);
+  CHECK(rejection->code == runtime::RunKernelErrorCode::protocol_failure);
+}
+
 TEST_CASE("cost observations require a started response and occur once",
           "[runtime][cost][failure]") {
   SECTION("before response start") {

@@ -95,6 +95,31 @@ class FakeModels final : public ModelsCommand {
   std::optional<CommandFailure> failure;
 };
 
+class FakeImage final : public ImageCommand {
+ public:
+  auto generate(GenerateRequest request, CommandEnvironment&,
+                std::ostream& output, std::ostream&)
+      -> std::expected<void, CommandFailure> override {
+    ++generate_calls;
+    generated = std::move(request);
+    output << "generated\n";
+    return {};
+  }
+
+  auto show(ShowRequest request, CommandEnvironment&, std::ostream& output,
+            std::ostream&) -> std::expected<void, CommandFailure> override {
+    ++show_calls;
+    shown = std::move(request);
+    output << "shown\n";
+    return {};
+  }
+
+  int generate_calls{};
+  int show_calls{};
+  std::optional<GenerateRequest> generated;
+  std::optional<ShowRequest> shown;
+};
+
 class FakeLogin final : public LoginCommand {
  public:
   auto execute(CommandEnvironment& environment, std::ostream& output,
@@ -304,11 +329,15 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
   const auto& registry = builtin_command_registry();
   const auto schema = make_parser_schema(registry);
   REQUIRE(schema);
-  REQUIRE(schema->root.subcommands.size() == 6);
+  REQUIRE(schema->root.subcommands.size() == 7);
   const auto config =
       std::ranges::find(schema->root.subcommands, "config", &CommandSchema::id);
   REQUIRE(config != schema->root.subcommands.end());
   REQUIRE(config->subcommands.size() == 4);
+  const auto image =
+      std::ranges::find(schema->root.subcommands, "image", &CommandSchema::id);
+  REQUIRE(image != schema->root.subcommands.end());
+  REQUIRE(image->subcommands.size() == 2);
 
   std::string output;
   std::string error;
@@ -578,6 +607,56 @@ TEST_CASE("models command uses its dedicated service and preserves streams",
                                        std::vector<std::string_view>{"models"},
                                        environment, output, error) == 1);
   REQUIRE(error.str().find("offline") != std::string::npos);
+}
+
+TEST_CASE("image subcommands parse explicit generation and replay contracts",
+          "[commands][image]") {
+  const auto& registry = builtin_command_registry();
+  FakeImage image;
+  std::istringstream input;
+  CommandEnvironment environment{input, false, false, false, {}};
+  environment.image = &image;
+  std::ostringstream output;
+  std::ostringstream error;
+
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{
+                  "image", "generate", "--model", "image-model", "--format",
+                  "png", "--output", "result.png", "blue", "square"},
+              environment, output, error) == 0);
+  REQUIRE(image.generate_calls == 1);
+  REQUIRE(image.generated);
+  CHECK(image.generated->prompt == "blue square");
+  CHECK(image.generated->model == "image-model");
+  CHECK(image.generated->format == "png");
+  CHECK(image.generated->output_path == "result.png");
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"image", "show", "--session",
+                                            "image-session-1", "--artifact",
+                                            "image-artifact-1"},
+              environment, output, error) == 0);
+  REQUIRE(image.show_calls == 1);
+  REQUIRE(image.shown);
+  CHECK(image.shown->session_id ==
+        aiforge::domain::SessionId::from("image-session-1").value());
+  CHECK(image.shown->artifact_id ==
+        aiforge::domain::ArtifactId::from("image-artifact-1").value());
+
+  for (const auto& arguments :
+       {std::vector<std::string_view>{"image", "generate", "prompt"},
+        std::vector<std::string_view>{"image", "generate", "--model", "m",
+                                      "--format", "gif", "prompt"},
+        std::vector<std::string_view>{"image", "show"}}) {
+    output.str({});
+    error.str({});
+    CHECK(CommandDispatcher{}.dispatch(registry, arguments, environment, output,
+                                       error) == 2);
+  }
 }
 
 TEST_CASE("login command uses its dedicated terminal service",

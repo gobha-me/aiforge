@@ -23,15 +23,28 @@ struct ArtifactStoreExchange {
   auto operator==(const ArtifactStoreExchange&) const -> bool = default;
 };
 
+struct ArtifactStoreReadExchange {
+  domain::ArtifactMetadata expected_metadata;
+  std::size_t expected_maximum_bytes{};
+  std::variant<storage::ArtifactRead, storage::ArtifactStoreError> outcome;
+  auto operator==(const ArtifactStoreReadExchange&) const -> bool = default;
+};
+
 class ScriptedArtifactStore final : public storage::ArtifactStore {
  public:
   explicit ScriptedArtifactStore(
-      std::vector<ArtifactStoreExchange> exchanges = {});
+      std::vector<ArtifactStoreExchange> exchanges = {},
+      std::vector<ArtifactStoreReadExchange> reads = {});
 
   [[nodiscard]] auto put(storage::ArtifactWrite write,
                          std::span<const std::byte> content,
                          std::stop_token stop_token = {})
       -> std::expected<domain::ArtifactMetadata,
+                       storage::ArtifactStoreError> override;
+  [[nodiscard]] auto get(const domain::ArtifactMetadata& metadata,
+                         std::size_t maximum_bytes,
+                         std::stop_token stop_token = {})
+      -> std::expected<storage::ArtifactRead,
                        storage::ArtifactStoreError> override;
 
   [[nodiscard]] auto recorded_calls() const noexcept
@@ -41,7 +54,9 @@ class ScriptedArtifactStore final : public storage::ArtifactStore {
  private:
   std::vector<ArtifactStoreExchange> m_exchanges;
   std::vector<ArtifactStoreCall> m_recorded_calls;
+  std::vector<ArtifactStoreReadExchange> m_reads;
   std::size_t m_next_exchange{};
+  std::size_t m_next_read{};
 };
 
 } // namespace aiforge::testing

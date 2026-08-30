@@ -17,8 +17,8 @@ if (NOT TARGET venice-cpp::lib)
     include(FetchContent)
     FetchContent_Declare(venice-cpp
       GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-      # v0.29.2 retains the neutral chat and model-catalogue seams while adding
-      # complete current chat shapes plus redirect and header-injection guards.
+      # v0.29.2 retains the chat and model-catalogue seams while adding owned
+      # native image bytes/media types plus redirect and header-injection guards.
       GIT_TAG v0.29.2
       GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(venice-cpp)

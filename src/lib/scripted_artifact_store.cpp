@@ -5,8 +5,44 @@
 namespace aiforge::testing {
 
 ScriptedArtifactStore::ScriptedArtifactStore(
-    std::vector<ArtifactStoreExchange> exchanges)
-    : m_exchanges(std::move(exchanges)) {
+    std::vector<ArtifactStoreExchange> exchanges,
+    std::vector<ArtifactStoreReadExchange> reads)
+    : m_exchanges(std::move(exchanges)), m_reads(std::move(reads)) {
+}
+
+auto ScriptedArtifactStore::get(const domain::ArtifactMetadata& metadata,
+                                const std::size_t maximum_bytes,
+                                const std::stop_token stop_token)
+    -> std::expected<storage::ArtifactRead, storage::ArtifactStoreError> {
+  try {
+    if (stop_token.stop_requested()) {
+      return std::unexpected(storage::ArtifactStoreError{
+          storage::ArtifactStoreErrorCode::cancelled, "artifact read cancelled",
+          false});
+    }
+    if (m_next_read >= m_reads.size()) {
+      return std::unexpected(storage::ArtifactStoreError{
+          storage::ArtifactStoreErrorCode::unavailable,
+          "scripted artifact store has no read remaining", false});
+    }
+    const auto& exchange = m_reads[m_next_read];
+    if (exchange.expected_metadata != metadata ||
+        exchange.expected_maximum_bytes != maximum_bytes) {
+      return std::unexpected(storage::ArtifactStoreError{
+          storage::ArtifactStoreErrorCode::internal_failure,
+          "artifact read did not match the script", false});
+    }
+    ++m_next_read;
+    if (const auto* error =
+            std::get_if<storage::ArtifactStoreError>(&exchange.outcome)) {
+      return std::unexpected(*error);
+    }
+    return std::get<storage::ArtifactRead>(exchange.outcome);
+  } catch (...) {
+    return std::unexpected(storage::ArtifactStoreError{
+        storage::ArtifactStoreErrorCode::internal_failure,
+        "scripted artifact read failed internally", false});
+  }
 }
 
 auto ScriptedArtifactStore::put(storage::ArtifactWrite write,

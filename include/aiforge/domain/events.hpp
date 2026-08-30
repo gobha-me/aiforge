@@ -282,6 +282,7 @@ struct ArtifactMetadata {
   std::optional<InvocationId> producing_invocation_id;
   std::optional<std::uint32_t> width;
   std::optional<std::uint32_t> height;
+  std::optional<InferenceId> producing_inference_id{};
   auto operator==(const ArtifactMetadata&) const -> bool = default;
 };
 

@@ -1,5 +1,6 @@
 add_library(${PROJECT_NAME}_adapters STATIC
   ask_user_dialog.cpp
+  filesystem_artifact_store.cpp
   filesystem_persona_source.cpp
   git_repository_snapshot_source.cpp
   json_model_catalog_cache.cpp
@@ -15,10 +16,14 @@ add_library(${PROJECT_NAME}_adapters STATIC
   process_repository.cpp
   process_draft_editor.cpp
   process_interactive.cpp
+  process_image.cpp
   termforge_run_bridge.cpp
+  termforge_image_renderer.cpp
   transcript_view.cpp
   tui_scenario.cpp
   venice_backend.cpp
+  venice_image_generator.cpp
+  image_backend.cpp
   venice_model_catalog_source.cpp
 )
 add_library(${PROJECT_NAME}::adapters ALIAS ${PROJECT_NAME}_adapters)
@@ -33,5 +38,6 @@ target_link_libraries(${PROJECT_NAME}_adapters
   PUBLIC ${PROJECT_NAME}::lib
   PUBLIC termforge::lib
   PRIVATE nlohmann_json::nlohmann_json
+  PRIVATE rasterforge::lib
   PRIVATE venice-cpp::lib
 )

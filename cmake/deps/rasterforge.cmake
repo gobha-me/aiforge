@@ -1,5 +1,4 @@
-# RasterForge: bounded raster decode and pixel transforms. This recipe remains
-# dormant until an owning media feature names rasterforge in aiforge_DEPS.
+# RasterForge: bounded raster decode and pixel transforms for image artifacts.
 # Prefer an installed package, then a sibling checkout for coordinated
 # development, then the compatible stable release.
 if (NOT TARGET rasterforge::lib)

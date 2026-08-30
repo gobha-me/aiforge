@@ -32,6 +32,10 @@ class SqliteSessionStore final : public storage::SessionStore {
                                  storage::SessionStoreLimits limits = {})
       -> std::expected<std::unique_ptr<SqliteSessionStore>,
                        storage::SessionStoreError>;
+  [[nodiscard]] static auto open_existing_read_only(
+      std::filesystem::path path, storage::SessionStoreLimits limits = {})
+      -> std::expected<std::unique_ptr<SqliteSessionStore>,
+                       storage::SessionStoreError>;
 
   ~SqliteSessionStore() override;
   SqliteSessionStore(const SqliteSessionStore&) = delete;
