@@ -40,9 +40,9 @@ then a sibling checkout, with `FetchContent` as the fallback. Adapter builds use
 TermForge and venice-cpp; consumed core-only builds may set
 `aiforge_BUILD_ADAPTERS=OFF`. Their fallbacks are pinned to compatible stable
 baselines: TermForge v0.57.20 for the existing interactive seams plus bounded
-input, output-refusal, resize, and image-route hardening; and venice-cpp v0.29.2
-for the existing chat and model-catalogue seams plus current request shapes,
-redirect refusal, and header-injection guards. RasterForge v0.5.0 supplies
+input, output-refusal, resize, and image-route hardening; and venice-cpp v0.29.6
+for the existing chat, model-catalogue, and owned-media seams plus redirect,
+header-injection, and multipart-metadata guards. RasterForge v0.5.0 supplies
 bounded static PNG, JPEG, and WebP validation for generated-image artifacts. It
 is active with the process adapters through `${PROJECT_NAME}_DEPS`.
 
@@ -93,6 +93,11 @@ export VENICE_API_KEY=your-key      # takes precedence over the stored key
 ./build/src/bin/aiforge image show --session image-session-id
 ./build/src/bin/aiforge image show --session image-session-id \
   --artifact image-artifact-id --output image.png
+./build/src/bin/aiforge audio synthesize --model tts-model --voice voice \
+  --output speech.wav "Read this aloud"
+./build/src/bin/aiforge audio transcribe --model asr-model recording.wav
+./build/src/bin/aiforge audio export --session audio-session-id \
+  --artifact audio-artifact-id --output copy.wav
 ./build/src/bin/aiforge                 # interactive Chat
 ./build/src/bin/aiforge --continue      # interactive latest session
 printf '%s\n' '{"schema_version":1,"request_id":"inspect-1","operation":"inspect"}' \

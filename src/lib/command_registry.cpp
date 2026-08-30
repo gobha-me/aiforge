@@ -410,6 +410,94 @@ auto image_parent_handler(CommandContext& context) -> int {
   return usage_exit_code;
 }
 
+auto audio_parent_handler(CommandContext& context) -> int {
+  context.error << "aiforge: an audio subcommand is required\n";
+  return usage_exit_code;
+}
+
+auto audio_synthesize_handler(CommandContext& context) -> int {
+  const auto text =
+      parsed_text_values(context.invocation, "audio.synthesize.text");
+  const auto model =
+      parsed_text_values(context.invocation, "audio.synthesize.model");
+  const auto voice =
+      parsed_text_values(context.invocation, "audio.synthesize.voice");
+  const auto language =
+      parsed_text_values(context.invocation, "audio.synthesize.language");
+  const auto output =
+      parsed_text_values(context.invocation, "audio.synthesize.output");
+  if (!text || text->empty() || !model || model->size() != 1 ||
+      model->front().empty() || !voice || voice->size() != 1 ||
+      voice->front().empty() || (language && language->size() != 1) ||
+      (output && output->size() != 1)) {
+    return usage_exit_code;
+  }
+  std::string joined;
+  for (const auto value : *text) {
+    if (!joined.empty()) joined.push_back(' ');
+    joined.append(value);
+  }
+  if (context.environment.audio == nullptr) return unavailable_handler(context);
+  return command_result(
+      context.environment.audio->synthesize(
+          {std::move(joined), std::string{model->front()},
+           std::string{voice->front()},
+           language ? std::optional<std::string>{language->front()}
+                    : std::nullopt,
+           output ? std::optional<std::string>{output->front()} : std::nullopt},
+          context.environment, context.output, context.error),
+      context);
+}
+
+auto audio_transcribe_handler(CommandContext& context) -> int {
+  const auto input =
+      parsed_text_values(context.invocation, "audio.transcribe.input");
+  const auto model =
+      parsed_text_values(context.invocation, "audio.transcribe.model");
+  const auto language =
+      parsed_text_values(context.invocation, "audio.transcribe.language");
+  if (!input || input->size() != 1 || input->front().empty() || !model ||
+      model->size() != 1 || model->front().empty() ||
+      (language && language->size() != 1)) {
+    return usage_exit_code;
+  }
+  if (context.environment.audio == nullptr) return unavailable_handler(context);
+  return command_result(
+      context.environment.audio->transcribe(
+          {std::string{input->front()}, std::string{model->front()},
+           language ? std::optional<std::string>{language->front()}
+                    : std::nullopt},
+          context.environment, context.output, context.error),
+      context);
+}
+
+auto audio_export_handler(CommandContext& context) -> int {
+  const auto session =
+      parsed_text_values(context.invocation, "audio.export.session");
+  const auto artifact =
+      parsed_text_values(context.invocation, "audio.export.artifact");
+  const auto output =
+      parsed_text_values(context.invocation, "audio.export.output");
+  if (!session || session->size() != 1 || (artifact && artifact->size() != 1) ||
+      !output || output->size() != 1 || output->front().empty()) {
+    return usage_exit_code;
+  }
+  auto session_id = domain::SessionId::from(std::string{session->front()});
+  if (!session_id) return usage_exit_code;
+  std::optional<domain::ArtifactId> artifact_id;
+  if (artifact) {
+    auto parsed = domain::ArtifactId::from(std::string{artifact->front()});
+    if (!parsed) return usage_exit_code;
+    artifact_id = std::move(*parsed);
+  }
+  if (context.environment.audio == nullptr) return unavailable_handler(context);
+  return command_result(context.environment.audio->export_artifact(
+                            {std::move(*session_id), std::move(artifact_id),
+                             std::string{output->front()}},
+                            context.environment, context.output, context.error),
+                        context);
+}
+
 auto image_generate_handler(CommandContext& context) -> int {
   const auto prompt =
       parsed_text_values(context.invocation, "image.generate.prompt");
@@ -911,7 +999,100 @@ auto builtin_command_registry() -> const CommandRegistry& {
        session_options("root"),
        {{{"root.prompt", "prompt", ArgumentValueKind::text, 0, 1},
          "Prompt text for a one-shot request."}},
-       {{"chat",
+       {{"audio",
+         "audio",
+         "Synthesize, transcribe, or export durable PCM WAV artifacts.",
+         true,
+         {},
+         {},
+         {{"audio-synthesize",
+           "synthesize",
+           "Synthesize and store PCM WAV speech.",
+           false,
+           {{{"audio.synthesize.model",
+              {"--model"},
+              ArgumentValueKind::text,
+              1,
+              1},
+             "model-id",
+             "Select and validate a TTS model."},
+            {{"audio.synthesize.voice",
+              {"--voice"},
+              ArgumentValueKind::text,
+              1,
+              1},
+             "voice-id",
+             "Select an explicit voice."},
+            {{"audio.synthesize.language",
+              {"--language"},
+              ArgumentValueKind::text,
+              0,
+              1},
+             "tag",
+             "Set an optional bounded language tag."},
+            {{"audio.synthesize.output",
+              {"--output"},
+              ArgumentValueKind::text,
+              0,
+              1},
+             "path",
+             "Export without overwriting an existing file."}},
+           {{{"audio.synthesize.text", "text", ArgumentValueKind::text, 1, 256},
+             "Speech text."}},
+           {},
+           audio_synthesize_handler},
+          {"audio-transcribe",
+           "transcribe",
+           "Transcribe a local PCM WAV artifact.",
+           false,
+           {{{"audio.transcribe.model",
+              {"--model"},
+              ArgumentValueKind::text,
+              1,
+              1},
+             "model-id",
+             "Select and validate an ASR model."},
+            {{"audio.transcribe.language",
+              {"--language"},
+              ArgumentValueKind::text,
+              0,
+              1},
+             "tag",
+             "Set an optional bounded language tag."}},
+           {{{"audio.transcribe.input", "input", ArgumentValueKind::text, 1, 1},
+             "PCM WAV input path."}},
+           {},
+           audio_transcribe_handler},
+          {"audio-export",
+           "export",
+           "Export a durable PCM WAV artifact without provider access.",
+           false,
+           {{{"audio.export.session",
+              {"--session"},
+              ArgumentValueKind::text,
+              1,
+              1},
+             "session-id",
+             "Select an exact durable session."},
+            {{"audio.export.artifact",
+              {"--artifact"},
+              ArgumentValueKind::text,
+              0,
+              1},
+             "artifact-id",
+             "Select an exact artifact; latest is default."},
+            {{"audio.export.output",
+              {"--output"},
+              ArgumentValueKind::text,
+              1,
+              1},
+             "path",
+             "Create the export path exclusively."}},
+           {},
+           {},
+           audio_export_handler}},
+         audio_parent_handler},
+        {"chat",
          "chat",
          "Run a one-shot chat request.",
          false,

@@ -9,6 +9,7 @@
 #include <vector>
 
 #ifdef AIFORGE_HAS_ADAPTERS
+#include <aiforge/adapters/process_audio.hpp>
 #include <aiforge/adapters/process_image.hpp>
 #include <aiforge/adapters/process_interactive.hpp>
 #include <aiforge/adapters/process_login.hpp>
@@ -69,6 +70,7 @@ auto main(const int argc, char* argv[]) -> int {
   aiforge::adapters::ProcessOneShotCommand one_shot;
   aiforge::adapters::ProcessInteractiveCommand interactive;
   aiforge::adapters::ProcessImageCommand image;
+  aiforge::adapters::ProcessAudioCommand audio;
   aiforge::adapters::ProcessLoginCommand login;
   aiforge::adapters::ProcessModelsCommand models;
   aiforge::adapters::ProcessPlanCommand plan;
@@ -78,6 +80,7 @@ auto main(const int argc, char* argv[]) -> int {
   aiforge::cli::LoginCommand* login_service = &login;
   aiforge::cli::PlanCommand* plan_service = &plan;
   aiforge::cli::ImageCommand* image_service = &image;
+  aiforge::cli::AudioCommand* audio_service = &audio;
 #else
   aiforge::cli::OneShotCommand* one_shot_service = nullptr;
   aiforge::cli::InteractiveCommand* interactive_service = nullptr;
@@ -85,6 +88,7 @@ auto main(const int argc, char* argv[]) -> int {
   aiforge::cli::LoginCommand* login_service = nullptr;
   aiforge::cli::PlanCommand* plan_service = nullptr;
   aiforge::cli::ImageCommand* image_service = nullptr;
+  aiforge::cli::AudioCommand* audio_service = nullptr;
 #endif
   aiforge::cli::CommandEnvironment environment{std::cin,
 #ifdef _WIN32
@@ -105,12 +109,14 @@ auto main(const int argc, char* argv[]) -> int {
                                                -1,
                                                plan_service,
                                                image_service,
-                                               -1};
+                                               -1,
+                                               audio_service};
 #else
                                                STDIN_FILENO,
                                                plan_service,
                                                image_service,
-                                               STDOUT_FILENO};
+                                               STDOUT_FILENO,
+                                               audio_service};
 #endif
   const auto result =
       aiforge::cli::run_cli(arguments, environment, std::cout, std::cerr);

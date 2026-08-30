@@ -116,6 +116,47 @@ class ImageCommand {
       -> std::expected<void, CommandFailure> = 0;
 };
 
+class AudioCommand {
+ public:
+  virtual ~AudioCommand() = default;
+
+  struct SynthesizeRequest {
+    std::string text;
+    std::string model;
+    std::string voice;
+    std::optional<std::string> language;
+    std::optional<std::string> output_path;
+  };
+
+  struct TranscribeRequest {
+    std::string input_path;
+    std::string model;
+    std::optional<std::string> language;
+  };
+
+  struct ExportRequest {
+    domain::SessionId session_id;
+    std::optional<domain::ArtifactId> artifact_id;
+    std::string output_path;
+  };
+
+  [[nodiscard]] virtual auto synthesize(SynthesizeRequest request,
+                                        CommandEnvironment& environment,
+                                        std::ostream& output,
+                                        std::ostream& error)
+      -> std::expected<void, CommandFailure> = 0;
+  [[nodiscard]] virtual auto transcribe(TranscribeRequest request,
+                                        CommandEnvironment& environment,
+                                        std::ostream& output,
+                                        std::ostream& error)
+      -> std::expected<void, CommandFailure> = 0;
+  [[nodiscard]] virtual auto export_artifact(ExportRequest request,
+                                             CommandEnvironment& environment,
+                                             std::ostream& output,
+                                             std::ostream& error)
+      -> std::expected<void, CommandFailure> = 0;
+};
+
 class LoginCommand {
  public:
   virtual ~LoginCommand() = default;
@@ -158,6 +199,7 @@ struct CommandEnvironment {
   PlanCommand* plan{};
   ImageCommand* image{};
   int output_descriptor{-1};
+  AudioCommand* audio{};
 };
 
 struct CommandContext {

@@ -420,30 +420,77 @@ using WorkerUpdate =
       created_ids, [&](const auto& id) { return referenced.contains(id); });
 }
 
-[[nodiscard]] auto valid_generated_image_artifact(
+[[nodiscard]] auto valid_generated_artifact(
     const domain::ArtifactMetadata& artifact,
     const domain::InferenceId& inference_id,
     const domain::SessionEventLog& event_log) -> bool {
+  const bool dimensions_match =
+      artifact.width.has_value() == artifact.height.has_value();
   if (artifact.producing_invocation_id || !artifact.producing_inference_id ||
       *artifact.producing_inference_id != inference_id ||
-      (artifact.media_type != "image/png" &&
-       artifact.media_type != "image/jpeg" &&
-       artifact.media_type != "image/webp") ||
-      artifact.byte_size == 0 || !artifact.digest.starts_with("sha256:") ||
-      artifact.digest.size() != 71 ||
+      artifact.media_type.empty() || artifact.media_type.size() > 255 ||
+      has_control_character(artifact.media_type) || artifact.byte_size == 0 ||
+      !artifact.digest.starts_with("sha256:") || artifact.digest.size() != 71 ||
       !std::ranges::all_of(std::string_view{artifact.digest}.substr(7),
                            [](const unsigned char byte) {
                              return (byte >= '0' && byte <= '9') ||
                                     (byte >= 'a' && byte <= 'f');
                            }) ||
-      !artifact.width || !artifact.height || *artifact.width == 0 ||
-      *artifact.height == 0) {
+      !dimensions_match ||
+      (artifact.width && (*artifact.width == 0 || *artifact.height == 0))) {
     return false;
   }
   return std::ranges::none_of(event_log.events(), [&](const auto& event) {
     const auto* created = std::get_if<domain::ArtifactCreated>(&event.payload);
     return created != nullptr &&
            created->artifact.artifact_id == artifact.artifact_id;
+  });
+}
+
+[[nodiscard]] auto valid_imported_artifacts(
+    const std::vector<domain::ArtifactMetadata>& artifacts,
+    const domain::Message& user_message,
+    const domain::SessionEventLog& event_log) -> bool {
+  constexpr std::size_t maximum_artifacts{16};
+  if (artifacts.size() > maximum_artifacts) return false;
+  std::set<domain::ArtifactId> existing;
+  for (const auto& event : event_log.events()) {
+    if (const auto* created =
+            std::get_if<domain::ArtifactCreated>(&event.payload)) {
+      existing.insert(created->artifact.artifact_id);
+    }
+  }
+  std::set<domain::ArtifactId> referenced;
+  for (const auto& block : user_message.content) {
+    if (const auto* reference =
+            std::get_if<domain::ArtifactReferenceBlock>(&block)) {
+      referenced.insert(reference->artifact_id);
+    }
+  }
+  std::set<domain::ArtifactId> imported;
+  for (const auto& artifact : artifacts) {
+    const bool dimensions_match =
+        artifact.width.has_value() == artifact.height.has_value();
+    if (artifact.producing_invocation_id || artifact.producing_inference_id ||
+        artifact.media_type.empty() || artifact.media_type.size() > 255 ||
+        has_control_character(artifact.media_type) || artifact.byte_size == 0 ||
+        !artifact.digest.starts_with("sha256:") ||
+        artifact.digest.size() != 71 ||
+        !std::ranges::all_of(std::string_view{artifact.digest}.substr(7),
+                             [](const unsigned char byte) {
+                               return (byte >= '0' && byte <= '9') ||
+                                      (byte >= 'a' && byte <= 'f');
+                             }) ||
+        !dimensions_match ||
+        (artifact.width && (*artifact.width == 0 || *artifact.height == 0)) ||
+        existing.contains(artifact.artifact_id) ||
+        !imported.insert(artifact.artifact_id).second ||
+        !referenced.contains(artifact.artifact_id)) {
+      return false;
+    }
+  }
+  return std::ranges::all_of(referenced, [&](const auto& id) {
+    return existing.contains(id) || imported.contains(id);
   });
 }
 
@@ -1169,12 +1216,13 @@ struct RunKernel::Impl {
             }
             return record_or_fail(domain::InferenceCostRecorded{
                 *active->inference_id, std::move(value.cost)});
-          } else if constexpr (std::same_as<Value,
-                                            backend::ImageArtifactProduced>) {
+          } else if constexpr (std::same_as<Value, backend::ArtifactProduced>) {
             if (!active->response_started ||
-                !valid_generated_image_artifact(value.artifact,
-                                                *active->inference_id,
-                                                transaction.event_log)) {
+                !valid_generated_artifact(value.artifact, *active->inference_id,
+                                          transaction.event_log) ||
+                (value.label &&
+                 (value.label->empty() || value.label->size() > 256 ||
+                  has_control_character(*value.label)))) {
               return fail_live_run(transaction, protocol_domain_error());
             }
             const auto artifact_id = value.artifact.artifact_id;
@@ -1191,7 +1239,9 @@ struct RunKernel::Impl {
             return record_or_fail(domain::AssistantContentDeltaAdded{
                 *active->assistant_message_id, *active->inference_id,
                 domain::ArtifactReferenceBlock{
-                    artifact_id, std::string{"generated image"}}});
+                    artifact_id, value.label ? std::move(value.label)
+                                             : std::optional<std::string>{
+                                                   "generated image"}}});
           } else if constexpr (std::same_as<Value, backend::ToolCallDelta>) {
             if (!active->response_started || value.tool_name.size() > 256 ||
                 has_control_character(value.tool_name)) {
@@ -2620,6 +2670,12 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
           RunKernelErrorCode::invalid_start,
           "run start contains invalid identity or tool declarations"));
     }
+    if (!valid_imported_artifacts(start.imported_artifacts, start.user_message,
+                                  m_impl->event_log)) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "run start contains invalid imported artifacts"));
+    }
     if (m_impl->projections.contains(start.run_id)) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_start,
@@ -2730,6 +2786,23 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
                                        domain::PersonaSelectionRecorded{
                                            std::move(*start.persona_selection)},
                                        transaction);
+          !result) {
+        return result;
+      }
+    }
+    for (auto& artifact : start.imported_artifacts) {
+      const auto artifact_id = artifact.artifact_id;
+      if (auto result = m_impl->record(
+              start.run_id, domain::ArtifactCreated{std::move(artifact)},
+              transaction);
+          !result) {
+        return result;
+      }
+      if (auto result =
+              m_impl->record(start.run_id,
+                             domain::ArtifactReferenced{
+                                 artifact_id, start.user_message.message_id},
+                             transaction);
           !result) {
         return result;
       }

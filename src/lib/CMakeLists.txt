@@ -1,5 +1,6 @@
 add_library(${PROJECT_NAME}_lib STATIC
   ask_user_tool.cpp
+  audio.cpp
   bootstrap.cpp
   cli11_parser.cpp
   chat_session.cpp
@@ -40,6 +41,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   run_kernel.cpp
   run_projection.cpp
   scripted_artifact_store.cpp
+  scripted_audio_service.cpp
   scripted_backend.cpp
   scripted_child_runner.cpp
   scripted_exact_source_editor.cpp
@@ -60,6 +62,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   tool_registry.cpp
   usage_ledger.cpp
   verification_evidence.cpp
+  wav.cpp
 )
 add_library(${PROJECT_NAME}::lib ALIAS ${PROJECT_NAME}_lib)
 

@@ -120,6 +120,37 @@ class FakeImage final : public ImageCommand {
   std::optional<ShowRequest> shown;
 };
 
+class FakeAudio final : public AudioCommand {
+ public:
+  auto synthesize(SynthesizeRequest request, CommandEnvironment&,
+                  std::ostream& output, std::ostream&)
+      -> std::expected<void, CommandFailure> override {
+    synthesized = std::move(request);
+    output << "synthesized\n";
+    return {};
+  }
+
+  auto transcribe(TranscribeRequest request, CommandEnvironment&,
+                  std::ostream& output, std::ostream&)
+      -> std::expected<void, CommandFailure> override {
+    transcribed = std::move(request);
+    output << "transcribed\n";
+    return {};
+  }
+
+  auto export_artifact(ExportRequest request, CommandEnvironment&,
+                       std::ostream& output, std::ostream&)
+      -> std::expected<void, CommandFailure> override {
+    exported = std::move(request);
+    output << "exported\n";
+    return {};
+  }
+
+  std::optional<SynthesizeRequest> synthesized;
+  std::optional<TranscribeRequest> transcribed;
+  std::optional<ExportRequest> exported;
+};
+
 class FakeLogin final : public LoginCommand {
  public:
   auto execute(CommandEnvironment& environment, std::ostream& output,
@@ -329,7 +360,7 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
   const auto& registry = builtin_command_registry();
   const auto schema = make_parser_schema(registry);
   REQUIRE(schema);
-  REQUIRE(schema->root.subcommands.size() == 7);
+  REQUIRE(schema->root.subcommands.size() == 8);
   const auto config =
       std::ranges::find(schema->root.subcommands, "config", &CommandSchema::id);
   REQUIRE(config != schema->root.subcommands.end());
@@ -338,6 +369,10 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
       std::ranges::find(schema->root.subcommands, "image", &CommandSchema::id);
   REQUIRE(image != schema->root.subcommands.end());
   REQUIRE(image->subcommands.size() == 2);
+  const auto audio =
+      std::ranges::find(schema->root.subcommands, "audio", &CommandSchema::id);
+  REQUIRE(audio != schema->root.subcommands.end());
+  REQUIRE(audio->subcommands.size() == 3);
 
   std::string output;
   std::string error;
@@ -654,6 +689,62 @@ TEST_CASE("image subcommands parse explicit generation and replay contracts",
         std::vector<std::string_view>{"image", "show"}}) {
     output.str({});
     error.str({});
+    CHECK(CommandDispatcher{}.dispatch(registry, arguments, environment, output,
+                                       error) == 2);
+  }
+}
+
+TEST_CASE("audio subcommands parse bounded artifact-only contracts",
+          "[commands][audio]") {
+  const auto& registry = builtin_command_registry();
+  FakeAudio audio;
+  std::istringstream input;
+  CommandEnvironment environment{input, false, false, false, {}};
+  environment.audio = &audio;
+  std::ostringstream output;
+  std::ostringstream error;
+
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"audio", "synthesize", "--model",
+                                            "tts-model", "--voice", "voice",
+                                            "--language", "en-US", "--output",
+                                            "speech.wav", "hello", "world"},
+              environment, output, error) == 0);
+  REQUIRE(audio.synthesized);
+  CHECK(audio.synthesized->text == "hello world");
+  CHECK(audio.synthesized->model == "tts-model");
+  CHECK(audio.synthesized->voice == "voice");
+  CHECK(audio.synthesized->language == "en-US");
+  CHECK(audio.synthesized->output_path == "speech.wav");
+
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"audio", "transcribe", "--model",
+                                            "asr-model", "input.wav"},
+              environment, output, error) == 0);
+  REQUIRE(audio.transcribed);
+  CHECK(audio.transcribed->model == "asr-model");
+  CHECK(audio.transcribed->input_path == "input.wav");
+
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{
+                  "audio", "export", "--session", "audio-session-1",
+                  "--artifact", "audio-artifact-1", "--output", "copy.wav"},
+              environment, output, error) == 0);
+  REQUIRE(audio.exported);
+  CHECK(audio.exported->session_id ==
+        aiforge::domain::SessionId::from("audio-session-1").value());
+  CHECK(audio.exported->artifact_id ==
+        aiforge::domain::ArtifactId::from("audio-artifact-1").value());
+  CHECK(audio.exported->output_path == "copy.wav");
+
+  for (const auto& arguments :
+       {std::vector<std::string_view>{"audio", "synthesize", "--model", "m",
+                                      "missing voice"},
+        std::vector<std::string_view>{"audio", "transcribe", "input.wav"},
+        std::vector<std::string_view>{"audio", "export", "--session", "s"}}) {
     CHECK(CommandDispatcher{}.dispatch(registry, arguments, environment, output,
                                        error) == 2);
   }

@@ -205,7 +205,8 @@ auto ImageBackend::start(backend::BackendRequest request,
     std::vector<backend::BackendEvent> events;
     events.emplace_back(backend::ResponseStarted{
         "image:" + std::string{request.inference_id.value()}});
-    events.emplace_back(backend::ImageArtifactProduced{std::move(*stored)});
+    events.emplace_back(backend::ArtifactProduced{
+        std::move(*stored), std::string{"generated image"}});
     events.emplace_back(backend::ResponseFinished{domain::FinishReason::stop});
     return std::make_unique<ImageStream>(std::move(events));
   } catch (...) {

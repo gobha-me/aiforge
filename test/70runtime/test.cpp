@@ -619,6 +619,58 @@ TEST_CASE("duplicate generated artifact observations fail closed",
   CHECK(rejection->code == runtime::RunKernelErrorCode::protocol_failure);
 }
 
+TEST_CASE("imported artifacts require exact user references and no producer",
+          "[runtime][artifact][failure]") {
+  const domain::ArtifactMetadata imported{
+      make_id<domain::ArtifactId>("imported-audio"),
+      "audio/wav",
+      48,
+      "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt};
+
+  SECTION("unreferenced import") {
+    testing::ScriptedBackend backend{std::vector<testing::ScriptedExchange>{}};
+    runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend};
+    auto start = run_start();
+    start.imported_artifacts = {imported};
+    auto rejected = kernel.start(std::move(start));
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == runtime::RunKernelErrorCode::invalid_start);
+    CHECK(kernel.event_log().events().empty());
+  }
+
+  SECTION("unknown reference") {
+    testing::ScriptedBackend backend{std::vector<testing::ScriptedExchange>{}};
+    runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend};
+    auto start = run_start();
+    start.user_message.content = {domain::ArtifactReferenceBlock{
+        imported.artifact_id, std::string{"audio to transcribe"}}};
+    auto rejected = kernel.start(std::move(start));
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == runtime::RunKernelErrorCode::invalid_start);
+    CHECK(kernel.event_log().events().empty());
+  }
+
+  SECTION("import with producer") {
+    testing::ScriptedBackend backend{std::vector<testing::ScriptedExchange>{}};
+    runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend};
+    auto start = run_start();
+    start.user_message.content = {domain::ArtifactReferenceBlock{
+        imported.artifact_id, std::string{"audio to transcribe"}}};
+    auto produced = imported;
+    produced.producing_inference_id =
+        make_id<domain::InferenceId>("prior-inference");
+    start.imported_artifacts = {std::move(produced)};
+    auto rejected = kernel.start(std::move(start));
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == runtime::RunKernelErrorCode::invalid_start);
+    CHECK(kernel.event_log().events().empty());
+  }
+}
+
 TEST_CASE("cost observations require a started response and occur once",
           "[runtime][cost][failure]") {
   SECTION("before response start") {
