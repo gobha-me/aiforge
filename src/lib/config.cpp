@@ -497,6 +497,9 @@ auto builtin_config_registry() -> const ConfigRegistry& {
   static const ConfigRegistry registry{{
       {"model", ConfigValueKind::text, std::string{"AIFORGE_MODEL"},
        std::nullopt, false, true, 1024, 1},
+      {"venice.web_search", ConfigValueKind::text,
+       std::string{"AIFORGE_VENICE_WEB_SEARCH"}, std::nullopt, false, true, 4,
+       1},
       {"memory.global.capture", ConfigValueKind::text,
        std::string{"AIFORGE_MEMORY_GLOBAL_CAPTURE"},
        ConfigValue{std::string{"off"}}, false, true, 16, 1},

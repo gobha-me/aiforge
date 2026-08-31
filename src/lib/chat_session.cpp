@@ -270,6 +270,7 @@ struct ChatSession::Impl {
   backend::ModelContextInfo model;
   backend::ModelContextProvider* model_context{};
   std::uint64_t output_tokens{};
+  backend::GenerationOptions generation_options;
   ChatSessionLimits limits;
   bool is_durable{};
   ChatIdentitySuffixSource identity_suffix_source;
@@ -343,6 +344,13 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
       return error(ChatSessionErrorCode::context_failed,
                    "model context capacity is too small");
     }
+    if (auto supported = backend::validate_generation_requirements(
+            request.generation_options, *model);
+        !supported) {
+      return error(ChatSessionErrorCode::model_lookup_failed,
+                   supported.error().redacted_message);
+    }
+    request.generation_options.max_output_tokens = output_tokens;
 
     if (!dependencies.identity_suffix_source) {
       dependencies.identity_suffix_source = next_suffix;
@@ -431,6 +439,7 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              *model,
              &model_context,
              output_tokens,
+             std::move(request.generation_options),
              limits,
              durable,
              std::move(dependencies.identity_suffix_source),
@@ -619,13 +628,12 @@ auto ChatSession::submit(std::string prompt)
     }
 
     const auto before = m_impl->kernel->event_log().events().size();
-    backend::BackendRequest backend_request{
-        *inference_id,
-        *assistant_message_id,
-        m_impl->model_id,
-        std::move(*context),
-        {},
-        {std::nullopt, m_impl->output_tokens, std::nullopt, {}}};
+    backend::BackendRequest backend_request{*inference_id,
+                                            *assistant_message_id,
+                                            m_impl->model_id,
+                                            std::move(*context),
+                                            {},
+                                            m_impl->generation_options};
     auto started = m_impl->kernel->start(
         {*run_id,
          {*surface_id, *workspace_id, *permission_id,
@@ -777,9 +785,16 @@ auto ChatSession::select_model(domain::ModelId model_id)
     return error(ChatSessionErrorCode::context_failed,
                  "selected model context capacity is too small");
   }
+  if (auto supported = backend::validate_generation_requirements(
+          m_impl->generation_options, *selected);
+      !supported) {
+    return error(ChatSessionErrorCode::model_lookup_failed,
+                 supported.error().redacted_message);
+  }
   m_impl->model_id = std::move(model_id);
   m_impl->model = std::move(*selected);
   m_impl->output_tokens = output_tokens;
+  m_impl->generation_options.max_output_tokens = output_tokens;
   if (m_impl->provenance) m_impl->provenance->model_id = m_impl->model_id;
   return {};
 }

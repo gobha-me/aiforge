@@ -67,7 +67,7 @@ auto request(std::vector<backend::ToolDeclaration> tools = {})
                                  make_id<domain::ModelId>("model"),
                                  context(),
                                  std::move(tools),
-                                 {0.25, 128, 42, {}}};
+                                 {0.25, 128, 42, {}, {}}};
 }
 
 auto run_start(backend::BackendRequest backend_request = request())

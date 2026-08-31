@@ -71,7 +71,11 @@ class Backend final : public backend::Backend,
   auto lookup(const domain::ModelId& model_id, std::stop_token)
       -> std::expected<backend::ModelContextInfo,
                        backend::BackendError> override {
-    return backend::ModelContextInfo{model_id, 100000, 4096};
+    const auto found =
+        capabilities_by_model.find(std::string{model_id.value()});
+    return backend::ModelContextInfo{
+        model_id, 100000, 4096, std::nullopt,
+        found == capabilities_by_model.end() ? capabilities : found->second};
   }
 
   auto start(backend::BackendRequest request, std::stop_token)
@@ -85,6 +89,8 @@ class Backend final : public backend::Backend,
 
   std::vector<backend::BackendRequest> requests;
   std::optional<domain::ReportedCost> reported_cost;
+  backend::ModelCapabilityMap capabilities;
+  std::map<std::string, backend::ModelCapabilityMap> capabilities_by_model;
 };
 
 auto usd_cost(const std::string& value) -> domain::ReportedCost {
@@ -261,6 +267,116 @@ TEST_CASE("interactive turns stream and reuse completed conversation context",
           std::vector<std::string>{"answer-1"});
   REQUIRE((*session)->submitted_prompts() ==
           std::vector<std::string>{"first\nline", "second"});
+}
+
+TEST_CASE("interactive generation requirements fail closed before transport",
+          "[chat][models][capabilities][failure]") {
+  backend::GenerationOptions options;
+  options.extensions.emplace(
+      "venice.chat.web-search",
+      domain::StructuredDataBlock{"application/json", R"("on")"});
+  options.required_model_capabilities.emplace_back("web-search");
+
+  for (const auto support :
+       {std::optional<bool>{false}, std::optional<bool>{std::nullopt}}) {
+    Backend backend;
+    backend.capabilities.emplace("web-search", support);
+    const auto session =
+        surfaces::ChatSession::open({make_id<domain::ModelId>("model"),
+                                     surfaces::ChatSessionOpen::Mode::ephemeral,
+                                     std::nullopt,
+                                     std::nullopt,
+                                     {},
+                                     std::nullopt,
+                                     options},
+                                    backend, backend);
+    REQUIRE_FALSE(session);
+    REQUIRE(session.error().code ==
+            surfaces::ChatSessionErrorCode::model_lookup_failed);
+    REQUIRE(backend.requests.empty());
+  }
+
+  Backend missing;
+  const auto absent =
+      surfaces::ChatSession::open({make_id<domain::ModelId>("model"),
+                                   surfaces::ChatSessionOpen::Mode::ephemeral,
+                                   std::nullopt,
+                                   std::nullopt,
+                                   {},
+                                   std::nullopt,
+                                   options},
+                                  missing, missing);
+  REQUIRE_FALSE(absent);
+  REQUIRE(missing.requests.empty());
+
+  auto duplicate = options;
+  duplicate.required_model_capabilities.emplace_back("web-search");
+  Backend duplicated;
+  duplicated.capabilities.emplace("web-search", true);
+  const auto repeated =
+      surfaces::ChatSession::open({make_id<domain::ModelId>("model"),
+                                   surfaces::ChatSessionOpen::Mode::ephemeral,
+                                   std::nullopt,
+                                   std::nullopt,
+                                   {},
+                                   std::nullopt,
+                                   duplicate},
+                                  duplicated, duplicated);
+  REQUIRE_FALSE(repeated);
+  REQUIRE(duplicated.requests.empty());
+
+  Backend disabled;
+  disabled.capabilities.emplace("web-search", false);
+  auto off = options;
+  off.extensions.at("venice.chat.web-search").data = R"("off")";
+  off.required_model_capabilities.clear();
+  auto allowed =
+      surfaces::ChatSession::open({make_id<domain::ModelId>("model"),
+                                   surfaces::ChatSessionOpen::Mode::ephemeral,
+                                   std::nullopt,
+                                   std::nullopt,
+                                   {},
+                                   std::nullopt,
+                                   off},
+                                  disabled, disabled);
+  REQUIRE(allowed);
+  REQUIRE((*allowed)->submit("do not search"));
+  drain_to_end(**allowed);
+  REQUIRE(disabled.requests.size() == 1);
+}
+
+TEST_CASE("interactive web-search options survive submission and model checks",
+          "[chat][models][capabilities]") {
+  Backend backend;
+  backend.capabilities.emplace("web-search", true);
+  backend.capabilities_by_model.emplace(
+      "unsupported", backend::ModelCapabilityMap{{"web-search", std::nullopt}});
+  backend::GenerationOptions options;
+  options.extensions.emplace(
+      "venice.chat.web-search",
+      domain::StructuredDataBlock{"application/json", R"("auto")"});
+  options.required_model_capabilities.emplace_back("web-search");
+  auto session =
+      surfaces::ChatSession::open({make_id<domain::ModelId>("model"),
+                                   surfaces::ChatSessionOpen::Mode::ephemeral,
+                                   std::nullopt,
+                                   std::nullopt,
+                                   {},
+                                   std::nullopt,
+                                   options},
+                                  backend, backend);
+  REQUIRE(session);
+
+  const auto rejected =
+      (*session)->select_model(make_id<domain::ModelId>("unsupported"));
+  REQUIRE_FALSE(rejected);
+  REQUIRE((*session)->model_id() == make_id<domain::ModelId>("model"));
+  REQUIRE((*session)->submit("search"));
+  drain_to_end(**session);
+  REQUIRE(backend.requests.size() == 1);
+  REQUIRE(backend.requests.front().options.extensions == options.extensions);
+  REQUIRE(backend.requests.front().options.required_model_capabilities ==
+          options.required_model_capabilities);
 }
 
 TEST_CASE("interactive spend ceilings persist and block subsequent inference",

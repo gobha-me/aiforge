@@ -552,6 +552,13 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       return one_shot_error(OneShotErrorCode::context_failed,
                             "model context capacity is too small");
     }
+    if (auto supported = backend::validate_generation_requirements(
+            request.generation_options, *model);
+        !supported) {
+      return one_shot_error(OneShotErrorCode::model_lookup_failed,
+                            supported.error().redacted_message);
+    }
+    request.generation_options.max_output_tokens = output_tokens;
 
     const auto suffix = next_suffix();
     const bool durable =
@@ -783,13 +790,12 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                             "one-shot input exceeds model context capacity");
     }
 
-    backend::BackendRequest backend_request{
-        *inference_id,
-        *assistant_message_id,
-        request.model_id,
-        std::move(*context),
-        m_dependencies.tools.declarations(),
-        {std::nullopt, output_tokens, std::nullopt, {}}};
+    backend::BackendRequest backend_request{*inference_id,
+                                            *assistant_message_id,
+                                            request.model_id,
+                                            std::move(*context),
+                                            m_dependencies.tools.declarations(),
+                                            request.generation_options};
     const auto run_event_offset = kernel->event_log().events().size();
     auto started = kernel->start(
         {*run_id,
@@ -913,12 +919,9 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
           }
           auto continued = kernel->continue_run(
               *run_id,
-              {*continuation_inference,
-               *continuation_assistant,
-               request.model_id,
-               std::move(*continuation_context),
-               m_dependencies.tools.declarations(),
-               {std::nullopt, output_tokens, std::nullopt, {}},
+              {*continuation_inference, *continuation_assistant,
+               request.model_id, std::move(*continuation_context),
+               m_dependencies.tools.declarations(), request.generation_options,
                std::move(*continuation_state)},
               model->pricing_observation);
           if (!continued &&

@@ -41,6 +41,7 @@ class FakeOneShot final : public OneShotCommand {
     seen_persona = std::move(request.persona);
     seen_model = std::move(request.model);
     seen_spend_ceiling = std::move(request.session_spend_ceiling);
+    seen_web_search = std::move(request.web_search);
     saw_terminal_input = environment.input_is_terminal;
     output << "answer";
     error << "usage\n";
@@ -54,6 +55,7 @@ class FakeOneShot final : public OneShotCommand {
   aiforge::persona::PersonaDirective seen_persona;
   std::optional<std::string> seen_model;
   std::optional<aiforge::domain::SessionSpendCeiling> seen_spend_ceiling;
+  std::optional<std::string> seen_web_search;
   bool saw_terminal_input{};
   std::optional<CommandFailure> failure;
 };
@@ -67,6 +69,7 @@ class FakeInteractive final : public InteractiveCommand {
     seen_persona = std::move(request.persona);
     seen_model = std::move(request.model);
     seen_spend_ceiling = std::move(request.session_spend_ceiling);
+    seen_web_search = std::move(request.web_search);
     output << "interactive";
     if (failure) return std::unexpected(*failure);
     return {};
@@ -77,6 +80,7 @@ class FakeInteractive final : public InteractiveCommand {
   aiforge::persona::PersonaDirective seen_persona;
   std::optional<std::string> seen_model;
   std::optional<aiforge::domain::SessionSpendCeiling> seen_spend_ceiling;
+  std::optional<std::string> seen_web_search;
   std::optional<CommandFailure> failure;
 };
 
@@ -542,6 +546,27 @@ TEST_CASE("one-shot session options are explicit and mutually exclusive",
               environment, output, error) == 0);
   REQUIRE(one_shot.seen_spend_ceiling->amount().to_string() == "12.34");
 
+  output.str({});
+  error.str({});
+  REQUIRE(
+      CommandDispatcher{}.dispatch(
+          registry,
+          std::vector<std::string_view>{"chat", "--web-search", "on", "search"},
+          environment, output, error) == 0);
+  REQUIRE(one_shot.seen_web_search == "on");
+
+  for (const auto value : {"", "true", "sometimes", "ON"}) {
+    output.str({});
+    error.str({});
+    CAPTURE(value);
+    REQUIRE(CommandDispatcher{}.dispatch(
+                registry,
+                std::vector<std::string_view>{"chat", "--web-search", value,
+                                              "invalid"},
+                environment, output, error) == 2);
+    REQUIRE(error.str().find("requires auto, on, or off") != std::string::npos);
+  }
+
   for (const auto value : {"0", "-1", "1e2", "0.0000001"}) {
     output.str({});
     error.str({});
@@ -617,6 +642,13 @@ TEST_CASE("one-shot session options are explicit and mutually exclusive",
               std::vector<std::string_view>{"--session-max-spend", "5.5"},
               environment, output, error) == 0);
   REQUIRE(interactive.seen_spend_ceiling->amount().to_string() == "5.5");
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry, std::vector<std::string_view>{"--web-search", "auto"},
+              environment, output, error) == 0);
+  REQUIRE(interactive.seen_web_search == "auto");
 }
 
 TEST_CASE("models command uses its dedicated service and preserves streams",

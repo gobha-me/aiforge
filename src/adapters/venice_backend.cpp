@@ -1,4 +1,5 @@
 #include <aiforge/adapters/venice_backend.hpp>
+#include <aiforge/adapters/venice_generation_options.hpp>
 
 #include <algorithm>
 #include <array>
@@ -15,6 +16,8 @@
 #include <thread>
 #include <utility>
 #include <variant>
+
+#include <aiforge/model/catalog.hpp>
 
 #include <nlohmann/json.hpp>
 #include <venice/client.hpp>
@@ -239,12 +242,59 @@ constexpr std::string_view tool_thought_signature_media_type{
   return {};
 }
 
+[[nodiscard]] auto web_search_mode(const backend::GenerationOptions& options)
+    -> std::expected<std::optional<std::string>, backend::BackendError> {
+  constexpr std::size_t maximum_extension_data_bytes{16};
+  constexpr std::size_t maximum_required_capabilities{64};
+  if (options.extensions.size() > 1 ||
+      options.required_model_capabilities.size() >
+          maximum_required_capabilities) {
+    return std::unexpected(
+        request_error("Venice generation options exceed supported bounds"));
+  }
+
+  std::optional<std::string> result;
+  for (const auto& [name, value] : options.extensions) {
+    if (name != venice_web_search_extension) {
+      return std::unexpected(
+          request_error("Venice extension namespace is unsupported"));
+    }
+    if (value.media_type != "application/json") {
+      return std::unexpected(
+          request_error("Venice web-search extension media type is invalid"));
+    }
+    if (value.data.size() > maximum_extension_data_bytes) {
+      return std::unexpected(
+          request_error("Venice web-search extension value is too large"));
+    }
+    const auto parsed = nlohmann::json::parse(value.data, nullptr, false);
+    if (!parsed.is_string()) {
+      return std::unexpected(
+          request_error("Venice web-search extension value is invalid"));
+    }
+    auto mode = parsed.get<std::string>();
+    if (mode != "auto" && mode != "on" && mode != "off") {
+      return std::unexpected(
+          request_error("Venice web-search extension value is invalid"));
+    }
+    result = std::move(mode);
+  }
+
+  const auto requirements = std::ranges::count(
+      options.required_model_capabilities, web_search_model_capability);
+  const bool requires_search = result && *result != "off";
+  if ((requires_search && requirements != 1) ||
+      (!requires_search && requirements != 0)) {
+    return std::unexpected(
+        request_error("Venice web-search capability requirement is invalid"));
+  }
+  return result;
+}
+
 [[nodiscard]] auto make_request(const backend::BackendRequest& request)
     -> std::expected<venice::ChatRequest, backend::BackendError> {
-  if (!request.options.extensions.empty()) {
-    return std::unexpected(
-        request_error("Venice extensions are not enabled for this milestone"));
-  }
+  auto search_mode = web_search_mode(request.options);
+  if (!search_mode) return std::unexpected(std::move(search_mode.error()));
   if (request.options.max_output_tokens &&
       *request.options.max_output_tokens >
           static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
@@ -265,6 +315,10 @@ constexpr std::string_view tool_thought_signature_media_type{
   }
   if (request.options.seed) {
     result.seed = static_cast<std::int64_t>(*request.options.seed);
+  }
+  if (*search_mode) {
+    result.venice_parameters.emplace();
+    result.venice_parameters->enable_web_search = std::move(**search_mode);
   }
 
   result.messages.reserve(request.context.entries.size());
@@ -786,8 +840,43 @@ auto VeniceBackend::lookup(const domain::ModelId& model_id,
       maximum_output =
           static_cast<std::uint64_t>(*found->max_completion_tokens);
     }
+    backend::ModelCapabilityMap capabilities;
+    if (found->capabilities) {
+      const auto add = [&](const model::Capability capability,
+                           const std::optional<bool> supported) {
+        capabilities.emplace(std::string{model::capability_name(capability)},
+                             supported);
+      };
+      add(model::Capability::tool_calling,
+          found->capabilities->supports_function_calling);
+      add(model::Capability::vision, found->capabilities->supports_vision);
+      add(model::Capability::multiple_images,
+          found->capabilities->supports_multiple_images);
+      add(model::Capability::video_input,
+          found->capabilities->supports_video_input);
+      add(model::Capability::audio_input,
+          found->capabilities->supports_audio_input);
+      add(model::Capability::reasoning,
+          found->capabilities->supports_reasoning);
+      add(model::Capability::reasoning_effort,
+          found->capabilities->supports_reasoning_effort);
+      add(model::Capability::response_schema,
+          found->capabilities->supports_response_schema);
+      add(model::Capability::log_probabilities,
+          found->capabilities->supports_log_probs);
+      add(model::Capability::web_search,
+          found->capabilities->supports_web_search);
+      add(model::Capability::x_search, found->capabilities->supports_x_search);
+      add(model::Capability::tee_attestation,
+          found->capabilities->supports_tee_attestation);
+      add(model::Capability::end_to_end_encryption,
+          found->capabilities->supports_e2ee);
+      add(model::Capability::optimized_for_code,
+          found->capabilities->optimized_for_code);
+    }
     return backend::ModelContextInfo{
-        model_id, static_cast<std::uint64_t>(*context_tokens), maximum_output};
+        model_id, static_cast<std::uint64_t>(*context_tokens), maximum_output,
+        std::nullopt, std::move(capabilities)};
   } catch (...) {
     return std::unexpected(adapter_error(backend::BackendErrorKind::unavailable,
                                          "Venice model lookup failed"));

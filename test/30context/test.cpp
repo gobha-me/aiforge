@@ -414,7 +414,7 @@ TEST_CASE("scripted backend captures the constructed context and provenance",
       make_id<domain::ModelId>("model"),
       *context,
       {},
-      {std::nullopt, 128, std::nullopt, {}}};
+      {std::nullopt, 128, std::nullopt, {}, {}}};
   testing::ScriptedBackend fake{{testing::ScriptedExchange{
       request, testing::StreamScript{{testing::EndOfStream{}}}}}};
 

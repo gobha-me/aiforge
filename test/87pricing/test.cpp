@@ -99,7 +99,7 @@ auto request() -> backend::BackendRequest {
           id<domain::ModelId>("model"),
           context(),
           {},
-          {std::nullopt, 128, std::nullopt, {}}};
+          {std::nullopt, 128, std::nullopt, {}, {}}};
 }
 
 } // namespace

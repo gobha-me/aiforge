@@ -60,6 +60,7 @@ struct ChatSessionOpen {
   std::optional<domain::RunProvenance> provenance{};
   persona::PersonaDirective persona{};
   std::optional<domain::SessionSpendCeiling> session_spend_ceiling{};
+  backend::GenerationOptions generation_options{};
 };
 
 struct ChatPersonaState {
