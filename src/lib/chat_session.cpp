@@ -271,6 +271,7 @@ struct ChatSession::Impl {
   backend::ModelContextProvider* model_context{};
   std::uint64_t output_tokens{};
   backend::GenerationOptions generation_options;
+  std::vector<backend::ToolDeclaration> tool_declarations;
   ChatSessionLimits limits;
   bool is_durable{};
   ChatIdentitySuffixSource identity_suffix_source;
@@ -376,6 +377,7 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
       selected = sessions->front().session_id;
     }
 
+    auto tool_declarations = dependencies.tools.declarations();
     const bool durable = request.mode != ChatSessionOpen::Mode::ephemeral &&
                          session_store != nullptr;
     std::unique_ptr<runtime::RunKernel> kernel;
@@ -440,6 +442,7 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              &model_context,
              output_tokens,
              std::move(request.generation_options),
+             std::move(tool_declarations),
              limits,
              durable,
              std::move(dependencies.identity_suffix_source),
@@ -632,7 +635,7 @@ auto ChatSession::submit(std::string prompt)
                                             *assistant_message_id,
                                             m_impl->model_id,
                                             std::move(*context),
-                                            {},
+                                            m_impl->tool_declarations,
                                             m_impl->generation_options};
     auto started = m_impl->kernel->start(
         {*run_id,
