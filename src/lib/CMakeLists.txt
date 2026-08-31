@@ -15,6 +15,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   context_selection.cpp
   event_log.cpp
   exact_source_edit.cpp
+  generation_options.cpp
   image.cpp
   json_config_file_store.cpp
   language_analysis.cpp

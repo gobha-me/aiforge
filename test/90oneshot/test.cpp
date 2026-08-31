@@ -472,6 +472,71 @@ TEST_CASE("one-shot streams only sanitized text and builds neutral evidence",
       "stdin");
 }
 
+TEST_CASE("one-shot validates and forwards required generation capabilities",
+          "[one-shot][models][capabilities]") {
+  backend::GenerationOptions options;
+  options.extensions.emplace(
+      "venice.chat.web-search",
+      domain::StructuredDataBlock{"application/json", R"("on")"});
+  options.required_model_capabilities.emplace_back("web-search");
+
+  FakeModels unsupported_models;
+  unsupported_models.info.capabilities.emplace("web-search", std::nullopt);
+  CapturingBackend rejected_backend{{}};
+  surfaces::OneShotSurface rejected_surface{rejected_backend,
+                                            unsupported_models};
+  std::ostringstream output;
+  std::ostringstream error;
+  const auto rejected =
+      rejected_surface.run({"search",
+                            std::nullopt,
+                            make_id<domain::ModelId>("model"),
+                            surfaces::OneShotRequest::SessionMode::ephemeral,
+                            std::nullopt,
+                            std::nullopt,
+                            {},
+                            std::nullopt,
+                            options},
+                           output, error);
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code ==
+          surfaces::OneShotErrorCode::model_lookup_failed);
+  REQUIRE(rejected_backend.starts == 0);
+
+  FakeModels supported_models;
+  supported_models.info.capabilities.emplace("web-search", true);
+  class RewritingBackend final : public backend::Backend {
+   public:
+    auto start(backend::BackendRequest request, std::stop_token)
+        -> std::expected<std::unique_ptr<backend::BackendStream>,
+                         backend::BackendError> override {
+      captured = request;
+      return std::make_unique<VectorStream>(
+          success_items(request.assistant_message_id));
+    }
+    std::optional<backend::BackendRequest> captured;
+  } accepted;
+  surfaces::OneShotSurface accepted_surface{accepted, supported_models};
+  output.str({});
+  error.str({});
+  const auto result =
+      accepted_surface.run({"search",
+                            std::nullopt,
+                            make_id<domain::ModelId>("model"),
+                            surfaces::OneShotRequest::SessionMode::ephemeral,
+                            std::nullopt,
+                            std::nullopt,
+                            {},
+                            std::nullopt,
+                            options},
+                           output, error);
+  REQUIRE(result);
+  REQUIRE(accepted.captured);
+  REQUIRE(accepted.captured->options.extensions == options.extensions);
+  REQUIRE(accepted.captured->options.required_model_capabilities ==
+          options.required_model_capabilities);
+}
+
 TEST_CASE("one-shot continues after a rejected tool result",
           "[one-shot][tools][failure]") {
   FakeModels models;

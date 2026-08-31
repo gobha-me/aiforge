@@ -48,6 +48,7 @@ class OneShotCommand {
     persona::PersonaDirective persona;
     std::optional<std::string> model;
     std::optional<domain::SessionSpendCeiling> session_spend_ceiling;
+    std::optional<std::string> web_search;
   };
 
   [[nodiscard]] virtual auto execute(Request request,
@@ -73,6 +74,7 @@ class InteractiveCommand {
     persona::PersonaDirective persona;
     std::optional<std::string> model;
     std::optional<domain::SessionSpendCeiling> session_spend_ceiling;
+    std::optional<std::string> web_search;
   };
 
   [[nodiscard]] virtual auto execute(Request request,

@@ -59,12 +59,14 @@ struct OneShotRequest {
                  std::optional<domain::RunProvenance> provenance = std::nullopt,
                  persona::PersonaDirective persona = {},
                  std::optional<domain::SessionSpendCeiling>
-                     session_spend_ceiling = std::nullopt)
+                     session_spend_ceiling = std::nullopt,
+                 backend::GenerationOptions generation_options = {})
       : prompt(std::move(prompt)), stdin_evidence(std::move(stdin_evidence)),
         model_id(std::move(model_id)), session_mode(session_mode),
         session_id(std::move(session_id)), provenance(std::move(provenance)),
         persona(std::move(persona)),
-        session_spend_ceiling(std::move(session_spend_ceiling)) {}
+        session_spend_ceiling(std::move(session_spend_ceiling)),
+        generation_options(std::move(generation_options)) {}
 
   std::string prompt;
   std::optional<std::string> stdin_evidence;
@@ -76,6 +78,7 @@ struct OneShotRequest {
   std::optional<domain::RunProvenance> provenance;
   persona::PersonaDirective persona;
   std::optional<domain::SessionSpendCeiling> session_spend_ceiling;
+  backend::GenerationOptions generation_options;
 };
 
 struct OneShotResult {

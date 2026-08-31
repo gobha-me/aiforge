@@ -11,6 +11,7 @@
 #include <aiforge/adapters/termforge_run_bridge.hpp>
 #include <aiforge/adapters/transcript_view.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
+#include <aiforge/adapters/venice_generation_options.hpp>
 #include <aiforge/config/config.hpp>
 #include <aiforge/config/file_store.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
@@ -190,15 +191,24 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
 
 [[nodiscard]] auto load_config(
     std::ostream& diagnostics,
-    const std::optional<std::string>& requested_model)
+    const std::optional<std::string>& requested_model,
+    const std::optional<std::string>& requested_web_search)
     -> std::expected<config::ResolvedConfig, cli::CommandFailure> {
   const auto& registry = config::builtin_config_registry();
   std::vector<config::ConfigLayer> layers;
+  std::vector<config::ConfigCandidate> command_line;
   if (requested_model) {
+    command_line.push_back(
+        {"model", config::ConfigValue{*requested_model}, std::nullopt});
+  }
+  if (requested_web_search) {
+    command_line.push_back({"venice.web_search",
+                            config::ConfigValue{*requested_web_search},
+                            std::nullopt});
+  }
+  if (!command_line.empty()) {
     layers.push_back(config::ConfigLayer{
-        config::ConfigSource::command_line,
-        {{"model", config::ConfigValue{*requested_model}, std::nullopt}},
-        {}});
+        config::ConfigSource::command_line, std::move(command_line), {}});
   }
   auto environment = config::environment_config_layer(registry);
   if (!environment) {
@@ -2131,10 +2141,16 @@ auto ProcessInteractiveCommand::execute(Request request,
       return failure(cli::CommandFailureKind::usage,
                      "interactive chat requires terminal input and output");
     }
-    auto resolved = load_config(diagnostics, request.model);
+    auto resolved = load_config(diagnostics, request.model, request.web_search);
     if (!resolved) return std::unexpected(std::move(resolved.error()));
     auto model = configured_model(*resolved);
     if (!model) return std::unexpected(std::move(model.error()));
+    auto generation_options = venice_generation_options(*resolved);
+    if (!generation_options) {
+      return failure(request.web_search ? cli::CommandFailureKind::usage
+                                        : cli::CommandFailureKind::runtime,
+                     generation_options.error());
+    }
     auto catalog = ProcessModelCatalog::create();
     if (!catalog)
       return failure(cli::CommandFailureKind::runtime, catalog.error().message);
@@ -2194,7 +2210,8 @@ auto ProcessInteractiveCommand::execute(Request request,
                                    std::move(request.session_id),
                                    std::move(provenance),
                                    std::move(request.persona),
-                                   std::move(request.session_spend_ceiling)};
+                                   std::move(request.session_spend_ceiling),
+                                   std::move(*generation_options)};
 
     std::unique_ptr<SqliteSessionStore> store;
     if (mode != surfaces::ChatSessionOpen::Mode::ephemeral) {

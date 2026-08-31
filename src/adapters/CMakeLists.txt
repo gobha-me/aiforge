@@ -24,6 +24,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   transcript_view.cpp
   tui_scenario.cpp
   venice_backend.cpp
+  venice_generation_options.cpp
   venice_audio_service.cpp
   venice_image_generator.cpp
   image_backend.cpp

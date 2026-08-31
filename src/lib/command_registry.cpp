@@ -238,6 +238,8 @@ auto one_shot_handler(CommandContext& context,
       context.invocation, std::string{option_prefix} + "persona");
   const auto requested_model = parsed_text_values(
       context.invocation, std::string{option_prefix} + "model");
+  const auto requested_web_search = parsed_text_values(
+      context.invocation, std::string{option_prefix} + "web-search");
   const auto requested_spend_ceiling = parsed_text_values(
       context.invocation, std::string{option_prefix} + "session-max-spend");
   const bool no_persona =
@@ -259,6 +261,13 @@ auto one_shot_handler(CommandContext& context,
   if (requested_model &&
       (requested_model->size() != 1 || requested_model->front().empty())) {
     context.error << "aiforge: model ID is invalid\n";
+    return usage_exit_code;
+  }
+  if (requested_web_search && (requested_web_search->size() != 1 ||
+                               (requested_web_search->front() != "auto" &&
+                                requested_web_search->front() != "on" &&
+                                requested_web_search->front() != "off"))) {
+    context.error << "aiforge: --web-search requires auto, on, or off\n";
     return usage_exit_code;
   }
   std::optional<domain::SessionSpendCeiling> session_spend_ceiling;
@@ -318,7 +327,10 @@ auto one_shot_handler(CommandContext& context,
            requested_model
                ? std::optional<std::string>{requested_model->front()}
                : std::nullopt,
-           session_spend_ceiling},
+           session_spend_ceiling,
+           requested_web_search
+               ? std::optional<std::string>{requested_web_search->front()}
+               : std::nullopt},
           context.environment, context.output, context.error);
       if (result) return success_exit_code;
       if (!result.error().message.empty()) {
@@ -353,7 +365,10 @@ auto one_shot_handler(CommandContext& context,
        std::move(persona_directive),
        requested_model ? std::optional<std::string>{requested_model->front()}
                        : std::nullopt,
-       session_spend_ceiling},
+       session_spend_ceiling,
+       requested_web_search
+           ? std::optional<std::string>{requested_web_search->front()}
+           : std::nullopt},
       context.environment, context.output, context.error);
   if (result) return success_exit_code;
   if (!result.error().message.empty()) {
@@ -974,6 +989,13 @@ auto builtin_command_registry() -> const CommandRegistry& {
           1},
          "model-id",
          "Select and validate a text model."},
+        {{std::string{prefix} + ".web-search",
+          {"--web-search"},
+          ArgumentValueKind::text,
+          0,
+          1},
+         "auto|on|off",
+         "Set the Venice web-search mode."},
         {{std::string{prefix} + ".session-max-spend",
           {"--session-max-spend"},
           ArgumentValueKind::text,

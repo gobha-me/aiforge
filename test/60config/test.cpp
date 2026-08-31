@@ -559,6 +559,7 @@ TEST_CASE("config CLI keeps content and diagnostics on their streams",
   TemporaryDirectory temporary;
   EnvironmentGuard xdg{"XDG_CONFIG_HOME", temporary.path().string()};
   EnvironmentGuard model{"AIFORGE_MODEL", std::nullopt};
+  EnvironmentGuard web_search{"AIFORGE_VENICE_WEB_SEARCH", std::nullopt};
   std::string output;
   std::string error;
 
@@ -573,6 +574,7 @@ TEST_CASE("config CLI keeps content and diagnostics on their streams",
 
   REQUIRE(run_cli({"config", "show"}, output, error) == 0);
   REQUIRE(output == "model\t<unset>\tunset\n"
+                    "venice.web_search\t<unset>\tunset\n"
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n");
@@ -602,6 +604,7 @@ TEST_CASE("malformed files are diagnostic for reads but never overwritten",
   TemporaryDirectory temporary;
   EnvironmentGuard xdg{"XDG_CONFIG_HOME", temporary.path().string()};
   EnvironmentGuard model{"AIFORGE_MODEL", std::nullopt};
+  EnvironmentGuard web_search{"AIFORGE_VENICE_WEB_SEARCH", std::nullopt};
   const auto app = temporary.path() / "aiforge";
   REQUIRE(std::filesystem::create_directory(app));
   REQUIRE(::chmod(app.c_str(), 0700) == 0);
@@ -613,6 +616,7 @@ TEST_CASE("malformed files are diagnostic for reads but never overwritten",
 
   REQUIRE(run_cli({"config", "show"}, output, error) == 0);
   REQUIRE(output == "model\t<unset>\tunset\n"
+                    "venice.web_search\t<unset>\tunset\n"
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n");
@@ -630,11 +634,13 @@ TEST_CASE("read-only resolution survives an unavailable config home",
   EnvironmentGuard xdg{"XDG_CONFIG_HOME", std::nullopt};
   EnvironmentGuard home{"HOME", std::nullopt};
   EnvironmentGuard model{"AIFORGE_MODEL", std::string{"environment-model"}};
+  EnvironmentGuard web_search{"AIFORGE_VENICE_WEB_SEARCH", std::nullopt};
   std::string output;
   std::string error;
 
   REQUIRE(run_cli({"config", "show"}, output, error) == 0);
   REQUIRE(output == "model\tenvironment-model\tenvironment\n"
+                    "venice.web_search\t<unset>\tunset\n"
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n");

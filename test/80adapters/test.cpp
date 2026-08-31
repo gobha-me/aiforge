@@ -32,6 +32,7 @@
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/termforge_run_bridge.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
+#include <aiforge/adapters/venice_generation_options.hpp>
 #include <aiforge/adapters/venice_model_catalog_source.hpp>
 #include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
@@ -77,7 +78,7 @@ auto request(domain::ConstructedContext built = context())
                                  make_id<domain::ModelId>("test-model"),
                                  std::move(built),
                                  {},
-                                 {0.5, 64, 7, {}}};
+                                 {0.5, 64, 7, {}, {}}};
 }
 
 class LocalServer final {
@@ -99,7 +100,7 @@ class LocalServer final {
         m_model_authorization = request.get_header_value("Authorization");
       }
       response.set_content(
-          R"({"data":[{"id":"test-model","type":"text","context_length":8192,"model_spec":{"availableContextTokens":8192,"maxCompletionTokens":1024,"offline":false,"pricing":{"input":{"usd":1.42,"diem":2.5},"output":{"usd":2.83},"cache_input":{"usd":0.23}}}}]})",
+          R"({"data":[{"id":"test-model","type":"text","context_length":8192,"model_spec":{"availableContextTokens":8192,"maxCompletionTokens":1024,"offline":false,"capabilities":{"supportsWebSearch":true,"supportsReasoning":null},"pricing":{"input":{"usd":1.42,"diem":2.5},"output":{"usd":2.83},"cache_input":{"usd":0.23}}}}]})",
           "application/json");
     });
     m_server.Post(
@@ -607,6 +608,97 @@ TEST_CASE("Venice adapter terminates after trailing response accounting",
   REQUIRE(server.body().find("test-secret") == std::string::npos);
 }
 
+TEST_CASE("Venice adapter maps bounded web-search extensions exactly",
+          "[adapter][venice][extensions]") {
+  for (const auto& mode :
+       {std::string{"auto"}, std::string{"on"}, std::string{"off"}}) {
+    CAPTURE(mode);
+    LocalServer server;
+    adapters::VeniceBackend backend{secret("test-secret"),
+                                    {server.base_url(), 1s, 1s, 1s, 8}};
+    auto value = request();
+    value.options.extensions.emplace(
+        std::string{adapters::venice_web_search_extension},
+        domain::StructuredDataBlock{"application/json", "\"" + mode + "\""});
+    if (mode != "off") {
+      value.options.required_model_capabilities.emplace_back(
+          adapters::web_search_model_capability);
+    }
+    auto started = backend.start(std::move(value), {});
+    REQUIRE(started);
+    while (true) {
+      auto next = (*started)->next({});
+      REQUIRE(next);
+      if (!*next) break;
+    }
+    const auto sent = nlohmann::json::parse(server.body());
+    REQUIRE(sent.at("venice_parameters").at("enable_web_search") == mode);
+  }
+}
+
+TEST_CASE(
+    "Venice adapter rejects malformed web-search extensions before transport",
+    "[adapter][venice][extensions][failure]") {
+  std::vector<backend::GenerationOptions> invalid;
+  const auto extension = [](std::string name, std::string media_type,
+                            std::string data) {
+    backend::GenerationOptions options;
+    options.extensions.emplace(
+        std::move(name),
+        domain::StructuredDataBlock{std::move(media_type), std::move(data)});
+    return options;
+  };
+  invalid.push_back(
+      extension("other.chat.web-search", "application/json", R"("on")"));
+  invalid.push_back(
+      extension(std::string{adapters::venice_web_search_extension},
+                "text/plain", R"("on")"));
+  invalid.push_back(
+      extension(std::string{adapters::venice_web_search_extension},
+                "application/json", "{"));
+  invalid.push_back(
+      extension(std::string{adapters::venice_web_search_extension},
+                "application/json", "true"));
+  invalid.push_back(
+      extension(std::string{adapters::venice_web_search_extension},
+                "application/json", R"("sometimes")"));
+  invalid.push_back(
+      extension(std::string{adapters::venice_web_search_extension},
+                "application/json", std::string(17, 'x')));
+  invalid.push_back(
+      extension(std::string{adapters::venice_web_search_extension},
+                "application/json", R"("on")"));
+  auto inconsistent_off =
+      extension(std::string{adapters::venice_web_search_extension},
+                "application/json", R"("off")");
+  inconsistent_off.required_model_capabilities.emplace_back(
+      adapters::web_search_model_capability);
+  invalid.push_back(std::move(inconsistent_off));
+  auto multiple_extensions =
+      extension(std::string{adapters::venice_web_search_extension},
+                "application/json", R"("off")");
+  multiple_extensions.extensions.emplace(
+      "other.extension",
+      domain::StructuredDataBlock{"application/json", "null"});
+  invalid.push_back(std::move(multiple_extensions));
+  backend::GenerationOptions excessive_requirements;
+  excessive_requirements.required_model_capabilities.resize(65, "unused");
+  invalid.push_back(std::move(excessive_requirements));
+
+  for (auto& options : invalid) {
+    LocalServer server;
+    adapters::VeniceBackend backend{secret("test-secret"),
+                                    {server.base_url(), 1s, 1s, 1s, 8}};
+    auto value = request();
+    value.options = std::move(options);
+    const auto started = backend.start(std::move(value), {});
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().kind ==
+            backend::BackendErrorKind::request_rejected);
+    REQUIRE(server.body().empty());
+  }
+}
+
 TEST_CASE("Venice adapter captures opaque assistant continuation state",
           "[adapter][venice][reasoning]") {
   LocalServer server{std::nullopt, false, "0.0645375", false, false, true};
@@ -1026,6 +1118,8 @@ TEST_CASE("Venice adapter exposes neutral model context metadata",
   REQUIRE(context->model_id == model_id);
   REQUIRE(context->context_window_tokens == 8192);
   REQUIRE(context->maximum_output_tokens == 1024);
+  REQUIRE(context->capabilities.at("web-search") == true);
+  REQUIRE_FALSE(context->capabilities.at("reasoning").has_value());
 
   const auto missing =
       backend.lookup(make_id<domain::ModelId>("missing-model"), {});
@@ -1175,6 +1269,63 @@ TEST_CASE("ask_user dialog maps recommended indices back to stable IDs",
   REQUIRE(after_duplicate);
   REQUIRE(after_duplicate->size() == 1);
   REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
+}
+
+TEST_CASE("resolved Venice web-search config becomes a bounded extension",
+          "[adapter][venice][extensions][config]") {
+  for (const auto& mode :
+       {std::string{"auto"}, std::string{"on"}, std::string{"off"}}) {
+    const config::ConfigLayer layer{
+        config::ConfigSource::command_line,
+        {{"venice.web_search", config::ConfigValue{mode}, std::nullopt}},
+        {}};
+    const std::array layers{layer};
+    const auto resolved =
+        config::resolve_config(config::builtin_config_registry(), layers);
+    REQUIRE(resolved);
+    const auto options = adapters::venice_generation_options(*resolved);
+    REQUIRE(options);
+    REQUIRE(
+        options->extensions.at(
+            std::string{adapters::venice_web_search_extension}) ==
+        domain::StructuredDataBlock{"application/json", "\"" + mode + "\""});
+    REQUIRE(options->required_model_capabilities.empty() == (mode == "off"));
+  }
+
+  const config::ConfigLayer file{
+      config::ConfigSource::file,
+      {{"venice.web_search", config::ConfigValue{std::string{"off"}},
+        std::nullopt}},
+      {}};
+  const config::ConfigLayer environment{
+      config::ConfigSource::environment,
+      {{"venice.web_search", config::ConfigValue{std::string{"auto"}},
+        std::nullopt}},
+      {}};
+  const config::ConfigLayer command_line{
+      config::ConfigSource::command_line,
+      {{"venice.web_search", config::ConfigValue{std::string{"on"}},
+        std::nullopt}},
+      {}};
+  const std::array precedence_layers{file, environment, command_line};
+  const auto precedence = config::resolve_config(
+      config::builtin_config_registry(), precedence_layers);
+  REQUIRE(precedence);
+  const auto precedence_options =
+      adapters::venice_generation_options(*precedence);
+  REQUIRE(precedence_options);
+  REQUIRE(precedence_options->extensions.at(
+              std::string{adapters::venice_web_search_extension}) ==
+          domain::StructuredDataBlock{"application/json", R"("on")"});
+
+  const config::ResolvedConfig invalid{
+      {{"venice.web_search",
+        config::ConfigValue{std::string{"sometimes"}},
+        config::ConfigSource::file,
+        false,
+        {}}},
+      {}};
+  REQUIRE_FALSE(adapters::venice_generation_options(invalid));
 }
 
 TEST_CASE("process provenance names a credential source without its secret",

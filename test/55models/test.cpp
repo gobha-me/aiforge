@@ -104,6 +104,14 @@ TEST_CASE("catalog validation rejects malformed, duplicate, and bounded data",
   checked = model::validate_catalog(snapshot(1ms, {entry("one"), entry("two")}),
                                     {.maximum_entries = 1});
   REQUIRE_FALSE(checked);
+
+  auto duplicate_capability = entry("duplicate-capability");
+  duplicate_capability.capabilities = {
+      {model::Capability::web_search, true},
+      {model::Capability::web_search, std::nullopt}};
+  checked =
+      model::validate_catalog(snapshot(1ms, {std::move(duplicate_capability)}));
+  REQUIRE_FALSE(checked);
 }
 
 TEST_CASE("fresh cache avoids live fetch and one snapshot is reused",
@@ -193,6 +201,23 @@ TEST_CASE("lookup rejects missing offline and capacity-less text models",
   REQUIRE_FALSE(service.lookup(model_id("offline"), {}));
   REQUIRE_FALSE(service.lookup(model_id("empty"), {}));
   REQUIRE_FALSE(service.lookup(model_id("image"), {}));
+}
+
+TEST_CASE("lookup preserves explicit and unknown model capabilities",
+          "[models][lookup][capabilities]") {
+  FakeSource source;
+  auto capable = entry("capable");
+  capable.capabilities = {{model::Capability::web_search, true},
+                          {model::Capability::reasoning, std::nullopt},
+                          {model::Capability::vision, false}};
+  source.value = snapshot(1ms, {std::move(capable)});
+  model::CatalogService service{source};
+
+  const auto found = service.lookup(model_id("capable"), {});
+  REQUIRE(found);
+  REQUIRE(found->capabilities.at("web-search") == true);
+  REQUIRE_FALSE(found->capabilities.at("reasoning").has_value());
+  REQUIRE(found->capabilities.at("vision") == false);
 }
 
 TEST_CASE("lookup returns provenance-rich decimal pricing observations",

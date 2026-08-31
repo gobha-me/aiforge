@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <ranges>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -295,9 +296,14 @@ auto CatalogService::lookup(const domain::ModelId& model_id,
     }
     observation = std::move(*created);
   }
-  return backend::ModelContextInfo{entry->id, *entry->context_window_tokens,
-                                   entry->maximum_output_tokens,
-                                   std::move(observation)};
+  backend::ModelCapabilityMap capabilities;
+  for (const auto& capability : entry->capabilities) {
+    capabilities.emplace(std::string{capability_name(capability.capability)},
+                         capability.supported);
+  }
+  return backend::ModelContextInfo{
+      entry->id, *entry->context_window_tokens, entry->maximum_output_tokens,
+      std::move(observation), std::move(capabilities)};
 }
 
 auto CatalogService::clear_memory_cache() noexcept -> void {
@@ -316,6 +322,7 @@ auto validate_catalog(const CatalogSnapshot& snapshot,
   std::vector<std::string_view> identities;
   identities.reserve(snapshot.entries.size());
   for (const auto& entry : snapshot.entries) {
+    std::set<Capability> capabilities;
     if (!valid_text(entry.id.value(), limits.maximum_text_bytes) ||
         !valid_text(entry.type, limits.maximum_text_bytes) ||
         (entry.name && !valid_text(*entry.name, limits.maximum_text_bytes)) ||
@@ -325,6 +332,12 @@ auto validate_catalog(const CatalogSnapshot& snapshot,
         })) {
       return catalog_error(CatalogErrorCode::invalid_data,
                            "model catalog contains invalid text or metadata");
+    }
+    if (std::ranges::any_of(entry.capabilities, [&](const auto& capability) {
+          return !capabilities.insert(capability.capability).second;
+        })) {
+      return catalog_error(CatalogErrorCode::invalid_data,
+                           "model catalog contains duplicate capabilities");
     }
     if (entry.context_window_tokens == 0 || entry.maximum_output_tokens == 0 ||
         (entry.pricing &&

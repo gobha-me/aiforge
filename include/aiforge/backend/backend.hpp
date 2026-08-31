@@ -17,12 +17,14 @@
 namespace aiforge::backend {
 
 using ExtensionMap = std::map<std::string, domain::StructuredDataBlock>;
+using ModelCapabilityMap = std::map<std::string, std::optional<bool>>;
 
 struct GenerationOptions {
   std::optional<double> temperature;
   std::optional<std::uint64_t> max_output_tokens;
   std::optional<std::uint64_t> seed;
   ExtensionMap extensions;
+  std::vector<std::string> required_model_capabilities;
   auto operator==(const GenerationOptions&) const -> bool = default;
 };
 
@@ -149,18 +151,25 @@ struct ModelContextInfo {
   ModelContextInfo(
       domain::ModelId selected_model_id, std::uint64_t context_tokens,
       std::optional<std::uint64_t> output_tokens = std::nullopt,
-      std::optional<domain::PricingObservation> pricing = std::nullopt)
+      std::optional<domain::PricingObservation> pricing = std::nullopt,
+      ModelCapabilityMap model_capabilities = {})
       : model_id(std::move(selected_model_id)),
         context_window_tokens(context_tokens),
         maximum_output_tokens(output_tokens),
-        pricing_observation(std::move(pricing)) {}
+        pricing_observation(std::move(pricing)),
+        capabilities(std::move(model_capabilities)) {}
 
   domain::ModelId model_id;
   std::uint64_t context_window_tokens{};
   std::optional<std::uint64_t> maximum_output_tokens;
   std::optional<domain::PricingObservation> pricing_observation;
+  ModelCapabilityMap capabilities;
   auto operator==(const ModelContextInfo&) const -> bool = default;
 };
+
+[[nodiscard]] auto validate_generation_requirements(
+    const GenerationOptions& options, const ModelContextInfo& model)
+    -> std::expected<void, BackendError>;
 
 class BackendStream {
  public:

@@ -79,7 +79,7 @@ auto request(std::string inference, std::string assistant,
           make_id<domain::ModelId>("model"),
           context(std::move(tool_messages)),
           std::move(tools),
-          {0.25, 128, 42, {}}};
+          {0.25, 128, 42, {}, {}}};
 }
 
 auto run_start(backend::BackendRequest backend_request) -> runtime::RunStart {

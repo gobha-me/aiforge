@@ -87,6 +87,7 @@ export VENICE_API_KEY=your-key      # takes precedence over the stored key
 ./build/src/bin/aiforge --resume session-id "Reopen this session"
 ./build/src/bin/aiforge --ephemeral "Do not retain this request"
 ./build/src/bin/aiforge --model model-id "Use this model"
+./build/src/bin/aiforge --web-search on "Use Venice web search"
 ./build/src/bin/aiforge --session-max-spend 5.00 "Bound this session"
 ./build/src/bin/aiforge models
 ./build/src/bin/aiforge image generate --model image-model "A blue square"
@@ -290,6 +291,13 @@ and `/model <id>` selects directly; changes are allowed only while idle and
 take effect on the next run, whose ordinary provenance records the chosen
 model.
 
+`--web-search <auto|on|off>` controls Venice web search for one-shot requests
+and interactive startup. `auto` and `on` are accepted only when the selected
+catalog entry explicitly reports web-search support; false, missing, and
+unknown capability values fail before a provider request. `off` explicitly
+disables search, while omitting the option preserves the provider default.
+Interactive model changes recheck this requirement before changing models.
+
 The bounded catalog cache is
 `$XDG_CACHE_HOME/aiforge/model-catalog.json`, or
 `$HOME/.cache/aiforge/model-catalog.json` when the XDG location is unset. A
@@ -475,14 +483,16 @@ instead of hanging.
 ## Configuration
 
 AIForge resolves registered settings in command-line, environment, file, then
-compiled-default order and retains the winning source. The first registered
-application setting is the optional `model` value, bound to `AIFORGE_MODEL`.
+compiled-default order and retains the winning source. Registered application
+settings include the optional `model` value, bound to `AIFORGE_MODEL`, and the
+optional `venice.web_search` value, bound to `AIFORGE_VENICE_WEB_SEARCH`.
 
 ```bash
 aiforge config show
 aiforge config get model
 aiforge config set model model-id
 aiforge config unset model
+aiforge config set venice.web_search auto
 ```
 
 The configuration file is `$XDG_CONFIG_HOME/aiforge/config.json`, or

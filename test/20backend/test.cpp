@@ -56,7 +56,7 @@ auto request(std::string model = "model") -> backend::BackendRequest {
       make_id<domain::ModelId>(std::move(model)),
       context,
       {},
-      {0.25, 128, 42, {}},
+      {0.25, 128, 42, {}, {}},
   };
 }
 
