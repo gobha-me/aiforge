@@ -7,7 +7,14 @@ if (NOT AIFORGE_SOURCE_DIR)
 endif ()
 
 if (PROBE_PREEXISTING_TARGETS)
+  if (NOT IS_DIRECTORY "${PROBE_TERMFORGE_INCLUDE_DIR}")
+    message(FATAL_ERROR
+      "PROBE_TERMFORGE_INCLUDE_DIR is required for pre-existing targets")
+  endif ()
+
   add_library(probe_termforge INTERFACE)
+  target_include_directories(probe_termforge INTERFACE
+    "${PROBE_TERMFORGE_INCLUDE_DIR}")
   add_library(termforge::lib ALIAS probe_termforge)
   add_library(probe_venice_cpp INTERFACE)
   add_library(venice-cpp::lib ALIAS probe_venice_cpp)
