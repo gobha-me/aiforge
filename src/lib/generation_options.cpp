@@ -38,8 +38,8 @@ auto validate_generation_requirements(const GenerationOptions& options,
     std::set<std::string> seen;
     for (const auto& required : options.required_model_capabilities) {
       if (!valid_capability_name(required) || !seen.insert(required).second) {
-        return std::unexpected(rejection(
-            "generation options contain invalid model capabilities"));
+        return std::unexpected(
+            rejection("generation options contain invalid model capabilities"));
       }
       const auto found = model.capabilities.find(required);
       if (found == model.capabilities.end() || !found->second.value_or(false)) {
