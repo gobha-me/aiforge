@@ -118,6 +118,27 @@ cmake -S "${WORK_DIR}/fetched-rasterforge/_deps/rasterforge-src" \
 cmake --build "${WORK_DIR}/install-rasterforge" --parallel 2
 cmake --install "${WORK_DIR}/install-rasterforge"
 
+INCOMPLETE_TERMFORGE_PREFIX="${WORK_DIR}/incomplete-termforge"
+cmake -E copy_directory "${PREFIX}" "${INCOMPLETE_TERMFORGE_PREFIX}"
+cmake -E remove \
+  "${INCOMPLETE_TERMFORGE_PREFIX}/include/termforge/widgets/choice_wizard_dialog.hpp"
+INCOMPLETE_TERMFORGE_LOG="${WORK_DIR}/incomplete-termforge.log"
+if configure_probe "incomplete-termforge" termforge \
+  -DCMAKE_PREFIX_PATH="${INCOMPLETE_TERMFORGE_PREFIX}" \
+  -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+  >"${INCOMPLETE_TERMFORGE_LOG}" 2>&1; then
+  echo "termforge accepted an installed package with missing headers" >&2
+  exit 1
+fi
+if ! grep -Fq "TermForge package contract failure" \
+    "${INCOMPLETE_TERMFORGE_LOG}" || \
+  ! grep -Fq "termforge/widgets/choice_wizard_dialog.hpp" \
+    "${INCOMPLETE_TERMFORGE_LOG}"; then
+  cat "${INCOMPLETE_TERMFORGE_LOG}" >&2
+  echo "termforge missing-header diagnostic was not actionable" >&2
+  exit 1
+fi
+
 for dependency in termforge venice_cpp rasterforge; do
   fetch_name=$(dependency_fetch_name "${dependency}")
   configure_probe "installed-${dependency}" "${dependency}" \
@@ -140,10 +161,19 @@ for dependency in termforge venice_cpp rasterforge; do
   fi
 done
 
+cmake -E create_symlink \
+  "${WORK_DIR}/fetched-termforge/_deps/termforge-src" \
+  "${SNAPSHOT_DIR}/cmake/termforge"
+configure_probe "sibling-termforge" termforge \
+  -DPROBE_EXPECT_EMBEDDED=ON \
+  -DCMAKE_DISABLE_FIND_PACKAGE_termforge=TRUE
+build_and_run_probe "sibling-termforge"
+
 cmake -S "${SNAPSHOT_DIR}/cmake/dependency-probe" \
   -B "${WORK_DIR}/preexisting" \
   "${COMMON_CMAKE_ARGS[@]}" \
   -DAIFORGE_SOURCE_DIR="${SNAPSHOT_DIR}" \
+  -DPROBE_TERMFORGE_INCLUDE_DIR="${WORK_DIR}/fetched-termforge/_deps/termforge-src/include" \
   -DPROBE_PREEXISTING_TARGETS=ON
 
 cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-fetched" \

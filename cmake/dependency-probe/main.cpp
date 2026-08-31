@@ -1,5 +1,6 @@
 #if defined(PROBE_TERMFORGE)
 #include <termforge/core/screen.hpp>
+#include <termforge/widgets/choice_wizard_dialog.hpp>
 
 auto main() -> int {
   termforge::Screen screen{2, 1};
