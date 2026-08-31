@@ -1,5 +1,6 @@
 #include <aiforge/surfaces/chat_session.hpp>
 #include <aiforge/testing/scripted_persona_source.hpp>
+#include <aiforge/testing/scripted_tool_executor.hpp>
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
@@ -265,8 +266,44 @@ TEST_CASE("interactive turns stream and reuse completed conversation context",
           std::vector<std::string>{"first\nline", "second"});
   REQUIRE(text_messages(backend.requests[1], domain::Role::assistant) ==
           std::vector<std::string>{"answer-1"});
+  REQUIRE(backend.requests[0].tools.empty());
+  REQUIRE(backend.requests[1].tools.empty());
   REQUIRE((*session)->submitted_prompts() ==
           std::vector<std::string>{"first\nline", "second"});
+}
+
+TEST_CASE("interactive turns preserve registered tool declarations",
+          "[chat][tools]") {
+  Backend backend;
+  const backend::ToolDeclaration tool{
+      "lookup",
+      "Look up a value",
+      {"application/schema+json", R"({"type":"object"})"},
+      {domain::Effect::read},
+      {{domain::Effect::read, "filesystem.root", "/repo"}}};
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      tool, std::make_shared<testing::ScriptedToolExecutor>(
+                std::vector<testing::ScriptedToolExchange>{})));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.tools = std::move(*tools);
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
+      backend, backend, nullptr, nullptr, {}, {}, std::move(dependencies));
+  REQUIRE(session);
+
+  REQUIRE((*session)->submit("first"));
+  drain_to_end(**session);
+  REQUIRE((*session)->submit("second"));
+  drain_to_end(**session);
+
+  REQUIRE(backend.requests.size() == 2);
+  for (const auto& request : backend.requests) {
+    REQUIRE(request.tools == std::vector<backend::ToolDeclaration>{tool});
+  }
 }
 
 TEST_CASE("interactive generation requirements fail closed before transport",
