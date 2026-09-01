@@ -32,6 +32,34 @@ struct InteractiveChatAppOptions {
   model::CatalogService* model_catalog{};
 };
 
+struct InteractiveModelPickerAppOptions {
+  termforge::ByteSink* rendered_output{};
+  std::function<void(const termforge::Screen&)> rendered_frame;
+};
+
+class InteractiveModelPickerApp : public termforge::App {
+ public:
+  ~InteractiveModelPickerApp() override = default;
+
+  [[nodiscard]] virtual auto selected_model() const
+      -> std::optional<domain::ModelId> = 0;
+  [[nodiscard]] virtual auto cancelled() const noexcept -> bool = 0;
+  [[nodiscard]] virtual auto status_text() const noexcept
+      -> std::string_view = 0;
+  [[nodiscard]] virtual auto configure_terminal_for_scenario(
+      termforge::TerminalIo io, const termforge::Capabilities& capabilities)
+      -> std::expected<void, std::string> = 0;
+};
+
+[[nodiscard]] auto validate_interactive_model_selection(
+    const model::CatalogSnapshot& snapshot, const domain::ModelId& selected)
+    -> std::expected<void, std::string>;
+
+[[nodiscard]] auto make_interactive_model_picker_app(
+    const model::CatalogSnapshot& snapshot, std::stop_token stop_token = {},
+    InteractiveModelPickerAppOptions options = {})
+    -> std::unique_ptr<InteractiveModelPickerApp>;
+
 class InteractiveChatApp : public termforge::App {
  public:
   ~InteractiveChatApp() override = default;

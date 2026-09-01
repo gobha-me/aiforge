@@ -1009,6 +1009,91 @@ auto cursor_modal_scenario() -> testing::TuiScenario {
   return value;
 }
 
+auto startup_model_scenario(const bool cancel) -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = cancel ? "interactive-startup-model-cancel"
+                             : "interactive-startup-model-select-resize";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {40, 12, 400, 240};
+  const auto key = [](const termforge::Key selected) {
+    return testing::TuiScenarioPost{termforge::KeyEvent{
+        selected, 0, false, false, false, termforge::KeyAction::Press}};
+  };
+  if (cancel) {
+    value.steps = {{0, key(termforge::Key::Escape)}};
+  } else {
+    value.steps = {
+        {0, testing::TuiScenarioResize{{8, 3, 80, 60}}},
+        {1, testing::TuiScenarioResize{{40, 12, 400, 240}}},
+        {2, testing::TuiScenarioPost{termforge::PasteEvent{"alternate"}}},
+        {3, key(termforge::Key::Tab)},
+        {3, key(termforge::Key::Enter)},
+    };
+  }
+  value.limits.maximum_frames = 16;
+  return value;
+}
+
+auto startup_model_factory(
+    const model::CatalogOrigin origin = model::CatalogOrigin::live)
+    -> testing::TuiScenarioTargetFactory {
+  return [origin](testing::TuiScenarioPass, termforge::ByteSink* output)
+             -> std::expected<testing::TuiScenarioTarget,
+                              testing::TuiScenarioError> {
+    auto pipe = std::make_shared<Pipe>();
+    if (!pipe->ok()) {
+      return std::unexpected(testing::TuiScenarioError{
+          testing::TuiScenarioErrorCode::target_failure,
+          "startup model scenario pipe setup failed"});
+    }
+    model::CatalogEntry first{make_id<domain::ModelId>("model"), "text"};
+    first.name = "Current model";
+    first.context_window_tokens = 8192;
+    model::CatalogEntry alternate{make_id<domain::ModelId>("alternate"),
+                                  "text"};
+    alternate.name = "Alternate model";
+    alternate.context_window_tokens = 8192;
+    model::CatalogSnapshot snapshot{
+        std::chrono::sys_time<std::chrono::milliseconds>{123ms},
+        {std::move(first), std::move(alternate)}};
+    snapshot.origin = origin;
+    if (origin == model::CatalogOrigin::stale_cache) {
+      snapshot.warnings.push_back("using stale model catalog");
+    }
+    auto frame = std::make_shared<std::string>();
+    adapters::InteractiveModelPickerAppOptions options;
+    options.rendered_output = output;
+    options.rendered_frame = [frame](const termforge::Screen& screen) {
+      *frame = normalized_screen(screen);
+    };
+    auto app = adapters::make_interactive_model_picker_app(snapshot, {},
+                                                           std::move(options));
+    auto* raw = app.get();
+    return testing::TuiScenarioTarget{
+        std::move(app),
+        [raw, pipe](const termforge::Capabilities& capabilities) {
+          return raw->configure_terminal_for_scenario(
+              termforge::TerminalIo{pipe->read_fd(), -1}, capabilities);
+        },
+        [raw] { return raw->run(); },
+        [](std::string_view) -> std::expected<void, std::string> {
+          return std::unexpected("startup model scenario has no backend");
+        },
+        [](std::string_view) -> std::expected<void, std::string> {
+          return std::unexpected("startup model scenario has no tool");
+        },
+        [frame] { return *frame; },
+        [raw] {
+          if (const auto selected = raw->selected_model()) {
+            return "selected:" + std::string{selected->value()};
+          }
+          return raw->cancelled() ? std::string{"cancelled"}
+                                  : std::string{raw->status_text()};
+        }};
+  };
+}
+
 auto chat_factory(const bool with_catalog = false)
     -> testing::TuiScenarioTargetFactory {
   return [with_catalog](const testing::TuiScenarioPass pass,
@@ -1630,6 +1715,32 @@ TEST_CASE("interactive composer yields cursor focus to modal overlays",
       [](const std::string& frame) {
         return frame.find("@reverse=0,4") != std::string::npos;
       }));
+}
+
+TEST_CASE("startup model selection is keyboard-only and resize deterministic",
+          "[scenario][models][startup]") {
+  for (const auto origin :
+       {model::CatalogOrigin::live, model::CatalogOrigin::fresh_cache,
+        model::CatalogOrigin::stale_cache}) {
+    const auto result = testing::run_tui_scenario(
+        startup_model_scenario(false), startup_model_factory(origin));
+    INFO((result ? std::string{} : result.error().message));
+    REQUIRE(result);
+    REQUIRE(result->recorded == result->replayed);
+    REQUIRE(result->recorded.semantic_state == "selected:alternate");
+    REQUIRE(result->recorded.wire_output.find("Select model") !=
+            std::string::npos);
+  }
+}
+
+TEST_CASE("startup model cancellation creates no session or backend surface",
+          "[scenario][models][startup][cancel]") {
+  const auto result = testing::run_tui_scenario(startup_model_scenario(true),
+                                                startup_model_factory());
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state == "cancelled");
 }
 
 TEST_CASE("interactive session actions list resume and create atomically",

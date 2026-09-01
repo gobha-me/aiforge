@@ -25,6 +25,7 @@
 
 #include <aiforge/adapters/ask_user_dialog.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
+#include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/json_model_catalog_cache.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
 #include <aiforge/adapters/process_credentials.hpp>
@@ -435,6 +436,44 @@ TEST_CASE("model picker filters, selects, cancels and survives tiny geometry",
       termforge::KeyEvent{termforge::Key::Escape, 0, false, false, false,
                           termforge::KeyAction::Press}));
   REQUIRE(cancelled_result);
+}
+
+TEST_CASE("interactive model selection rejects stale and unusable entries",
+          "[adapter][models][picker][failure]") {
+  model::CatalogEntry available{make_id<domain::ModelId>("available"), "text"};
+  available.context_window_tokens = 8192;
+  model::CatalogSnapshot snapshot{
+      std::chrono::sys_time<std::chrono::milliseconds>{1ms},
+      {std::move(available)}};
+  REQUIRE(adapters::validate_interactive_model_selection(
+      snapshot, make_id<domain::ModelId>("available")));
+
+  const auto vanished = adapters::validate_interactive_model_selection(
+      snapshot, make_id<domain::ModelId>("vanished"));
+  REQUIRE_FALSE(vanished);
+  REQUIRE(vanished.error() == "selected text model is no longer available");
+
+  model::CatalogEntry offline{make_id<domain::ModelId>("offline"), "text"};
+  offline.context_window_tokens = 8192;
+  offline.offline = true;
+  model::CatalogSnapshot offline_snapshot{
+      std::chrono::sys_time<std::chrono::milliseconds>{1ms},
+      {std::move(offline)}};
+  const auto unavailable = adapters::validate_interactive_model_selection(
+      offline_snapshot, make_id<domain::ModelId>("offline"));
+  REQUIRE_FALSE(unavailable);
+  REQUIRE(unavailable.error() == "selected text model is offline");
+
+  model::CatalogEntry incomplete{make_id<domain::ModelId>("incomplete"),
+                                 "text"};
+  model::CatalogSnapshot incomplete_snapshot{
+      std::chrono::sys_time<std::chrono::milliseconds>{1ms},
+      {std::move(incomplete)}};
+  const auto malformed = adapters::validate_interactive_model_selection(
+      incomplete_snapshot, make_id<domain::ModelId>("incomplete"));
+  REQUIRE_FALSE(malformed);
+  REQUIRE(malformed.error() ==
+          "selected text model has invalid context metadata");
 }
 
 TEST_CASE("persona roots follow XDG configuration semantics",

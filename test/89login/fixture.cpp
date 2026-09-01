@@ -55,6 +55,9 @@ struct Child {
 enum class ChildMode {
   login,
   offline_chat,
+  bootstrap_cancel,
+  bootstrap_ephemeral,
+  one_shot_missing_model,
 };
 
 auto close_child(Child& child) -> void {
@@ -136,12 +139,27 @@ auto close_child(Child& child) -> void {
     static_cast<void>(::close(master));
     if (slave > STDERR_FILENO) static_cast<void>(::close(slave));
     static_cast<void>(::setenv("XDG_CONFIG_HOME", config_home.c_str(), 1));
+    const auto state_home = config_home / "state";
+    static_cast<void>(::setenv("XDG_STATE_HOME", state_home.c_str(), 1));
     static_cast<void>(::unsetenv("VENICE_API_KEY"));
     if (mode == ChildMode::offline_chat) {
       static_cast<void>(::setenv("AIFORGE_MODEL", "offline-model", 1));
       const auto cache_home = config_home / "cache";
       static_cast<void>(::setenv("XDG_CACHE_HOME", cache_home.c_str(), 1));
       ::execl(executable.c_str(), executable.c_str(), "--ephemeral", nullptr);
+    } else if (mode == ChildMode::bootstrap_cancel ||
+               mode == ChildMode::bootstrap_ephemeral) {
+      static_cast<void>(::unsetenv("AIFORGE_MODEL"));
+      const auto cache_home = config_home / "cache";
+      static_cast<void>(::setenv("XDG_CACHE_HOME", cache_home.c_str(), 1));
+      if (mode == ChildMode::bootstrap_ephemeral) {
+        ::execl(executable.c_str(), executable.c_str(), "--ephemeral", nullptr);
+      } else {
+        ::execl(executable.c_str(), executable.c_str(), nullptr);
+      }
+    } else if (mode == ChildMode::one_shot_missing_model) {
+      static_cast<void>(::unsetenv("AIFORGE_MODEL"));
+      ::execl(executable.c_str(), executable.c_str(), "hello", nullptr);
     } else {
       ::execl(executable.c_str(), executable.c_str(), "login", nullptr);
     }
@@ -299,6 +317,70 @@ auto main(const int argc, char* argv[]) -> int {
     return fail("cancelled login did not restore echo safely", &cancelled);
   }
   close_child(cancelled);
+
+  const auto bootstrap_home = temporary.path() / "bootstrap-cancel";
+  if (!write_offline_catalog(bootstrap_home)) {
+    return fail("could not prepare the startup model catalog");
+  }
+  auto bootstrap =
+      spawn(executable, bootstrap_home, ChildMode::bootstrap_cancel);
+  if (bootstrap.pid < 0 || !read_until(bootstrap, "Select model", 5s)) {
+    close_child(bootstrap);
+    return fail("startup model picker did not appear", &bootstrap);
+  }
+  const char escape = 0x1b;
+  if (::write(bootstrap.master, &escape, 1) != 1) {
+    close_child(bootstrap);
+    return fail("could not cancel startup model selection", &bootstrap);
+  }
+  const auto bootstrap_status = finish(bootstrap, 5s);
+  const auto session_store =
+      bootstrap_home / "state" / "aiforge" / "sessions.sqlite3";
+  if (bootstrap_status != 130 || std::filesystem::exists(session_store)) {
+    close_child(bootstrap);
+    return fail("cancelled model selection created durable session state",
+                &bootstrap);
+  }
+  close_child(bootstrap);
+
+  const auto selected_home = temporary.path() / "bootstrap-selected";
+  if (!write_offline_catalog(selected_home)) {
+    return fail("could not prepare the selected startup model catalog");
+  }
+  auto selected =
+      spawn(executable, selected_home, ChildMode::bootstrap_ephemeral);
+  if (selected.pid < 0 || !read_until(selected, "Select model", 5s)) {
+    close_child(selected);
+    return fail("selected startup model picker did not appear", &selected);
+  }
+  const std::string choose{"\t\r"};
+  if (::write(selected.master, choose.data(), choose.size()) !=
+          static_cast<ssize_t>(choose.size()) ||
+      !read_until(selected, "Enter submit", 5s)) {
+    close_child(selected);
+    return fail("startup model selection did not open chat", &selected);
+  }
+  if (::write(selected.master, &eof, 1) != 1) {
+    close_child(selected);
+    return fail("could not exit selected startup chat", &selected);
+  }
+  const auto selected_status = finish(selected, 5s);
+  if (selected_status != 0) {
+    close_child(selected);
+    return fail("selected startup model was not session-usable", &selected);
+  }
+  close_child(selected);
+
+  auto one_shot = spawn(executable, temporary.path() / "one-shot-missing",
+                        ChildMode::one_shot_missing_model);
+  const auto one_shot_status = finish(one_shot, 5s);
+  if (one_shot_status != 1 ||
+      visible_terminal_text(one_shot.output).find("model is not configured") ==
+          std::string::npos) {
+    close_child(one_shot);
+    return fail("one-shot input accepted a missing model", &one_shot);
+  }
+  close_child(one_shot);
 
   const auto offline_home = temporary.path() / "offline";
   if (!write_offline_catalog(offline_home)) {
