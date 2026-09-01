@@ -1,6 +1,7 @@
 #include <unistd.h>
 
 #include <aiforge/adapters/interactive_chat_app.hpp>
+#include <aiforge/model/catalog.hpp>
 #include <aiforge/testing/tui_scenario.hpp>
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
@@ -75,6 +76,7 @@ auto pricing_observation() -> domain::PricingObservation {
 
 auto normalized_screen(const termforge::Screen& screen) -> std::string {
   std::ostringstream normalized;
+  std::vector<std::pair<int, int>> reverse_cells;
   normalized << screen.cols() << 'x' << screen.rows() << ':';
   for (int row{}; row < screen.rows(); ++row) {
     if (row != 0) normalized << '\n';
@@ -82,10 +84,22 @@ auto normalized_screen(const termforge::Screen& screen) -> std::string {
     for (int column{}; column < screen.cols(); ++column) {
       const auto cell = screen.text_at(column, row);
       text += cell.empty() ? " " : std::string{cell};
+      if (termforge::any(screen.at(column, row).attrs &
+                         termforge::Attr::Reverse)) {
+        reverse_cells.emplace_back(column, row);
+      }
     }
     while (!text.empty() && text.back() == ' ')
       text.pop_back();
     normalized << text;
+  }
+  if (!reverse_cells.empty()) {
+    normalized << "\n@reverse=";
+    for (std::size_t index{}; index < reverse_cells.size(); ++index) {
+      if (index != 0) normalized << ';';
+      normalized << reverse_cells[index].first << ','
+                 << reverse_cells[index].second;
+    }
   }
   return std::move(normalized).str();
 }
@@ -196,6 +210,21 @@ class NoEditor final : public surfaces::DraftEditor {
     return std::unexpected(surfaces::DraftEditorError{
         surfaces::DraftEditorErrorCode::not_configured,
         "editor is unavailable in a scenario"});
+  }
+};
+
+class ScenarioCatalogSource final : public model::CatalogSource {
+ public:
+  auto fetch(std::stop_token)
+      -> std::expected<model::CatalogSnapshot, model::CatalogError> override {
+    model::CatalogEntry current{make_id<domain::ModelId>("model"), "text"};
+    current.name = "Current model";
+    model::CatalogEntry alternate{make_id<domain::ModelId>("alternate"),
+                                  "text"};
+    alternate.name = "Alternate model";
+    return model::CatalogSnapshot{
+        std::chrono::sys_time<std::chrono::milliseconds>{123ms},
+        {std::move(current), std::move(alternate)}};
   }
 };
 
@@ -911,8 +940,79 @@ auto active_control_d_scenario() -> testing::TuiScenario {
   return value;
 }
 
-auto chat_factory() -> testing::TuiScenarioTargetFactory {
-  return [](const testing::TuiScenarioPass pass, termforge::ByteSink* output)
+auto cursor_lifecycle_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-visible-composer-cursor";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {8, 4, 80, 80};
+  value.backend_script = {"response-started",  "delta:hello", "usage", "cost",
+                          "response-finished", "end"};
+  const auto key = [](const termforge::Key value) {
+    return testing::TuiScenarioPost{termforge::KeyEvent{
+        value, 0, false, false, false, termforge::KeyAction::Press}};
+  };
+  const auto control = [](const char32_t ch) {
+    return testing::TuiScenarioPost{
+        termforge::KeyEvent{termforge::Key::Char, ch, true, false, false,
+                            termforge::KeyAction::Press}};
+  };
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"abcd"}}},
+      {1, key(termforge::Key::Left)},
+      {2, testing::TuiScenarioResize{{4, 4, 40, 80}}},
+      {3, key(termforge::Key::Right)},
+      {4, control(U'c')},
+      {5, testing::TuiScenarioResize{{1, 1, 10, 20}}},
+      {6, testing::TuiScenarioPost{termforge::PasteEvent{"tiny"}}},
+      {7, testing::TuiScenarioResize{{8, 2, 80, 40}}},
+      {8, control(U'c')},
+      {9, testing::TuiScenarioResize{{20, 6, 200, 120}}},
+      {10, testing::TuiScenarioPost{termforge::PasteEvent{"/help"}}},
+      {10, key(termforge::Key::Enter)},
+      {11, key(termforge::Key::Escape)},
+      {12, testing::TuiScenarioPost{termforge::PasteEvent{"prompt"}}},
+      {12, key(termforge::Key::Enter)},
+      {13, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {14, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {15, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {16, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {17, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {18, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {19, key(termforge::Key::Up)},
+      {20, testing::TuiScenarioPost{termforge::MouseEvent{2, 4, 0, true}}},
+      {21, control(U'e')},
+  };
+  value.limits.maximum_frames = 48;
+  return value;
+}
+
+auto cursor_modal_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-composer-cursor-modal-focus";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {20, 6, 200, 120};
+  const auto key = [](const termforge::Key value) {
+    return testing::TuiScenarioPost{termforge::KeyEvent{
+        value, 0, false, false, false, termforge::KeyAction::Press}};
+  };
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/model"}}},
+      {0, key(termforge::Key::Enter)},
+      {1, key(termforge::Key::Escape)},
+      {2, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Char, U'd', true, false, false,
+              termforge::KeyAction::Press}}},
+  };
+  value.limits.maximum_frames = 16;
+  return value;
+}
+
+auto chat_factory(const bool with_catalog = false)
+    -> testing::TuiScenarioTargetFactory {
+  return [with_catalog](const testing::TuiScenarioPass pass,
+                        termforge::ByteSink* output)
              -> std::expected<testing::TuiScenarioTarget,
                               testing::TuiScenarioError> {
     auto pipe = std::make_shared<Pipe>();
@@ -924,11 +1024,14 @@ auto chat_factory() -> testing::TuiScenarioTargetFactory {
     auto backend_state = std::make_shared<GatedBackendState>();
     auto backend = std::make_shared<GatedBackend>(backend_state);
     auto editor = std::make_shared<NoEditor>();
+    auto catalog_source = std::make_shared<ScenarioCatalogSource>();
+    auto catalog = std::make_shared<model::CatalogService>(*catalog_source);
     auto frame = std::make_shared<std::string>();
     auto suffix = std::make_shared<std::uint64_t>();
     adapters::InteractiveChatAppOptions options;
     options.live_wake_enabled = pass == testing::TuiScenarioPass::record;
     options.poll_worker_updates = false;
+    if (with_catalog) options.model_catalog = catalog.get();
     options.wake_observer = [backend_state] { backend_state->observe_wake(); };
     options.rendered_output = output;
     options.rendered_frame = [frame](const termforge::Screen& screen) {
@@ -957,9 +1060,11 @@ auto chat_factory() -> testing::TuiScenarioTargetFactory {
           return raw->configure_terminal_for_scenario(
               termforge::TerminalIo{pipe->read_fd(), -1}, capabilities);
         },
-        [raw, backend, editor] {
+        [raw, backend, editor, catalog_source, catalog] {
           static_cast<void>(backend);
           static_cast<void>(editor);
+          static_cast<void>(catalog_source);
+          static_cast<void>(catalog);
           return raw->run();
         },
         [backend_state](const std::string_view step) {
@@ -987,11 +1092,14 @@ auto chat_factory() -> testing::TuiScenarioTargetFactory {
           return std::unexpected("chat scenario has no tool script");
         },
         [frame] { return *frame; },
-        [raw, backend, editor] {
+        [raw, backend, editor, catalog_source, catalog] {
           static_cast<void>(backend);
           static_cast<void>(editor);
+          static_cast<void>(catalog_source);
+          static_cast<void>(catalog);
           std::ostringstream state;
           state << raw->status_text();
+          if (raw->pending_edit()) state << "|pending-edit";
           for (const auto& event : raw->events()) {
             state << '|' << event.metadata.sequence << ':'
                   << event.payload.index();
@@ -1445,6 +1553,82 @@ TEST_CASE("active Ctrl+D neither exits nor cancels the run",
       result->recorded.normalized_frames, [](const std::string& frame) {
         return frame.starts_with("48x5:") &&
                frame.find("Esc/Ctrl+C cancel | Ctrl+D") != std::string::npos;
+      }));
+}
+
+TEST_CASE("interactive composer cursor survives fallback lifecycle boundaries",
+          "[scenario][chat][cursor][fallback]") {
+  const auto result =
+      testing::run_tui_scenario(cursor_lifecycle_scenario(), chat_factory());
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state.find("|pending-edit") !=
+          std::string::npos);
+
+  const auto has_frame = [&](const auto& predicate) {
+    return std::ranges::any_of(result->recorded.normalized_frames, predicate);
+  };
+  REQUIRE(has_frame([](const std::string& frame) {
+    return frame.starts_with("8x4:") &&
+           frame.find("abcd") != std::string::npos &&
+           frame.find("@reverse=4,2") != std::string::npos;
+  }));
+  REQUIRE(has_frame([](const std::string& frame) {
+    return frame.starts_with("8x4:") &&
+           frame.find("@reverse=3,2") != std::string::npos;
+  }));
+  REQUIRE(has_frame([](const std::string& frame) {
+    return frame.starts_with("4x4:") &&
+           frame.find("@reverse=0,2") != std::string::npos;
+  }));
+  REQUIRE(has_frame([](const std::string& frame) {
+    return frame.starts_with("1x1:") &&
+           frame.find("@reverse=0,0") != std::string::npos;
+  }));
+  REQUIRE(has_frame([](const std::string& frame) {
+    return frame.starts_with("8x2:tiny") &&
+           frame.find("@reverse=4,0") != std::string::npos;
+  }));
+  REQUIRE(has_frame([](const std::string& frame) {
+    return frame.find("Slash command help") != std::string::npos &&
+           frame.find("@reverse=0,4") != std::string::npos;
+  }));
+  REQUIRE(has_frame([](const std::string& frame) {
+    return frame.find("Running") != std::string::npos &&
+           frame.find("@reverse=") == std::string::npos;
+  }));
+  REQUIRE(has_frame([](const std::string& frame) {
+    return frame.find("prompt") != std::string::npos &&
+           frame.find("@reverse=6,4") != std::string::npos;
+  }));
+  REQUIRE(has_frame([](const std::string& frame) {
+    return frame.find("prompt") != std::string::npos &&
+           frame.find("@reverse=2,4") != std::string::npos;
+  }));
+  REQUIRE(result->recorded.wire_output.find("\033[7m") != std::string::npos);
+  REQUIRE(result->recorded.wire_output.find("\033[0m") != std::string::npos);
+}
+
+TEST_CASE("interactive composer yields cursor focus to modal overlays",
+          "[scenario][chat][cursor][modal]") {
+  const auto result =
+      testing::run_tui_scenario(cursor_modal_scenario(), chat_factory(true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state == "Model selection cancelled");
+  const auto modal_frame = std::ranges::find_if(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("@reverse=") == std::string::npos;
+      });
+  REQUIRE(modal_frame != result->recorded.normalized_frames.begin());
+  REQUIRE(modal_frame != result->recorded.normalized_frames.end());
+  REQUIRE(std::prev(modal_frame)->find("@reverse=0,4") != std::string::npos);
+  REQUIRE(std::ranges::any_of(
+      std::next(modal_frame), result->recorded.normalized_frames.end(),
+      [](const std::string& frame) {
+        return frame.find("@reverse=0,4") != std::string::npos;
       }));
 }
 

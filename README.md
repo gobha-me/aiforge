@@ -39,8 +39,9 @@ AIForge uses CMake only for dependencies. A configured package is preferred,
 then a sibling checkout, with `FetchContent` as the fallback. Adapter builds use
 TermForge and venice-cpp; consumed core-only builds may set
 `aiforge_BUILD_ADAPTERS=OFF`. Their fallbacks are pinned to compatible stable
-baselines: TermForge v0.57.20 for the existing interactive seams plus bounded
-input, output-refusal, resize, and image-route hardening; and venice-cpp v0.29.6
+baselines: TermForge v0.57.22 for the existing interactive seams plus visible
+fallback cursors, bounded input, output-refusal, resize, and image-route
+hardening; and venice-cpp v0.29.6
 for the existing chat, model-catalogue, and owned-media seams plus redirect,
 header-injection, and multipart-metadata guards. RasterForge v0.5.0 supplies
 bounded static PNG, JPEG, and WebP validation for generated-image artifacts. It
