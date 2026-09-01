@@ -172,6 +172,8 @@ class LocalServer final {
     m_port = m_server.bind_to_any_port("127.0.0.1");
     REQUIRE(m_port > 0);
     m_thread = std::jthread([this] { m_server.listen_after_bind(); });
+    m_server.wait_until_ready();
+    REQUIRE(m_server.is_running());
   }
 
   ~LocalServer() {
@@ -213,6 +215,14 @@ class LocalServer final {
   bool m_reasoning_state{};
   std::string m_cost_value;
 };
+
+TEST_CASE("local adapter server stops without receiving a request",
+          "[adapter][venice][lifetime]") {
+  for (int iteration = 0; iteration < 64; ++iteration) {
+    CAPTURE(iteration);
+    LocalServer server;
+  }
+}
 
 class TestApp final : public termforge::App {
  private:
