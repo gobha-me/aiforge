@@ -246,12 +246,10 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
 }
 
 [[nodiscard]] auto configured_model(const config::ResolvedConfig& resolved)
-    -> std::expected<domain::ModelId, cli::CommandFailure> {
+    -> std::expected<std::optional<domain::ModelId>, cli::CommandFailure> {
   const auto* entry = resolved.find("model");
   if (entry == nullptr || !entry->value) {
-    return failure(
-        cli::CommandFailureKind::runtime,
-        "model is not configured; set AIFORGE_MODEL or config model");
+    return std::nullopt;
   }
   const auto* text = std::get_if<std::string>(&*entry->value);
   if (text == nullptr || text->empty()) {
@@ -263,7 +261,75 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
     return failure(cli::CommandFailureKind::runtime,
                    "configured model is invalid");
   }
-  return std::move(*model);
+  return std::optional<domain::ModelId>{std::move(*model)};
+}
+
+[[nodiscard]] auto select_startup_model(
+    model::CatalogService& catalog,
+    const backend::GenerationOptions& generation_options,
+    const std::stop_token stop_token)
+    -> std::expected<domain::ModelId, cli::CommandFailure> {
+  auto snapshot = catalog.snapshot(stop_token);
+  if (!snapshot) {
+    return failure(snapshot.error().code == model::CatalogErrorCode::cancelled
+                       ? cli::CommandFailureKind::cancelled
+                       : cli::CommandFailureKind::runtime,
+                   snapshot.error().message);
+  }
+  const bool has_selectable = std::ranges::any_of(
+      snapshot->get().entries, [](const model::CatalogEntry& entry) {
+        return entry.type == "text" && !entry.offline &&
+               entry.context_window_tokens.has_value();
+      });
+  if (!has_selectable) {
+    return failure(cli::CommandFailureKind::runtime,
+                   "model catalog contains no selectable text models");
+  }
+  auto picker = make_interactive_model_picker_app(snapshot->get(), stop_token);
+  const int picker_result = picker->run();
+  if (stop_token.stop_requested() || picker->cancelled()) {
+    return failure(cli::CommandFailureKind::cancelled,
+                   "model selection cancelled");
+  }
+  if (picker_result != 0) {
+    return failure(cli::CommandFailureKind::runtime,
+                   "model selection terminal setup failed");
+  }
+  auto selected = picker->selected_model();
+  if (!selected) {
+    return failure(cli::CommandFailureKind::runtime,
+                   "model selection produced no result");
+  }
+  if (auto valid =
+          validate_interactive_model_selection(snapshot->get(), *selected);
+      !valid) {
+    return failure(cli::CommandFailureKind::runtime, valid.error());
+  }
+  auto context = catalog.lookup(*selected, stop_token);
+  if (!context) {
+    return failure(context.error().kind == backend::BackendErrorKind::cancelled
+                       ? cli::CommandFailureKind::cancelled
+                       : cli::CommandFailureKind::runtime,
+                   context.error().redacted_message);
+  }
+  if (auto supported = backend::validate_generation_requirements(
+          generation_options, *context);
+      !supported) {
+    return failure(cli::CommandFailureKind::runtime,
+                   supported.error().redacted_message);
+  }
+  return std::move(*selected);
+}
+
+[[nodiscard]] auto resolve_interactive_model(
+    const config::ResolvedConfig& resolved, model::CatalogService& catalog,
+    const backend::GenerationOptions& generation_options,
+    const std::stop_token stop_token)
+    -> std::expected<domain::ModelId, cli::CommandFailure> {
+  auto configured = configured_model(resolved);
+  if (!configured) return std::unexpected(std::move(configured.error()));
+  if (*configured) return std::move(**configured);
+  return select_startup_model(catalog, generation_options, stop_token);
 }
 
 [[nodiscard]] auto session_error(const surfaces::ChatSessionError& value)
@@ -2159,7 +2225,117 @@ class ChatAppImpl final : public InteractiveChatApp {
   std::function<void()> m_close_action;
 };
 
+class ModelPickerAppImpl final : public InteractiveModelPickerApp {
+ public:
+  ModelPickerAppImpl(const model::CatalogSnapshot& snapshot,
+                     const std::stop_token stop_token,
+                     InteractiveModelPickerAppOptions options)
+      : m_stop_token(stop_token), m_rendered_output(options.rendered_output),
+        m_rendered_frame(std::move(options.rendered_frame)) {
+    set_frame_ms(33);
+    m_picker.set_models(snapshot);
+    m_picker.on_result([this](std::optional<domain::ModelId> selected) {
+      m_selected = std::move(selected);
+      m_cancelled = !m_selected.has_value();
+      m_status = m_selected
+                     ? "Selected model " + std::string{m_selected->value()}
+                     : "Model selection cancelled";
+      pop_overlay();
+      quit();
+    });
+    if (!snapshot.warnings.empty()) {
+      m_status = snapshot.warnings.back();
+    } else {
+      m_status = "Choose a model";
+    }
+  }
+
+  [[nodiscard]] auto selected_model() const
+      -> std::optional<domain::ModelId> override {
+    return m_selected;
+  }
+
+  [[nodiscard]] auto cancelled() const noexcept -> bool override {
+    return m_cancelled;
+  }
+
+  [[nodiscard]] auto status_text() const noexcept -> std::string_view override {
+    return m_status;
+  }
+
+  [[nodiscard]] auto configure_terminal_for_scenario(
+      const termforge::TerminalIo io,
+      const termforge::Capabilities& capabilities)
+      -> std::expected<void, std::string> override {
+    auto configured_io = terminal().set_io(io);
+    if (!configured_io) return std::unexpected(configured_io.error().message);
+    auto configured_capabilities = terminal().set_capabilities(capabilities);
+    if (!configured_capabilities) {
+      return std::unexpected(configured_capabilities.error().message);
+    }
+    return {};
+  }
+
+  auto on_start() -> void override {
+    if (m_rendered_output != nullptr) driver().set_output(m_rendered_output);
+    push_overlay(m_picker, {.backdrop = termforge::Backdrop::Fill,
+                            .dismiss_on_click_outside = false});
+  }
+
+  auto on_tick(std::chrono::duration<double>) -> void override {
+    if (!m_stop_token.stop_requested()) return;
+    m_cancelled = true;
+    m_status = "Model selection cancelled";
+    quit();
+  }
+
+  auto on_render(termforge::Screen& screen) -> void override {
+    screen.clear();
+    if (screen.rows() > 0) {
+      screen.write_text(0, screen.rows() - 1, m_status, termforge::theme::kDim,
+                        termforge::theme::kBg);
+    }
+    if (m_rendered_frame) m_rendered_frame(screen);
+  }
+
+ private:
+  std::stop_token m_stop_token;
+  termforge::ByteSink* m_rendered_output{};
+  std::function<void(const termforge::Screen&)> m_rendered_frame;
+  ModelPickerDialog m_picker;
+  std::optional<domain::ModelId> m_selected;
+  std::string m_status;
+  bool m_cancelled{};
+};
+
 } // namespace
+
+auto validate_interactive_model_selection(
+    const model::CatalogSnapshot& snapshot, const domain::ModelId& selected)
+    -> std::expected<void, std::string> {
+  if (auto valid = model::validate_catalog(snapshot); !valid) {
+    return std::unexpected(valid.error().message);
+  }
+  const auto* entry = model::find_model(snapshot, selected, "text");
+  if (entry == nullptr) {
+    return std::unexpected("selected text model is no longer available");
+  }
+  if (entry->offline) {
+    return std::unexpected("selected text model is offline");
+  }
+  if (!entry->context_window_tokens) {
+    return std::unexpected("selected text model has invalid context metadata");
+  }
+  return {};
+}
+
+auto make_interactive_model_picker_app(const model::CatalogSnapshot& snapshot,
+                                       const std::stop_token stop_token,
+                                       InteractiveModelPickerAppOptions options)
+    -> std::unique_ptr<InteractiveModelPickerApp> {
+  return std::make_unique<ModelPickerAppImpl>(snapshot, stop_token,
+                                              std::move(options));
+}
 
 auto make_interactive_chat_app(
     backend::Backend& backend, backend::ModelContextProvider& model_context,
@@ -2184,8 +2360,6 @@ auto ProcessInteractiveCommand::execute(Request request,
     }
     auto resolved = load_config(diagnostics, request.model, request.web_search);
     if (!resolved) return std::unexpected(std::move(resolved.error()));
-    auto model = configured_model(*resolved);
-    if (!model) return std::unexpected(std::move(model.error()));
     auto generation_options = venice_generation_options(*resolved);
     if (!generation_options) {
       return failure(request.web_search ? cli::CommandFailureKind::usage
@@ -2195,6 +2369,10 @@ auto ProcessInteractiveCommand::execute(Request request,
     auto catalog = ProcessModelCatalog::create();
     if (!catalog)
       return failure(cli::CommandFailureKind::runtime, catalog.error().message);
+    auto model =
+        resolve_interactive_model(*resolved, (*catalog)->service(),
+                                  *generation_options, environment.stop_token);
+    if (!model) return std::unexpected(std::move(model.error()));
     if (request.model) {
       auto snapshot = (*catalog)->service().snapshot(environment.stop_token);
       if (!snapshot) {
@@ -2251,7 +2429,7 @@ auto ProcessInteractiveCommand::execute(Request request,
                                    std::move(request.session_id),
                                    std::move(provenance),
                                    std::move(request.persona),
-                                   std::move(request.session_spend_ceiling),
+                                   request.session_spend_ceiling,
                                    std::move(*generation_options)};
 
     std::unique_ptr<SqliteSessionStore> store;

@@ -18,7 +18,8 @@ class ModelPickerDialog final : public termforge::Dialog {
   ModelPickerDialog();
 
   auto set_models(const model::CatalogSnapshot& snapshot,
-                  const domain::ModelId& current) -> void;
+                  std::optional<domain::ModelId> current = std::nullopt)
+      -> void;
   auto on_result(std::function<void(std::optional<domain::ModelId>)> callback)
       -> void;
 
@@ -34,7 +35,7 @@ class ModelPickerDialog final : public termforge::Dialog {
     domain::ModelId id;
     std::string label;
     std::string searchable;
-    bool offline{};
+    bool unavailable{};
   };
 
   auto apply_filter() -> void;

@@ -33,8 +33,9 @@ ModelPickerDialog::ModelPickerDialog() : Dialog("Select model") {
 }
 
 auto ModelPickerDialog::set_models(const model::CatalogSnapshot& snapshot,
-                                   const domain::ModelId& current) -> void {
-  m_current = current;
+                                   std::optional<domain::ModelId> current)
+    -> void {
+  m_current = std::move(current);
   m_all.clear();
   for (const auto& entry : snapshot.entries) {
     if (entry.type != "text") continue;
@@ -42,11 +43,13 @@ auto ModelPickerDialog::set_models(const model::CatalogSnapshot& snapshot,
     if (entry.name && *entry.name != entry.id.value())
       label += " — " + *entry.name;
     if (entry.offline) label += " (offline)";
-    if (entry.id == current) label += " [current]";
+    const bool missing_context = !entry.context_window_tokens;
+    if (missing_context) label += " (invalid metadata)";
+    if (m_current && entry.id == *m_current) label += " [current]";
     auto searchable = lower_ascii(entry.id.value());
     if (entry.name) searchable += " " + lower_ascii(*entry.name);
     m_all.push_back(Choice{entry.id, std::move(label), std::move(searchable),
-                           entry.offline});
+                           entry.offline || missing_context});
   }
   std::ranges::sort(m_all, {}, [](const Choice& choice) {
     return std::string{choice.id.value()};
@@ -112,7 +115,7 @@ auto ModelPickerDialog::apply_filter() -> void {
 auto ModelPickerDialog::choose(const int index) -> void {
   if (index < 0 || static_cast<std::size_t>(index) >= m_visible.size()) return;
   const auto& choice = m_all[m_visible[static_cast<std::size_t>(index)]];
-  if (choice.offline) return;
+  if (choice.unavailable) return;
   if (!begin_result()) return;
   if (m_on_result) m_on_result(choice.id);
   close();

@@ -158,7 +158,6 @@ src/adapters/process_image.cpp	cppcoreguidelines-pro-type-vararg	66fa5e306b6f18c
 src/adapters/process_image.cpp	cppcoreguidelines-pro-type-vararg	97451ad82c8fb3255a8c	do not call c-style vararg functions
 src/adapters/process_image.cpp	readability-function-cognitive-complexity	2218539b52118fae2370	function 'render_terminal_viewer' has cognitive complexity of 31 (threshold 20)
 src/adapters/process_interactive.cpp	bugprone-unchecked-optional-access	ffe86d08b2431fa6d267	unchecked access to optional value
-src/adapters/process_interactive.cpp	performance-move-const-arg	d75fb6f1b6260c132cfb	std::move of the expression of the trivially-copyable type 'std::optional<domain::SessionSpendCeiling>' has no effect; remove std::move()
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	17175cd81b663ee15bc7	function 'show_plan' has cognitive complexity of 29 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	1cae3bdecf86de8b0b0d	function 'manage_memory' has cognitive complexity of 84 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	36028207f0f5b9ba595e	function 'switch_session' has cognitive complexity of 23 (threshold 20)
