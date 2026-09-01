@@ -1,0 +1,506 @@
+# clang-tidy 20 legacy diagnostic baseline
+# New exceptions belong in source as exact, justified NOLINT directives.
+include/aiforge/adapters/audio_backend.hpp	bugprone-implicit-widening-of-multiplication-result	702246febf239ba96a40	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/adapters/audio_backend.hpp	bugprone-implicit-widening-of-multiplication-result	b6b9ea65b674a2f55132	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/adapters/filesystem_artifact_store.hpp	bugprone-implicit-widening-of-multiplication-result	97d3a171f05e2fa5a8de	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/adapters/image_backend.hpp	bugprone-implicit-widening-of-multiplication-result	77cc3e4710e8d081b641	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/adapters/image_backend.hpp	bugprone-implicit-widening-of-multiplication-result	8d4939a1a2ac207862d9	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/adapters/image_backend.hpp	bugprone-implicit-widening-of-multiplication-result	bd9b36e737b77e5267c4	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/adapters/image_backend.hpp	bugprone-implicit-widening-of-multiplication-result	cc3031453e535036c2ab	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/adapters/image_backend.hpp	bugprone-implicit-widening-of-multiplication-result	ef1829565109e8ecbc38	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/adapters/json_model_catalog_cache.hpp	bugprone-implicit-widening-of-multiplication-result	2e27720470e8a4f4d66e	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/adapters/process_draft_editor.hpp	bugprone-implicit-widening-of-multiplication-result	c1f9d0665ddf5bdf20d7	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/adapters/process_interactive.hpp	readability-inconsistent-declaration-parameter-name	f8258586c3c8c1b51962	function 'aiforge::adapters::ProcessInteractiveCommand::execute' has a definition with different parameter names
+include/aiforge/adapters/process_one_shot.hpp	bugprone-implicit-widening-of-multiplication-result	204ee95374e8a66a0ab1	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/audio/wav.hpp	bugprone-implicit-widening-of-multiplication-result	c38025a9a90041989c7c	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/cli/command_registry.hpp	bugprone-implicit-widening-of-multiplication-result	30f73d18856886f10e96	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/cli/command_registry.hpp	bugprone-implicit-widening-of-multiplication-result	6a8a5151002c24ce68a0	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/cli/command_registry.hpp	bugprone-implicit-widening-of-multiplication-result	a8e231b84976e1aa4c3f	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/cli/command_registry.hpp	misc-no-recursion	0ab8342fa2cd24b26deb	function 'CommandSpec' is within a recursive call chain
+include/aiforge/config/config.hpp	bugprone-implicit-widening-of-multiplication-result	73a557941674abb87a9a	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/credentials/credential.hpp	bugprone-implicit-widening-of-multiplication-result	7fcbae6c5e5808e09142	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/domain/context.hpp	cppcoreguidelines-pro-type-member-init	60f58c19b7b80f07aee3	constructor does not initialize these fields: kind
+include/aiforge/domain/context.hpp	cppcoreguidelines-pro-type-member-init	72c9f183700cd48e463b	constructor does not initialize these fields: decision
+include/aiforge/domain/context.hpp	cppcoreguidelines-pro-type-member-init	e2fd30cd6e9193bd9f08	constructor does not initialize these fields: layer
+include/aiforge/domain/memory.hpp	bugprone-implicit-widening-of-multiplication-result	2aa8c4019b505f6469f3	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/domain/memory.hpp	bugprone-implicit-widening-of-multiplication-result	306cb4459d04b142fad5	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/domain/memory.hpp	bugprone-implicit-widening-of-multiplication-result	4a5a0885794022819c23	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/domain/plan_projection.hpp	bugprone-implicit-widening-of-multiplication-result	56a896478983120b5645	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/domain/plan_projection.hpp	bugprone-implicit-widening-of-multiplication-result	a6f98fe4a029c3f1768f	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/domain/pricing.hpp	performance-move-const-arg	65caa3af08a66659bb5b	std::move of the variable 'base_value' of the trivially-copyable type 'TextPriceTier' has no effect; remove std::move()
+include/aiforge/domain/project_backlog.hpp	bugprone-implicit-widening-of-multiplication-result	4799704bdce855c80ae4	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/domain/provenance.hpp	bugprone-implicit-widening-of-multiplication-result	65016c2accb2c2c7e0df	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/domain/provenance.hpp	bugprone-implicit-widening-of-multiplication-result	8186b9ae88bf9e482635	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/model/catalog.hpp	performance-move-const-arg	4d340dab59c7cee7153c	std::move of the variable 'base_value' of the trivially-copyable type 'PriceTier' has no effect; remove std::move()
+include/aiforge/persona/source.hpp	bugprone-implicit-widening-of-multiplication-result	a4b04d845c1b1b73f7de	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/presentation/text.hpp	bugprone-implicit-widening-of-multiplication-result	d17b25801857f9f5db73	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/context_parcel.hpp	bugprone-implicit-widening-of-multiplication-result	380bb7b2ef789d99a09a	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/context_parcel.hpp	bugprone-implicit-widening-of-multiplication-result	46c5469c2112b35d59b8	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/context_parcel.hpp	bugprone-implicit-widening-of-multiplication-result	92687b4c4fa21c2e1518	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/exact_source_edit.hpp	bugprone-implicit-widening-of-multiplication-result	24e26e9ba53becb96a33	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/exact_source_edit.hpp	bugprone-implicit-widening-of-multiplication-result	65c728a22f88aaec7078	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/knowledge.hpp	bugprone-implicit-widening-of-multiplication-result	9827ce1dea22fd83d3c5	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/knowledge.hpp	bugprone-implicit-widening-of-multiplication-result	9c3c01332fdd85565769	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/project_instruction_source.hpp	bugprone-implicit-widening-of-multiplication-result	9a5d33cb3771117a517b	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/project_instruction_source.hpp	bugprone-implicit-widening-of-multiplication-result	a4bed9c7b0f4e46c32cf	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/review_receipt.hpp	bugprone-implicit-widening-of-multiplication-result	14ecf541f3ea92d2ae22	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/snapshot_source.hpp	bugprone-implicit-widening-of-multiplication-result	6dc06aaa6fef301a5a60	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/snapshot_source.hpp	bugprone-implicit-widening-of-multiplication-result	b41ccae169583bcdfe8a	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/verification_evidence.hpp	bugprone-implicit-widening-of-multiplication-result	31f57e1c2f861e2f635a	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/verification_evidence.hpp	bugprone-implicit-widening-of-multiplication-result	5838fe65a685a1e8036e	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/verification_evidence.hpp	bugprone-implicit-widening-of-multiplication-result	7296386daf6c27aba14d	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/repository/verification_evidence.hpp	bugprone-implicit-widening-of-multiplication-result	f243c27505364bf51aaf	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/runtime/run_kernel.hpp	bugprone-implicit-widening-of-multiplication-result	37607d91382142435eb4	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/runtime/tool_registry.hpp	bugprone-implicit-widening-of-multiplication-result	52630e8455b48f9bcfba	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/storage/session_store.hpp	bugprone-implicit-widening-of-multiplication-result	1bd5c4895d48543ec346	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/storage/session_store.hpp	bugprone-implicit-widening-of-multiplication-result	adda2a069d7235b85059	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/surfaces/chat_session.hpp	bugprone-implicit-widening-of-multiplication-result	7fba7dfee09ba73dd944	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/surfaces/one_shot.hpp	bugprone-implicit-widening-of-multiplication-result	1d173df3dbcf76829a5d	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/surfaces/one_shot.hpp	performance-move-const-arg	a245213f423174b0e519	std::move of the variable 'session_spend_ceiling' of the trivially-copyable type 'std::optional<domain::SessionSpendCeiling>' has no effect; remove std::move()
+include/aiforge/surfaces/slash_commands.hpp	bugprone-implicit-widening-of-multiplication-result	bea35d4f8dfce6a2079d	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/testing/tui_scenario.hpp	bugprone-implicit-widening-of-multiplication-result	0a6eab3e66f74253ef02	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/testing/tui_scenario.hpp	bugprone-implicit-widening-of-multiplication-result	11595d4cea32ace4a8b2	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/testing/tui_scenario.hpp	bugprone-implicit-widening-of-multiplication-result	5bbb4b22af9aef534036	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/testing/tui_scenario.hpp	bugprone-implicit-widening-of-multiplication-result	9a63f576ceec552cabdd	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+include/aiforge/testing/tui_scenario.hpp	bugprone-implicit-widening-of-multiplication-result	c8b3c07aecc921dc85c6	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/adapters/audio_backend.cpp	performance-move-const-arg	bd926bbf7962a382ca7b	std::move of the variable 'status' of the trivially-copyable type 'std::optional<int>' has no effect; remove std::move()
+src/adapters/audio_backend.cpp	readability-function-cognitive-complexity	bb505d1db6cf7db2aa87	function 'safe_text' has cognitive complexity of 29 (threshold 20)
+src/adapters/audio_backend.cpp	readability-simplify-boolean-expr	55550e106002fa33939c	boolean expression can be simplified by DeMorgan's theorem
+src/adapters/filesystem_artifact_store.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	da9b161e5ff718f8a4b3	do not use pointer arithmetic
+src/adapters/filesystem_artifact_store.cpp	cppcoreguidelines-pro-type-vararg	2bd3ba332287f1f3d1d3	do not call c-style vararg functions
+src/adapters/filesystem_artifact_store.cpp	cppcoreguidelines-pro-type-vararg	8fc89ac8801415ec820c	do not call c-style vararg functions
+src/adapters/filesystem_artifact_store.cpp	cppcoreguidelines-pro-type-vararg	d66dd70b2fffa3a6c14a	do not call c-style vararg functions
+src/adapters/filesystem_artifact_store.cpp	modernize-use-integer-sign-comparison	40a060bb7bc278d0de71	comparison between 'signed' and 'unsigned' integers
+src/adapters/filesystem_artifact_store.cpp	readability-function-cognitive-complexity	926f4c919418594c066a	function 'get' has cognitive complexity of 24 (threshold 20)
+src/adapters/filesystem_persona_source.cpp	concurrency-mt-unsafe	035ff6b2fa68a98596c1	function is not thread safe
+src/adapters/filesystem_persona_source.cpp	concurrency-mt-unsafe	52bfa384a16930b923ea	function is not thread safe
+src/adapters/filesystem_persona_source.cpp	cppcoreguidelines-pro-type-vararg	f7b838850753c48a1dfa	do not call c-style vararg functions
+src/adapters/filesystem_persona_source.cpp	cppcoreguidelines-pro-type-vararg	fc8f3d209baa315a962e	do not call c-style vararg functions
+src/adapters/filesystem_persona_source.cpp	modernize-use-integer-sign-comparison	f2761ca5d63e604a2bf5	comparison between 'signed' and 'unsigned' integers
+src/adapters/filesystem_persona_source.cpp	readability-function-cognitive-complexity	10146ae1e9b2eff52d46	function 'load_indexed' has cognitive complexity of 36 (threshold 20)
+src/adapters/filesystem_persona_source.cpp	readability-function-cognitive-complexity	2d575b41089c6b98fd06	function 'bounded_description' has cognitive complexity of 29 (threshold 20)
+src/adapters/filesystem_persona_source.cpp	readability-function-cognitive-complexity	53f224377511b22a5246	function 'valid_utf8_text' has cognitive complexity of 29 (threshold 20)
+src/adapters/filesystem_persona_source.cpp	readability-function-cognitive-complexity	d92aeef68803a78fe400	function 'index_personas' has cognitive complexity of 27 (threshold 20)
+src/adapters/git_repository_snapshot_source.cpp	bugprone-unchecked-optional-access	24cf5db87f8e761a8b81	unchecked access to optional value
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	c52c46e315ddd42c4ff5	do not declare C-style arrays, use 'std::array' instead
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	ddedbf9de3163244e942	do not declare C-style arrays, use 'std::array' instead
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	f27bf00abe5fc54ae83e	do not declare C-style arrays, use 'std::array' instead
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-bounds-array-to-pointer-decay	28a03dd04a179fb61f04	do not implicitly decay an array into a pointer; consider using gsl::array_view or an explicit cast instead
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-bounds-array-to-pointer-decay	a60d7240ddf883508224	do not implicitly decay an array into a pointer; consider using gsl::array_view or an explicit cast instead
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	7bcc70509915d9babac8	do not use pointer arithmetic
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	9afd870759886422abe4	do not use pointer arithmetic
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	b2438fd798f9d5439a6f	do not use pointer arithmetic
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	da9b161e5ff718f8a4b3	do not use pointer arithmetic
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-const-cast	f339047fc9b91f6da5f6	do not use const_cast to remove const qualifier
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-const-cast	fe3941382bf327a68181	do not use const_cast to remove const qualifier
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	077de43c2f64f087ce2e	do not call c-style vararg functions
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	0be3f4e87b76fa44dfa0	do not call c-style vararg functions
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	0d54941187af3f869f8f	do not call c-style vararg functions
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	3402b2b65ec808ca8d4f	do not call c-style vararg functions
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	4a94538fb7d7dacd2ca7	do not call c-style vararg functions
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	559847b11a3c8df9d9bd	do not call c-style vararg functions
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	ad1351ed1d0ecfaf0cc3	do not call c-style vararg functions
+src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	b33bddb778c68f747d5e	do not call c-style vararg functions
+src/adapters/git_repository_snapshot_source.cpp	modernize-use-integer-sign-comparison	26b24ff743c699515bd0	comparison between 'signed' and 'unsigned' integers
+src/adapters/git_repository_snapshot_source.cpp	modernize-use-integer-sign-comparison	84b47d22b7e97a187e44	comparison between 'signed' and 'unsigned' integers
+src/adapters/git_repository_snapshot_source.cpp	readability-else-after-return	dac9994d6c168c7e8ac9	do not use 'else' after 'return'
+src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	09db0175f59d912d2faf	function 'observe_git_once' has cognitive complexity of 77 (threshold 20)
+src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	0ad80642abc0b54bce39	function 'valid_utf8_instruction' has cognitive complexity of 28 (threshold 20)
+src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	102e73454c1fb916eb3e	function 'hash_path' has cognitive complexity of 22 (threshold 20)
+src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	a6aef2f4519215c8efd6	function 'discover' has cognitive complexity of 110 (threshold 20)
+src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	c5a0f0faa0f86a50e9a4	function 'create' has cognitive complexity of 30 (threshold 20)
+src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	d321e7aed1727bb22a26	function 'observe_plain_once' has cognitive complexity of 30 (threshold 20)
+src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	e908ca6803d764919f24	function 'observe' has cognitive complexity of 30 (threshold 20)
+src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	ebc8e45c5213a1fc10c1	function 'read_exact_file' has cognitive complexity of 27 (threshold 20)
+src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	f5dc6129f02e6e9c211e	function 'run_command' has cognitive complexity of 72 (threshold 20)
+src/adapters/git_repository_snapshot_source.cpp	readability-use-anyofallof	d5b1655aad5f89549a8e	replace loop by 'std::ranges::all_of()'
+src/adapters/image_backend.cpp	performance-move-const-arg	bd926bbf7962a382ca7b	std::move of the variable 'status' of the trivially-copyable type 'std::optional<int>' has no effect; remove std::move()
+src/adapters/json_model_catalog_cache.cpp	concurrency-mt-unsafe	73578a513035233dfd95	function is not thread safe
+src/adapters/json_model_catalog_cache.cpp	concurrency-mt-unsafe	f3b2e0c5186240c4e67a	function is not thread safe
+src/adapters/json_model_catalog_cache.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	5339c7f667c85cd5ce88	do not use pointer arithmetic
+src/adapters/json_model_catalog_cache.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	553e0487ffc4cefb89ee	do not use pointer arithmetic
+src/adapters/json_model_catalog_cache.cpp	cppcoreguidelines-pro-type-vararg	1e7b4569e794764ef42a	do not call c-style vararg functions
+src/adapters/json_model_catalog_cache.cpp	cppcoreguidelines-pro-type-vararg	477b442bcb49447fca2e	do not call c-style vararg functions
+src/adapters/json_model_catalog_cache.cpp	cppcoreguidelines-pro-type-vararg	75c761d6335491200cba	do not call c-style vararg functions
+src/adapters/json_model_catalog_cache.cpp	modernize-use-integer-sign-comparison	38580a383ab13c96dbeb	comparison between 'signed' and 'unsigned' integers
+src/adapters/json_model_catalog_cache.cpp	performance-move-const-arg	a0ed7c86d02b02946859	std::move of the variable 'parsed' of the trivially-copyable type 'model::Pricing' has no effect; remove std::move()
+src/adapters/json_model_catalog_cache.cpp	readability-function-cognitive-complexity	ecd84bb0055d51e05d6b	function 'store' has cognitive complexity of 25 (threshold 20)
+src/adapters/process_audio.cpp	bugprone-implicit-widening-of-multiplication-result	924fb9e17768357f6740	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
+src/adapters/process_audio.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	0c97dc3a21776e8739cf	do not use pointer arithmetic
+src/adapters/process_audio.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	68809ec42b060f1088a5	do not use pointer arithmetic
+src/adapters/process_audio.cpp	cppcoreguidelines-pro-type-vararg	97451ad82c8fb3255a8c	do not call c-style vararg functions
+src/adapters/process_audio.cpp	cppcoreguidelines-pro-type-vararg	af1400161a9fb75a0ded	do not call c-style vararg functions
+src/adapters/process_audio.cpp	modernize-use-integer-sign-comparison	37fe90ed713818aca3ba	comparison between 'signed' and 'unsigned' integers
+src/adapters/process_audio.cpp	readability-simplify-boolean-expr	55550e106002fa33939c	boolean expression can be simplified by DeMorgan's theorem
+src/adapters/process_credentials.cpp	concurrency-mt-unsafe	c5364c291a55d994c64b	function is not thread safe
+src/adapters/process_draft_editor.cpp	concurrency-mt-unsafe	69d57c517b27dd7fa2b8	function is not thread safe
+src/adapters/process_draft_editor.cpp	concurrency-mt-unsafe	7bfccebfb60910d8a0b3	function is not thread safe
+src/adapters/process_draft_editor.cpp	concurrency-mt-unsafe	c55edd4df60b17a26fe5	function is not thread safe
+src/adapters/process_draft_editor.cpp	concurrency-mt-unsafe	d4de6d04aff903186627	function is not thread safe
+src/adapters/process_draft_editor.cpp	concurrency-mt-unsafe	dee138f68513d8a50ba2	function is not thread safe
+src/adapters/process_draft_editor.cpp	cppcoreguidelines-pro-type-const-cast	0c73528bd7f5cde02ecf	do not use const_cast to remove const qualifier
+src/adapters/process_draft_editor.cpp	cppcoreguidelines-pro-type-const-cast	37f7cf3baaa25393c601	do not use const_cast to remove const qualifier
+src/adapters/process_draft_editor.cpp	cppcoreguidelines-pro-type-vararg	51157c5eaa6caa22dc22	do not call c-style vararg functions
+src/adapters/process_draft_editor.cpp	cppcoreguidelines-pro-type-vararg	9f66c7c173b96f50bf50	do not call c-style vararg functions
+src/adapters/process_draft_editor.cpp	modernize-deprecated-headers	dbd6043e47dc9fd1c29c	inclusion of deprecated C++ header 'signal.h'; consider using 'csignal' instead
+src/adapters/process_draft_editor.cpp	modernize-use-integer-sign-comparison	bb9ca808f75080fa88f0	comparison between 'signed' and 'unsigned' integers
+src/adapters/process_draft_editor.cpp	performance-no-automatic-move	ad7d48838c2b6ba5ff46	constness of 'candidate' prevents automatic move
+src/adapters/process_draft_editor.cpp	readability-function-cognitive-complexity	7c102349fadec2c91394	function 'run_editor' has cognitive complexity of 32 (threshold 20)
+src/adapters/process_draft_editor.cpp	readability-function-cognitive-complexity	b036c3c061322f6ccf15	function 'normalized_text' has cognitive complexity of 35 (threshold 20)
+src/adapters/process_draft_editor.cpp	readability-function-cognitive-complexity	d287e60674432ced932e	function 'resolve_editor' has cognitive complexity of 21 (threshold 20)
+src/adapters/process_image.cpp	bugprone-implicit-widening-of-multiplication-result	4f34a41114cdf15a9355	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
+src/adapters/process_image.cpp	bugprone-implicit-widening-of-multiplication-result	5bfc88c3a045b1d03e5a	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/adapters/process_image.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	9015cee6cb911c21383a	do not declare C-style arrays, use 'std::array' instead
+src/adapters/process_image.cpp	cppcoreguidelines-pro-bounds-array-to-pointer-decay	020f6e05059a1892a527	do not implicitly decay an array into a pointer; consider using gsl::array_view or an explicit cast instead
+src/adapters/process_image.cpp	cppcoreguidelines-pro-bounds-array-to-pointer-decay	5b4a86efbdd8a7959ca4	do not implicitly decay an array into a pointer; consider using gsl::array_view or an explicit cast instead
+src/adapters/process_image.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	0c97dc3a21776e8739cf	do not use pointer arithmetic
+src/adapters/process_image.cpp	cppcoreguidelines-pro-type-vararg	66fa5e306b6f18c6c343	do not call c-style vararg functions
+src/adapters/process_image.cpp	cppcoreguidelines-pro-type-vararg	97451ad82c8fb3255a8c	do not call c-style vararg functions
+src/adapters/process_image.cpp	readability-function-cognitive-complexity	2218539b52118fae2370	function 'render_terminal_viewer' has cognitive complexity of 31 (threshold 20)
+src/adapters/process_interactive.cpp	bugprone-unchecked-optional-access	ffe86d08b2431fa6d267	unchecked access to optional value
+src/adapters/process_interactive.cpp	performance-move-const-arg	d75fb6f1b6260c132cfb	std::move of the expression of the trivially-copyable type 'std::optional<domain::SessionSpendCeiling>' has no effect; remove std::move()
+src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	17175cd81b663ee15bc7	function 'show_plan' has cognitive complexity of 29 (threshold 20)
+src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	1cae3bdecf86de8b0b0d	function 'manage_memory' has cognitive complexity of 84 (threshold 20)
+src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	36028207f0f5b9ba595e	function 'switch_session' has cognitive complexity of 23 (threshold 20)
+src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	39b0e565bfcd66520988	function 'request_close' has cognitive complexity of 50 (threshold 20)
+src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	50ab4a6afac48443a492	function 'on_event' has cognitive complexity of 65 (threshold 20)
+src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	778df45db8d9bf448427	function 'execute' has cognitive complexity of 56 (threshold 20)
+src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	7c3209940c7bc6a277b6	function 'on_render' has cognitive complexity of 27 (threshold 20)
+src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	c8e01de8f7f20ca090b4	function 'ensure_plan_review' has cognitive complexity of 64 (threshold 20)
+src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	d17c360a0321aebd1e52	function 'execute_command' has cognitive complexity of 44 (threshold 20)
+src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	d2b512e48c1c32a25b60	lambda has cognitive complexity of 21 (threshold 20)
+src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	e2cb5e508d1870ec8883	function 'show_memory' has cognitive complexity of 43 (threshold 20)
+src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	ee61c5ba8d710095f66b	lambda has cognitive complexity of 21 (threshold 20)
+src/adapters/process_login.cpp	readability-function-cognitive-complexity	d9032caf106e6bcf2f41	function 'execute' has cognitive complexity of 22 (threshold 20)
+src/adapters/process_one_shot.cpp	performance-move-const-arg	d75fb6f1b6260c132cfb	std::move of the expression of the trivially-copyable type 'std::optional<domain::SessionSpendCeiling>' has no effect; remove std::move()
+src/adapters/process_one_shot.cpp	readability-function-cognitive-complexity	451d59e8a4f5d08f1390	function 'execute' has cognitive complexity of 40 (threshold 20)
+src/adapters/process_plan.cpp	bugprone-implicit-widening-of-multiplication-result	e06c9c1539770eb07bac	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
+src/adapters/process_plan.cpp	bugprone-implicit-widening-of-multiplication-result	ec3d66cdb934ddb7b311	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
+src/adapters/process_plan.cpp	bugprone-optional-value-conversion	3008d08ae15e461697a3	conversion from 'std::optional<aiforge::domain::Id<aiforge::domain::EventIdTag>>' into 'aiforge::domain::Id<aiforge::domain::EventIdTag>' and back into 'std::optional<aiforge::domain::Id<aiforge::domain::EventIdTag>>', remove potentially error-prone optional dereference
+src/adapters/process_plan.cpp	readability-function-cognitive-complexity	a3f5c7da57fafe932d29	function 'execute' has cognitive complexity of 236 (threshold 20)
+src/adapters/process_plan.cpp	readability-function-cognitive-complexity	f7144daf2d91d2f0c572	function 'state_json' has cognitive complexity of 27 (threshold 20)
+src/adapters/process_repository.cpp	concurrency-mt-unsafe	d4cb7cd50206a2aa6b7c	function is not thread safe
+src/adapters/process_tool.cpp	concurrency-mt-unsafe	d2b8c38ed645e758ae70	function is not thread safe
+src/adapters/process_tool.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	64f6575b70fffd8124ff	do not declare C-style arrays, use 'std::array' instead
+src/adapters/process_tool.cpp	cppcoreguidelines-avoid-do-while	992ab6f1d58c7d6d0fe1	avoid do-while loops
+src/adapters/process_tool.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	da411e49b64498fafa82	do not use pointer arithmetic
+src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-reinterpret-cast	93844a502c2c1198b537	do not use reinterpret_cast
+src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	2702ce525156b607bcce	do not call c-style vararg functions
+src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	2fac2cd6556f69dee252	do not call c-style vararg functions
+src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	816a0abf1fd3e11c93ae	do not call c-style vararg functions
+src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	a19ee3487aa3e6b4853e	do not call c-style vararg functions
+src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	bd23a73286bc53425745	do not call c-style vararg functions
+src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	c0852e9f29ce9780243b	do not call c-style vararg functions
+src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	c7604c55b5aa04b48133	do not call c-style vararg functions
+src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	fa1364a4429cf8f12543	do not call c-style vararg functions
+src/adapters/process_tool.cpp	modernize-deprecated-headers	4a21ab478f80ef15456a	inclusion of deprecated C++ header 'signal.h'; consider using 'csignal' instead
+src/adapters/process_tool.cpp	modernize-use-integer-sign-comparison	5ded5eda399a4faddc10	comparison between 'signed' and 'unsigned' integers
+src/adapters/process_tool.cpp	modernize-use-integer-sign-comparison	ea5f5864680ee2276142	comparison between 'signed' and 'unsigned' integers
+src/adapters/process_tool.cpp	modernize-use-nodiscard	747226726207b84b1e4c	function 'validate' should be marked [[nodiscard]]
+src/adapters/process_tool.cpp	readability-function-cognitive-complexity	11d1477af9f6d2197889	function 'parse_request' has cognitive complexity of 30 (threshold 20)
+src/adapters/process_tool.cpp	readability-function-cognitive-complexity	74be45432af52da94e58	function 'start' has cognitive complexity of 81 (threshold 20)
+src/adapters/process_tool.cpp	readability-function-cognitive-complexity	8da71f44118678272551	function 'safe_utf8' has cognitive complexity of 29 (threshold 20)
+src/adapters/process_tool.cpp	readability-function-cognitive-complexity	f3b0b87a654a7976b515	function 'make_result' has cognitive complexity of 23 (threshold 20)
+src/adapters/process_tool.cpp	readability-math-missing-parentheses	3823178d6963730833fa	'*' has higher precedence than '+'; add parentheses to explicitly specify the order of operations
+src/adapters/process_tool.cpp	readability-math-missing-parentheses	ce6abe3123ab50dd24c3	'*' has higher precedence than '+'; add parentheses to explicitly specify the order of operations
+src/adapters/termforge_image_renderer.cpp	bugprone-implicit-widening-of-multiplication-result	40c37c83633115e25498	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/adapters/termforge_image_renderer.cpp	bugprone-implicit-widening-of-multiplication-result	8cbcc4bed105340c43e7	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/adapters/termforge_image_renderer.cpp	bugprone-implicit-widening-of-multiplication-result	a3e6b1f1fb8895b0b398	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/adapters/termforge_image_renderer.cpp	bugprone-implicit-widening-of-multiplication-result	ffe1c07cbae948cef82b	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/adapters/termforge_run_bridge.cpp	bugprone-empty-catch	4f6fca66b777e141c4ea	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
+src/adapters/transcript_view.cpp	performance-move-const-arg	a050aa34a7c30e9e260d	std::move of the variable 'theme' of the trivially-copyable type 'TranscriptTheme' has no effect; remove std::move()
+src/adapters/transcript_view.cpp	readability-function-cognitive-complexity	3f5179956adce0302f59	function 'render_run' has cognitive complexity of 210 (threshold 20)
+src/adapters/transcript_view.cpp	readability-function-cognitive-complexity	d3db41dcc9cdbc8bbff6	lambda has cognitive complexity of 37 (threshold 20)
+src/adapters/transcript_view.cpp	readability-function-cognitive-complexity	f782f47a7a739e2f3b9b	function 'sync' has cognitive complexity of 21 (threshold 20)
+src/adapters/tui_scenario.cpp	readability-function-cognitive-complexity	625ce5bf438504c48cbb	function 'run_tui_scenario' has cognitive complexity of 24 (threshold 20)
+src/adapters/tui_scenario.cpp	readability-function-cognitive-complexity	925bcfd14e4ae1024c91	function 'validate' has cognitive complexity of 30 (threshold 20)
+src/adapters/tui_scenario.cpp	readability-function-cognitive-complexity	e82c1a4d46fe5b3c0c26	function 'observe_frame' has cognitive complexity of 22 (threshold 20)
+src/adapters/venice_backend.cpp	bugprone-empty-catch	02415e7f513deb2cacc4	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
+src/adapters/venice_backend.cpp	readability-function-cognitive-complexity	48d574fcbb063c0c94df	function 'produce' has cognitive complexity of 109 (threshold 20)
+src/adapters/venice_backend.cpp	readability-function-cognitive-complexity	5c8f3eee03102f5ff861	function 'apply_continuation_state' has cognitive complexity of 46 (threshold 20)
+src/adapters/venice_backend.cpp	readability-function-cognitive-complexity	8aae2a4dbf61364a05fc	function 'make_request' has cognitive complexity of 25 (threshold 20)
+src/adapters/venice_backend.cpp	readability-function-cognitive-complexity	c1cfccb1e2b508a7f4ec	lambda has cognitive complexity of 70 (threshold 20)
+src/adapters/venice_image_generator.cpp	bugprone-implicit-widening-of-multiplication-result	52724e0f5ac122c91df0	performing an implicit widening conversion to type 'size_type' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/adapters/venice_model_catalog_source.cpp	performance-move-const-arg	19ba18206b7921916733	std::move of the expression of the trivially-copyable type 'aiforge::model::PriceTier' has no effect; remove std::move()
+src/adapters/venice_model_catalog_source.cpp	performance-move-const-arg	2430cc4826c11286b00d	std::move of the expression of the trivially-copyable type 'std::optional<aiforge::model::Price>' has no effect; remove std::move()
+src/adapters/venice_model_catalog_source.cpp	performance-move-const-arg	8a5fd4e8f6c3f0317c5c	std::move of the expression of the trivially-copyable type 'aiforge::model::Price' has no effect
+src/adapters/venice_model_catalog_source.cpp	performance-move-const-arg	92441fa807ee3920f032	std::move of the expression of the trivially-copyable type 'aiforge::model::Pricing' has no effect; remove std::move()
+src/adapters/venice_model_catalog_source.cpp	performance-move-const-arg	b9c9fa7bda8ffad06bcf	std::move of the expression of the trivially-copyable type 'aiforge::model::Price' has no effect; remove std::move()
+src/adapters/venice_model_catalog_source.cpp	performance-move-const-arg	df13a4e0023be46434a6	std::move of the expression of the trivially-copyable type 'aiforge::model::PriceTier' has no effect; remove std::move()
+src/adapters/venice_model_catalog_source.cpp	performance-move-const-arg	e2e63f4b990fb836326e	std::move of the expression of the trivially-copyable type 'std::optional<aiforge::model::Price>' has no effect; remove std::move()
+src/bin/main.cpp	cert-err33-c	6488486f4873d7938b30	the value returned by this function should not be disregarded; neglecting it may lead to errors
+src/bin/main.cpp	cert-err33-c	88da32cc434672ed2e09	the value returned by this function should not be disregarded; neglecting it may lead to errors
+src/bin/main.cpp	cppcoreguidelines-avoid-non-const-global-variables	6849333b1e05cb93612c	variable 'interrupted' is non-const and globally accessible, consider making it const
+src/bin/main.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	e771ad95c8d631892314	do not use pointer arithmetic
+src/lib/ask_user_tool.cpp	bugprone-implicit-widening-of-multiplication-result	d5535abf95dc1937beae	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/ask_user_tool.cpp	bugprone-use-after-move	02b6b71b563a472583e9	'limits' used after it was moved
+src/lib/ask_user_tool.cpp	modernize-use-nodiscard	6634eee7ceab98f2be84	function 'validate' should be marked [[nodiscard]]
+src/lib/ask_user_tool.cpp	performance-move-const-arg	24bc059c9393fe068e9a	std::move of the variable 'limits' of the trivially-copyable type 'AskUserLimits' has no effect; remove std::move()
+src/lib/ask_user_tool.cpp	readability-function-cognitive-complexity	52c8f2142ac2285dec2d	function 'parse_questions' has cognitive complexity of 61 (threshold 20)
+src/lib/audio.cpp	bugprone-implicit-widening-of-multiplication-result	7f547056314198b60a88	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/audio.cpp	readability-function-cognitive-complexity	1bd75b322e3c80fbb842	function 'safe_text' has cognitive complexity of 29 (threshold 20)
+src/lib/audio.cpp	readability-function-cognitive-complexity	52574834ef08acc90990	function 'run_audio' has cognitive complexity of 34 (threshold 20)
+src/lib/chat_session.cpp	bugprone-unchecked-optional-access	a49a1bd5858647682b73	unchecked access to optional value
+src/lib/chat_session.cpp	readability-function-cognitive-complexity	5a91a13d2f8e47a8bf57	function 'resolve_persona' has cognitive complexity of 25 (threshold 20)
+src/lib/chat_session.cpp	readability-function-cognitive-complexity	85259e49452bbef96cb6	function 'open' has cognitive complexity of 45 (threshold 20)
+src/lib/chat_session.cpp	readability-function-cognitive-complexity	9bf2f4958c19db25569c	function 'valid_text' has cognitive complexity of 27 (threshold 20)
+src/lib/chat_session.cpp	readability-function-cognitive-complexity	c31b605c79cee1347400	function 'submit' has cognitive complexity of 45 (threshold 20)
+src/lib/child_run.cpp	bugprone-implicit-widening-of-multiplication-result	3d926d461e3e723d7de6	performing an implicit widening conversion to type 'const std::uint64_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/child_run.cpp	bugprone-implicit-widening-of-multiplication-result	732bfd9ff6055e8d5862	performing an implicit widening conversion to type 'const std::uint64_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/child_run.cpp	bugprone-implicit-widening-of-multiplication-result	f450e2863188357a5a82	performing an implicit widening conversion to type 'size_type' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/cli11_parser.cpp	misc-no-recursion	10d4abf3f4da4d613383	function 'validate_command' is within a recursive call chain
+src/lib/cli11_parser.cpp	misc-no-recursion	45205684361d65906dac	function 'build_command' is within a recursive call chain
+src/lib/cli11_parser.cpp	readability-function-cognitive-complexity	45e76e5c854c20030e96	function 'classify_extra' has cognitive complexity of 40 (threshold 20)
+src/lib/cli11_parser.cpp	readability-function-cognitive-complexity	55a10b5b74a89a5b764f	function 'parse' has cognitive complexity of 26 (threshold 20)
+src/lib/cli11_parser.cpp	readability-function-cognitive-complexity	8a06af761426215c7597	function 'append_arguments' has cognitive complexity of 26 (threshold 20)
+src/lib/cli11_parser.cpp	readability-function-cognitive-complexity	d8ef788becd5ac6d40c4	function 'validate_command' has cognitive complexity of 50 (threshold 20)
+src/lib/command_registry.cpp	misc-no-recursion	9d34b19b3837738663cd	function 'validate_command' is within a recursive call chain
+src/lib/command_registry.cpp	misc-no-recursion	f3370e651e7c4d4673a4	function 'parser_command' is within a recursive call chain
+src/lib/command_registry.cpp	performance-move-const-arg	d258feb7a06deccc2cae	std::move of the expression of the trivially-copyable type 'aiforge::domain::SessionSpendCeiling' has no effect; remove std::move()
+src/lib/command_registry.cpp	readability-function-cognitive-complexity	36fba92a6cc692469490	function 'dispatch' has cognitive complexity of 21 (threshold 20)
+src/lib/command_registry.cpp	readability-function-cognitive-complexity	d690ef18c4696d750038	function 'render_help' has cognitive complexity of 22 (threshold 20)
+src/lib/command_registry.cpp	readability-function-cognitive-complexity	fd30ebadbd7117c4c7dd	function 'one_shot_handler' has cognitive complexity of 66 (threshold 20)
+src/lib/config.cpp	concurrency-mt-unsafe	6d18d706b10e599beb3c	function is not thread safe
+src/lib/config.cpp	readability-function-cognitive-complexity	241d8821a6e026eb8108	function 'resolve_config' has cognitive complexity of 61 (threshold 20)
+src/lib/config.cpp	readability-function-cognitive-complexity	5f2f3d0c6f1b7e5298ba	function 'valid_utf8' has cognitive complexity of 24 (threshold 20)
+src/lib/config.cpp	readability-function-cognitive-complexity	6c370da57a5500f99644	function 'environment_config_layer' has cognitive complexity of 27 (threshold 20)
+src/lib/context_builder.cpp	bugprone-unchecked-optional-access	24f3abff1464bff22bfe	unchecked access to optional value
+src/lib/context_builder.cpp	bugprone-unchecked-optional-access	b536e3eef5d0a5c820a1	unchecked access to optional value
+src/lib/context_builder.cpp	readability-function-cognitive-complexity	abd4c1d1b8244e9f9a44	function 'build' has cognitive complexity of 100 (threshold 20)
+src/lib/context_parcel.cpp	readability-function-cognitive-complexity	303705061f19c3c76bd4	function 'content_bytes' has cognitive complexity of 25 (threshold 20)
+src/lib/context_parcel.cpp	readability-function-cognitive-complexity	48854d8c88ab13081945	lambda has cognitive complexity of 44 (threshold 20)
+src/lib/context_parcel.cpp	readability-function-cognitive-complexity	78a03f55652885c89aa4	function 'valid_utf8_text' has cognitive complexity of 29 (threshold 20)
+src/lib/context_parcel.cpp	readability-function-cognitive-complexity	8f9449323504ea65a792	function 'validate_context_parcel_impl' has cognitive complexity of 66 (threshold 20)
+src/lib/context_parcel.cpp	readability-function-cognitive-complexity	e504d16807ea584e9428	function 'validate_reference' has cognitive complexity of 60 (threshold 20)
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	36cb264c7d8ac7e9fd3a	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	4a27bc891a7428c20678	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	51523fa79d5a7a6b85cf	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	530ef7d249b8c8f7c52a	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	666081d089e186c11d3d	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	91ff6e73014b21b56ea4	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	9a068f175b8ab72c3a79	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	9c48cf16771e2db8c425	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	a08280e0075130d0d0d9	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	b10db8759ee1a21d4e61	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	c4cc59e2051f3fc637f5	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	e315f84c6f85b5673006	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	ebb546b3e4944d62473d	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	edee4e50eaa7c81b742b	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	f70dd99ce91ae6e22e18	do not declare C-style arrays, use 'std::array' instead
+src/lib/context_selection.cpp	readability-function-cognitive-complexity	52e2c08423fbd52f3626	function 'select_and_build' has cognitive complexity of 119 (threshold 20)
+src/lib/context_selection.cpp	readability-implicit-bool-conversion	ea6e553d6aaa0133168e	implicit conversion 'const aiforge::domain::ExactSourceEvidence *' -> 'bool'
+src/lib/conversation_context.cpp	readability-function-cognitive-complexity	161b2d678aadd28be0c9	function 'replayed_conversation' has cognitive complexity of 26 (threshold 20)
+src/lib/credential.cpp	concurrency-mt-unsafe	035ff6b2fa68a98596c1	function is not thread safe
+src/lib/credential.cpp	concurrency-mt-unsafe	2d36dc089928b3350a04	function is not thread safe
+src/lib/credential.cpp	concurrency-mt-unsafe	c8ab11e6f035622396f2	function is not thread safe
+src/lib/credential.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	cf626de3921ef2bf9ec4	do not declare C-style arrays, use 'std::array' instead
+src/lib/credential.cpp	cppcoreguidelines-pro-bounds-array-to-pointer-decay	8a051e29011396d1db9f	do not implicitly decay an array into a pointer; consider using gsl::array_view or an explicit cast instead
+src/lib/credential.cpp	cppcoreguidelines-pro-bounds-array-to-pointer-decay	d38635ad870a9325943c	do not implicitly decay an array into a pointer; consider using gsl::array_view or an explicit cast instead
+src/lib/credential.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	3d3298c1ed6471f64301	do not use pointer arithmetic
+src/lib/credential.cpp	cppcoreguidelines-pro-type-vararg	15f3110552203a357c8d	do not call c-style vararg functions
+src/lib/credential.cpp	cppcoreguidelines-pro-type-vararg	a2a0cfefb7a1ba61edec	do not call c-style vararg functions
+src/lib/credential.cpp	cppcoreguidelines-pro-type-vararg	d54601a993fe8ef7660e	do not call c-style vararg functions
+src/lib/credential.cpp	cppcoreguidelines-pro-type-vararg	f7451933627ee6336068	do not call c-style vararg functions
+src/lib/credential.cpp	misc-no-recursion	a9686d379344541d21f6	function 'validate_directory' is within a recursive call chain
+src/lib/credential.cpp	readability-function-cognitive-complexity	beaed630982a3e92ddc0	function 'load' has cognitive complexity of 24 (threshold 20)
+src/lib/image.cpp	bugprone-implicit-widening-of-multiplication-result	5ce4bcdb62fc045bd724	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/image.cpp	readability-function-cognitive-complexity	d9840e47cf9d6e890df6	function 'generate' has cognitive complexity of 38 (threshold 20)
+src/lib/image.cpp	readability-function-cognitive-complexity	fc6602dfc5c395c12b8a	function 'valid_utf8' has cognitive complexity of 25 (threshold 20)
+src/lib/json_config_file_store.cpp	bugprone-implicit-widening-of-multiplication-result	34918ad7536a0d784743	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/json_config_file_store.cpp	concurrency-mt-unsafe	035ff6b2fa68a98596c1	function is not thread safe
+src/lib/json_config_file_store.cpp	concurrency-mt-unsafe	1e58b0b3d105ae55c2d1	function is not thread safe
+src/lib/json_config_file_store.cpp	concurrency-mt-unsafe	543d184d4369e92accd4	function is not thread safe
+src/lib/json_config_file_store.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	19a0b5975b9e6c9aa2be	do not declare C-style arrays, use 'std::array' instead
+src/lib/json_config_file_store.cpp	cppcoreguidelines-missing-std-forward	a8360ade1c7006f02b64	forwarding reference parameter 'mutation' is never forwarded inside the function body
+src/lib/json_config_file_store.cpp	cppcoreguidelines-pro-bounds-array-to-pointer-decay	8a051e29011396d1db9f	do not implicitly decay an array into a pointer; consider using gsl::array_view or an explicit cast instead
+src/lib/json_config_file_store.cpp	cppcoreguidelines-pro-bounds-array-to-pointer-decay	d38635ad870a9325943c	do not implicitly decay an array into a pointer; consider using gsl::array_view or an explicit cast instead
+src/lib/json_config_file_store.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	69ac0ab031445f54caea	do not use pointer arithmetic
+src/lib/json_config_file_store.cpp	cppcoreguidelines-pro-type-vararg	42eb3f0566e18347fd19	do not call c-style vararg functions
+src/lib/json_config_file_store.cpp	cppcoreguidelines-pro-type-vararg	53a54c1a3d28eeaa2f75	do not call c-style vararg functions
+src/lib/json_config_file_store.cpp	cppcoreguidelines-pro-type-vararg	7b66b15fcf970386a6af	do not call c-style vararg functions
+src/lib/json_config_file_store.cpp	cppcoreguidelines-pro-type-vararg	a2a0cfefb7a1ba61edec	do not call c-style vararg functions
+src/lib/json_config_file_store.cpp	misc-no-recursion	74cfa0bdeaf1d8c4b410	function 'collect_leaf_keys' is within a recursive call chain
+src/lib/json_config_file_store.cpp	modernize-use-integer-sign-comparison	462e82151973e31ce225	comparison between 'signed' and 'unsigned' integers
+src/lib/json_config_file_store.cpp	readability-function-cognitive-complexity	f2cb3d4e85c155607d9a	function 'json_value' has cognitive complexity of 25 (threshold 20)
+src/lib/language_analysis.cpp	readability-function-cognitive-complexity	19fb4b559595ed38725e	function 'validate_language_analysis_result' has cognitive complexity of 38 (threshold 20)
+src/lib/language_analysis.cpp	readability-function-cognitive-complexity	78a03f55652885c89aa4	function 'valid_utf8_text' has cognitive complexity of 29 (threshold 20)
+src/lib/language_analysis.cpp	readability-implicit-bool-conversion	2ab4baa817f0cbd2b839	implicit conversion 'const KnowledgeEntity *' -> 'bool'
+src/lib/memory_controller.cpp	bugprone-implicit-widening-of-multiplication-result	9f5a24ccd2aebf5c8905	performing an implicit widening conversion to type 'unsigned long' of a multiplication performed in type 'unsigned int'
+src/lib/memory_controller.cpp	readability-function-cognitive-complexity	85ae13ff397c99c3d26d	function 'inspect' has cognitive complexity of 23 (threshold 20)
+src/lib/memory_controller.cpp	readability-function-cognitive-complexity	9350b251782a4ff474f6	function 'capture_committed' has cognitive complexity of 67 (threshold 20)
+src/lib/memory_projection.cpp	readability-function-cognitive-complexity	ff0aa8ad5577d19062f7	function 'apply' has cognitive complexity of 53 (threshold 20)
+src/lib/memory_projection.cpp	readability-implicit-bool-conversion	22cf9d9288e931c0cc94	implicit conversion 'const ProjectedMemoryRecord *' -> 'bool'
+src/lib/memory_projection.cpp	readability-implicit-bool-conversion	7012bedb39c15fcbe109	implicit conversion 'const ProjectedMemoryRecord *' -> 'bool'
+src/lib/memory_projection.cpp	readability-implicit-bool-conversion	93ec71e74e41d06915d7	implicit conversion 'const ProjectedMemoryRecord *' -> 'bool'
+src/lib/memory_projection.cpp	readability-implicit-bool-conversion	c61087491e9974557052	implicit conversion 'const ProjectedMemoryProposal *' -> 'bool'
+src/lib/memory_tool.cpp	bugprone-implicit-widening-of-multiplication-result	9ece2841a9afdea6b0d9	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/memory_tool.cpp	bugprone-implicit-widening-of-multiplication-result	afcf3ef9dd96d5781db1	performing an implicit widening conversion to type 'size_type' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/memory_tool.cpp	modernize-use-nodiscard	6634eee7ceab98f2be84	function 'validate' should be marked [[nodiscard]]
+src/lib/memory_tool.cpp	performance-move-const-arg	e4bccf215a945393b561	std::move of the variable 'configuration' of the trivially-copyable type 'MemoryToolConfiguration' has no effect; remove std::move()
+src/lib/memory_tool.cpp	readability-function-cognitive-complexity	15973404797c5353026d	function 'parse_draft' has cognitive complexity of 36 (threshold 20)
+src/lib/model_catalog.cpp	readability-function-cognitive-complexity	404d990de3013cc1e90e	function 'valid_text' has cognitive complexity of 29 (threshold 20)
+src/lib/model_catalog.cpp	readability-function-cognitive-complexity	78d300e72f987be08e56	function 'snapshot' has cognitive complexity of 31 (threshold 20)
+src/lib/money.cpp	modernize-use-integer-sign-comparison	dcea9467895a051e1037	comparison between 'signed' and 'unsigned' integers
+src/lib/money.cpp	readability-function-cognitive-complexity	6956ca1599ecd39737fe	function 'from' has cognitive complexity of 42 (threshold 20)
+src/lib/one_shot.cpp	bugprone-unchecked-optional-access	45d1bdb59f64117b2a3b	unchecked access to optional value
+src/lib/one_shot.cpp	bugprone-unused-return-value	14ced4fc6449bc6ff6bd	the value returned by this function should not be disregarded; neglecting it may lead to errors
+src/lib/one_shot.cpp	bugprone-unused-return-value	78ceceba786141d8e4a9	the value returned by this function should not be disregarded; neglecting it may lead to errors
+src/lib/one_shot.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	7df6b762d49aa80fb2fb	do not use pointer arithmetic
+src/lib/one_shot.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	d58af3dc2ca21bc58e44	do not use pointer arithmetic
+src/lib/one_shot.cpp	readability-function-cognitive-complexity	04282ca6a831e6542eee	function 'run' has cognitive complexity of 185 (threshold 20)
+src/lib/one_shot.cpp	readability-function-cognitive-complexity	496a1271f3251ab40f50	function 'render_events' has cognitive complexity of 34 (threshold 20)
+src/lib/one_shot.cpp	readability-function-cognitive-complexity	6985728956b7a7597d42	function 'estimated_message_tokens' has cognitive complexity of 21 (threshold 20)
+src/lib/one_shot.cpp	readability-function-cognitive-complexity	f5b43a857caa7cf1fd69	function 'resolve_persona' has cognitive complexity of 23 (threshold 20)
+src/lib/one_shot.cpp	readability-function-cognitive-complexity	fc6602dfc5c395c12b8a	function 'valid_utf8' has cognitive complexity of 25 (threshold 20)
+src/lib/persona.cpp	bugprone-implicit-widening-of-multiplication-result	3af33fbf819fdcf4f5b3	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/persona.cpp	bugprone-implicit-widening-of-multiplication-result	71c3909c1b288df608a8	performing an implicit widening conversion to type 'size_type' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/persona.cpp	readability-function-cognitive-complexity	678e9a0e3a1ffc811477	function 'valid_utf8_text' has cognitive complexity of 30 (threshold 20)
+src/lib/plan.cpp	bugprone-unchecked-optional-access	26014a008d2e99d11f53	unchecked access to optional value
+src/lib/plan.cpp	bugprone-unchecked-optional-access	2e816405a2a97f868b23	unchecked access to optional value
+src/lib/plan.cpp	bugprone-unchecked-optional-access	a6909089782e9ea76295	unchecked access to optional value
+src/lib/plan.cpp	readability-function-cognitive-complexity	0eb4da27d62ba8acd630	function 'validate_plan_revision' has cognitive complexity of 64 (threshold 20)
+src/lib/plan.cpp	readability-function-cognitive-complexity	78a03f55652885c89aa4	function 'valid_utf8_text' has cognitive complexity of 29 (threshold 20)
+src/lib/plan.cpp	readability-function-cognitive-complexity	b5d161eb98bd131200ca	function 'apply_in_place' has cognitive complexity of 86 (threshold 20)
+src/lib/plan.cpp	readability-implicit-bool-conversion	50f016ed69c5790a9d03	implicit conversion 'const PlanId *' (aka 'const Id<PlanIdTag> *') -> 'bool'
+src/lib/plan_task_controller.cpp	bugprone-implicit-widening-of-multiplication-result	33725d979d211576d406	performing an implicit widening conversion to type 'size_type' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/plan_task_controller.cpp	modernize-loop-convert	63a7ed99b06e11c26e18	use range-based for loop instead
+src/lib/plan_task_controller.cpp	readability-function-cognitive-complexity	81e4a0619e8ef5b9dbdd	function 'inspect' has cognitive complexity of 40 (threshold 20)
+src/lib/presentation_text.cpp	readability-function-cognitive-complexity	0897a591746429f69eef	function 'sanitize_untrusted_text' has cognitive complexity of 26 (threshold 20)
+src/lib/presentation_text.cpp	readability-function-cognitive-complexity	372b1e0e7d429a3091ca	function 'parse_inline' has cognitive complexity of 28 (threshold 20)
+src/lib/presentation_text.cpp	readability-function-cognitive-complexity	b6654c4ce307d2b69f18	function 'tokenize_markdown_lite' has cognitive complexity of 43 (threshold 20)
+src/lib/pricing.cpp	performance-move-const-arg	7214cabd4eb7457b26a6	std::move of the variable 'pricing' of the trivially-copyable type 'TextPricing' has no effect; remove std::move()
+src/lib/project_backlog.cpp	readability-function-cognitive-complexity	74dc256d7fdfeac64ac0	function 'apply' has cognitive complexity of 33 (threshold 20)
+src/lib/project_instructions.cpp	bugprone-implicit-widening-of-multiplication-result	71c3909c1b288df608a8	performing an implicit widening conversion to type 'size_type' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/project_instructions.cpp	readability-function-cognitive-complexity	678e9a0e3a1ffc811477	function 'valid_utf8_text' has cognitive complexity of 30 (threshold 20)
+src/lib/project_instructions.cpp	readability-function-cognitive-complexity	bb0e28408cf0a19f9f91	function 'project_instruction_inputs' has cognitive complexity of 22 (threshold 20)
+src/lib/project_instructions.cpp	readability-use-anyofallof	d5b1655aad5f89549a8e	replace loop by 'std::ranges::all_of()'
+src/lib/provenance.cpp	readability-function-cognitive-complexity	5f2f3d0c6f1b7e5298ba	function 'valid_utf8' has cognitive complexity of 24 (threshold 20)
+src/lib/provenance.cpp	readability-function-cognitive-complexity	f75f121cf282523fdcf1	function 'validate_configuration' has cognitive complexity of 22 (threshold 20)
+src/lib/repository_knowledge.cpp	bugprone-unchecked-optional-access	d6c18e6b2b45bb9e91f1	unchecked access to optional value
+src/lib/repository_knowledge.cpp	misc-no-recursion	ae1bcfb1176a7ab97859	function 'operator()<(lambda at /config/Projects/.worktrees/aiforge-clang-tidy-ci/src/lib/repository_knowledge.cpp:555:22)>' is within a recursive call chain
+src/lib/repository_knowledge.cpp	readability-function-cognitive-complexity	0d8b2baadbe5643d70e9	function 'validate_graph_impl' has cognitive complexity of 39 (threshold 20)
+src/lib/repository_knowledge.cpp	readability-function-cognitive-complexity	22d31628cfd0e48e57d1	function 'validate_environment' has cognitive complexity of 21 (threshold 20)
+src/lib/repository_knowledge.cpp	readability-function-cognitive-complexity	26104d129effcb86e9cf	lambda has cognitive complexity of 37 (threshold 20)
+src/lib/repository_knowledge.cpp	readability-function-cognitive-complexity	5dc238a9fc22800baa3e	function 'apply_update_impl' has cognitive complexity of 51 (threshold 20)
+src/lib/repository_knowledge.cpp	readability-function-cognitive-complexity	72c358422726c19933e7	function 'validate_record' has cognitive complexity of 43 (threshold 20)
+src/lib/repository_knowledge.cpp	readability-function-cognitive-complexity	759ecb540e393109d0d0	function 'assess_impl' has cognitive complexity of 51 (threshold 20)
+src/lib/repository_knowledge.cpp	readability-function-cognitive-complexity	78a03f55652885c89aa4	function 'valid_utf8_text' has cognitive complexity of 29 (threshold 20)
+src/lib/repository_knowledge.cpp	readability-function-cognitive-complexity	b6f8c2c45e31c4d4f627	function 'entity_sources' has cognitive complexity of 32 (threshold 20)
+src/lib/repository_knowledge.cpp	readability-function-cognitive-complexity	e9c9ffd33b82aabc0d42	function 'payload_inline_bytes' has cognitive complexity of 49 (threshold 20)
+src/lib/repository_knowledge.cpp	readability-function-cognitive-complexity	ea246cff2dea0d6b7de2	lambda has cognitive complexity of 22 (threshold 20)
+src/lib/repository_knowledge.cpp	readability-simplify-boolean-expr	fefd1bb8e3ee2f962fd7	boolean expression can be simplified by DeMorgan's theorem
+src/lib/repository_snapshot.cpp	readability-function-cognitive-complexity	447c71a662cd75c168cf	function 'validate_repository_snapshot' has cognitive complexity of 53 (threshold 20)
+src/lib/review_gate.cpp	readability-function-cognitive-complexity	3eb7845498138bc86fb0	function 'evaluate' has cognitive complexity of 61 (threshold 20)
+src/lib/review_gate.cpp	readability-function-cognitive-complexity	490160ae51964513e0a8	function 'decision_digest' has cognitive complexity of 33 (threshold 20)
+src/lib/review_receipt.cpp	readability-function-cognitive-complexity	78a03f55652885c89aa4	function 'valid_utf8_text' has cognitive complexity of 29 (threshold 20)
+src/lib/review_receipt.cpp	readability-function-cognitive-complexity	78e721f0fe7a7f5e1d10	function 'apply_in_place' has cognitive complexity of 69 (threshold 20)
+src/lib/review_receipt.cpp	readability-implicit-bool-conversion	02e852489f01c2adc5c4	implicit conversion 'const ReviewReceiptId *' (aka 'const Id<ReviewReceiptIdTag> *') -> 'bool'
+src/lib/review_receipt.cpp	readability-implicit-bool-conversion	931f541ab28b5159d48b	implicit conversion 'const ReviewReceiptId *' (aka 'const Id<ReviewReceiptIdTag> *') -> 'bool'
+src/lib/run_kernel.cpp	bugprone-empty-catch	117003ae82267c76a50e	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
+src/lib/run_kernel.cpp	bugprone-empty-catch	4845d7502acb85565c5e	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
+src/lib/run_kernel.cpp	bugprone-empty-catch	4de7fc5ab4243f6558b4	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
+src/lib/run_kernel.cpp	bugprone-empty-catch	55bb095f09cee5c1c8af	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
+src/lib/run_kernel.cpp	bugprone-empty-catch	b7793445ee89c997204d	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
+src/lib/run_kernel.cpp	bugprone-empty-catch	b84fc3739cee09bebc71	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
+src/lib/run_kernel.cpp	bugprone-implicit-widening-of-multiplication-result	e2ffd1748150dbbba3eb	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	0b5338e47fbcca98791d	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	0d15dddfc2f82031ea48	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	114fc9f74795b162f6cf	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	176b2a751d312a83aa0c	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	24ec2b907f43a62f6fe2	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	32617c11277852bad032	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	362ce1485987f688ee50	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	3f871eb05294d5a3bd3b	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	470b4433e97e717784fd	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	475c9e097fd6d114affc	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	476b058506525184a3ee	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	49df6ded2928a44210e2	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	4aa47b64507dbe92ff31	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	569a24a14226ea70c72d	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	6fcbf1404c69f900108f	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	75d754ebea4decf8f016	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	7e0fec0859bbcb2efa05	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8634384da1ead018866e	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8c1e43403bdfb3c78a3f	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8cb7b6e09ef257c1d98d	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	9b64dc8caddb8bd6794c	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	9e223020278128058925	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	a31df26173aa64e40b56	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	a47dbca187f3538f1e84	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	a8129e93eb3f9ce2ef2b	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	b4bbbf2ec2699970c988	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	b702b0c05829d63be9c1	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	ce9c89ed860e186c67dd	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	e021583cbbc0440fa6af	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	e4b4b04f33e6da6e68ad	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	e7b4ae990692f689d0f5	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	ee8352bb50a34163f7a4	unchecked access to optional value
+src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	f8a2d45f6bc0a80c2bb7	unchecked access to optional value
+src/lib/run_kernel.cpp	modernize-make-unique	3827400b29caa0bfd14d	use std::make_unique instead
+src/lib/run_kernel.cpp	performance-move-const-arg	2e39eadd6d726edeadbb	std::move of the expression of the trivially-copyable type 'domain::SessionSpendCeiling' has no effect; remove std::move()
+src/lib/run_kernel.cpp	performance-move-const-arg	d7d200ab6d2e3e5f3206	std::move of the variable 'consumption' of the trivially-copyable type 'domain::ChildRunConsumption' has no effect; remove std::move()
+src/lib/run_kernel.cpp	performance-unnecessary-copy-initialization	ea1fd8518f768802cccf	the const qualified variable 'selected_task' is copy-constructed from a const reference; consider making it a const reference
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	03b69a2d9ed28ddd33a4	function 'valid_question_definitions' has cognitive complexity of 30 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	06881eb50cd04132fbec	function 'open_durable' has cognitive complexity of 196 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	14848f7bc8598abd459e	function 'process_tool_update' has cognitive complexity of 65 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	1e14684fe20b926fc8d6	lambda has cognitive complexity of 45 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	24c9b42e2d94c3d4d522	lambda has cognitive complexity of 139 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	36081bf7427e30fbfcd3	function 'dispatch_child' has cognitive complexity of 78 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	3a7e9f2435eb44b651ab	function 'record_child_terminal' has cognitive complexity of 25 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	3d85f609b90077c24657	function 'cancel_run' has cognitive complexity of 49 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	48605afeb0e02c0af334	function 'launch_next_tool' has cognitive complexity of 24 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	87a60ae0ea874695253e	function 'valid_question_answers' has cognitive complexity of 27 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	8bcc548cf36e891cfb4b	function 'process_child_result' has cognitive complexity of 25 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	8d429577b58c5e8b508e	function 'drain' has cognitive complexity of 31 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	9783d0140f61cd2e8374	function 'decide_approval' has cognitive complexity of 35 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	9d500c9fef0ef4da1dfa	function 'decide_plan' has cognitive complexity of 36 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	b9007823d8405300b62e	function 'evaluate_pending_policies' has cognitive complexity of 38 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	b92907f7553f52e9b93e	function 'process_backend_event' has cognitive complexity of 186 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	bb99b5aae5f74e09593f	function 'continue_run' has cognitive complexity of 22 (threshold 20)
+src/lib/run_kernel.cpp	readability-function-cognitive-complexity	f23521b803bf92e25343	function 'start' has cognitive complexity of 59 (threshold 20)
+src/lib/run_kernel.cpp	readability-implicit-bool-conversion	3fa0b8b0af4af3d82b9b	implicit conversion 'const aiforge::domain::ReviewReceiptDrafted *' -> 'bool'
+src/lib/run_kernel.cpp	readability-implicit-bool-conversion	cccf256ebaf939f4e427	implicit conversion 'const aiforge::domain::ReviewReceiptDrafted *' -> 'bool'
+src/lib/run_kernel.cpp	readability-implicit-bool-conversion	d1bc4e7c5e7723e59ffb	implicit conversion 'const aiforge::domain::ReviewRequested *' -> 'bool'
+src/lib/run_kernel.cpp	readability-make-member-function-const	bc82d4f9771a97c8d344	method 'make_event' can be made const
+src/lib/run_projection.cpp	readability-function-cognitive-complexity	7538335c1bdf55e60418	function 'apply' has cognitive complexity of 141 (threshold 20)
+src/lib/slash_commands.cpp	readability-function-cognitive-complexity	1d81730e0627741cf249	function 'valid_utf8_text' has cognitive complexity of 28 (threshold 20)
+src/lib/slash_commands.cpp	readability-simplify-boolean-expr	6c8df12388880a7b3e86	boolean expression can be simplified by DeMorgan's theorem
+src/lib/sqlite_session_store.cpp	bugprone-misplaced-widening-cast	e2f1f80ec254a941d095	either cast from 'std::size_t' (aka 'unsigned long') to 'sqlite3_int64' (aka 'long long') is ineffective, or there is loss of precision before the conversion
+src/lib/sqlite_session_store.cpp	concurrency-mt-unsafe	01df2b280ad7ede60b6f	function is not thread safe
+src/lib/sqlite_session_store.cpp	concurrency-mt-unsafe	6c55350b1bc2d0665613	function is not thread safe
+src/lib/sqlite_session_store.cpp	cppcoreguidelines-pro-type-reinterpret-cast	283d7119c5b26fd9a4e6	do not use reinterpret_cast
+src/lib/sqlite_session_store.cpp	cppcoreguidelines-pro-type-vararg	0208dafcb463d62be3f0	do not call c-style vararg functions
+src/lib/sqlite_session_store.cpp	cppcoreguidelines-pro-type-vararg	baacf94b5dad243589a9	do not call c-style vararg functions
+src/lib/sqlite_session_store.cpp	modernize-use-integer-sign-comparison	78e2c5333290f67b8328	comparison between 'signed' and 'unsigned' integers
+src/lib/sqlite_session_store.cpp	modernize-use-integer-sign-comparison	7e830045b00ac2e79c6d	comparison between 'signed' and 'unsigned' integers
+src/lib/sqlite_session_store.cpp	performance-move-const-arg	5a4a5a76e765d2f9a6fb	std::move of the variable 'parsed' of the trivially-copyable type 'domain::TextPricing' has no effect; remove std::move()
+src/lib/sqlite_session_store.cpp	performance-move-const-arg	9ed619b4d0dec50b3202	std::move of the expression of the trivially-copyable type 'aiforge::domain::SessionSpendCeiling' has no effect; remove std::move()
+src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	46cb989175705abfa405	function 'append_events' has cognitive complexity of 59 (threshold 20)
+src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	56504b750c7c85a1938c	function 'replay_events' has cognitive complexity of 59 (threshold 20)
+src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	69be260cea8712ba6ce8	function 'parse_payload' has cognitive complexity of 100 (threshold 20)
+src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	6ce7e0c9dfab2a23e300	function 'open' has cognitive complexity of 28 (threshold 20)
+src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	87e5b2b5523c1d0e4306	function 'payload_json' has cognitive complexity of 25 (threshold 20)
+src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	8db47d5d78a5c044f99d	function 'open_or_create_memory_journal' has cognitive complexity of 40 (threshold 20)
+src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	9fe5e262b39b7ebf1411	function 'replay_project_backlog' has cognitive complexity of 22 (threshold 20)
+src/lib/sqlite_session_store.cpp	readability-use-anyofallof	574d8db7bbf43f36c9a2	replace loop by 'std::ranges::any_of()'
+src/lib/task_scheduler.cpp	bugprone-unchecked-optional-access	cf109f800ab12c223bfa	unchecked access to optional value
+src/lib/task_scheduler.cpp	readability-function-cognitive-complexity	ddc33b24bb5086415650	function 'analyze_task_schedule' has cognitive complexity of 98 (threshold 20)
+src/lib/tool_policy.cpp	bugprone-unchecked-optional-access	438f9ad71ba423d3029c	unchecked access to optional value
+src/lib/tool_policy.cpp	bugprone-unchecked-optional-access	5f8dcd4cbad338e75cb1	unchecked access to optional value
+src/lib/tool_policy.cpp	performance-no-automatic-move	ef4326693ff20df215d3	constness of 'normalized' prevents automatic move
+src/lib/tool_policy.cpp	readability-function-cognitive-complexity	7256458726bd54e83127	function 'evaluate' has cognitive complexity of 22 (threshold 20)
+src/lib/tool_policy.cpp	readability-simplify-boolean-expr	7b8beafecb64c9c02386	boolean expression can be simplified by DeMorgan's theorem
+src/lib/tool_registry.cpp	bugprone-implicit-widening-of-multiplication-result	073e69eee95375d04b28	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/tool_registry.cpp	bugprone-implicit-widening-of-multiplication-result	420c57ebaf289ae0d825	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/tool_registry.cpp	bugprone-implicit-widening-of-multiplication-result	5db5827898e5b2dda274	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
+src/lib/tool_registry.cpp	bugprone-unchecked-optional-access	87048f563e207973c579	unchecked access to optional value
+src/lib/tool_registry.cpp	readability-function-cognitive-complexity	aa03b6ee8e2b0a3b70c9	function 'tool_continuation_messages' has cognitive complexity of 67 (threshold 20)
+src/lib/transcript_projection.cpp	bugprone-branch-clone	4c97e1a55f3c841acfac	switch has 2 consecutive identical branches
+src/lib/transcript_projection.cpp	readability-function-cognitive-complexity	bf6e598ce72a0fb30618	function 'apply_in_place' has cognitive complexity of 133 (threshold 20)
+src/lib/usage_ledger.cpp	bugprone-unchecked-optional-access	32bb0aacd9093f040fd6	unchecked access to optional value
+src/lib/usage_ledger.cpp	readability-function-cognitive-complexity	c598c64a664c27bb0680	function 'apply' has cognitive complexity of 44 (threshold 20)
+src/lib/verification_evidence.cpp	readability-function-cognitive-complexity	3f9ba352dfd952de892f	function 'make_verification_context_item' has cognitive complexity of 24 (threshold 20)
+src/lib/verification_evidence.cpp	readability-function-cognitive-complexity	6e35cfdbcca7b491896e	function 'validate_impl' has cognitive complexity of 38 (threshold 20)
+src/lib/verification_evidence.cpp	readability-function-cognitive-complexity	78a03f55652885c89aa4	function 'valid_utf8_text' has cognitive complexity of 29 (threshold 20)
+src/lib/verification_evidence.cpp	readability-function-cognitive-complexity	c30cb36006c449aae501	function 'assess_verification_evidence' has cognitive complexity of 25 (threshold 20)
+src/lib/wav.cpp	readability-function-cognitive-complexity	0ac57f57f48375e7e474	function 'validate_pcm_wav' has cognitive complexity of 41 (threshold 20)

@@ -1,0 +1,58 @@
+---
+InheritParentConfig: false
+
+# Prefer category-level coverage. Exclusions below are policy decisions, not a
+# quiet baseline assembled from whichever checks happen to pass today.
+Checks: >
+  -*,
+  clang-analyzer-*,
+  bugprone-*,
+  cert-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -clang-analyzer-apiModeling.google.GTest,
+  -clang-analyzer-apiModeling.llvm.*,
+  -clang-analyzer-fuchsia.*,
+  -clang-analyzer-optin.mpi.*,
+  -clang-analyzer-optin.osx.*,
+  -clang-analyzer-osx.*,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-avoid-const-or-ref-data-members,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-special-member-functions,
+  -misc-include-cleaner,
+  -misc-const-correctness,
+  -misc-non-private-member-variables-in-classes,
+  -modernize-use-emplace,
+  -modernize-use-designated-initializers,
+  -modernize-use-ranges,
+  -performance-enum-size,
+  -performance-unnecessary-value-param,
+  -readability-avoid-nested-conditional-operator,
+  -readability-braces-around-statements,
+  -readability-convert-member-functions-to-static,
+  -readability-function-size,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-named-parameter,
+  -readability-qualified-auto,
+  -readability-redundant-member-init
+
+HeaderFilterRegex: '^.*/(include/aiforge|src/(lib|adapters|bin))/'
+ExcludeHeaderFilterRegex: '^.*/(build[^/]*/|_deps/)/'
+SystemHeaders: false
+FormatStyle: file
+
+CheckOptions:
+  # Two same-typed arguments are common in small value constructors. Three or
+  # more adjacent parameters still deserve a naming/type review.
+  bugprone-easily-swappable-parameters.MinimumLength: '3'
+  # Make complexity a reviewable design boundary rather than an informational
+  # metric. A local exception must use a justified, check-specific NOLINT.
+  readability-function-cognitive-complexity.Threshold: '20'
+  readability-function-cognitive-complexity.DescribeBasicIncrements: 'true'

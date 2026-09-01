@@ -14,6 +14,24 @@ permissions:
   contents: read
 
 jobs:
+  clang-tidy:
+    name: Clang Tidy 20
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Clang Tidy 20
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 20
+          sudo apt-get install --no-install-recommends clang-tidy-20 clang-tools-20
+
+      - name: Check shipped code and suppression policy
+        run: tools/lint.sh
+
   format:
     name: Clang Format 20
     runs-on: ubuntu-24.04
