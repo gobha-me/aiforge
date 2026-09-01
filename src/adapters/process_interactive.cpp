@@ -611,6 +611,7 @@ class ChatAppImpl final : public InteractiveChatApp {
                : persona.selected
                    ? "Ready with persona " + persona.selected->name
                    : "Ready";
+    sync_composer_focus();
   }
 
   [[nodiscard]] auto ready() const noexcept -> bool override {
@@ -632,10 +633,12 @@ class ChatAppImpl final : public InteractiveChatApp {
     auto edited = m_editor.edit(original, m_stop_token);
     if (!edited) {
       m_status = edited.error().message;
+      sync_composer_focus();
       return;
     }
     m_composer.set_text(std::move(*edited));
     m_status = "Draft updated by editor";
+    sync_composer_focus();
   }
 
   [[nodiscard]] auto failure_state() const
@@ -670,6 +673,7 @@ class ChatAppImpl final : public InteractiveChatApp {
 
   auto on_start() -> void override {
     if (m_rendered_output != nullptr) driver().set_output(m_rendered_output);
+    sync_composer_focus();
     ensure_plan_review();
   }
 
@@ -798,6 +802,25 @@ class ChatAppImpl final : public InteractiveChatApp {
     const int rows = screen.rows();
     if (columns <= 0 || rows <= 0 || !m_session) return;
 
+    if (rows <= 2) {
+      m_composer.set_geometry({0, 0, columns, 1});
+      m_composer.draw(screen);
+      if (rows == 2) {
+        std::string footer =
+            m_session->active()
+                ? "Running — Esc/Ctrl+C cancel | Ctrl+D unavailable"
+            : m_help_visible
+                ? "Slash command help — Esc closes | Ctrl+D exits"
+                : "Enter submit | Tab | Ctrl+C clear | Ctrl+D exit | ^E "
+                  "editor | /help";
+        if (!m_status.empty()) footer += " | " + m_status;
+        screen.write_text(0, 1, footer, termforge::theme::kDim,
+                          termforge::theme::kBg);
+      }
+      if (m_rendered_frame) m_rendered_frame(screen);
+      return;
+    }
+
     std::string header =
         "AIForge  session " + std::string{m_session->session_id().value()};
     if (!m_session->durable()) header += " (ephemeral)";
@@ -841,7 +864,24 @@ class ChatAppImpl final : public InteractiveChatApp {
  private:
   auto request_edit() -> void {
     m_pending_edit = true;
+    sync_composer_focus();
     quit();
+  }
+
+  auto sync_composer_focus() -> void {
+    m_composer.set_focused(m_session != nullptr && !m_session->active() &&
+                           !modal() && !m_pending_edit);
+  }
+
+  auto push_modal(termforge::Widget& widget, termforge::OverlayOptions options)
+      -> void {
+    m_composer.set_focused(false);
+    push_overlay(widget, options);
+  }
+
+  auto pop_modal() -> void {
+    pop_overlay();
+    sync_composer_focus();
   }
 
   [[nodiscard]] auto open_chat_session(surfaces::ChatSessionOpen request)
@@ -1791,7 +1831,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     m_plan_dialog->on_result([this, pending, revision](
                                  std::optional<termforge::ChoiceWizardResult>
                                      result) {
-      pop_overlay();
+      pop_modal();
       m_plan_review_active = false;
       if (!result || result->pages.size() != 1 ||
           result->pages.front().selected_indices.size() != 1) {
@@ -1845,8 +1885,8 @@ class ChatAppImpl final : public InteractiveChatApp {
                      ? "Plan revision requested"
                      : "Plan rejected";
     });
-    push_overlay(*m_plan_dialog, {.backdrop = termforge::Backdrop::Dim,
-                                  .dismiss_on_click_outside = false});
+    push_modal(*m_plan_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                .dismiss_on_click_outside = false});
     m_status = "Review the exact proposed plan";
   }
 
@@ -1939,7 +1979,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     m_close_dialog->on_result(
         [this, unresolved = std::move(unresolved), repository_id](
             std::optional<termforge::ChoiceWizardResult> result) mutable {
-          pop_overlay();
+          pop_modal();
           m_close_dialog_active = false;
           if (!result || result->pages.size() != 2 ||
               result->pages[1].selected_indices.size() != 1) {
@@ -1998,8 +2038,8 @@ class ChatAppImpl final : public InteractiveChatApp {
           m_close_action = {};
           if (next) next();
         });
-    push_overlay(*m_close_dialog, {.backdrop = termforge::Backdrop::Dim,
-                                   .dismiss_on_click_outside = false});
+    push_modal(*m_close_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                 .dismiss_on_click_outside = false});
     m_status = "Resolve session cleanup before leaving";
   }
 
@@ -2015,7 +2055,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     }
     if (!m_model_picker) {
       m_model_picker = std::make_unique<ModelPickerDialog>();
-      m_model_picker->on_close([this] { pop_overlay(); });
+      m_model_picker->on_close([this] { pop_modal(); });
       m_model_picker->on_result(
           [this](std::optional<domain::ModelId> selected) {
             if (!selected) {
@@ -2032,8 +2072,8 @@ class ChatAppImpl final : public InteractiveChatApp {
           });
     }
     m_model_picker->set_models(snapshot->get(), m_session->model_id());
-    push_overlay(*m_model_picker, {.backdrop = termforge::Backdrop::Dim,
-                                   .dismiss_on_click_outside = false});
+    push_modal(*m_model_picker, {.backdrop = termforge::Backdrop::Dim,
+                                 .dismiss_on_click_outside = false});
     if (!snapshot->get().warnings.empty())
       m_status = snapshot->get().warnings.back();
     else
@@ -2072,6 +2112,7 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_status = failed->error.message;
       }
     }
+    sync_composer_focus();
     return true;
   }
 

@@ -1,7 +1,7 @@
 # termforge: terminal UI framework. Prefer an installed package, then a sibling
 # checkout for coordinated development, then the compatible stable release.
 if (NOT TARGET termforge::lib)
-  find_package(termforge 0.57.20 CONFIG QUIET)
+  find_package(termforge 0.57.22 CONFIG QUIET)
 endif ()
 
 if (NOT TARGET termforge::lib)
@@ -19,9 +19,9 @@ if (NOT TARGET termforge::lib)
     include(FetchContent)
     FetchContent_Declare(termforge
       GIT_REPOSITORY https://github.com/gobha-me/termforge.git
-      # v0.57.20 retains the Composer, transcript, and choice-wizard seams while
-      # adding bounded input, output-refusal, resize, and image-route hardening.
-      GIT_TAG v0.57.20
+      # v0.57.22 retains the Composer, transcript, and choice-wizard seams while
+      # keeping focused text cursors visible on the colorless fallback tier.
+      GIT_TAG v0.57.22
       GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(termforge)
   endif ()
@@ -100,7 +100,7 @@ function(_aiforge_validate_termforge_headers target)
     message(FATAL_ERROR
       "TermForge package contract failure: ${target} does not export required "
       "headers through its INTERFACE_INCLUDE_DIRECTORIES: ${missing_header_text}. "
-      "Install a complete TermForge 0.57.20 package or adjust CMAKE_PREFIX_PATH "
+      "Install a complete TermForge 0.57.22 package or adjust CMAKE_PREFIX_PATH "
       "so AIForge can use its controlled sibling/FetchContent fallback.")
   endif ()
 endfunction()
