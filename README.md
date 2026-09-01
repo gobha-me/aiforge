@@ -73,6 +73,11 @@ to check every tracked `*.cpp` and `*.hpp` file or `tools/format.sh --fix` to
 apply the policy. The selected TermForge-aligned options are documented in
 [`docs/code-style.md`](docs/code-style.md).
 
+Static analysis is pinned to clang-tidy 20.x. Run `tools/lint.sh` to analyze
+all shipped translation units and enforce check-specific, justified `NOLINT`
+suppressions. The category-level policy and suppression contract are documented
+in [`docs/static-analysis.md`](docs/static-analysis.md).
+
 Configure a model and either store or export a Venice API key, then run a
 one-shot request:
 
