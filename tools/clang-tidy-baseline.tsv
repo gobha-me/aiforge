@@ -377,7 +377,7 @@ src/lib/project_instructions.cpp	readability-use-anyofallof	d5b1655aad5f89549a8e
 src/lib/provenance.cpp	readability-function-cognitive-complexity	5f2f3d0c6f1b7e5298ba	function 'valid_utf8' has cognitive complexity of 24 (threshold 20)
 src/lib/provenance.cpp	readability-function-cognitive-complexity	f75f121cf282523fdcf1	function 'validate_configuration' has cognitive complexity of 22 (threshold 20)
 src/lib/repository_knowledge.cpp	bugprone-unchecked-optional-access	d6c18e6b2b45bb9e91f1	unchecked access to optional value
-src/lib/repository_knowledge.cpp	misc-no-recursion	ae1bcfb1176a7ab97859	function 'operator()<(lambda at /config/Projects/.worktrees/aiforge-clang-tidy-ci/src/lib/repository_knowledge.cpp:555:22)>' is within a recursive call chain
+src/lib/repository_knowledge.cpp	misc-no-recursion	65d6e20f31dd94087707	function 'operator()<(lambda at $REPOSITORY_ROOT/src/lib/repository_knowledge.cpp:555:22)>' is within a recursive call chain
 src/lib/repository_knowledge.cpp	readability-function-cognitive-complexity	0d8b2baadbe5643d70e9	function 'validate_graph_impl' has cognitive complexity of 39 (threshold 20)
 src/lib/repository_knowledge.cpp	readability-function-cognitive-complexity	22d31628cfd0e48e57d1	function 'validate_environment' has cognitive complexity of 21 (threshold 20)
 src/lib/repository_knowledge.cpp	readability-function-cognitive-complexity	26104d129effcb86e9cf	lambda has cognitive complexity of 37 (threshold 20)

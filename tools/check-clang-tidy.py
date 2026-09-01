@@ -64,7 +64,9 @@ def diagnostics(output: pathlib.Path, root: pathlib.Path) -> set[str]:
         if relative.parts[0] not in {"include", "src"}:
             continue
 
-        message = " ".join(match.group("message").split())
+        message = " ".join(match.group("message").split()).replace(
+            str(root), "$REPOSITORY_ROOT"
+        )
         checks = match.group("checks")
         context = normalized_context(source, int(match.group("line")))
         digest = hashlib.sha256(
