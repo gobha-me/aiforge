@@ -425,6 +425,20 @@ class SessionScenarioStore final : public storage::SessionStore {
 
 class GatedBackendState final {
  public:
+  auto set_web_search_support(std::optional<bool> support) -> void {
+    std::lock_guard lock{m_mutex};
+    m_web_search_support = support;
+  }
+
+  auto model_capabilities() -> backend::ModelCapabilityMap {
+    std::lock_guard lock{m_mutex};
+    backend::ModelCapabilityMap result;
+    if (m_web_search_support) {
+      result.emplace("web-search", m_web_search_support);
+    }
+    return result;
+  }
+
   auto initialize(const backend::BackendRequest& request) -> bool {
     std::lock_guard lock{m_mutex};
     if (m_initialized) return false;
@@ -539,6 +553,7 @@ class GatedBackendState final {
   bool m_cancelled{};
   bool m_cancel_end_waiting{};
   bool m_cancel_end_released{};
+  std::optional<bool> m_web_search_support;
 };
 
 class GatedStream final : public backend::BackendStream {
@@ -566,7 +581,8 @@ class GatedBackend final : public backend::Backend,
       -> std::expected<backend::ModelContextInfo,
                        backend::BackendError> override {
     return backend::ModelContextInfo{model_id, 8192, 1024,
-                                     pricing_observation()};
+                                     pricing_observation(),
+                                     m_state->model_capabilities()};
   }
 
   auto start(backend::BackendRequest request, std::stop_token)
@@ -1009,6 +1025,122 @@ auto cursor_modal_scenario() -> testing::TuiScenario {
   return value;
 }
 
+auto request_settings_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-request-settings-cancel-resize";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {160, 28, 1600, 560};
+  const auto key = [](const termforge::Key selected) {
+    return testing::TuiScenarioPost{termforge::KeyEvent{
+        selected, 0, false, false, false, termforge::KeyAction::Press}};
+  };
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/settings"}}},
+      {0, key(termforge::Key::Enter)},
+      {1, testing::TuiScenarioResize{{8, 3, 80, 60}}},
+      {2, testing::TuiScenarioResize{{160, 28, 1600, 560}}},
+      {3, key(termforge::Key::Enter)},
+      {4, testing::TuiScenarioResize{{160, 28, 1600, 560}}},
+      {5, testing::TuiScenarioResize{{16, 5, 160, 100}}},
+      {6, testing::TuiScenarioResize{{160, 28, 1600, 560}}},
+      {7, key(termforge::Key::Escape)},
+      {8, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Char, U'd', true, false, false,
+              termforge::KeyAction::Press}}},
+  };
+  value.limits.maximum_frames = 24;
+  return value;
+}
+
+auto request_settings_apply_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-request-settings-session-apply";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 18, 1000, 360};
+  const auto key = [](const termforge::Key selected) {
+    return testing::TuiScenarioPost{termforge::KeyEvent{
+        selected, 0, false, false, false, termforge::KeyAction::Press}};
+  };
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/settings"}}},
+      {0, key(termforge::Key::Enter)},
+      {1, key(termforge::Key::Down)},
+      {2, key(termforge::Key::Enter)},
+      {3, key(termforge::Key::Down)},
+      {4, key(termforge::Key::Enter)},
+      {5, key(termforge::Key::Enter)},
+      {6, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Char, U'd', true, false, false,
+              termforge::KeyAction::Press}}},
+  };
+  value.limits.maximum_frames = 24;
+  return value;
+}
+
+auto request_settings_session_switch_scenario() -> testing::TuiScenario {
+  auto value = request_settings_apply_scenario();
+  value.scenario_id = "interactive-request-settings-session-switch";
+  const auto key = [](const termforge::Key selected) {
+    return testing::TuiScenarioPost{termforge::KeyEvent{
+        selected, 0, false, false, false, termforge::KeyAction::Press}};
+  };
+  value.steps.pop_back();
+  value.steps.insert(
+      value.steps.end(),
+      {{6, testing::TuiScenarioPost{termforge::PasteEvent{"/session new"}}},
+       {6, key(termforge::Key::Enter)},
+       {7, testing::TuiScenarioPost{termforge::PasteEvent{"/settings"}}},
+       {7, key(termforge::Key::Enter)},
+       {8, key(termforge::Key::Down)},
+       {9, key(termforge::Key::Enter)},
+       {10, key(termforge::Key::Escape)},
+       {11, testing::TuiScenarioPost{
+                termforge::KeyEvent{termforge::Key::Char, U'd', true, false,
+                                    false, termforge::KeyAction::Press}}}});
+  value.limits.maximum_frames = 40;
+  return value;
+}
+
+auto request_settings_save_scenario() -> testing::TuiScenario {
+  auto value = request_settings_apply_scenario();
+  value.scenario_id = "interactive-request-settings-save-default";
+  value.steps.insert(value.steps.begin() + 6,
+                     {5, testing::TuiScenarioPost{termforge::KeyEvent{
+                             termforge::Key::Down, 0, false, false, false,
+                             termforge::KeyAction::Press}}});
+  value.steps.back().after_frame = 7;
+  return value;
+}
+
+auto request_web_search_save_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-web-search-save-default";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 18, 1000, 360};
+  const auto key = [](const termforge::Key selected) {
+    return testing::TuiScenarioPost{termforge::KeyEvent{
+        selected, 0, false, false, false, termforge::KeyAction::Press}};
+  };
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/settings"}}},
+      {0, key(termforge::Key::Enter)},
+      {1, key(termforge::Key::Enter)},
+      {2, key(termforge::Key::Down)},
+      {3, key(termforge::Key::Down)},
+      {4, key(termforge::Key::Enter)},
+      {5, key(termforge::Key::Down)},
+      {6, key(termforge::Key::Enter)},
+      {7, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Char, U'd', true, false, false,
+              termforge::KeyAction::Press}}},
+  };
+  value.limits.maximum_frames = 24;
+  return value;
+}
+
 auto startup_model_scenario(const bool cancel) -> testing::TuiScenario {
   testing::TuiScenario value;
   value.scenario_id = cancel ? "interactive-startup-model-cancel"
@@ -1103,10 +1235,15 @@ auto startup_model_factory(
   };
 }
 
-auto chat_factory(const bool with_catalog = false)
+auto chat_factory(
+    const bool with_catalog = false, const bool with_persistence = false,
+    const bool stale_preview = false, const bool persistence_failure = false,
+    std::optional<config::ConfigSource> shadow_source = std::nullopt,
+    const bool report_persist_calls = false)
     -> testing::TuiScenarioTargetFactory {
-  return [with_catalog](const testing::TuiScenarioPass pass,
-                        termforge::ByteSink* output)
+  return [with_catalog, with_persistence, stale_preview, persistence_failure,
+          shadow_source, report_persist_calls](
+             const testing::TuiScenarioPass pass, termforge::ByteSink* output)
              -> std::expected<testing::TuiScenarioTarget,
                               testing::TuiScenarioError> {
     auto pipe = std::make_shared<Pipe>();
@@ -1116,16 +1253,67 @@ auto chat_factory(const bool with_catalog = false)
           "chat scenario pipe setup failed"});
     }
     auto backend_state = std::make_shared<GatedBackendState>();
+    if (stale_preview) backend_state->set_web_search_support(true);
     auto backend = std::make_shared<GatedBackend>(backend_state);
     auto editor = std::make_shared<NoEditor>();
     auto catalog_source = std::make_shared<ScenarioCatalogSource>();
     auto catalog = std::make_shared<model::CatalogService>(*catalog_source);
     auto frame = std::make_shared<std::string>();
     auto suffix = std::make_shared<std::uint64_t>();
+    auto persist_calls = std::make_shared<std::size_t>();
     adapters::InteractiveChatAppOptions options;
     options.live_wake_enabled = pass == testing::TuiScenarioPass::record;
     options.poll_worker_updates = false;
     if (with_catalog) options.model_catalog = catalog.get();
+    if (with_persistence) {
+      options.preview_request_setting =
+          [backend_state, stale_preview,
+           shadow_source](const adapters::VeniceRequestSettingSave& save)
+          -> std::expected<adapters::VenicePreparedPersistedSettings,
+                           std::string> {
+        adapters::VeniceConfiguredRequestSettings configured;
+        if (save.web_search) {
+          if (shadow_source) {
+            configured.web_search = adapters::VeniceWebSearchSetting::off;
+            configured.web_search_source = shadow_source;
+          } else {
+            configured.web_search = *save.web_search;
+            if (*save.web_search != adapters::VeniceWebSearchSetting::inherit) {
+              configured.web_search_source = config::ConfigSource::file;
+            }
+          }
+        } else if (save.system_prompt) {
+          if (shadow_source) {
+            configured.system_prompt =
+                adapters::VeniceSystemPromptSetting::exclude;
+            configured.system_prompt_source = shadow_source;
+          } else {
+            configured.system_prompt = *save.system_prompt;
+            if (*save.system_prompt !=
+                adapters::VeniceSystemPromptSetting::inherit) {
+              configured.system_prompt_source = config::ConfigSource::file;
+            }
+          }
+        } else {
+          return std::unexpected("scenario save is empty");
+        }
+        if (stale_preview) backend_state->set_web_search_support(false);
+        domain::ConfigurationProvenanceEntry provenance;
+        provenance.key = save.web_search ? "venice.web_search"
+                                         : "venice.include_system_prompt";
+        return adapters::VenicePreparedPersistedSettings{std::move(configured),
+                                                         std::move(provenance)};
+      };
+      options.persist_request_setting =
+          [persistence_failure,
+           persist_calls](const adapters::VeniceRequestSettingSave&)
+          -> std::expected<void, std::string> {
+        ++*persist_calls;
+        if (persistence_failure)
+          return std::unexpected("scenario persistence failed");
+        return {};
+      };
+    }
     options.wake_observer = [backend_state] { backend_state->observe_wake(); };
     options.rendered_output = output;
     options.rendered_frame = [frame](const termforge::Screen& screen) {
@@ -1186,7 +1374,8 @@ auto chat_factory(const bool with_catalog = false)
           return std::unexpected("chat scenario has no tool script");
         },
         [frame] { return *frame; },
-        [raw, backend, editor, catalog_source, catalog] {
+        [raw, backend, editor, catalog_source, catalog, persist_calls,
+         report_persist_calls] {
           static_cast<void>(backend);
           static_cast<void>(editor);
           static_cast<void>(catalog_source);
@@ -1201,6 +1390,7 @@ auto chat_factory(const bool with_catalog = false)
               state << ":cancelled";
             }
           }
+          if (report_persist_calls) state << "|persist=" << *persist_calls;
           return std::move(state).str();
         }};
   };
@@ -1724,6 +1914,105 @@ TEST_CASE("interactive composer yields cursor focus to modal overlays",
       [](const std::string& frame) {
         return frame.find("@reverse=0,4") != std::string::npos;
       }));
+}
+
+TEST_CASE("request settings panel cancels atomically across tiny resizes",
+          "[scenario][chat][settings][failure]") {
+  const auto result =
+      testing::run_tui_scenario(request_settings_scenario(), chat_factory());
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state == "Request settings unchanged");
+  REQUIRE(result->recorded.wire_output.find("Request settings") !=
+          std::string::npos);
+  REQUIRE(result->recorded.wire_output.find("Selected-model support") !=
+          std::string::npos);
+  REQUIRE(result->recorded.wire_output.find("Takes effect: next inference") !=
+          std::string::npos);
+  REQUIRE(result->recorded.wire_output.find("Effective winner:") !=
+          std::string::npos);
+  REQUIRE(result->recorded.wire_output.find("(provider default)") !=
+          std::string::npos);
+}
+
+TEST_CASE("request settings panel applies a transient next-inference value",
+          "[scenario][chat][settings]") {
+  const auto result = testing::run_tui_scenario(
+      request_settings_apply_scenario(), chat_factory());
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "Session request override updated; applies next inference");
+  REQUIRE(result->recorded.wire_output.find("Venice system prompt") !=
+          std::string::npos);
+}
+
+TEST_CASE("request setting session overrides clear on session switch",
+          "[scenario][chat][settings][session]") {
+  const auto result = testing::run_tui_scenario(
+      request_settings_session_switch_scenario(), chat_factory());
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state == "Request settings unchanged");
+  const auto last_settings_panel =
+      result->recorded.wire_output.rfind("Venice system prompt");
+  REQUIRE(last_settings_panel != std::string::npos);
+  REQUIRE(result->recorded.wire_output.find("Session override: none",
+                                            last_settings_panel) !=
+          std::string::npos);
+}
+
+TEST_CASE("request settings panel distinguishes a persisted default",
+          "[scenario][chat][settings][config]") {
+  const auto result = testing::run_tui_scenario(
+      request_settings_save_scenario(), chat_factory(false, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "Saved request default; applies next inference");
+}
+
+TEST_CASE("request setting save revalidates stale model support before write",
+          "[scenario][chat][settings][config][failure]") {
+  const auto result = testing::run_tui_scenario(
+      request_web_search_save_scenario(),
+      chat_factory(false, true, true, false, std::nullopt, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "selected model does not confirm required capability "
+          "'web-search'|persist=0");
+}
+
+TEST_CASE("request setting persistence failure leaves the live session intact",
+          "[scenario][chat][settings][config][failure]") {
+  const auto result = testing::run_tui_scenario(
+      request_settings_save_scenario(),
+      chat_factory(false, true, false, true, std::nullopt, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "scenario persistence failed|persist=1");
+}
+
+TEST_CASE("saved request setting reports a higher-precedence active winner",
+          "[scenario][chat][settings][config]") {
+  const auto result = testing::run_tui_scenario(
+      request_settings_save_scenario(),
+      chat_factory(false, true, false, false,
+                   config::ConfigSource::environment));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "Saved request default; active environment value still wins next "
+          "inference");
 }
 
 TEST_CASE("startup model selection is keyboard-only and resize deterministic",

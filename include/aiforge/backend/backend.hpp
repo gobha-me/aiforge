@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <utility>
@@ -169,6 +170,11 @@ struct ModelContextInfo {
 
 [[nodiscard]] auto validate_generation_requirements(
     const GenerationOptions& options, const ModelContextInfo& model)
+    -> std::expected<void, BackendError>;
+
+[[nodiscard]] auto validate_effective_request_options(
+    const GenerationOptions& options,
+    std::span<const domain::EffectiveRequestOption> effective_options)
     -> std::expected<void, BackendError>;
 
 class BackendStream {

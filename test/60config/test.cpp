@@ -554,12 +554,94 @@ TEST_CASE("concurrent writers serialize read-modify-write updates",
   REQUIRE(std::get<bool>(*resolved->find("enabled")->value) == false);
 }
 
+TEST_CASE("Venice system-prompt config preserves absence and explicit false",
+          "[config][venice][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "config.json";
+  JsonConfigFileStore store{path};
+  REQUIRE(store.set(builtin_config_registry(), "venice.include_system_prompt",
+                    ConfigValue{false}));
+  const auto file = store.load(builtin_config_registry());
+  REQUIRE(file);
+  const std::array layers{*file};
+  const auto resolved = resolve_config(builtin_config_registry(), layers);
+  REQUIRE(resolved);
+  REQUIRE(std::get<bool>(
+              *resolved->find("venice.include_system_prompt")->value) == false);
+  REQUIRE(resolved->find("venice.include_system_prompt")->source ==
+          ConfigSource::file);
+  REQUIRE(
+      store.unset(builtin_config_registry(), "venice.include_system_prompt"));
+  const auto absent = store.load(builtin_config_registry());
+  REQUIRE(absent);
+  const std::array absent_layers{*absent};
+  const auto inherited =
+      resolve_config(builtin_config_registry(), absent_layers);
+  REQUIRE(inherited);
+  REQUIRE_FALSE(inherited->find("venice.include_system_prompt")->value);
+
+  EnvironmentGuard malformed{"AIFORGE_VENICE_INCLUDE_SYSTEM_PROMPT",
+                             std::string{"sometimes"}};
+  const auto environment = environment_config_layer(builtin_config_registry());
+  REQUIRE(environment);
+  const std::array malformed_layers{*environment};
+  const auto rejected =
+      resolve_config(builtin_config_registry(), malformed_layers);
+  REQUIRE(rejected);
+  REQUIRE_FALSE(rejected->find("venice.include_system_prompt")->value);
+  REQUIRE(
+      std::ranges::any_of(rejected->diagnostics, [](const auto& diagnostic) {
+        return diagnostic.key == "venice.include_system_prompt" &&
+               diagnostic.code == ConfigDiagnosticCode::invalid_value;
+      }));
+}
+
+TEST_CASE("malformed persisted Venice request settings fail closed",
+          "[config][venice][file][failure]") {
+  TemporaryDirectory temporary;
+  const auto app = temporary.path() / "aiforge";
+  REQUIRE(std::filesystem::create_directories(app));
+  REQUIRE(::chmod(app.c_str(), 0700) == 0);
+  const auto path = app / "config.json";
+
+  write_file(path, R"({"venice":{"include_system_prompt":"false"}})");
+  REQUIRE(::chmod(path.c_str(), 0600) == 0);
+  auto file = JsonConfigFileStore{path}.load(builtin_config_registry());
+  REQUIRE(file);
+  REQUIRE(file->candidates.size() == 1);
+  REQUIRE_FALSE(file->candidates.front().value);
+  REQUIRE(file->candidates.front().rejection);
+  REQUIRE(file->candidates.front().rejection->key ==
+          "venice.include_system_prompt");
+  REQUIRE(file->candidates.front().rejection->source == ConfigSource::file);
+  REQUIRE(file->candidates.front().rejection->code ==
+          ConfigDiagnosticCode::invalid_value);
+  const std::array prompt_layers{*file};
+  auto prompt = resolve_config(builtin_config_registry(), prompt_layers);
+  REQUIRE(prompt);
+  REQUIRE_FALSE(prompt->find("venice.include_system_prompt")->value);
+
+  write_file(path, R"({"venice":{"web_search":"sometimes"}})");
+  REQUIRE(::chmod(path.c_str(), 0600) == 0);
+  file = JsonConfigFileStore{path}.load(builtin_config_registry());
+  REQUIRE(file);
+  REQUIRE(file->candidates.size() == 1);
+  REQUIRE(file->candidates.front().key == "venice.web_search");
+  REQUIRE(file->candidates.front().value);
+  const auto* invalid_web =
+      std::get_if<std::string>(&*file->candidates.front().value);
+  REQUIRE(invalid_web);
+  REQUIRE(*invalid_web == "sometimes");
+}
+
 TEST_CASE("config CLI keeps content and diagnostics on their streams",
           "[config][commands]") {
   TemporaryDirectory temporary;
   EnvironmentGuard xdg{"XDG_CONFIG_HOME", temporary.path().string()};
   EnvironmentGuard model{"AIFORGE_MODEL", std::nullopt};
   EnvironmentGuard web_search{"AIFORGE_VENICE_WEB_SEARCH", std::nullopt};
+  EnvironmentGuard system_prompt{"AIFORGE_VENICE_INCLUDE_SYSTEM_PROMPT",
+                                 std::nullopt};
   std::string output;
   std::string error;
 
@@ -575,6 +657,7 @@ TEST_CASE("config CLI keeps content and diagnostics on their streams",
   REQUIRE(run_cli({"config", "show"}, output, error) == 0);
   REQUIRE(output == "model\t<unset>\tunset\n"
                     "venice.web_search\t<unset>\tunset\n"
+                    "venice.include_system_prompt\t<unset>\tunset\n"
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n");
@@ -605,6 +688,8 @@ TEST_CASE("malformed files are diagnostic for reads but never overwritten",
   EnvironmentGuard xdg{"XDG_CONFIG_HOME", temporary.path().string()};
   EnvironmentGuard model{"AIFORGE_MODEL", std::nullopt};
   EnvironmentGuard web_search{"AIFORGE_VENICE_WEB_SEARCH", std::nullopt};
+  EnvironmentGuard system_prompt{"AIFORGE_VENICE_INCLUDE_SYSTEM_PROMPT",
+                                 std::nullopt};
   const auto app = temporary.path() / "aiforge";
   REQUIRE(std::filesystem::create_directory(app));
   REQUIRE(::chmod(app.c_str(), 0700) == 0);
@@ -617,6 +702,7 @@ TEST_CASE("malformed files are diagnostic for reads but never overwritten",
   REQUIRE(run_cli({"config", "show"}, output, error) == 0);
   REQUIRE(output == "model\t<unset>\tunset\n"
                     "venice.web_search\t<unset>\tunset\n"
+                    "venice.include_system_prompt\t<unset>\tunset\n"
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n");
@@ -635,12 +721,15 @@ TEST_CASE("read-only resolution survives an unavailable config home",
   EnvironmentGuard home{"HOME", std::nullopt};
   EnvironmentGuard model{"AIFORGE_MODEL", std::string{"environment-model"}};
   EnvironmentGuard web_search{"AIFORGE_VENICE_WEB_SEARCH", std::nullopt};
+  EnvironmentGuard system_prompt{"AIFORGE_VENICE_INCLUDE_SYSTEM_PROMPT",
+                                 std::nullopt};
   std::string output;
   std::string error;
 
   REQUIRE(run_cli({"config", "show"}, output, error) == 0);
   REQUIRE(output == "model\tenvironment-model\tenvironment\n"
                     "venice.web_search\t<unset>\tunset\n"
+                    "venice.include_system_prompt\t<unset>\tunset\n"
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n");

@@ -429,6 +429,7 @@ TEST_CASE("interactive spend ceilings persist and block subsequent inference",
        {},
        domain::SessionSpendCeiling::from("1").value()},
       backend, backend, &store);
+  INFO((created ? std::string{} : created.error().message));
   REQUIRE(created);
   const auto session_id = (*created)->session_id();
   REQUIRE(std::ranges::count_if(
@@ -715,6 +716,252 @@ TEST_CASE("idle model selection updates context and next-run provenance",
           make_id<domain::ModelId>("new-model"));
 }
 
+TEST_CASE("request settings are idle-only atomic and recorded on the next run",
+          "[chat][settings][failure][provenance]") {
+  Backend backend;
+  backend.capabilities["web-search"] = false;
+  domain::RunProvenance provenance{"0.54.0",
+                                   "venice",
+                                   std::nullopt,
+                                   make_id<domain::ModelId>("model"),
+                                   std::nullopt,
+                                   {},
+                                   {{"aiforge", "0.54.0"}},
+                                   {}};
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt, provenance},
+      backend, backend);
+  REQUIRE(session);
+
+  backend::GenerationOptions unsupported;
+  unsupported.extensions.emplace(
+      "venice.chat.web-search",
+      domain::StructuredDataBlock{"application/json", R"("on")"});
+  unsupported.required_model_capabilities.push_back("web-search");
+  const auto rejected = (*session)->set_generation_options(
+      unsupported, {{"venice.chat.web-search", std::string{"on"},
+                     domain::RequestOptionSource::session_override}});
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code ==
+          surfaces::ChatSessionErrorCode::model_lookup_failed);
+  REQUIRE(backend.requests.empty());
+
+  backend::GenerationOptions disabled;
+  disabled.extensions.emplace(
+      "venice.chat.web-search",
+      domain::StructuredDataBlock{"application/json", R"("off")"});
+  const std::vector<domain::EffectiveRequestOption> snapshot{
+      {"venice.chat.web-search", std::string{"off"},
+       domain::RequestOptionSource::session_override},
+      {"venice.chat.include-system-prompt", std::nullopt,
+       domain::RequestOptionSource::provider_default}};
+  const std::vector<domain::ConfigurationProvenanceEntry>
+      refreshed_configuration{
+          {"venice.web_search",
+           std::string{"off"},
+           true,
+           domain::ProvenanceSource::file,
+           false,
+           {{domain::ProvenanceSource::file,
+             domain::ProvenanceDisposition::selected, std::nullopt}}}};
+  REQUIRE((*session)->set_generation_options(disabled, snapshot,
+                                             refreshed_configuration));
+
+  auto submitted = (*session)->submit("use the setting");
+  REQUIRE(submitted);
+  const auto active_change = (*session)->set_generation_options({}, snapshot);
+  REQUIRE_FALSE(active_change);
+  REQUIRE(active_change.error().code ==
+          surfaces::ChatSessionErrorCode::run_failed);
+  const auto recorded =
+      std::ranges::find_if(submitted->committed_events, [](const auto& event) {
+        return std::holds_alternative<domain::RunProvenanceRecorded>(
+            event.payload);
+      });
+  REQUIRE(recorded != submitted->committed_events.end());
+  REQUIRE(std::get<domain::RunProvenanceRecorded>(recorded->payload)
+              .provenance.effective_request_options == snapshot);
+  REQUIRE(std::get<domain::RunProvenanceRecorded>(recorded->payload)
+              .provenance.configuration == refreshed_configuration);
+  drain_to_end(**session);
+  REQUIRE(backend.requests.size() == 1);
+  REQUIRE(backend.requests.front().options.extensions.at(
+              "venice.chat.web-search") ==
+          domain::StructuredDataBlock{"application/json", R"("off")"});
+}
+
+TEST_CASE("request option provenance must match the exact backend extension",
+          "[chat][settings][provenance][failure]") {
+  Backend backend;
+  backend.capabilities["web-search"] = true;
+  backend::GenerationOptions options;
+  options.extensions.emplace(
+      "venice.chat.web-search",
+      domain::StructuredDataBlock{"application/json", R"("on")"});
+  options.required_model_capabilities.push_back("web-search");
+  domain::RunProvenance provenance{
+      "0.54.0",
+      "venice",
+      std::nullopt,
+      make_id<domain::ModelId>("model"),
+      std::nullopt,
+      {},
+      {{"aiforge", "0.54.0"}},
+      {},
+      {{"venice.chat.web-search", std::string{"off"},
+        domain::RequestOptionSource::configuration}}};
+  const auto session =
+      surfaces::ChatSession::open({make_id<domain::ModelId>("model"),
+                                   surfaces::ChatSessionOpen::Mode::ephemeral,
+                                   std::nullopt,
+                                   provenance,
+                                   {},
+                                   std::nullopt,
+                                   options},
+                                  backend, backend);
+  REQUIRE_FALSE(session);
+  REQUIRE(session.error().code ==
+          surfaces::ChatSessionErrorCode::invalid_input);
+  REQUIRE(backend.requests.empty());
+}
+
+TEST_CASE(
+    "request option provenance rejects unknown sources without run metadata",
+    "[chat][settings][provenance][failure]") {
+  Backend backend;
+  backend.capabilities["web-search"] = true;
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
+      backend, backend);
+  REQUIRE(session);
+  backend::GenerationOptions options;
+  options.extensions.emplace(
+      "venice.chat.web-search",
+      domain::StructuredDataBlock{"application/json", R"("on")"});
+  options.required_model_capabilities.push_back("web-search");
+  const auto rejected = (*session)->set_generation_options(
+      std::move(options), {{"venice.chat.web-search", std::string{"on"},
+                            static_cast<domain::RequestOptionSource>(99)}});
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code ==
+          surfaces::ChatSessionErrorCode::invalid_input);
+  REQUIRE(backend.requests.empty());
+}
+
+TEST_CASE("durable resume uses current request settings and preserves history",
+          "[chat][settings][provenance][resume]") {
+  Backend backend;
+  MemoryStore store;
+  backend::GenerationOptions included;
+  included.extensions.emplace(
+      "venice.chat.include-system-prompt",
+      domain::StructuredDataBlock{"application/json", "true"});
+  domain::RunProvenance historical{
+      "0.54.0",
+      "venice",
+      std::nullopt,
+      make_id<domain::ModelId>("model"),
+      std::nullopt,
+      {},
+      {{"aiforge", "0.54.0"}},
+      {},
+      {{"venice.chat.include-system-prompt", std::string{"true"},
+        domain::RequestOptionSource::session_override}}};
+  auto created =
+      surfaces::ChatSession::open({make_id<domain::ModelId>("model"),
+                                   surfaces::ChatSessionOpen::Mode::create,
+                                   std::nullopt,
+                                   historical,
+                                   {},
+                                   std::nullopt,
+                                   included},
+                                  backend, backend, &store);
+  INFO((created ? std::string{} : created.error().message));
+  REQUIRE(created);
+  const auto session_id = (*created)->session_id();
+  REQUIRE((*created)->submit("historical request"));
+  drain_to_end(**created);
+
+  backend::GenerationOptions excluded;
+  excluded.extensions.emplace(
+      "venice.chat.include-system-prompt",
+      domain::StructuredDataBlock{"application/json", "false"});
+  auto current = historical;
+  current.effective_request_options = {
+      {"venice.chat.include-system-prompt", std::string{"false"},
+       domain::RequestOptionSource::configuration}};
+  auto resumed =
+      surfaces::ChatSession::open({make_id<domain::ModelId>("model"),
+                                   surfaces::ChatSessionOpen::Mode::resume,
+                                   session_id,
+                                   current,
+                                   {},
+                                   std::nullopt,
+                                   excluded},
+                                  backend, backend, &store);
+  INFO((resumed ? std::string{} : resumed.error().message));
+  REQUIRE(resumed);
+  const auto submitted = (*resumed)->submit("current request");
+  REQUIRE(submitted);
+  drain_to_end(**resumed);
+  REQUIRE(backend.requests.size() == 2);
+  REQUIRE(backend.requests.front().options.extensions.at(
+              "venice.chat.include-system-prompt") ==
+          domain::StructuredDataBlock{"application/json", "true"});
+  REQUIRE(backend.requests.back().options.extensions.at(
+              "venice.chat.include-system-prompt") ==
+          domain::StructuredDataBlock{"application/json", "false"});
+  const auto recorded = std::ranges::find_if(
+      submitted->committed_events, [](const domain::RunEvent& event) {
+        return std::holds_alternative<domain::RunProvenanceRecorded>(
+            event.payload);
+      });
+  REQUIRE(recorded != submitted->committed_events.end());
+  REQUIRE(std::get<domain::RunProvenanceRecorded>(recorded->payload)
+              .provenance.effective_request_options ==
+          current.effective_request_options);
+  const auto& history = store.histories.at(session_id);
+  const auto first_recorded =
+      std::ranges::find_if(history, [](const domain::RunEvent& event) {
+        return std::holds_alternative<domain::RunProvenanceRecorded>(
+            event.payload);
+      });
+  REQUIRE(first_recorded != history.end());
+  REQUIRE(std::get<domain::RunProvenanceRecorded>(first_recorded->payload)
+              .provenance.effective_request_options ==
+          historical.effective_request_options);
+}
+
+TEST_CASE("model switches retain the old model when settings lose support",
+          "[chat][settings][models][failure]") {
+  Backend backend;
+  backend.capabilities_by_model["old-model"]["web-search"] = true;
+  backend.capabilities_by_model["new-model"]["web-search"] = false;
+  backend::GenerationOptions options;
+  options.extensions.emplace(
+      "venice.chat.web-search",
+      domain::StructuredDataBlock{"application/json", R"("auto")"});
+  options.required_model_capabilities.push_back("web-search");
+  auto session =
+      surfaces::ChatSession::open({make_id<domain::ModelId>("old-model"),
+                                   surfaces::ChatSessionOpen::Mode::ephemeral,
+                                   std::nullopt,
+                                   std::nullopt,
+                                   {},
+                                   std::nullopt,
+                                   options},
+                                  backend, backend);
+  REQUIRE(session);
+
+  const auto changed =
+      (*session)->select_model(make_id<domain::ModelId>("new-model"));
+  REQUIRE_FALSE(changed);
+  REQUIRE((*session)->model_id() == make_id<domain::ModelId>("old-model"));
+  REQUIRE(backend.requests.empty());
+}
+
 TEST_CASE("interactive sessions accept deterministic identity and time sources",
           "[chat][scenario]") {
   Backend backend;
@@ -768,6 +1015,7 @@ TEST_CASE("durable interactive resume rebuilds history without inference",
       {make_id<domain::ModelId>("model"),
        surfaces::ChatSessionOpen::Mode::resume, created_id},
       backend, backend, &store);
+  INFO((resumed ? std::string{} : resumed.error().message));
   REQUIRE(resumed);
   REQUIRE((*resumed)->submitted_prompts() ==
           std::vector<std::string>{"persisted"});

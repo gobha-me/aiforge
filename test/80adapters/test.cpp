@@ -916,6 +916,57 @@ TEST_CASE("Venice adapter maps bounded web-search extensions exactly",
   }
 }
 
+TEST_CASE("Venice adapter maps the explicit system-prompt boolean exactly",
+          "[adapter][venice][extensions]") {
+  for (const bool include : {true, false}) {
+    CAPTURE(include);
+    LocalServer server;
+    adapters::VeniceBackend backend{secret("test-secret"),
+                                    {server.base_url(), 1s, 1s, 1s, 8}};
+    auto value = request();
+    value.options.extensions.emplace(
+        std::string{adapters::venice_system_prompt_extension},
+        domain::StructuredDataBlock{"application/json",
+                                    include ? "true" : "false"});
+    auto started = backend.start(std::move(value), {});
+    REQUIRE(started);
+    while (true) {
+      auto next = (*started)->next({});
+      REQUIRE(next);
+      if (!*next) break;
+    }
+    const auto sent = nlohmann::json::parse(server.body());
+    REQUIRE(sent.at("venice_parameters").at("include_venice_system_prompt") ==
+            include);
+  }
+}
+
+TEST_CASE("Venice adapter combines both bounded Chat request settings",
+          "[adapter][venice][extensions]") {
+  LocalServer server;
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
+  auto value = request();
+  value.options.extensions.emplace(
+      std::string{adapters::venice_web_search_extension},
+      domain::StructuredDataBlock{"application/json", R"("off")"});
+  value.options.extensions.emplace(
+      std::string{adapters::venice_system_prompt_extension},
+      domain::StructuredDataBlock{"application/json", "false"});
+  auto started = backend.start(std::move(value), {});
+  REQUIRE(started);
+  while (true) {
+    auto next = (*started)->next({});
+    REQUIRE(next);
+    if (!*next) break;
+  }
+  const auto sent = nlohmann::json::parse(server.body());
+  REQUIRE(sent.at("venice_parameters").at("enable_web_search") == "off");
+  REQUIRE_FALSE(sent.at("venice_parameters")
+                    .at("include_venice_system_prompt")
+                    .get<bool>());
+}
+
 TEST_CASE(
     "Venice adapter rejects malformed web-search extensions before transport",
     "[adapter][venice][extensions][failure]") {
@@ -931,6 +982,8 @@ TEST_CASE(
   invalid.push_back(
       extension("other.chat.web-search", "application/json", R"("on")"));
   invalid.push_back(
+      extension("venice.media.safe-mode", "application/json", "true"));
+  invalid.push_back(
       extension(std::string{adapters::venice_web_search_extension},
                 "text/plain", R"("on")"));
   invalid.push_back(
@@ -945,6 +998,12 @@ TEST_CASE(
   invalid.push_back(
       extension(std::string{adapters::venice_web_search_extension},
                 "application/json", std::string(17, 'x')));
+  invalid.push_back(
+      extension(std::string{adapters::venice_system_prompt_extension},
+                "application/json", R"("true")"));
+  invalid.push_back(
+      extension(std::string{adapters::venice_system_prompt_extension},
+                "text/plain", "true"));
   invalid.push_back(
       extension(std::string{adapters::venice_web_search_extension},
                 "application/json", R"("on")"));
@@ -1606,6 +1665,68 @@ TEST_CASE("resolved Venice web-search config becomes a bounded extension",
         {}}},
       {}};
   REQUIRE_FALSE(adapters::venice_generation_options(invalid));
+}
+
+TEST_CASE("resolved Venice chat settings preserve inherit and explicit false",
+          "[adapter][venice][extensions][config][provenance]") {
+  const config::ConfigLayer layer{config::ConfigSource::file,
+                                  {{"venice.include_system_prompt",
+                                    config::ConfigValue{false}, std::nullopt}},
+                                  {}};
+  const std::array layers{layer};
+  const auto resolved =
+      config::resolve_config(config::builtin_config_registry(), layers);
+  REQUIRE(resolved);
+  const auto configured =
+      adapters::venice_configured_request_settings(*resolved);
+  REQUIRE(configured);
+  REQUIRE(configured->system_prompt ==
+          adapters::VeniceSystemPromptSetting::exclude);
+  REQUIRE(configured->system_prompt_source == config::ConfigSource::file);
+
+  const auto options = adapters::venice_generation_options(*configured);
+  REQUIRE(options);
+  REQUIRE(options->extensions.at(
+              std::string{adapters::venice_system_prompt_extension}) ==
+          domain::StructuredDataBlock{"application/json", "false"});
+  REQUIRE_FALSE(options->extensions.contains(
+      std::string{adapters::venice_web_search_extension}));
+
+  const auto snapshot = adapters::venice_effective_request_options(*configured);
+  REQUIRE(snapshot);
+  REQUIRE(*snapshot ==
+          std::vector<domain::EffectiveRequestOption>{
+              {"venice.chat.web-search", std::nullopt,
+               domain::RequestOptionSource::provider_default},
+              {"venice.chat.include-system-prompt", std::string{"false"},
+               domain::RequestOptionSource::configuration}});
+
+  const adapters::VeniceRequestSettingOverrides overrides{
+      adapters::VeniceWebSearchSetting::off,
+      adapters::VeniceSystemPromptSetting::include};
+  const auto overridden =
+      adapters::venice_effective_request_options(*configured, overrides);
+  REQUIRE(overridden);
+  REQUIRE(overridden->front().value == "off");
+  REQUIRE(overridden->front().source ==
+          domain::RequestOptionSource::session_override);
+  REQUIRE(overridden->back().value == "true");
+  REQUIRE(overridden->back().source ==
+          domain::RequestOptionSource::session_override);
+}
+
+TEST_CASE("invalid closed Venice request setting values fail closed",
+          "[adapter][venice][extensions][failure]") {
+  adapters::VeniceConfiguredRequestSettings configured;
+  configured.web_search = static_cast<adapters::VeniceWebSearchSetting>(999);
+  REQUIRE_FALSE(adapters::venice_generation_options(configured));
+  REQUIRE_FALSE(adapters::venice_effective_request_options(configured));
+
+  configured.web_search = adapters::VeniceWebSearchSetting::inherit;
+  configured.system_prompt =
+      static_cast<adapters::VeniceSystemPromptSetting>(999);
+  REQUIRE_FALSE(adapters::venice_generation_options(configured));
+  REQUIRE_FALSE(adapters::venice_effective_request_options(configured));
 }
 
 TEST_CASE("process provenance names a credential source without its secret",

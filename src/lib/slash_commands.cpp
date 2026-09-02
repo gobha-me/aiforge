@@ -211,6 +211,12 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
   return no_arguments(arguments, SlashCommandAction::show_usage);
 }
 
+[[nodiscard]] auto settings_handler(std::string_view arguments,
+                                    const SlashCommandContext&)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  return no_arguments(arguments, SlashCommandAction::manage_request_settings);
+}
+
 [[nodiscard]] auto plan_handler(std::string_view arguments,
                                 const SlashCommandContext&)
     -> std::expected<SlashCommandResult, SlashCommandError> {
@@ -250,6 +256,9 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
        persona_handler},
       {"model", "model", "[model-id]", "Choose a text model for future runs.",
        idle_available, model_handler},
+      {"settings", "settings", "",
+       "Inspect or change request settings for future runs.", idle_available,
+       settings_handler},
       {"usage", "usage", "", "Show session usage and reported cost.",
        idle_available, usage_handler},
       {"plan", "plan", "", "Show the current plan and review state.",

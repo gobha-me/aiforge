@@ -224,10 +224,13 @@ auto warning(std::ostream& error, const std::string_view message) -> bool {
 
 } // namespace
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit process setup.
 auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
                                     cli::CommandEnvironment& environment,
                                     std::ostream& output, std::ostream& error)
     -> std::expected<void, cli::CommandFailure> {
+  // clang-format on
   try {
     if (m_maximum_input_bytes == 0) {
       return failure(cli::CommandFailureKind::runtime,
@@ -287,6 +290,19 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
     }();
     auto provenance = process_run_provenance(*resolved, *model, "venice",
                                              std::move(credential_source));
+    auto request_settings = venice_configured_request_settings(*resolved);
+    if (!request_settings) {
+      return failure(cli::CommandFailureKind::runtime,
+                     request_settings.error());
+    }
+    auto effective_request_options =
+        venice_effective_request_options(*request_settings);
+    if (!effective_request_options) {
+      return failure(cli::CommandFailureKind::runtime,
+                     effective_request_options.error());
+    }
+    provenance.effective_request_options =
+        std::move(*effective_request_options);
     auto persona_root = process_persona_root();
     std::optional<FilesystemPersonaSource> personas;
     if (persona_root) personas.emplace(std::move(*persona_root));

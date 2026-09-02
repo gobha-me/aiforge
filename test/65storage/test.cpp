@@ -228,7 +228,13 @@ auto run_provenance() -> domain::RunProvenance {
           {{"aiforge", "0.10.0"}, {"sqlite3", "3.45.1"}},
           {{"read",
             {domain::Effect::read},
-            {{domain::Effect::read, "root", "/workspace"}}}}};
+            {{domain::Effect::read, "root", "/workspace"}}}},
+          {{"venice.chat.web-search", std::string{"auto"},
+            domain::RequestOptionSource::configuration},
+           {"venice.chat.include-system-prompt", std::nullopt,
+            domain::RequestOptionSource::provider_default},
+           {"venice.media.safe-mode", std::string{"off"},
+            domain::RequestOptionSource::session_override}}};
 }
 
 auto pricing_observation() -> domain::PricingObservation {
@@ -1099,6 +1105,65 @@ TEST_CASE("run provenance never persists a secret and rejects stored damage",
   damaged = store->replay_events(session);
   REQUIRE_FALSE(damaged);
   REQUIRE(damaged.error().code == storage::SessionStoreErrorCode::corrupt);
+}
+
+TEST_CASE("effective request option provenance round-trips strictly and reads "
+          "legacy records",
+          "[storage][sqlite][codec][provenance][request-options]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "session", 100);
+  REQUIRE(store->append_events(
+      session,
+      std::array{event(1, started(), "start"),
+                 event(2, domain::RunProvenanceRecorded{run_provenance()},
+                       "options")}));
+
+  const auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  const auto* recorded =
+      std::get_if<domain::RunProvenanceRecorded>(&replayed->at(1).payload);
+  REQUIRE(recorded != nullptr);
+  REQUIRE(recorded->provenance.effective_request_options ==
+          run_provenance().effective_request_options);
+  store.reset();
+
+  // Records written before this tail field existed remain valid and project an
+  // empty effective request-option snapshot.
+  execute_sql(
+      path,
+      "UPDATE events SET payload_json=json_remove(payload_json,"
+      "'$.provenance.effective_request_options') WHERE event_id='options'");
+  store = open_store(path);
+  const auto legacy = store->replay_events(session);
+  REQUIRE(legacy);
+  const auto* legacy_recorded =
+      std::get_if<domain::RunProvenanceRecorded>(&legacy->at(1).payload);
+  REQUIRE(legacy_recorded != nullptr);
+  REQUIRE(legacy_recorded->provenance.effective_request_options.empty());
+  store.reset();
+
+  execute_sql(
+      path,
+      "UPDATE events SET payload_json=json_set(payload_json,"
+      "'$.provenance.effective_request_options',"
+      "json_array(json_object('key','venice.chat.web-search','value','on',"
+      "'source','future_source'))) WHERE event_id='options'");
+  store = open_store(path);
+  const auto unknown_source = store->replay_events(session);
+  REQUIRE_FALSE(unknown_source);
+  REQUIRE(unknown_source.error().code ==
+          storage::SessionStoreErrorCode::corrupt);
+  store.reset();
+
+  execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                    "'$.provenance.effective_request_options',json_object()) "
+                    "WHERE event_id='options'");
+  store = open_store(path);
+  const auto wrong_shape = store->replay_events(session);
+  REQUIRE_FALSE(wrong_shape);
+  REQUIRE(wrong_shape.error().code == storage::SessionStoreErrorCode::corrupt);
 }
 
 TEST_CASE("bounded SQLite writer contention is retryable",

@@ -91,6 +91,34 @@ struct ChatSessionDependencies {
   std::string runtime_version{"unknown"};
 };
 
+class PreparedChatGenerationOptions final {
+ public:
+  PreparedChatGenerationOptions(const PreparedChatGenerationOptions&) = delete;
+  auto operator=(const PreparedChatGenerationOptions&)
+      -> PreparedChatGenerationOptions& = delete;
+  PreparedChatGenerationOptions(PreparedChatGenerationOptions&&) noexcept =
+      default;
+  auto operator=(PreparedChatGenerationOptions&&) noexcept
+      -> PreparedChatGenerationOptions& = default;
+
+ private:
+  friend class ChatSession;
+  PreparedChatGenerationOptions(domain::ModelId model_id,
+                                backend::ModelContextInfo model,
+                                std::uint64_t output_tokens,
+                                backend::GenerationOptions options,
+                                std::optional<domain::RunProvenance> provenance)
+      : m_model_id(std::move(model_id)), m_model(std::move(model)),
+        m_output_tokens(output_tokens), m_options(std::move(options)),
+        m_provenance(std::move(provenance)) {}
+
+  domain::ModelId m_model_id;
+  backend::ModelContextInfo m_model;
+  std::uint64_t m_output_tokens{};
+  backend::GenerationOptions m_options;
+  std::optional<domain::RunProvenance> m_provenance;
+};
+
 class ChatSession final {
  public:
   [[nodiscard]] static auto open(ChatSessionOpen request,
@@ -124,6 +152,21 @@ class ChatSession final {
   [[nodiscard]] auto disable_persona() -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto select_model(domain::ModelId model_id)
       -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto set_generation_options(
+      backend::GenerationOptions options,
+      std::vector<domain::EffectiveRequestOption> effective_request_options,
+      std::optional<std::vector<domain::ConfigurationProvenanceEntry>>
+          configuration = std::nullopt)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto prepare_generation_options(
+      backend::GenerationOptions options,
+      std::vector<domain::EffectiveRequestOption> effective_request_options,
+      std::optional<std::vector<domain::ConfigurationProvenanceEntry>>
+          configuration = std::nullopt)
+      -> std::expected<PreparedChatGenerationOptions, ChatSessionError>;
+  [[nodiscard]] auto commit_generation_options(
+      PreparedChatGenerationOptions prepared)
+      -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto persona_state() const -> ChatPersonaState;
 
   [[nodiscard]] auto plan_task_state(
@@ -154,6 +197,8 @@ class ChatSession final {
       -> const domain::SessionEventLog&;
   [[nodiscard]] auto session_id() const noexcept -> const domain::SessionId&;
   [[nodiscard]] auto model_id() const noexcept -> const domain::ModelId&;
+  [[nodiscard]] auto model_info() const noexcept
+      -> const backend::ModelContextInfo&;
   [[nodiscard]] auto durable() const noexcept -> bool;
   [[nodiscard]] auto active() const noexcept -> bool;
 
