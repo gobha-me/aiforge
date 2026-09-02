@@ -51,6 +51,27 @@ auto secret(std::string value) -> credentials::Secret {
   return credentials::make_secret(std::move(value)).value();
 }
 
+auto type_text(adapters::ModelPickerDialog& dialog, const std::string_view text)
+    -> void {
+  for (const char character : text) {
+    REQUIRE(dialog.on_event(termforge::KeyEvent{
+        termforge::Key::Char, static_cast<char32_t>(character), false, false,
+        false, termforge::KeyAction::Press}));
+  }
+}
+
+auto screen_text(const termforge::Screen& screen) -> std::string {
+  std::string result;
+  for (int row{}; row < screen.rows(); ++row) {
+    for (int column{}; column < screen.cols(); ++column) {
+      const auto value = screen.text_at(column, row);
+      result += value.empty() ? " " : std::string{value};
+    }
+    result += '\n';
+  }
+  return result;
+}
+
 auto context(domain::ContentBlock content = domain::TextBlock{"hello"})
     -> domain::ConstructedContext {
   return domain::ConstructedContext{
@@ -388,7 +409,7 @@ TEST_CASE("model cache rejects duplicate JSON, loose modes, symlinks and "
   REQUIRE(cancelled.error().code == model::CatalogErrorCode::cancelled);
 }
 
-TEST_CASE("model picker filters, selects, cancels and survives tiny geometry",
+TEST_CASE("model picker navigates from either focus and survives tiny geometry",
           "[adapter][models][picker]") {
   model::CatalogEntry alpha{make_id<domain::ModelId>("alpha-chat"), "text"};
   alpha.name = "Alpha";
@@ -410,19 +431,62 @@ TEST_CASE("model picker filters, selects, cancels and survives tiny geometry",
   dialog.set_models(snapshot, make_id<domain::ModelId>("alpha-chat"));
   termforge::Screen screen{60, 16};
   dialog.draw(screen);
-  for (const char character : std::string{"beta"}) {
-    REQUIRE(dialog.on_event(termforge::KeyEvent{
-        termforge::Key::Char, static_cast<char32_t>(character), false, false,
-        false, termforge::KeyAction::Press}));
-  }
   REQUIRE(
-      dialog.on_event(termforge::KeyEvent{termforge::Key::Tab, 0, false, false,
+      dialog.on_event(termforge::KeyEvent{termforge::Key::Down, 0, false, false,
                                           false, termforge::KeyAction::Press}));
   REQUIRE(dialog.on_event(termforge::KeyEvent{termforge::Key::Enter, 0, false,
                                               false, false,
                                               termforge::KeyAction::Press}));
   REQUIRE(reported);
   REQUIRE(selected == make_id<domain::ModelId>("beta-chat"));
+
+  adapters::ModelPickerDialog refocused_dialog;
+  std::optional<domain::ModelId> refocused_selection;
+  refocused_dialog.on_result([&](std::optional<domain::ModelId> result) {
+    refocused_selection = result;
+  });
+  refocused_dialog.set_models(snapshot, {});
+  refocused_dialog.draw(screen);
+  REQUIRE(refocused_dialog.on_event(
+      termforge::KeyEvent{termforge::Key::Tab, 0, false, false, false,
+                          termforge::KeyAction::Press}));
+  type_text(refocused_dialog, "beta");
+  REQUIRE(refocused_dialog.on_event(
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}));
+  REQUIRE(refocused_selection == make_id<domain::ModelId>("beta-chat"));
+
+  adapters::ModelPickerDialog cursor_dialog;
+  cursor_dialog.set_models(snapshot, {});
+  cursor_dialog.draw(screen);
+  type_text(cursor_dialog, "beta");
+  REQUIRE(cursor_dialog.on_event(
+      termforge::KeyEvent{termforge::Key::Home, 0, false, false, false,
+                          termforge::KeyAction::Press}));
+  type_text(cursor_dialog, "x");
+  REQUIRE(cursor_dialog.on_event(
+      termforge::KeyEvent{termforge::Key::End, 0, false, false, false,
+                          termforge::KeyAction::Press}));
+  type_text(cursor_dialog, "y");
+  termforge::Screen cursor_screen{60, 16};
+  cursor_dialog.draw(cursor_screen);
+  REQUIRE(screen_text(cursor_screen).find("xbetay") != std::string::npos);
+
+  adapters::ModelPickerDialog stable_dialog;
+  std::optional<domain::ModelId> stable_selection;
+  stable_dialog.on_result([&](std::optional<domain::ModelId> result) {
+    stable_selection = result;
+  });
+  stable_dialog.set_models(snapshot, {});
+  stable_dialog.draw(screen);
+  REQUIRE(stable_dialog.on_event(
+      termforge::KeyEvent{termforge::Key::Down, 0, false, false, false,
+                          termforge::KeyAction::Press}));
+  type_text(stable_dialog, "a");
+  REQUIRE(stable_dialog.on_event(
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}));
+  REQUIRE(stable_selection == make_id<domain::ModelId>("beta-chat"));
 
   adapters::ModelPickerDialog cancelled_dialog;
   bool cancelled_result{};
@@ -436,6 +500,173 @@ TEST_CASE("model picker filters, selects, cancels and survives tiny geometry",
       termforge::KeyEvent{termforge::Key::Escape, 0, false, false, false,
                           termforge::KeyAction::Press}));
   REQUIRE(cancelled_result);
+}
+
+TEST_CASE("model picker filters explicit capability support states",
+          "[adapter][models][picker]") {
+  model::CatalogEntry supported{make_id<domain::ModelId>("supported"), "text"};
+  supported.context_window_tokens = 8192;
+  supported.capabilities.push_back({model::Capability::tool_calling, true});
+  model::CatalogEntry unsupported{make_id<domain::ModelId>("unsupported"),
+                                  "text"};
+  unsupported.context_window_tokens = 8192;
+  unsupported.capabilities.push_back({model::Capability::tool_calling, false});
+  model::CatalogEntry unknown{make_id<domain::ModelId>("unknown"), "text"};
+  unknown.context_window_tokens = 8192;
+  model::CatalogSnapshot snapshot{
+      std::chrono::sys_time<std::chrono::milliseconds>{1ms},
+      {std::move(supported), std::move(unsupported), std::move(unknown)}};
+
+  const auto select = [&](const std::string_view filter) {
+    adapters::ModelPickerDialog dialog;
+    std::optional<domain::ModelId> selected;
+    dialog.on_result(
+        [&](std::optional<domain::ModelId> result) { selected = result; });
+    dialog.set_models(snapshot, {});
+    termforge::Screen screen{100, 24};
+    dialog.draw(screen);
+    type_text(dialog, filter);
+    REQUIRE(dialog.on_event(termforge::KeyEvent{termforge::Key::Enter, 0, false,
+                                                false, false,
+                                                termforge::KeyAction::Press}));
+    return selected;
+  };
+
+  REQUIRE(select("cap:tools=true") == make_id<domain::ModelId>("supported"));
+  REQUIRE(select("cap:tools=false") == make_id<domain::ModelId>("unsupported"));
+  REQUIRE(select("cap:tools=unknown") == make_id<domain::ModelId>("unknown"));
+}
+
+TEST_CASE("model picker explains malformed, empty, and unmatched filters",
+          "[adapter][models][picker][failure]") {
+  model::CatalogEntry entry{make_id<domain::ModelId>("model"), "text"};
+  entry.context_window_tokens = 8192;
+  model::CatalogSnapshot snapshot{
+      std::chrono::sys_time<std::chrono::milliseconds>{1ms},
+      {std::move(entry)}};
+
+  adapters::ModelPickerDialog malformed;
+  malformed.set_models(snapshot, {});
+  termforge::Screen malformed_screen{110, 28};
+  malformed.draw(malformed_screen);
+  type_text(malformed, "cap:tools=maybe");
+  malformed.draw(malformed_screen);
+  REQUIRE(screen_text(malformed_screen).find("Filter error") !=
+          std::string::npos);
+  bool malformed_reported{};
+  malformed.on_result(
+      [&](std::optional<domain::ModelId>) { malformed_reported = true; });
+  REQUIRE_FALSE(malformed.on_event(
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}));
+  REQUIRE_FALSE(malformed_reported);
+
+  adapters::ModelPickerDialog unmatched;
+  unmatched.set_models(snapshot, {});
+  termforge::Screen unmatched_screen{110, 28};
+  unmatched.draw(unmatched_screen);
+  type_text(unmatched, "absent");
+  unmatched.draw(unmatched_screen);
+  REQUIRE(screen_text(unmatched_screen).find("No models match") !=
+          std::string::npos);
+
+  adapters::ModelPickerDialog empty;
+  empty.set_models(
+      model::CatalogSnapshot{
+          std::chrono::sys_time<std::chrono::milliseconds>{1ms}},
+      {});
+  termforge::Screen empty_screen{110, 28};
+  empty.draw(empty_screen);
+  REQUIRE(screen_text(empty_screen).find("No models match") !=
+          std::string::npos);
+
+  model::CatalogEntry offline_entry{make_id<domain::ModelId>("offline"),
+                                    "text"};
+  offline_entry.context_window_tokens = 8192;
+  offline_entry.offline = true;
+  adapters::ModelPickerDialog offline;
+  bool offline_reported{};
+  offline.on_result(
+      [&](std::optional<domain::ModelId>) { offline_reported = true; });
+  offline.set_models(
+      model::CatalogSnapshot{
+          std::chrono::sys_time<std::chrono::milliseconds>{1ms},
+          {std::move(offline_entry)}},
+      {});
+  termforge::Screen offline_screen{110, 28};
+  offline.draw(offline_screen);
+  REQUIRE(offline.on_event(termforge::KeyEvent{termforge::Key::Enter, 0, false,
+                                               false, false,
+                                               termforge::KeyAction::Press}));
+  REQUIRE_FALSE(offline_reported);
+}
+
+TEST_CASE("model picker bounds large catalogs and exposes selected metadata",
+          "[adapter][models][picker]") {
+  std::vector<model::CatalogEntry> entries;
+  entries.reserve(4096);
+  for (int index{}; index < 4096; ++index) {
+    auto id = std::string{"model-"};
+    id += std::to_string(10000 + index).substr(1);
+    model::CatalogEntry entry{make_id<domain::ModelId>(id), "text"};
+    entry.context_window_tokens = 8192;
+    entries.push_back(std::move(entry));
+  }
+  auto& selected_entry = entries.front();
+  selected_entry.name = "Metadata model";
+  selected_entry.maximum_output_tokens = 1024;
+  selected_entry.capabilities = {
+      {model::Capability::tool_calling, true},
+      {model::Capability::reasoning, std::nullopt},
+      {model::Capability::web_search, false},
+      {model::Capability::vision, true},
+  };
+  model::Pricing pricing;
+  pricing.base.input =
+      model::Price{domain::DecimalAmount::from("1").value(), std::nullopt};
+  pricing.extended_threshold_tokens = 64000;
+  pricing.extended = model::PriceTier{};
+  pricing.extended->output =
+      model::Price{std::nullopt, domain::DecimalAmount::from("2").value()};
+  selected_entry.pricing = std::move(pricing);
+  model::CatalogSnapshot snapshot{
+      std::chrono::sys_time<std::chrono::milliseconds>{1ms},
+      std::move(entries)};
+  snapshot.origin = model::CatalogOrigin::stale_cache;
+
+  adapters::ModelPickerDialog metadata;
+  metadata.set_models(snapshot, make_id<domain::ModelId>("model-0000"));
+  termforge::Screen metadata_screen{120, 30};
+  metadata.draw(metadata_screen);
+  const auto rendered = screen_text(metadata_screen);
+  REQUIRE(rendered.find("reasoning-effort") != std::string::npos);
+  for (const auto name : {"schema", "logprobs", "web-search", "x-search", "tee",
+                          "e2ee", "code"}) {
+    CAPTURE(name);
+    REQUIRE(rendered.find(name) != std::string::npos);
+  }
+  REQUIRE(rendered.find("Limits: context 8192 | output 1024 | status online") !=
+          std::string::npos);
+  REQUIRE(rendered.find("tools true | reasoning unknown | web false") !=
+          std::string::npos);
+  REQUIRE(rendered.find("Pricing base: input USD") != std::string::npos);
+  REQUIRE(rendered.find("Pricing extended@64000: input none | output diem") !=
+          std::string::npos);
+  REQUIRE(rendered.find("Catalog: stale cache") != std::string::npos);
+
+  std::optional<domain::ModelId> selected;
+  metadata.on_result(
+      [&](std::optional<domain::ModelId> result) { selected = result; });
+  REQUIRE(metadata.on_event(termforge::KeyEvent{termforge::Key::Tab, 0, false,
+                                                false, false,
+                                                termforge::KeyAction::Press}));
+  REQUIRE(metadata.on_event(termforge::KeyEvent{termforge::Key::End, 0, false,
+                                                false, false,
+                                                termforge::KeyAction::Press}));
+  REQUIRE(metadata.on_event(termforge::KeyEvent{termforge::Key::Enter, 0, false,
+                                                false, false,
+                                                termforge::KeyAction::Press}));
+  REQUIRE(selected == make_id<domain::ModelId>("model-4095"));
 }
 
 TEST_CASE("interactive model selection rejects stale and unusable entries",
