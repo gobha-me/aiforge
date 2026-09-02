@@ -17,6 +17,11 @@ enum class TranscriptRenderMode {
   plain_text,
 };
 
+enum class ReasoningVisibility {
+  collapsed,
+  expanded,
+};
+
 struct TranscriptTheme {
   termforge::Rgb user{0x7D, 0xD3, 0xFC};
   termforge::Rgb assistant{0xE5, 0xE7, 0xEB};
@@ -48,7 +53,9 @@ class TranscriptView final {
  public:
   explicit TranscriptView(
       TranscriptRenderMode mode = TranscriptRenderMode::rich,
-      TranscriptTheme theme = {});
+      TranscriptTheme theme = {},
+      ReasoningVisibility reasoning_visibility =
+          ReasoningVisibility::collapsed);
   ~TranscriptView();
 
   [[nodiscard]] auto apply(const domain::RunEvent& event)
@@ -56,6 +63,12 @@ class TranscriptView final {
   [[nodiscard]] auto rebuild(std::span<const domain::RunEvent> events)
       -> std::expected<void, TranscriptViewError>;
   [[nodiscard]] auto clear_view() -> std::expected<void, TranscriptViewError>;
+  [[nodiscard]] auto set_reasoning_visibility(ReasoningVisibility visibility)
+      -> std::expected<void, TranscriptViewError>;
+  [[nodiscard]] auto reasoning_visibility() const noexcept
+      -> ReasoningVisibility {
+    return m_reasoning_visibility;
+  }
 
   auto set_geometry(termforge::Rect geometry) -> void;
   [[nodiscard]] auto on_event(const termforge::Event& event) -> bool;
@@ -81,10 +94,12 @@ class TranscriptView final {
   struct RenderedEntry;
 
   [[nodiscard]] auto render(
-      const domain::SessionTranscriptProjection& projection) const
+      const domain::SessionTranscriptProjection& projection,
+      ReasoningVisibility visibility) const
       -> std::expected<std::vector<RenderedEntry>, TranscriptViewError>;
-  [[nodiscard]] auto render_run(const domain::TranscriptProjection& projection)
-      const -> std::expected<std::vector<RenderedEntry>, TranscriptViewError>;
+  [[nodiscard]] auto render_run(const domain::TranscriptProjection& projection,
+                                ReasoningVisibility visibility) const
+      -> std::expected<std::vector<RenderedEntry>, TranscriptViewError>;
   [[nodiscard]] auto sync(std::vector<RenderedEntry> next)
       -> std::expected<void, TranscriptViewError>;
   auto replace_all(const std::vector<RenderedEntry>& entries) -> void;
@@ -93,6 +108,7 @@ class TranscriptView final {
 
   TranscriptRenderMode m_mode;
   TranscriptTheme m_theme;
+  ReasoningVisibility m_reasoning_visibility;
   std::thread::id m_owner;
   domain::SessionTranscriptProjection m_projection;
   domain::TranscriptProjection m_empty_projection;

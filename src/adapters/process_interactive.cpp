@@ -2037,6 +2037,30 @@ class ChatAppImpl final : public InteractiveChatApp {
         if (!show_request_settings()) return false;
         m_composer.clear();
         return true;
+      case surfaces::SlashCommandAction::set_reasoning_visibility: {
+        if (!command.subject) {
+          m_status = "Reasoning visibility is required";
+          return false;
+        }
+        if (*command.subject != "show" && *command.subject != "hide") {
+          m_status = "Reasoning visibility is invalid";
+          return false;
+        }
+        const auto visibility = *command.subject == "show"
+                                    ? ReasoningVisibility::expanded
+                                    : ReasoningVisibility::collapsed;
+        auto updated = m_transcript.set_reasoning_visibility(visibility);
+        if (!updated) {
+          m_status = updated.error().message;
+          return false;
+        }
+        m_help_visible = false;
+        m_composer.clear();
+        m_status = visibility == ReasoningVisibility::expanded
+                       ? "Reasoning text shown"
+                       : "Reasoning text hidden";
+        return true;
+      }
       case surfaces::SlashCommandAction::show_usage:
         show_usage();
         m_composer.clear();

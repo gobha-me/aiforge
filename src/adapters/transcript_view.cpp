@@ -128,8 +128,10 @@ struct TranscriptView::RenderedEntry {
 };
 
 TranscriptView::TranscriptView(const TranscriptRenderMode mode,
-                               TranscriptTheme theme)
-    : m_mode(mode), m_theme(std::move(theme)),
+                               TranscriptTheme theme,
+                               const ReasoningVisibility reasoning_visibility)
+    : m_mode(mode), m_theme(theme),
+      m_reasoning_visibility(reasoning_visibility),
       m_owner(std::this_thread::get_id()) {
 }
 
@@ -164,7 +166,7 @@ auto TranscriptView::apply(const domain::RunEvent& event)
       return error(TranscriptViewErrorCode::projection_rejected,
                    applied.error().message);
     }
-    auto rendered = render(candidate);
+    auto rendered = render(candidate, m_reasoning_visibility);
     if (!rendered) return std::unexpected(std::move(rendered.error()));
     if (auto synced = sync(std::move(*rendered)); !synced) return synced;
     m_projection = std::move(candidate);
@@ -188,7 +190,7 @@ auto TranscriptView::rebuild(const std::span<const domain::RunEvent> events)
       return error(TranscriptViewErrorCode::projection_rejected,
                    candidate.error().message);
     }
-    auto rendered = render(*candidate);
+    auto rendered = render(*candidate, m_reasoning_visibility);
     if (!rendered) return std::unexpected(std::move(rendered.error()));
     replace_all(*rendered);
     m_rendered = std::move(*rendered);
@@ -219,13 +221,35 @@ auto TranscriptView::clear_view() -> std::expected<void, TranscriptViewError> {
   }
 }
 
+auto TranscriptView::set_reasoning_visibility(
+    const ReasoningVisibility visibility)
+    -> std::expected<void, TranscriptViewError> {
+  if (!owner_thread()) {
+    return error(
+        TranscriptViewErrorCode::wrong_thread,
+        "transcript widgets may be changed only on their owner thread");
+  }
+  try {
+    auto rendered = render(m_projection, visibility);
+    if (!rendered) return std::unexpected(std::move(rendered.error()));
+    replace_all(*rendered);
+    m_rendered = std::move(*rendered);
+    m_reasoning_visibility = visibility;
+    return {};
+  } catch (...) {
+    return error(TranscriptViewErrorCode::internal_failure,
+                 "reasoning visibility update failed internally");
+  }
+}
+
 auto TranscriptView::render(
-    const domain::SessionTranscriptProjection& projection) const
+    const domain::SessionTranscriptProjection& projection,
+    const ReasoningVisibility visibility) const
     -> std::expected<std::vector<RenderedEntry>, TranscriptViewError> {
   try {
     std::vector<RenderedEntry> result;
     for (const auto& run : projection.runs()) {
-      auto rendered = render_run(run);
+      auto rendered = render_run(run, visibility);
       if (!rendered) return std::unexpected(std::move(rendered.error()));
       result.reserve(result.size() + rendered->size());
       for (auto& entry : *rendered)
@@ -238,8 +262,10 @@ auto TranscriptView::render(
   }
 }
 
-auto TranscriptView::render_run(const domain::TranscriptProjection& projection)
-    const -> std::expected<std::vector<RenderedEntry>, TranscriptViewError> {
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Variant render
+auto TranscriptView::render_run(const domain::TranscriptProjection& projection,
+                                const ReasoningVisibility visibility) const
+    -> std::expected<std::vector<RenderedEntry>, TranscriptViewError> {
   try {
     std::vector<RenderedEntry> result;
     result.reserve(projection.items().size());
@@ -357,6 +383,30 @@ auto TranscriptView::render_run(const domain::TranscriptProjection& projection)
                     style(base, presentation::TextSemantic::strong));
         if (auto rendered = blocks(output, message->content, base); !rendered) {
           return std::unexpected(std::move(rendered.error()));
+        }
+        if (!message->reasoning.text.empty() ||
+            message->reasoning.has_opaque_metadata) {
+          const termforge::TextStyle reasoning_style{
+              m_theme.muted, {}, termforge::Attr::Dim};
+          if (visibility == ReasoningVisibility::collapsed) {
+            const auto summary =
+                message->reasoning.text.empty()
+                    ? std::string{"Reasoning metadata retained; no "
+                                  "displayable text"}
+                    : std::format("Reasoning — hidden ({} bytes)",
+                                  message->reasoning.text.size());
+            append_span(output, "\n" + summary, reasoning_style);
+          } else if (!message->reasoning.text.empty()) {
+            auto reasoning = sanitized(message->reasoning.text);
+            if (!reasoning) {
+              return std::unexpected(std::move(reasoning.error()));
+            }
+            append_span(output, "\nReasoning:\n" + *reasoning, reasoning_style);
+          } else {
+            append_span(output,
+                        "\nReasoning metadata retained; no displayable text",
+                        reasoning_style);
+          }
         }
         if (message->state == domain::TranscriptMessageState::cancelled) {
           append_span(output, "\n[cancelled]", style(m_theme.muted));

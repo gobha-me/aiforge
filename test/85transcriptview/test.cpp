@@ -132,6 +132,98 @@ TEST_CASE("TranscriptView provides a markup-free plain fallback and resizes",
   view.draw(screen);
 }
 
+TEST_CASE("TranscriptView keeps reasoning collapsed until explicitly expanded",
+          "[adapter][transcript][reasoning]") {
+  adapters::TranscriptView view;
+  view.set_geometry({0, 0, 120, 8});
+  const auto inference = make_id<domain::InferenceId>("inference");
+  const auto assistant = make_id<domain::MessageId>("assistant");
+  REQUIRE(view.apply(event(1, started())));
+  REQUIRE(
+      view.apply(event(2, domain::InferenceStarted{
+                              inference, make_id<domain::ModelId>("model")})));
+  REQUIRE(view.apply(
+      event(3, domain::AssistantContentStarted{assistant, inference})));
+  REQUIRE(
+      view.apply(event(4, domain::ReasoningMetadataAdded{
+                              inference,
+                              std::string{"**plan**\nnext"},
+                              {{"application/private", "secret-signature"}}})));
+  REQUIRE(view.apply(
+      event(5, domain::AssistantContentDeltaAdded{
+                   assistant, inference, domain::TextBlock{"answer"}})));
+
+  const auto visible_text = [&] {
+    termforge::Screen screen{120, 8};
+    view.draw(screen);
+    std::string result;
+    for (int row = 0; row < screen.rows(); ++row) {
+      result += row_text(screen, row);
+    }
+    return std::pair{std::move(screen), std::move(result)};
+  };
+
+  REQUIRE(view.reasoning_visibility() ==
+          adapters::ReasoningVisibility::collapsed);
+  auto [collapsed_screen, collapsed] = visible_text();
+  static_cast<void>(collapsed_screen);
+  REQUIRE(collapsed.find("Reasoning — hidden (13 bytes)") != std::string::npos);
+  REQUIRE(collapsed.find("**plan**") == std::string::npos);
+  REQUIRE(collapsed.find("secret-signature") == std::string::npos);
+
+  REQUIRE(
+      view.set_reasoning_visibility(adapters::ReasoningVisibility::expanded));
+  REQUIRE(view.reasoning_visibility() ==
+          adapters::ReasoningVisibility::expanded);
+  auto [expanded_screen, expanded] = visible_text();
+  REQUIRE(expanded.find("Reasoning:") != std::string::npos);
+  REQUIRE(expanded.find("**plan**") != std::string::npos);
+  REQUIRE(expanded.find("secret-signature") == std::string::npos);
+  bool saw_dim_reasoning{};
+  for (int row = 0; row < expanded_screen.rows(); ++row) {
+    if (row_text(expanded_screen, row).find("Reasoning:") !=
+        std::string::npos) {
+      for (int column = 0; column < expanded_screen.cols(); ++column) {
+        saw_dim_reasoning =
+            saw_dim_reasoning ||
+            termforge::any(expanded_screen.at(column, row).attrs &
+                           termforge::Attr::Dim);
+      }
+    }
+  }
+  REQUIRE(saw_dim_reasoning);
+
+  REQUIRE(
+      view.set_reasoning_visibility(adapters::ReasoningVisibility::collapsed));
+  view.set_geometry({0, 0, 8, 2});
+  auto [hidden_again_screen, hidden_again] = visible_text();
+  static_cast<void>(hidden_again_screen);
+  REQUIRE(hidden_again.find("**plan**") == std::string::npos);
+}
+
+TEST_CASE("TranscriptView reports metadata-only reasoning without exposing it",
+          "[adapter][transcript][reasoning][privacy]") {
+  adapters::TranscriptView view{adapters::TranscriptRenderMode::plain_text};
+  view.set_geometry({0, 0, 80, 4});
+  const auto inference = make_id<domain::InferenceId>("inference");
+  const auto assistant = make_id<domain::MessageId>("assistant");
+  REQUIRE(view.apply(event(1, started())));
+  REQUIRE(
+      view.apply(event(2, domain::InferenceStarted{
+                              inference, make_id<domain::ModelId>("model")})));
+  REQUIRE(view.apply(
+      event(3, domain::AssistantContentStarted{assistant, inference})));
+  REQUIRE(view.apply(
+      event(4, domain::ReasoningMetadataAdded{
+                   inference, std::nullopt, {{"opaque", "do-not-render"}}})));
+  termforge::Screen screen{80, 4};
+  view.draw(screen);
+  const auto visible = row_text(screen, 0) + row_text(screen, 1);
+  REQUIRE(visible.find("Reasoning metadata retained; no displayable text") !=
+          std::string::npos);
+  REQUIRE(visible.find("do-not-render") == std::string::npos);
+}
+
 TEST_CASE("TranscriptView groups questions from one invocation",
           "[adapter][transcript][questions]") {
   adapters::TranscriptView view{adapters::TranscriptRenderMode::plain_text};
@@ -226,6 +318,18 @@ TEST_CASE("TranscriptView rejects worker-thread projection and widget mutation",
           adapters::TranscriptViewErrorCode::wrong_thread);
   REQUIRE(view.projection().last_sequence() == 0);
   REQUIRE(view.widget().line_count() == 0);
+
+  std::jthread visibility_worker{[&] {
+    result =
+        view.set_reasoning_visibility(adapters::ReasoningVisibility::expanded);
+  }};
+  visibility_worker.join();
+  REQUIRE(result);
+  REQUIRE_FALSE(*result);
+  REQUIRE(result->error().code ==
+          adapters::TranscriptViewErrorCode::wrong_thread);
+  REQUIRE(view.reasoning_visibility() ==
+          adapters::ReasoningVisibility::collapsed);
 }
 
 TEST_CASE(

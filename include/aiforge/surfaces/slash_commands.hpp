@@ -33,6 +33,7 @@ enum class SlashCommandAction {
   manage_personas,
   choose_model,
   manage_request_settings,
+  set_reasoning_visibility,
   show_usage,
   show_plan,
   show_tasks,

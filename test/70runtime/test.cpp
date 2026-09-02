@@ -356,6 +356,10 @@ TEST_CASE("a delta before response start fails closed", "[runtime][failure]") {
 TEST_CASE("reasoning continuation state respects resource and text bounds",
           "[runtime][reasoning][failure]") {
   std::vector<backend::ReasoningDelta> cases;
+  cases.push_back({std::string{}, {}});
+  cases.push_back({std::nullopt, {}});
+  cases.push_back({std::string{"escape\x1b"}, {}});
+  cases.push_back({std::string{"\xc3", 1}, {}});
   cases.push_back({std::string(1024U * 1024U + 1, 'x'), {}});
   cases.push_back(
       {std::nullopt, domain::Metadata(257, {"media/type", "value"})});
@@ -386,6 +390,28 @@ TEST_CASE("reasoning continuation state respects resource and text bounds",
     REQUIRE(projection != nullptr);
     REQUIRE(projection->status() == domain::RunStatus::failed);
   }
+
+  auto backend_request = request();
+  testing::ScriptedBackend fake{{testing::ScriptedExchange{
+      backend_request,
+      testing::StreamScript{{
+          step(backend::ResponseStarted{"response"}),
+          step(backend::ReasoningDelta{std::string(1024U * 1024U, 'x'), {}}),
+          step(backend::ReasoningDelta{std::string{"x"}, {}}),
+          testing::EndOfStream{},
+      }}}}};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake, &wake};
+  REQUIRE(kernel.start(run_start(backend_request)));
+  static_cast<void>(drain_to_end(kernel, wake));
+  const auto* projection = kernel.projection(make_id<domain::RunId>("run"));
+  REQUIRE(projection != nullptr);
+  REQUIRE(projection->status() == domain::RunStatus::failed);
+  REQUIRE(
+      std::ranges::count_if(kernel.event_log().events(), [](const auto& event) {
+        return std::holds_alternative<domain::ReasoningMetadataAdded>(
+            event.payload);
+      }) == 1);
 }
 
 TEST_CASE("backend failure text is structurally excluded from run events",

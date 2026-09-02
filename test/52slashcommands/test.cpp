@@ -177,7 +177,7 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   const auto& registry = builtin_slash_command_registry();
   const auto listed = registry.describe();
   REQUIRE(listed);
-  REQUIRE(listed->size() == 12);
+  REQUIRE(listed->size() == 13);
   REQUIRE((*listed)[0].name == "help");
   REQUIRE((*listed)[1].name == "quit");
   REQUIRE((*listed)[2].name == "clear");
@@ -186,10 +186,11 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   REQUIRE((*listed)[5].name == "persona");
   REQUIRE((*listed)[6].name == "model");
   REQUIRE((*listed)[7].name == "settings");
-  REQUIRE((*listed)[8].name == "usage");
-  REQUIRE((*listed)[9].name == "plan");
-  REQUIRE((*listed)[10].name == "tasks");
-  REQUIRE((*listed)[11].name == "memory");
+  REQUIRE((*listed)[8].name == "reasoning");
+  REQUIRE((*listed)[9].name == "usage");
+  REQUIRE((*listed)[10].name == "plan");
+  REQUIRE((*listed)[11].name == "tasks");
+  REQUIRE((*listed)[12].name == "memory");
 
   const auto memory = registry.dispatch("/memory search convention");
   REQUIRE(memory);
@@ -285,6 +286,26 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
       registry.dispatch("/settings", {.run_active = true, .stop_token = {}});
   REQUIRE_FALSE(active_settings);
   REQUIRE(active_settings.error().code ==
+          SlashCommandErrorCode::unavailable_command);
+
+  for (const auto argument : {"show", "hide"}) {
+    const auto reasoning =
+        registry.dispatch("/reasoning " + std::string{argument});
+    REQUIRE(reasoning);
+    REQUIRE((*reasoning)->action ==
+            SlashCommandAction::set_reasoning_visibility);
+    REQUIRE((*reasoning)->subject == argument);
+  }
+  for (const auto invalid :
+       {"/reasoning", "/reasoning auto", "/reasoning show now"}) {
+    const auto rejected = registry.dispatch(invalid);
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error().code == SlashCommandErrorCode::invalid_arguments);
+  }
+  const auto active_reasoning = registry.dispatch(
+      "/reasoning show", {.run_active = true, .stop_token = {}});
+  REQUIRE_FALSE(active_reasoning);
+  REQUIRE(active_reasoning.error().code ==
           SlashCommandErrorCode::unavailable_command);
 
   const auto invalid_usage = registry.dispatch("/usage now");
