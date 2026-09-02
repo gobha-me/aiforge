@@ -195,8 +195,6 @@ src/adapters/termforge_image_renderer.cpp	bugprone-implicit-widening-of-multipli
 src/adapters/termforge_image_renderer.cpp	bugprone-implicit-widening-of-multiplication-result	a3e6b1f1fb8895b0b398	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
 src/adapters/termforge_image_renderer.cpp	bugprone-implicit-widening-of-multiplication-result	ffe1c07cbae948cef82b	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
 src/adapters/termforge_run_bridge.cpp	bugprone-empty-catch	4f6fca66b777e141c4ea	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
-src/adapters/transcript_view.cpp	performance-move-const-arg	a050aa34a7c30e9e260d	std::move of the variable 'theme' of the trivially-copyable type 'TranscriptTheme' has no effect; remove std::move()
-src/adapters/transcript_view.cpp	readability-function-cognitive-complexity	3f5179956adce0302f59	function 'render_run' has cognitive complexity of 210 (threshold 20)
 src/adapters/transcript_view.cpp	readability-function-cognitive-complexity	d3db41dcc9cdbc8bbff6	lambda has cognitive complexity of 37 (threshold 20)
 src/adapters/transcript_view.cpp	readability-function-cognitive-complexity	f782f47a7a739e2f3b9b	function 'sync' has cognitive complexity of 21 (threshold 20)
 src/adapters/tui_scenario.cpp	readability-function-cognitive-complexity	625ce5bf438504c48cbb	function 'run_tui_scenario' has cognitive complexity of 24 (threshold 20)
@@ -384,14 +382,11 @@ src/lib/run_kernel.cpp	bugprone-empty-catch	4de7fc5ab4243f6558b4	empty catch sta
 src/lib/run_kernel.cpp	bugprone-empty-catch	55bb095f09cee5c1c8af	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-empty-catch	b7793445ee89c997204d	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-empty-catch	b84fc3739cee09bebc71	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
-src/lib/run_kernel.cpp	bugprone-implicit-widening-of-multiplication-result	e2ffd1748150dbbba3eb	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	0b5338e47fbcca98791d	unchecked access to optional value
-src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	0d15dddfc2f82031ea48	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	114fc9f74795b162f6cf	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	176b2a751d312a83aa0c	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	24ec2b907f43a62f6fe2	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	32617c11277852bad032	unchecked access to optional value
-src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	362ce1485987f688ee50	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	3f871eb05294d5a3bd3b	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	470b4433e97e717784fd	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	475c9e097fd6d114affc	unchecked access to optional value
@@ -401,13 +396,11 @@ src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	4aa47b64507dbe92ff31	u
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	569a24a14226ea70c72d	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	6fcbf1404c69f900108f	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	75d754ebea4decf8f016	unchecked access to optional value
-src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	7e0fec0859bbcb2efa05	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8634384da1ead018866e	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8c1e43403bdfb3c78a3f	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8cb7b6e09ef257c1d98d	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	9b64dc8caddb8bd6794c	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	9e223020278128058925	unchecked access to optional value
-src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	a31df26173aa64e40b56	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	a47dbca187f3538f1e84	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	a8129e93eb3f9ce2ef2b	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	b4bbbf2ec2699970c988	unchecked access to optional value
@@ -415,9 +408,7 @@ src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	b702b0c05829d63be9c1	u
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	ce9c89ed860e186c67dd	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	e021583cbbc0440fa6af	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	e4b4b04f33e6da6e68ad	unchecked access to optional value
-src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	e7b4ae990692f689d0f5	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	ee8352bb50a34163f7a4	unchecked access to optional value
-src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	f8a2d45f6bc0a80c2bb7	unchecked access to optional value
 src/lib/run_kernel.cpp	modernize-make-unique	3827400b29caa0bfd14d	use std::make_unique instead
 src/lib/run_kernel.cpp	performance-move-const-arg	2e39eadd6d726edeadbb	std::move of the expression of the trivially-copyable type 'domain::SessionSpendCeiling' has no effect; remove std::move()
 src/lib/run_kernel.cpp	performance-move-const-arg	d7d200ab6d2e3e5f3206	std::move of the variable 'consumption' of the trivially-copyable type 'domain::ChildRunConsumption' has no effect; remove std::move()
@@ -426,7 +417,6 @@ src/lib/run_kernel.cpp	readability-function-cognitive-complexity	03b69a2d9ed28dd
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	06881eb50cd04132fbec	function 'open_durable' has cognitive complexity of 196 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	14848f7bc8598abd459e	function 'process_tool_update' has cognitive complexity of 65 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	1e14684fe20b926fc8d6	lambda has cognitive complexity of 45 (threshold 20)
-src/lib/run_kernel.cpp	readability-function-cognitive-complexity	24c9b42e2d94c3d4d522	lambda has cognitive complexity of 139 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	36081bf7427e30fbfcd3	function 'dispatch_child' has cognitive complexity of 78 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	3a7e9f2435eb44b651ab	function 'record_child_terminal' has cognitive complexity of 25 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	3d85f609b90077c24657	function 'cancel_run' has cognitive complexity of 49 (threshold 20)
@@ -437,7 +427,6 @@ src/lib/run_kernel.cpp	readability-function-cognitive-complexity	8d429577b58c5e8
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	9783d0140f61cd2e8374	function 'decide_approval' has cognitive complexity of 35 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	9d500c9fef0ef4da1dfa	function 'decide_plan' has cognitive complexity of 36 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	b9007823d8405300b62e	function 'evaluate_pending_policies' has cognitive complexity of 38 (threshold 20)
-src/lib/run_kernel.cpp	readability-function-cognitive-complexity	b92907f7553f52e9b93e	function 'process_backend_event' has cognitive complexity of 186 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	bb99b5aae5f74e09593f	function 'continue_run' has cognitive complexity of 22 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	f23521b803bf92e25343	function 'start' has cognitive complexity of 59 (threshold 20)
 src/lib/run_kernel.cpp	readability-implicit-bool-conversion	3fa0b8b0af4af3d82b9b	implicit conversion 'const aiforge::domain::ReviewReceiptDrafted *' -> 'bool'
@@ -478,7 +467,6 @@ src/lib/tool_registry.cpp	bugprone-implicit-widening-of-multiplication-result	5d
 src/lib/tool_registry.cpp	bugprone-unchecked-optional-access	87048f563e207973c579	unchecked access to optional value
 src/lib/tool_registry.cpp	readability-function-cognitive-complexity	aa03b6ee8e2b0a3b70c9	function 'tool_continuation_messages' has cognitive complexity of 67 (threshold 20)
 src/lib/transcript_projection.cpp	bugprone-branch-clone	4c97e1a55f3c841acfac	switch has 2 consecutive identical branches
-src/lib/transcript_projection.cpp	readability-function-cognitive-complexity	bf6e598ce72a0fb30618	function 'apply_in_place' has cognitive complexity of 133 (threshold 20)
 src/lib/usage_ledger.cpp	bugprone-unchecked-optional-access	32bb0aacd9093f040fd6	unchecked access to optional value
 src/lib/usage_ledger.cpp	readability-function-cognitive-complexity	c598c64a664c27bb0680	function 'apply' has cognitive complexity of 44 (threshold 20)
 src/lib/verification_evidence.cpp	readability-function-cognitive-complexity	3f9ba352dfd952de892f	function 'make_verification_context_item' has cognitive complexity of 24 (threshold 20)

@@ -105,6 +105,150 @@ TEST_CASE("transcript projection rejects invalid ordering transactionally",
   REQUIRE(projection.last_sequence() == 5);
 }
 
+TEST_CASE("transcript replays legacy reasoning defensively and stays bounded",
+          "[transcript][reasoning][compatibility]") {
+  const auto inference = make_id<domain::InferenceId>("inference");
+  const auto assistant = make_id<domain::MessageId>("assistant");
+  const auto active_projection = [&] {
+    domain::TranscriptProjection projection;
+    REQUIRE(projection.apply(event(1, started())));
+    REQUIRE(projection.apply(
+        event(2, domain::InferenceStarted{inference,
+                                          make_id<domain::ModelId>("model")})));
+    REQUIRE(projection.apply(
+        event(3, domain::AssistantContentStarted{assistant, inference})));
+    return projection;
+  };
+
+  const std::vector invalid_text{std::string{}, std::string{"escape\x1b"},
+                                 std::string{"\xc3", 1},
+                                 std::string(1024U * 1024U + 1U, 'x')};
+  for (const auto& text : invalid_text) {
+    auto projection = active_projection();
+    REQUIRE(projection.apply(
+        event(4, domain::ReasoningMetadataAdded{inference, text, {}})));
+    const auto& message =
+        std::get<domain::TranscriptMessage>(projection.items().front());
+    REQUIRE(message.reasoning.text.empty());
+    REQUIRE(projection.last_sequence() == 4);
+  }
+
+  auto projection = active_projection();
+  REQUIRE(projection.apply(
+      event(4, domain::ReasoningMetadataAdded{inference, std::nullopt, {}})));
+
+  projection = active_projection();
+  REQUIRE(projection.apply(
+      event(4, domain::ReasoningMetadataAdded{
+                   inference, std::string(1024U * 1024U, 'x'), {}})));
+  REQUIRE(projection.apply(event(
+      5, domain::ReasoningMetadataAdded{inference, std::string{"x"}, {}})));
+  const auto& bounded =
+      std::get<domain::TranscriptMessage>(projection.items().front());
+  REQUIRE(bounded.reasoning.text.size() == 1024U * 1024U);
+
+  projection = active_projection();
+  REQUIRE(projection.apply(
+      event(4, domain::AssistantContentFinished{assistant, inference})));
+  REQUIRE(projection.apply(event(
+      5, domain::ReasoningMetadataAdded{inference, std::string{"late"}, {}})));
+  REQUIRE(projection.apply(event(
+      6, domain::InferenceFinished{inference, domain::FinishReason::stop})));
+  const auto after_terminal = projection;
+  const auto terminal = projection.apply(event(
+      7, domain::ReasoningMetadataAdded{inference, std::string{"later"}, {}}));
+  REQUIRE_FALSE(terminal);
+  REQUIRE(projection.items() == after_terminal.items());
+  REQUIRE(projection.last_sequence() == after_terminal.last_sequence());
+
+  domain::TranscriptProjection before_message;
+  REQUIRE(before_message.apply(event(1, started())));
+  REQUIRE(before_message.apply(
+      event(2, domain::InferenceStarted{inference,
+                                        make_id<domain::ModelId>("model")})));
+  const auto no_message = before_message.apply(event(
+      3, domain::ReasoningMetadataAdded{inference, std::string{"early"}, {}}));
+  REQUIRE_FALSE(no_message);
+  REQUIRE(no_message.error().code ==
+          domain::TranscriptProjectionErrorCode::unknown_inference);
+  REQUIRE(before_message.last_sequence() == 2);
+
+  projection = active_projection();
+  const auto wrong = projection.apply(event(
+      4, domain::ReasoningMetadataAdded{
+             make_id<domain::InferenceId>("other"), std::string{"wrong"}, {}}));
+  REQUIRE_FALSE(wrong);
+  REQUIRE(wrong.error().code ==
+          domain::TranscriptProjectionErrorCode::unknown_inference);
+  REQUIRE(projection.last_sequence() == 3);
+}
+
+TEST_CASE(
+    "transcript retains ordered reasoning and opaque presence on cancellation",
+    "[transcript][reasoning]") {
+  const auto inference = make_id<domain::InferenceId>("inference");
+  const auto assistant = make_id<domain::MessageId>("assistant");
+  const std::vector events{
+      event(1, started()),
+      event(2, domain::InferenceStarted{inference,
+                                        make_id<domain::ModelId>("model")}),
+      event(3, domain::AssistantContentStarted{assistant, inference}),
+      event(4, domain::ReasoningMetadataAdded{inference,
+                                              std::string{"first\n"},
+                                              {}}),
+      event(5, domain::ReasoningMetadataAdded{inference,
+                                              std::nullopt,
+                                              {{"opaque/type", "hidden"}}}),
+      event(
+          6,
+          domain::ReasoningMetadataAdded{inference, std::string{"second"}, {}}),
+      event(7, domain::InferenceCancelled{inference, "cancelled"}),
+      event(8, domain::RunCancelled{"cancelled"}),
+  };
+
+  domain::TranscriptProjection incremental;
+  for (const auto& value : events)
+    REQUIRE(incremental.apply(value));
+  const auto rebuilt = domain::TranscriptProjection::rebuild(events);
+  REQUIRE(rebuilt);
+  REQUIRE(rebuilt->items() == incremental.items());
+  const auto& message =
+      std::get<domain::TranscriptMessage>(incremental.items().front());
+  REQUIRE(message.state == domain::TranscriptMessageState::cancelled);
+  REQUIRE(message.reasoning.text == "first\nsecond");
+  REQUIRE(message.reasoning.has_opaque_metadata);
+}
+
+TEST_CASE("transcript retains partial reasoning on inference failure",
+          "[transcript][reasoning][failure]") {
+  const auto inference = make_id<domain::InferenceId>("inference");
+  const auto assistant = make_id<domain::MessageId>("assistant");
+  const domain::DomainError failure{domain::ErrorCode::backend, "failed",
+                                    false};
+  const std::vector events{
+      event(1, started()),
+      event(2, domain::InferenceStarted{inference,
+                                        make_id<domain::ModelId>("model")}),
+      event(3, domain::AssistantContentStarted{assistant, inference}),
+      event(4, domain::ReasoningMetadataAdded{inference,
+                                              std::string{"partial"},
+                                              {}}),
+      event(5, domain::InferenceFailed{inference, failure}),
+      event(6, domain::RunFailed{failure}),
+  };
+  domain::TranscriptProjection incremental;
+  for (const auto& value : events)
+    REQUIRE(incremental.apply(value));
+  const auto rebuilt = domain::TranscriptProjection::rebuild(events);
+  REQUIRE(rebuilt);
+  REQUIRE(rebuilt->items() == incremental.items());
+  const auto& message =
+      std::get<domain::TranscriptMessage>(incremental.items().front());
+  REQUIRE(message.state == domain::TranscriptMessageState::failed);
+  REQUIRE(message.error == failure);
+  REQUIRE(message.reasoning.text == "partial");
+}
+
 TEST_CASE("transcript rebuild equals deterministic incremental application",
           "[transcript]") {
   const auto inference = make_id<domain::InferenceId>("inference");
@@ -116,14 +260,17 @@ TEST_CASE("transcript rebuild equals deterministic incremental application",
       event(3, domain::InferenceStarted{inference,
                                         make_id<domain::ModelId>("model")}),
       event(4, domain::AssistantContentStarted{assistant, inference}),
-      event(5,
+      event(5, domain::ReasoningMetadataAdded{inference,
+                                              std::string{"brief"},
+                                              {{"opaque/type", "hidden"}}}),
+      event(6,
             domain::AssistantContentDeltaAdded{
                 assistant, inference, domain::TextBlock{"**answer**"}}),
-      event(6, domain::UsageRecorded{inference, {4, 2, 1, 0}}),
-      event(7, domain::AssistantContentFinished{assistant, inference}),
-      event(8,
+      event(7, domain::UsageRecorded{inference, {4, 2, 1, 0}}),
+      event(8, domain::AssistantContentFinished{assistant, inference}),
+      event(9,
             domain::InferenceFinished{inference, domain::FinishReason::stop}),
-      event(9, domain::RunCompleted{}),
+      event(10, domain::RunCompleted{}),
   };
 
   domain::TranscriptProjection incremental;
@@ -134,13 +281,14 @@ TEST_CASE("transcript rebuild equals deterministic incremental application",
   REQUIRE(rebuilt->items() == incremental.items());
   REQUIRE(rebuilt->usage() == incremental.usage());
   REQUIRE(rebuilt->status() == domain::RunStatus::completed);
-  REQUIRE(rebuilt->last_sequence() == 9);
+  REQUIRE(rebuilt->last_sequence() == 10);
 
   REQUIRE(incremental.items().size() == 2);
   const auto& answer =
       std::get<domain::TranscriptMessage>(incremental.items().back());
   REQUIRE(answer.state == domain::TranscriptMessageState::complete);
   REQUIRE(answer.usage == domain::Usage{4, 2, 1, 0});
+  REQUIRE((answer.reasoning == domain::TranscriptReasoning{"brief", true}));
 }
 
 TEST_CASE("a provenance record replays without adding a transcript item",

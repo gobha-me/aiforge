@@ -276,6 +276,41 @@ class SessionScenarioStore final : public storage::SessionStore {
         run_event(11, "target-run-cancelled", "target-run-2",
                   domain::RunCancelled{"cancelled"}),
     };
+    const auto reasoning = make_id<domain::SessionId>("reasoning-session");
+    const auto reasoning_inference =
+        make_id<domain::InferenceId>("reasoning-inference");
+    const auto reasoning_message =
+        make_id<domain::MessageId>("reasoning-message");
+    m_sessions.emplace(reasoning, storage::SessionInfo{
+                                      reasoning, domain::EventTimestamp{600ms},
+                                      domain::EventTimestamp{4000ms}, 8, 1});
+    m_histories[reasoning] = {
+        run_event(
+            1, "reasoning-start", "reasoning-run",
+            domain::RunStarted{surface, workspace, profile, std::nullopt}),
+        run_event(2, "reasoning-inference", "reasoning-run",
+                  domain::InferenceStarted{reasoning_inference, model}),
+        run_event(3, "reasoning-message", "reasoning-run",
+                  domain::AssistantContentStarted{reasoning_message,
+                                                  reasoning_inference}),
+        run_event(4, "reasoning-delta", "reasoning-run",
+                  domain::ReasoningMetadataAdded{
+                      reasoning_inference,
+                      std::string{"literal **reasoning**"},
+                      {{"application/private", "never-render-this"}}}),
+        run_event(5, "reasoning-answer", "reasoning-run",
+                  domain::AssistantContentDeltaAdded{
+                      reasoning_message, reasoning_inference,
+                      domain::TextBlock{"durable answer"}}),
+        run_event(6, "reasoning-content-finished", "reasoning-run",
+                  domain::AssistantContentFinished{reasoning_message,
+                                                   reasoning_inference}),
+        run_event(7, "reasoning-finished", "reasoning-run",
+                  domain::InferenceFinished{reasoning_inference,
+                                            domain::FinishReason::stop}),
+        run_event(8, "reasoning-completed", "reasoning-run",
+                  domain::RunCompleted{}),
+    };
     const auto overflow = make_id<domain::SessionId>("usage-overflow-session");
     m_sessions.emplace(
         overflow, storage::SessionInfo{overflow, domain::EventTimestamp{450ms},
@@ -383,6 +418,7 @@ class SessionScenarioStore final : public storage::SessionStore {
                      std::stop_token token)
       -> std::expected<void, storage::SessionStoreError> override {
     if (token.stop_requested()) return std::unexpected(cancelled());
+    ++m_append_calls;
     const auto found = m_sessions.find(session_id);
     if (found == m_sessions.end()) {
       return std::unexpected(
@@ -400,6 +436,10 @@ class SessionScenarioStore final : public storage::SessionStore {
       found->second.run_count = runs.size();
     }
     return {};
+  }
+
+  [[nodiscard]] auto append_calls() const noexcept -> std::size_t {
+    return m_append_calls;
   }
 
   auto replay_events(const domain::SessionId& session_id, std::stop_token token)
@@ -421,6 +461,7 @@ class SessionScenarioStore final : public storage::SessionStore {
   }
 
   bool m_fail_listing{};
+  std::size_t m_append_calls{};
   std::map<domain::SessionId, storage::SessionInfo> m_sessions;
   std::map<domain::SessionId, std::vector<domain::RunEvent>> m_histories;
 };
@@ -443,6 +484,7 @@ class GatedBackendState final {
 
   auto initialize(const backend::BackendRequest& request) -> bool {
     std::lock_guard lock{m_mutex};
+    ++m_initialize_calls;
     if (m_initialized) return false;
     m_steps = {
         backend::BackendEvent{backend::ResponseStarted{"response"}},
@@ -457,6 +499,11 @@ class GatedBackendState final {
     m_initialized = true;
     m_condition.notify_all();
     return true;
+  }
+
+  auto initialize_calls() -> std::size_t {
+    std::lock_guard lock{m_mutex};
+    return m_initialize_calls;
   }
 
   auto next(std::stop_token stop_token)
@@ -550,6 +597,7 @@ class GatedBackendState final {
   std::size_t m_released{};
   std::size_t m_consumed{};
   std::size_t m_observed_wakes{};
+  std::size_t m_initialize_calls{};
   bool m_initialized{};
   bool m_ended{};
   bool m_cancelled{};
@@ -1474,6 +1522,37 @@ auto session_success_scenario() -> testing::TuiScenario {
   return value;
 }
 
+auto reasoning_visibility_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-reasoning-visibility";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {120, 10, 1200, 200};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{
+              "/session resume reasoning-session"}}},
+      {0, enter},
+      {1, testing::TuiScenarioPost{termforge::PasteEvent{"/reasoning show"}}},
+      {1, enter},
+      {2, testing::TuiScenarioResize{{18, 4, 180, 80}}},
+      {3, testing::TuiScenarioPost{termforge::PasteEvent{
+              "/session resume target-session"}}},
+      {3, enter},
+      {4, testing::TuiScenarioPost{termforge::PasteEvent{
+              "/session resume reasoning-session"}}},
+      {4, enter},
+      {5, testing::TuiScenarioPost{termforge::PasteEvent{"/reasoning hide"}}},
+      {5, enter},
+      {6, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
+      {6, enter},
+  };
+  value.limits.maximum_frames = 32;
+  return value;
+}
+
 auto session_failure_scenario(std::string scenario_id, std::string command)
     -> testing::TuiScenario {
   testing::TuiScenario value;
@@ -1520,7 +1599,8 @@ auto ephemeral_session_scenario() -> testing::TuiScenario {
   return value;
 }
 
-auto session_factory(const bool durable, const bool fail_listing = false)
+auto session_factory(const bool durable, const bool fail_listing = false,
+                     const bool report_mutations = false)
     -> testing::TuiScenarioTargetFactory {
   return [=](testing::TuiScenarioPass, termforge::ByteSink* output)
              -> std::expected<testing::TuiScenarioTarget,
@@ -1582,11 +1662,17 @@ auto session_factory(const bool durable, const bool fail_listing = false)
           return std::unexpected("session scenario has no tool script");
         },
         [frame] { return *frame; },
-        [raw, backend, editor, store] {
+        [raw, backend, editor, store, backend_state, report_mutations] {
           static_cast<void>(backend);
           static_cast<void>(editor);
           static_cast<void>(store);
-          return std::string{raw->status_text()};
+          auto state = std::string{raw->status_text()};
+          if (report_mutations) {
+            state += "|appends=" + std::to_string(store->append_calls());
+            state += "|inferences=" +
+                     std::to_string(backend_state->initialize_calls());
+          }
+          return state;
         }};
   };
 }
@@ -2147,6 +2233,31 @@ TEST_CASE("interactive session actions list resume and create atomically",
       result->recorded.normalized_frames, [](const std::string& frame) {
         return frame.find("AIForge  session session-3") != std::string::npos;
       }));
+}
+
+TEST_CASE(
+    "interactive reasoning visibility replays and survives session switches",
+    "[scenario][chat][reasoning][session]") {
+  const auto result = testing::run_tui_scenario(
+      reasoning_visibility_scenario(), session_factory(true, false, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "Reasoning text hidden|appends=0|inferences=0");
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("Reasoning — hidden (21 bytes)") !=
+                   std::string::npos &&
+               frame.find("literal **reasoning**") == std::string::npos;
+      }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("literal **reasoning**") != std::string::npos;
+      }));
+  for (const auto& frame : result->recorded.normalized_frames) {
+    REQUIRE(frame.find("never-render-this") == std::string::npos);
+  }
 }
 
 TEST_CASE("failed session operations preserve the current interactive app",

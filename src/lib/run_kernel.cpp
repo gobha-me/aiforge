@@ -1,5 +1,6 @@
 
 
+#include <aiforge/detail/utf8_text.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/repository/context_parcel.hpp>
 #include <aiforge/repository/review_receipt.hpp>
@@ -28,6 +29,8 @@
 
 namespace aiforge::runtime {
 namespace {
+
+constexpr std::size_t maximum_reasoning_bytes = std::size_t{1024} * 1024U;
 
 struct BackendFailure {
   backend::BackendError error;
@@ -710,6 +713,7 @@ struct RunKernel::Impl {
     std::optional<std::string> cancel_reason;
     std::optional<domain::PlanId> planning_plan_id;
     std::optional<domain::ChildRunDescriptor> child_run;
+    std::size_t reasoning_text_bytes{};
   };
 
   struct Transaction {
@@ -1126,6 +1130,7 @@ struct RunKernel::Impl {
     return {};
   }
 
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Event routing
   [[nodiscard]] auto process_backend_event(backend::BackendEvent event,
                                            Transaction& transaction)
       -> std::expected<void, RunKernelError> {
@@ -1160,7 +1165,10 @@ struct RunKernel::Impl {
     };
 
     return std::visit(
+        // clang-format off
+        // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Event mapping
         [&](auto&& value) -> std::expected<void, RunKernelError> {
+          // clang-format on
           using Value = std::remove_cvref_t<decltype(value)>;
           if constexpr (std::same_as<Value, backend::ResponseStarted>) {
             if (active->response_started || value.response_id.size() > 4096 ||
@@ -1179,21 +1187,35 @@ struct RunKernel::Impl {
                 value.message_id, *active->inference_id,
                 std::move(value.delta)});
           } else if constexpr (std::same_as<Value, backend::ReasoningDelta>) {
+            const auto text_bytes =
+                value.text
+                    .transform([](const auto& text) { return text.size(); })
+                    .value_or(0U);
+            const auto valid_text =
+                value.text
+                    .transform([](const auto& text) {
+                      return text.size() <= maximum_reasoning_bytes &&
+                             detail::is_safe_utf8_text(text);
+                    })
+                    .value_or(true);
             std::size_t metadata_bytes{};
             const auto invalid_metadata =
                 std::ranges::any_of(value.metadata, [&](const auto& entry) {
                   metadata_bytes += entry.first.size() + entry.second.size();
                   return entry.first.empty() || entry.first.size() > 256 ||
                          has_control_character(entry.first) ||
-                         entry.second.size() > 1024U * 1024U ||
+                         entry.second.size() > maximum_reasoning_bytes ||
                          has_control_character(entry.second) ||
-                         metadata_bytes > 1024U * 1024U;
+                         metadata_bytes > maximum_reasoning_bytes;
                 });
             if (!active->response_started ||
-                (value.text && value.text->size() > 1024U * 1024U) ||
+                (!value.text && value.metadata.empty()) || !valid_text ||
+                text_bytes >
+                    maximum_reasoning_bytes - active->reasoning_text_bytes ||
                 value.metadata.size() > 256 || invalid_metadata) {
               return fail_live_run(transaction, protocol_domain_error());
             }
+            active->reasoning_text_bytes += text_bytes;
             return record_or_fail(domain::ReasoningMetadataAdded{
                 *active->inference_id, std::move(value.text),
                 std::move(value.metadata)});
@@ -1509,6 +1531,7 @@ struct RunKernel::Impl {
       active->backend_terminal_seen = false;
       active->tool_call_finish = false;
       active->cancellation_ack_expected = false;
+      active->reasoning_text_bytes = 0;
       active->tool_calls.clear();
       active->tool_call_order.clear();
       if (auto evaluated = evaluate_pending_policies(transaction); !evaluated) {
@@ -2579,7 +2602,8 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                                                  false,
                                                  std::nullopt,
                                                  std::nullopt,
-                                                 std::nullopt};
+                                                 std::nullopt,
+                                                 0};
       }
       if (awaiting_plan_run) {
         std::optional<domain::RunStarted> started;
@@ -2623,7 +2647,8 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                                false,
                                std::nullopt,
                                std::nullopt,
-                               std::nullopt};
+                               std::nullopt,
+                               0};
         active.planning_plan_id = *plan_id;
         kernel->m_impl->active = std::move(active);
       }
@@ -2765,7 +2790,8 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
                            false,
                            std::nullopt,
                            std::nullopt,
-                           std::nullopt};
+                           std::nullopt,
+                           0};
     auto transaction = m_impl->transaction();
     if (auto result = m_impl->record(start.run_id, std::move(start.attributes),
                                      transaction);
@@ -2949,15 +2975,25 @@ auto RunKernel::start_plan(PlanStart start)
     }
 
     const auto plan_id = start.revision.plan_id;
-    Impl::ActiveRun active{start.run_id, start.attributes.permission_profile_id,
-                           std::nullopt, std::nullopt,
-                           {},           {},
-                           {},           {},
-                           std::nullopt, false,
-                           false,        false,
-                           false,        false,
-                           false,        std::nullopt,
-                           std::nullopt, std::nullopt};
+    Impl::ActiveRun active{start.run_id,
+                           start.attributes.permission_profile_id,
+                           std::nullopt,
+                           std::nullopt,
+                           {},
+                           {},
+                           {},
+                           {},
+                           std::nullopt,
+                           false,
+                           false,
+                           false,
+                           false,
+                           false,
+                           false,
+                           std::nullopt,
+                           std::nullopt,
+                           std::nullopt,
+                           0};
     active.planning_plan_id = plan_id;
 
     auto transaction = m_impl->transaction();
@@ -3481,7 +3517,8 @@ auto RunKernel::dispatch_child(ChildRunStart start)
                            false,
                            std::nullopt,
                            std::nullopt,
-                           descriptor};
+                           descriptor,
+                           0};
     auto transaction = m_impl->transaction();
     transaction.active_children.emplace(start.child_run_id, active);
     if (auto recorded = m_impl->record(
@@ -4099,12 +4136,17 @@ auto RunKernel::continue_run(
     }
 
     auto transaction = m_impl->transaction();
-    transaction.active->inference_id = request.inference_id;
-    transaction.active->assistant_message_id = request.assistant_message_id;
-    transaction.active->invocations.clear();
-    transaction.active->invocation_order.clear();
-    transaction.active->cancel_requested = false;
-    transaction.active->cancel_reason.reset();
+    // clang-format off
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- Active state checked
+    auto& transaction_active = *transaction.active;
+    // clang-format on
+    transaction_active.inference_id = request.inference_id;
+    transaction_active.assistant_message_id = request.assistant_message_id;
+    transaction_active.invocations.clear();
+    transaction_active.invocation_order.clear();
+    transaction_active.cancel_requested = false;
+    transaction_active.cancel_reason.reset();
+    transaction_active.reasoning_text_bytes = 0;
     if (auto result = m_impl->record(
             run_id,
             domain::InferenceStarted{request.inference_id, request.model_id},

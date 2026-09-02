@@ -1,3 +1,4 @@
+#include <aiforge/detail/utf8_text.hpp>
 #include <aiforge/domain/transcript_projection.hpp>
 #include <aiforge/repository/verification_evidence.hpp>
 
@@ -9,6 +10,8 @@
 
 namespace aiforge::domain {
 namespace {
+
+constexpr std::size_t maximum_reasoning_text_bytes = std::size_t{1024} * 1024U;
 
 template <typename... Callables> struct Overloaded : Callables... {
   using Callables::operator()...;
@@ -179,6 +182,7 @@ auto TranscriptProjection::rebuild(const std::span<const RunEvent> events)
   }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Replay events
 auto TranscriptProjection::apply_in_place(const RunEvent& event)
     -> std::expected<void, TranscriptProjectionError> {
   if (m_event_ids.contains(event.metadata.event_id)) {
@@ -206,6 +210,7 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
                                   std::nullopt,
                                   {},
                                   std::nullopt,
+                                  {},
                                   {}});
             return {};
           },
@@ -220,6 +225,7 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
                                   started.inference_id,
                                   usage,
                                   std::nullopt,
+                                  {},
                                   {}});
             return {};
           },
@@ -243,6 +249,23 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
                   "content finish refers to an unknown transcript message");
             }
             target->state = TranscriptMessageState::complete;
+            return {};
+          },
+          [&](const ReasoningMetadataAdded& reasoning)
+              -> std::expected<void, TranscriptProjectionError> {
+            auto* target = inference_message(reasoning.inference_id);
+            if (target == nullptr) {
+              return error(TranscriptProjectionErrorCode::unknown_inference,
+                           "reasoning refers to an unknown assistant message");
+            }
+            if (reasoning.text && detail::is_safe_utf8_text(*reasoning.text) &&
+                reasoning.text->size() <= maximum_reasoning_text_bytes -
+                                              target->reasoning.text.size()) {
+              target->reasoning.text += *reasoning.text;
+            }
+            if (!reasoning.metadata.empty()) {
+              target->reasoning.has_opaque_metadata = true;
+            }
             return {};
           },
           [&](const UsageRecorded& recorded)

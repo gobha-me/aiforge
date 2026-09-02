@@ -256,6 +256,13 @@ spend ceiling summary. `/plan` opens exact plan and schedule state, while
 malformed, and oversized
 slash commands are rejected locally and never become model content.
 
+Reasoning text emitted by a backend is durable and replayable but collapsed by
+default in Interactive Chat. `/reasoning show` renders the bounded text as
+sanitized, dim literal text without Markdown interpretation; `/reasoning hide`
+returns to the collapsed summary. This visibility is presentation-only and
+lasts for the app lifetime. Opaque provider continuation metadata is never
+rendered, and one-shot output is unchanged.
+
 ## File-backed personas
 
 Personas are bounded system instructions stored as `.md` or `.txt` files in

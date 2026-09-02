@@ -22,6 +22,12 @@ enum class TranscriptMessageState {
   failed,
 };
 
+struct TranscriptReasoning {
+  std::string text;
+  bool has_opaque_metadata{};
+  auto operator==(const TranscriptReasoning&) const -> bool = default;
+};
+
 struct TranscriptMessage {
   MessageId message_id;
   Role role{Role::user};
@@ -31,6 +37,7 @@ struct TranscriptMessage {
   Usage usage;
   std::optional<DomainError> error;
   std::vector<ArtifactMetadata> artifacts;
+  TranscriptReasoning reasoning;
   auto operator==(const TranscriptMessage&) const -> bool = default;
 };
 
