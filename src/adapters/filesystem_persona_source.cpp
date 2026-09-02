@@ -2,28 +2,39 @@
 
 #include <algorithm>
 #include <array>
-#include <bit>
+#include <atomic>
 #include <cerrno>
-#include <cstdint>
+#include <chrono>
 #include <cstdlib>
-#include <cstring>
-#include <format>
 #include <map>
 #include <optional>
 #include <ranges>
+#include <span>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 
+#include <aiforge/detail/sha256.hpp>
+#include <aiforge/detail/utf8_text.hpp>
+
 #ifndef _WIN32
+#include <dirent.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#endif
 #endif
 
 namespace aiforge::adapters {
 namespace {
 
+using persona::PersonaEditorErrorCode;
 using persona::PersonaErrorCode;
 
 [[nodiscard]] auto failure(PersonaErrorCode code, std::string message,
@@ -32,6 +43,16 @@ using persona::PersonaErrorCode;
     -> std::unexpected<persona::PersonaError> {
   return std::unexpected(persona::PersonaError{code, std::move(message),
                                                std::move(name), retryable});
+}
+
+[[nodiscard]] auto edit_failure(
+    PersonaEditorErrorCode code, std::string message,
+    std::optional<domain::PersonaReference> observed = std::nullopt,
+    bool retryable = false, bool may_have_applied = false)
+    -> std::unexpected<persona::PersonaEditorError> {
+  return std::unexpected(
+      persona::PersonaEditorError{code, std::move(message), std::move(observed),
+                                  retryable, may_have_applied});
 }
 
 [[nodiscard]] auto valid_limits(const persona::PersonaLimits& limits) -> bool {
@@ -66,159 +87,11 @@ using persona::PersonaErrorCode;
   return result;
 }
 
-[[nodiscard]] auto valid_utf8_text(const std::string_view value) -> bool {
-  if (value.empty()) return false;
-  std::size_t index{};
-  while (index < value.size()) {
-    const auto first = static_cast<unsigned char>(value[index]);
-    if (first == 0 || first == 0x7fU ||
-        (first < 0x20U && first != '\n' && first != '\r' && first != '\t')) {
-      return false;
-    }
-    if (first <= 0x7fU) {
-      ++index;
-      continue;
-    }
-    std::size_t length{};
-    std::uint32_t codepoint{};
-    if (first >= 0xc2U && first <= 0xdfU) {
-      length = 2;
-      codepoint = first & 0x1fU;
-    } else if (first >= 0xe0U && first <= 0xefU) {
-      length = 3;
-      codepoint = first & 0x0fU;
-    } else if (first >= 0xf0U && first <= 0xf4U) {
-      length = 4;
-      codepoint = first & 0x07U;
-    } else {
-      return false;
-    }
-    if (length > value.size() - index) return false;
-    for (std::size_t offset = 1; offset < length; ++offset) {
-      const auto next = static_cast<unsigned char>(value[index + offset]);
-      if ((next & 0xc0U) != 0x80U) return false;
-      codepoint = (codepoint << 6U) | (next & 0x3fU);
-    }
-    if ((length == 3 && codepoint < 0x800U) ||
-        (length == 4 && codepoint < 0x10000U) ||
-        (codepoint >= 0xd800U && codepoint <= 0xdfffU) ||
-        codepoint > 0x10ffffU) {
-      return false;
-    }
-    index += length;
-  }
-  return true;
+[[nodiscard]] auto content_digest(const std::string_view text) -> std::string {
+  detail::Sha256 digest;
+  digest.update(std::as_bytes(std::span{text.data(), text.size()}));
+  return digest.finish();
 }
-
-class Sha256 final {
- public:
-  auto update(const std::string_view bytes) -> void {
-    for (const unsigned char byte : bytes) {
-      m_block[m_block_size++] = byte;
-      ++m_byte_count;
-      if (m_block_size == m_block.size()) transform();
-    }
-  }
-
-  [[nodiscard]] auto finish() -> std::string {
-    const auto bit_count = m_byte_count * 8U;
-    m_block[m_block_size++] = 0x80U;
-    if (m_block_size > 56U) {
-      while (m_block_size < m_block.size())
-        m_block[m_block_size++] = 0;
-      transform();
-    }
-    while (m_block_size < 56U)
-      m_block[m_block_size++] = 0;
-    for (int shift = 56; shift >= 0; shift -= 8) {
-      m_block[m_block_size++] =
-          static_cast<std::uint8_t>(bit_count >> static_cast<unsigned>(shift));
-    }
-    transform();
-    std::string output;
-    output.reserve(64);
-    for (const auto word : m_state)
-      output += std::format("{:08x}", word);
-    return output;
-  }
-
- private:
-  static constexpr std::array<std::uint32_t, 64> constants{
-      0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU,
-      0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U, 0xd807aa98U, 0x12835b01U,
-      0x243185beU, 0x550c7dc3U, 0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U,
-      0xc19bf174U, 0xe49b69c1U, 0xefbe4786U, 0x0fc19dc6U, 0x240ca1ccU,
-      0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU, 0x983e5152U,
-      0xa831c66dU, 0xb00327c8U, 0xbf597fc7U, 0xc6e00bf3U, 0xd5a79147U,
-      0x06ca6351U, 0x14292967U, 0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU,
-      0x53380d13U, 0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U,
-      0xa2bfe8a1U, 0xa81a664bU, 0xc24b8b70U, 0xc76c51a3U, 0xd192e819U,
-      0xd6990624U, 0xf40e3585U, 0x106aa070U, 0x19a4c116U, 0x1e376c08U,
-      0x2748774cU, 0x34b0bcb5U, 0x391c0cb3U, 0x4ed8aa4aU, 0x5b9cca4fU,
-      0x682e6ff3U, 0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U,
-      0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U};
-
-  auto transform() -> void {
-    std::array<std::uint32_t, 64> words{};
-    for (std::size_t index{}; index < 16; ++index) {
-      const auto offset = index * 4U;
-      words[index] = (static_cast<std::uint32_t>(m_block[offset]) << 24U) |
-                     (static_cast<std::uint32_t>(m_block[offset + 1]) << 16U) |
-                     (static_cast<std::uint32_t>(m_block[offset + 2]) << 8U) |
-                     static_cast<std::uint32_t>(m_block[offset + 3]);
-    }
-    for (std::size_t index = 16; index < words.size(); ++index) {
-      const auto s0 = std::rotr(words[index - 15], 7) ^
-                      std::rotr(words[index - 15], 18) ^
-                      (words[index - 15] >> 3U);
-      const auto s1 = std::rotr(words[index - 2], 17) ^
-                      std::rotr(words[index - 2], 19) ^
-                      (words[index - 2] >> 10U);
-      words[index] = words[index - 16] + s0 + words[index - 7] + s1;
-    }
-    auto a = m_state[0];
-    auto b = m_state[1];
-    auto c = m_state[2];
-    auto d = m_state[3];
-    auto e = m_state[4];
-    auto f = m_state[5];
-    auto g = m_state[6];
-    auto h = m_state[7];
-    for (std::size_t index{}; index < words.size(); ++index) {
-      const auto sum1 = std::rotr(e, 6) ^ std::rotr(e, 11) ^ std::rotr(e, 25);
-      const auto choice = (e & f) ^ (~e & g);
-      const auto temporary1 =
-          h + sum1 + choice + constants[index] + words[index];
-      const auto sum0 = std::rotr(a, 2) ^ std::rotr(a, 13) ^ std::rotr(a, 22);
-      const auto majority = (a & b) ^ (a & c) ^ (b & c);
-      const auto temporary2 = sum0 + majority;
-      h = g;
-      g = f;
-      f = e;
-      e = d + temporary1;
-      d = c;
-      c = b;
-      b = a;
-      a = temporary1 + temporary2;
-    }
-    m_state[0] += a;
-    m_state[1] += b;
-    m_state[2] += c;
-    m_state[3] += d;
-    m_state[4] += e;
-    m_state[5] += f;
-    m_state[6] += g;
-    m_state[7] += h;
-    m_block_size = 0;
-  }
-
-  std::array<std::uint32_t, 8> m_state{0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U,
-                                       0xa54ff53aU, 0x510e527fU, 0x9b05688cU,
-                                       0x1f83d9abU, 0x5be0cd19U};
-  std::array<std::uint8_t, 64> m_block{};
-  std::size_t m_block_size{};
-  std::uint64_t m_byte_count{};
-};
 
 struct IndexedPersona {
   std::string canonical;
@@ -226,84 +99,179 @@ struct IndexedPersona {
   std::string filename;
 };
 
-[[nodiscard]] auto root_status(const std::filesystem::path& root,
-                               const bool missing_is_empty)
-    -> std::expected<bool, persona::PersonaError> {
+#ifndef _WIN32
+class UniqueFd final {
+ public:
+  explicit UniqueFd(const int value = -1) : m_value(value) {}
+  UniqueFd(const UniqueFd&) = delete;
+  auto operator=(const UniqueFd&) -> UniqueFd& = delete;
+  UniqueFd(UniqueFd&& other) noexcept
+      : m_value(std::exchange(other.m_value, -1)) {}
+  auto operator=(UniqueFd&& other) noexcept -> UniqueFd& {
+    if (this != &other) reset(std::exchange(other.m_value, -1));
+    return *this;
+  }
+  ~UniqueFd() { reset(); }
+  [[nodiscard]] auto get() const noexcept -> int { return m_value; }
+  [[nodiscard]] explicit operator bool() const noexcept { return m_value >= 0; }
+  auto reset(const int value = -1) noexcept -> void {
+    if (m_value >= 0) static_cast<void>(::close(m_value));
+    m_value = value;
+  }
+
+ private:
+  int m_value;
+};
+
+class UniqueDirectory final {
+ public:
+  explicit UniqueDirectory(DIR* value) : m_value(value) {}
+  UniqueDirectory(const UniqueDirectory&) = delete;
+  auto operator=(const UniqueDirectory&) -> UniqueDirectory& = delete;
+  ~UniqueDirectory() {
+    if (m_value != nullptr) static_cast<void>(::closedir(m_value));
+  }
+  [[nodiscard]] auto get() const noexcept -> DIR* { return m_value; }
+
+ private:
+  DIR* m_value;
+};
+
+[[nodiscard]] auto same_file(const struct stat& left, const struct stat& right)
+    -> bool {
+  return left.st_dev == right.st_dev && left.st_ino == right.st_ino &&
+         left.st_size == right.st_size &&
+         left.st_mtim.tv_sec == right.st_mtim.tv_sec &&
+         left.st_mtim.tv_nsec == right.st_mtim.tv_nsec &&
+         left.st_ctim.tv_sec == right.st_ctim.tv_sec &&
+         left.st_ctim.tv_nsec == right.st_ctim.tv_nsec;
+}
+
+[[nodiscard]] auto open_existing(const char* path, const int flags) -> int {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX open API.
+  return ::open(path, flags);
+}
+
+[[nodiscard]] auto open_existing_at(const int directory, const char* path,
+                                    const int flags) -> int {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX openat API.
+  return ::openat(directory, path, flags);
+}
+
+[[nodiscard]] auto create_at(const int directory, const char* path,
+                             const int flags, const mode_t mode) -> int {
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX create API.
+  return ::openat(directory, path, flags, mode);
+}
+
+[[nodiscard]] auto exchange_entries(const int directory,
+                                    const std::string& left,
+                                    const std::string& right) -> int {
+#ifdef __linux__
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Linux syscall API.
+  return static_cast<int>(::syscall(SYS_renameat2, directory, left.c_str(),
+                                    directory, right.c_str(), RENAME_EXCHANGE));
+#else
+  static_cast<void>(directory);
+  static_cast<void>(left);
+  static_cast<void>(right);
+  errno = ENOTSUP;
+  return -1;
+#endif
+}
+
+[[nodiscard]] auto open_read_root(const std::filesystem::path& root,
+                                  const bool missing_is_empty)
+    -> std::expected<std::optional<UniqueFd>, persona::PersonaError> {
   if (!root.is_absolute()) {
     return failure(PersonaErrorCode::invalid_root,
                    "persona root must be absolute");
   }
-  std::error_code error;
-  const auto status = std::filesystem::symlink_status(root, error);
-  if (error == std::errc::no_such_file_or_directory) {
-    if (missing_is_empty) return false;
-    return failure(PersonaErrorCode::not_found,
-                   "persona directory does not exist");
+  struct stat path_state{};
+  if (::lstat(root.c_str(), &path_state) != 0) {
+    if (errno == ENOENT && missing_is_empty) return std::nullopt;
+    return failure(errno == ENOENT   ? PersonaErrorCode::not_found
+                   : errno == EACCES ? PersonaErrorCode::permission_denied
+                                     : PersonaErrorCode::io_failure,
+                   errno == ENOENT ? "persona directory does not exist"
+                                   : "persona directory could not be inspected",
+                   std::nullopt, errno != ENOENT);
   }
-  if (error) {
-    return failure(error == std::errc::permission_denied
-                       ? PersonaErrorCode::permission_denied
-                       : PersonaErrorCode::io_failure,
-                   "persona directory could not be inspected");
-  }
-  if (std::filesystem::is_symlink(status)) {
+  if (S_ISLNK(path_state.st_mode)) {
     return failure(PersonaErrorCode::path_escape,
                    "persona directory cannot be a symbolic link");
   }
-  if (!std::filesystem::is_directory(status)) {
+  if (!S_ISDIR(path_state.st_mode)) {
     return failure(PersonaErrorCode::invalid_root,
                    "persona root is not a directory");
   }
-  return true;
+  UniqueFd descriptor{open_existing(
+      root.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)};
+  struct stat opened{};
+  if (!descriptor || ::fstat(descriptor.get(), &opened) != 0) {
+    return failure(errno == EACCES ? PersonaErrorCode::permission_denied
+                                   : PersonaErrorCode::io_failure,
+                   "persona directory could not be opened", std::nullopt, true);
+  }
+  if (!S_ISDIR(opened.st_mode) || opened.st_dev != path_state.st_dev ||
+      opened.st_ino != path_state.st_ino) {
+    return failure(PersonaErrorCode::invalid_root,
+                   "persona root is not a stable directory");
+  }
+  return std::optional<UniqueFd>{std::move(descriptor)};
 }
 
-[[nodiscard]] auto index_personas(const std::filesystem::path& root,
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Hostile entries.
+[[nodiscard]] auto index_personas(const int root_descriptor,
                                   const persona::PersonaLimits& limits,
-                                  const std::stop_token stop_token,
-                                  const bool missing_is_empty)
+                                  const std::stop_token stop_token)
     -> std::expected<std::vector<IndexedPersona>, persona::PersonaError> {
-  auto present = root_status(root, missing_is_empty);
-  if (!present) return std::unexpected(std::move(present.error()));
-  if (!*present) return std::vector<IndexedPersona>{};
-
+  const auto iterator_descriptor = open_existing_at(
+      root_descriptor, ".", O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
+  if (iterator_descriptor < 0) {
+    return failure(PersonaErrorCode::io_failure,
+                   "persona directory could not be listed", std::nullopt, true);
+  }
+  UniqueDirectory directory{::fdopendir(iterator_descriptor)};
+  if (directory.get() == nullptr) {
+    static_cast<void>(::close(iterator_descriptor));
+    return failure(PersonaErrorCode::io_failure,
+                   "persona directory could not be listed", std::nullopt, true);
+  }
   std::map<std::string, IndexedPersona> indexed;
-  std::error_code error;
-  for (std::filesystem::directory_iterator iterator{root, error}, end;
-       iterator != end; iterator.increment(error)) {
+  errno = 0;
+  // NOLINTNEXTLINE(concurrency-mt-unsafe) -- Private directory stream.
+  while (const auto* entry = ::readdir(directory.get())) {
     if (stop_token.stop_requested()) {
       return failure(PersonaErrorCode::cancelled, "persona listing cancelled");
     }
-    if (error) {
-      return failure(error == std::errc::permission_denied
-                         ? PersonaErrorCode::permission_denied
-                         : PersonaErrorCode::io_failure,
-                     "persona directory could not be listed", std::nullopt,
-                     true);
-    }
-    const auto extension = iterator->path().extension().string();
+    const std::string filename{&entry->d_name[0]};
+    const auto extension = std::filesystem::path{filename}.extension().string();
     if (extension != ".md" && extension != ".txt") continue;
-    const auto name = iterator->path().stem().string();
+    const auto name = std::filesystem::path{filename}.stem().string();
     if (!valid_name(name, limits.maximum_name_bytes)) {
       return failure(PersonaErrorCode::invalid_name,
                      "persona directory contains an invalid persona name",
                      name);
     }
-    const auto entry_status = iterator->symlink_status(error);
-    if (error) {
-      return failure(PersonaErrorCode::io_failure,
+    struct stat state{};
+    if (::fstatat(root_descriptor, filename.c_str(), &state,
+                  AT_SYMLINK_NOFOLLOW) != 0) {
+      return failure(errno == EACCES ? PersonaErrorCode::permission_denied
+                                     : PersonaErrorCode::io_failure,
                      "persona entry could not be inspected", name, true);
     }
-    if (std::filesystem::is_symlink(entry_status)) {
+    if (S_ISLNK(state.st_mode)) {
       return failure(PersonaErrorCode::path_escape,
                      "persona entry cannot be a symbolic link", name);
     }
-    if (!std::filesystem::is_regular_file(entry_status)) {
+    if (!S_ISREG(state.st_mode)) {
       return failure(PersonaErrorCode::unsupported_entry,
                      "persona entry must be a regular file", name);
     }
     auto canonical = canonical_name(name);
-    IndexedPersona entry{canonical, name, iterator->path().filename().string()};
-    if (!indexed.emplace(canonical, std::move(entry)).second) {
+    IndexedPersona indexed_entry{canonical, name, filename};
+    if (!indexed.emplace(canonical, std::move(indexed_entry)).second) {
       return failure(PersonaErrorCode::ambiguous_name,
                      "persona name has a case or extension alias", name);
     }
@@ -311,9 +279,11 @@ struct IndexedPersona {
       return failure(PersonaErrorCode::resource_exhausted,
                      "persona listing exceeds its entry limit");
     }
+    errno = 0;
   }
-  if (error) {
-    return failure(PersonaErrorCode::io_failure,
+  if (errno != 0) {
+    return failure(errno == EACCES ? PersonaErrorCode::permission_denied
+                                   : PersonaErrorCode::io_failure,
                    "persona directory could not be listed", std::nullopt, true);
   }
   std::vector<IndexedPersona> result;
@@ -325,84 +295,15 @@ struct IndexedPersona {
   return result;
 }
 
-#ifndef _WIN32
-class UniqueFd final {
- public:
-  explicit UniqueFd(const int value = -1) : m_value(value) {}
-  UniqueFd(const UniqueFd&) = delete;
-  auto operator=(const UniqueFd&) -> UniqueFd& = delete;
-  UniqueFd(UniqueFd&& other) noexcept
-      : m_value(std::exchange(other.m_value, -1)) {}
-  ~UniqueFd() {
-    if (m_value >= 0) static_cast<void>(::close(m_value));
-  }
-  [[nodiscard]] auto get() const noexcept -> int { return m_value; }
-
- private:
-  int m_value;
-};
-
-[[nodiscard]] auto same_file(const struct stat& left, const struct stat& right)
-    -> bool {
-  return left.st_dev == right.st_dev && left.st_ino == right.st_ino &&
-         left.st_size == right.st_size &&
-         left.st_mtim.tv_sec == right.st_mtim.tv_sec &&
-         left.st_mtim.tv_nsec == right.st_mtim.tv_nsec;
-}
-#endif
-
-[[nodiscard]] auto bounded_description(const std::string_view text,
-                                       const std::size_t maximum)
-    -> std::string {
-  for (const auto raw : text | std::views::split('\n')) {
-    std::string_view line{raw.begin(), raw.end()};
-    while (!line.empty() && (line.front() == ' ' || line.front() == '\t' ||
-                             line.front() == '\r')) {
-      line.remove_prefix(1);
-    }
-    while (!line.empty() &&
-           (line.back() == ' ' || line.back() == '\t' || line.back() == '\r')) {
-      line.remove_suffix(1);
-    }
-    if (line.empty()) continue;
-    std::size_t bytes{};
-    while (bytes < line.size() && bytes < maximum) {
-      const auto lead = static_cast<unsigned char>(line[bytes]);
-      const std::size_t length = lead < 0x80U   ? 1U
-                                 : lead < 0xe0U ? 2U
-                                 : lead < 0xf0U ? 3U
-                                                : 4U;
-      if (length > maximum - bytes) break;
-      bytes += length;
-    }
-    return std::string{line.substr(0, bytes)};
-  }
-  return {};
-}
-
-[[nodiscard]] auto load_indexed(const std::filesystem::path& root,
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Stable reads.
+[[nodiscard]] auto load_indexed(const int root_descriptor,
                                 const IndexedPersona& entry,
                                 const persona::PersonaLimits& limits,
                                 const std::stop_token stop_token)
     -> std::expected<domain::PersonaDocument, persona::PersonaError> {
-#ifdef _WIN32
-  static_cast<void>(root);
-  static_cast<void>(entry);
-  static_cast<void>(limits);
-  static_cast<void>(stop_token);
-  return failure(PersonaErrorCode::io_failure,
-                 "persona loading is unavailable on this platform");
-#else
-  UniqueFd directory{
-      ::open(root.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)};
-  if (directory.get() < 0) {
-    return failure(errno == EACCES ? PersonaErrorCode::permission_denied
-                                   : PersonaErrorCode::io_failure,
-                   "persona directory could not be opened", entry.name, true);
-  }
-  UniqueFd descriptor{::openat(directory.get(), entry.filename.c_str(),
-                               O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
-  if (descriptor.get() < 0) {
+  UniqueFd descriptor{open_existing_at(root_descriptor, entry.filename.c_str(),
+                                       O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
+  if (!descriptor) {
     if (errno == ELOOP) {
       return failure(PersonaErrorCode::path_escape,
                      "persona entry cannot be a symbolic link", entry.name);
@@ -448,35 +349,523 @@ class UniqueFd final {
     text.append(buffer.data(), static_cast<std::size_t>(count));
   }
   struct stat after{};
-  if (::fstat(descriptor.get(), &after) != 0) {
+  struct stat path_state{};
+  if (::fstat(descriptor.get(), &after) != 0 ||
+      ::fstatat(root_descriptor, entry.filename.c_str(), &path_state,
+                AT_SYMLINK_NOFOLLOW) != 0) {
     return failure(PersonaErrorCode::io_failure,
                    "persona file could not be verified", entry.name, true);
   }
-  if (!same_file(before, after) ||
+  if (!same_file(before, after) || after.st_dev != path_state.st_dev ||
+      after.st_ino != path_state.st_ino || S_ISLNK(path_state.st_mode) ||
       static_cast<std::uint64_t>(after.st_size) != text.size()) {
     return failure(PersonaErrorCode::unstable,
                    "persona file changed while it was being read", entry.name,
                    true);
   }
-  if (!valid_utf8_text(text)) {
+  if (!detail::is_safe_utf8_text(text)) {
     return failure(
         PersonaErrorCode::malformed_text,
         "persona file must be nonempty UTF-8 text without unsafe controls",
         entry.name);
   }
-  Sha256 digest;
-  digest.update(text);
   auto persona_id = domain::PersonaId::from("persona:" + entry.canonical);
   if (!persona_id) {
     return failure(PersonaErrorCode::internal_failure,
                    "persona identity could not be represented", entry.name);
   }
-  return domain::PersonaDocument{{std::move(*persona_id),
-                                  entry.name,
-                                  "personas/" + entry.filename,
-                                  {"sha256", digest.finish(), text.size()}},
-                                 std::move(text)};
+  return domain::PersonaDocument{
+      {std::move(*persona_id),
+       entry.name,
+       "personas/" + entry.filename,
+       {"sha256", content_digest(text), text.size()}},
+      std::move(text)};
+}
+
+[[nodiscard]] auto editor_error(persona::PersonaError error)
+    -> persona::PersonaEditorError {
+  auto code = PersonaEditorErrorCode::io_failure;
+  switch (error.code) {
+    case PersonaErrorCode::invalid_request:
+      code = PersonaEditorErrorCode::invalid_request;
+      break;
+    case PersonaErrorCode::invalid_name:
+      code = PersonaEditorErrorCode::invalid_name;
+      break;
+    case PersonaErrorCode::not_found:
+      code = PersonaEditorErrorCode::not_found;
+      break;
+    case PersonaErrorCode::path_escape:
+    case PersonaErrorCode::invalid_root:
+      code = PersonaEditorErrorCode::path_escape;
+      break;
+    case PersonaErrorCode::unsupported_entry:
+    case PersonaErrorCode::ambiguous_name:
+      code = PersonaEditorErrorCode::unsupported_entry;
+      break;
+    case PersonaErrorCode::malformed_text:
+      code = PersonaEditorErrorCode::malformed_text;
+      break;
+    case PersonaErrorCode::unstable:
+      code = PersonaEditorErrorCode::concurrent_change;
+      break;
+    case PersonaErrorCode::resource_exhausted:
+      code = PersonaEditorErrorCode::resource_exhausted;
+      break;
+    case PersonaErrorCode::permission_denied:
+      code = PersonaEditorErrorCode::permission_denied;
+      break;
+    case PersonaErrorCode::cancelled:
+      code = PersonaEditorErrorCode::cancelled;
+      break;
+    case PersonaErrorCode::missing_home:
+    case PersonaErrorCode::io_failure:
+      code = PersonaEditorErrorCode::io_failure;
+      break;
+    case PersonaErrorCode::internal_failure:
+      code = PersonaEditorErrorCode::internal_failure;
+      break;
+  }
+  return {code, std::move(error.message), std::nullopt, error.retryable, false};
+}
+
+struct WriteRoot {
+  UniqueFd parent;
+  UniqueFd directory;
+  std::string basename;
+  struct stat identity{};
+};
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Secure paths.
+[[nodiscard]] auto ensure_private_directory(const std::filesystem::path& path)
+    -> std::expected<UniqueFd, persona::PersonaEditorError> {
+  if (!path.is_absolute() || path.empty() || path.lexically_normal() != path) {
+    return edit_failure(PersonaEditorErrorCode::invalid_request,
+                        "persona parent must be an absolute normalized path");
+  }
+
+  UniqueFd current{
+      open_existing("/", O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)};
+  if (!current) {
+    return edit_failure(PersonaEditorErrorCode::io_failure,
+                        "filesystem root could not be opened", {}, true);
+  }
+
+  const auto relative = path.relative_path();
+  for (auto iterator = relative.begin(); iterator != relative.end();
+       ++iterator) {
+    const auto component = iterator->string();
+    if (component.empty() || component == "." || component == "..") {
+      return edit_failure(PersonaEditorErrorCode::invalid_request,
+                          "persona parent contains an invalid component");
+    }
+    const bool final = std::next(iterator) == relative.end();
+    struct stat path_state{};
+    bool created{};
+    if (::fstatat(current.get(), component.c_str(), &path_state,
+                  AT_SYMLINK_NOFOLLOW) != 0) {
+      if (errno != ENOENT) {
+        return edit_failure(
+            errno == EACCES ? PersonaEditorErrorCode::permission_denied
+                            : PersonaEditorErrorCode::io_failure,
+            "persona parent component could not be inspected", {}, true);
+      }
+      if (::mkdirat(current.get(), component.c_str(), 0700) == 0) {
+        created = true;
+      } else if (errno != EEXIST) {
+        return edit_failure(
+            errno == EACCES ? PersonaEditorErrorCode::permission_denied
+                            : PersonaEditorErrorCode::io_failure,
+            "persona parent component could not be created", {}, true);
+      }
+      if (::fstatat(current.get(), component.c_str(), &path_state,
+                    AT_SYMLINK_NOFOLLOW) != 0) {
+        return edit_failure(PersonaEditorErrorCode::io_failure,
+                            "created persona parent could not be inspected", {},
+                            true);
+      }
+    }
+    if (S_ISLNK(path_state.st_mode)) {
+      return edit_failure(PersonaEditorErrorCode::path_escape,
+                          "persona parent cannot traverse a symbolic link");
+    }
+    if (!S_ISDIR(path_state.st_mode)) {
+      return edit_failure(PersonaEditorErrorCode::unsupported_entry,
+                          "persona parent component is not a directory");
+    }
+
+    UniqueFd next{
+        open_existing_at(current.get(), component.c_str(),
+                         O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)};
+    struct stat opened{};
+    if (!next || ::fstat(next.get(), &opened) != 0) {
+      return edit_failure(
+          errno == ELOOP || errno == ENOTDIR
+              ? PersonaEditorErrorCode::path_escape
+          : errno == EACCES ? PersonaEditorErrorCode::permission_denied
+                            : PersonaEditorErrorCode::io_failure,
+          "persona parent component could not be opened", {}, true);
+    }
+    if (!S_ISDIR(opened.st_mode) || opened.st_dev != path_state.st_dev ||
+        opened.st_ino != path_state.st_ino) {
+      return edit_failure(PersonaEditorErrorCode::concurrent_change,
+                          "persona parent changed while it was opened", {},
+                          true);
+    }
+    if (created && ::fchmod(next.get(), 0700) != 0) {
+      return edit_failure(PersonaEditorErrorCode::permission_denied,
+                          "persona parent permissions could not be restricted");
+    }
+    if (created && (::fsync(next.get()) != 0 || ::fsync(current.get()) != 0)) {
+      return edit_failure(PersonaEditorErrorCode::durability_failure,
+                          "created persona parent could not be synchronized",
+                          {}, true);
+    }
+    if (final &&
+        (opened.st_uid != ::geteuid() || (opened.st_mode & 0077) != 0)) {
+      return edit_failure(
+          PersonaEditorErrorCode::permission_denied,
+          "persona parent directory must be owned by the current "
+          "user with mode 0700");
+    }
+    current = std::move(next);
+  }
+
+  struct stat attributes{};
+  if (::fstat(current.get(), &attributes) != 0 ||
+      !S_ISDIR(attributes.st_mode) || attributes.st_uid != ::geteuid() ||
+      (attributes.st_mode & 0077) != 0) {
+    return edit_failure(PersonaEditorErrorCode::permission_denied,
+                        "persona parent directory must be owned by the current "
+                        "user with mode 0700");
+  }
+  return current;
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Root identity.
+[[nodiscard]] auto open_write_root(const std::filesystem::path& root)
+    -> std::expected<WriteRoot, persona::PersonaEditorError> {
+  if (!root.is_absolute() || root.filename().empty() ||
+      root.lexically_normal() != root) {
+    return edit_failure(PersonaEditorErrorCode::invalid_request,
+                        "persona root must be an absolute normalized path");
+  }
+  auto parent = ensure_private_directory(root.parent_path());
+  if (!parent) return std::unexpected(std::move(parent.error()));
+  const auto basename = root.filename().string();
+  struct stat path_state{};
+  bool created{};
+  if (::fstatat(parent->get(), basename.c_str(), &path_state,
+                AT_SYMLINK_NOFOLLOW) != 0) {
+    if (errno != ENOENT) {
+      return edit_failure(errno == EACCES
+                              ? PersonaEditorErrorCode::permission_denied
+                              : PersonaEditorErrorCode::io_failure,
+                          "persona root could not be inspected", {}, true);
+    }
+    if (::mkdirat(parent->get(), basename.c_str(), 0700) == 0) {
+      created = true;
+    } else if (errno != EEXIST) {
+      return edit_failure(errno == EACCES
+                              ? PersonaEditorErrorCode::permission_denied
+                              : PersonaEditorErrorCode::io_failure,
+                          "persona root could not be created", {}, true);
+    }
+    if (::fstatat(parent->get(), basename.c_str(), &path_state,
+                  AT_SYMLINK_NOFOLLOW) != 0) {
+      return edit_failure(PersonaEditorErrorCode::io_failure,
+                          "created persona root could not be inspected", {},
+                          true);
+    }
+  }
+  if (S_ISLNK(path_state.st_mode)) {
+    return edit_failure(PersonaEditorErrorCode::path_escape,
+                        "persona root cannot be a symbolic link");
+  }
+  if (!S_ISDIR(path_state.st_mode)) {
+    return edit_failure(PersonaEditorErrorCode::unsupported_entry,
+                        "persona root is not a directory");
+  }
+  UniqueFd directory{
+      open_existing_at(parent->get(), basename.c_str(),
+                       O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)};
+  struct stat opened{};
+  if (!directory || ::fstat(directory.get(), &opened) != 0) {
+    return edit_failure(errno == EACCES
+                            ? PersonaEditorErrorCode::permission_denied
+                            : PersonaEditorErrorCode::io_failure,
+                        "persona root could not be opened", {}, true);
+  }
+  if (created && ::fchmod(directory.get(), 0700) != 0) {
+    return edit_failure(PersonaEditorErrorCode::permission_denied,
+                        "persona root permissions could not be restricted");
+  }
+  if (created && ::fstat(directory.get(), &opened) != 0) {
+    return edit_failure(PersonaEditorErrorCode::io_failure,
+                        "created persona root could not be verified", {}, true);
+  }
+  if (created && ::fsync(parent->get()) != 0) {
+    return edit_failure(PersonaEditorErrorCode::durability_failure,
+                        "created persona root could not be synchronized", {},
+                        true);
+  }
+  if (!S_ISDIR(opened.st_mode) || opened.st_dev != path_state.st_dev ||
+      opened.st_ino != path_state.st_ino) {
+    return edit_failure(PersonaEditorErrorCode::concurrent_change,
+                        "persona root changed while it was being opened", {},
+                        true);
+  }
+  if (opened.st_uid != ::geteuid() || (opened.st_mode & 0077) != 0) {
+    return edit_failure(PersonaEditorErrorCode::permission_denied,
+                        "persona root must be owned by the current user with "
+                        "mode 0700");
+  }
+  return WriteRoot{std::move(*parent), std::move(directory), basename, opened};
+}
+
+[[nodiscard]] auto root_unchanged(const WriteRoot& root)
+    -> std::expected<void, persona::PersonaEditorError> {
+  struct stat current{};
+  if (::fstatat(root.parent.get(), root.basename.c_str(), &current,
+                AT_SYMLINK_NOFOLLOW) != 0 ||
+      !S_ISDIR(current.st_mode) || S_ISLNK(current.st_mode) ||
+      current.st_dev != root.identity.st_dev ||
+      current.st_ino != root.identity.st_ino || current.st_uid != ::geteuid() ||
+      (current.st_mode & 0077) != 0) {
+    return edit_failure(PersonaEditorErrorCode::concurrent_change,
+                        "persona root changed before publication", {}, true);
+  }
+  return {};
+}
+
+[[nodiscard]] auto acquire_write_lock(const int root_descriptor,
+                                      const std::stop_token stop_token)
+    -> std::expected<UniqueFd, persona::PersonaEditorError> {
+  UniqueFd lock{create_at(root_descriptor, ".aiforge-personas.lock",
+                          O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600)};
+  if (!lock) {
+    return edit_failure(errno == ELOOP ? PersonaEditorErrorCode::path_escape
+                        : errno == EACCES
+                            ? PersonaEditorErrorCode::permission_denied
+                            : PersonaEditorErrorCode::io_failure,
+                        "persona write lock could not be opened", {}, true);
+  }
+  struct stat attributes{};
+  if (::fstat(lock.get(), &attributes) != 0 || !S_ISREG(attributes.st_mode) ||
+      attributes.st_uid != ::geteuid() || attributes.st_nlink != 1) {
+    return edit_failure(PersonaEditorErrorCode::permission_denied,
+                        "persona write lock has unsafe ownership or type");
+  }
+  if (::fchmod(lock.get(), 0600) != 0) {
+    return edit_failure(
+        PersonaEditorErrorCode::permission_denied,
+        "persona write lock permissions could not be restricted");
+  }
+  while (::flock(lock.get(), LOCK_EX | LOCK_NB) != 0) {
+    if (errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) {
+      return edit_failure(PersonaEditorErrorCode::io_failure,
+                          "persona write lock could not be acquired", {}, true);
+    }
+    if (stop_token.stop_requested()) {
+      return edit_failure(PersonaEditorErrorCode::cancelled,
+                          "persona write cancelled while waiting for its lock");
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds{2});
+  }
+  return lock;
+}
+
+[[nodiscard]] auto write_all(const int descriptor, const std::string_view text,
+                             const std::stop_token stop_token)
+    -> std::expected<void, persona::PersonaEditorError> {
+  std::size_t offset{};
+  while (offset < text.size()) {
+    if (stop_token.stop_requested()) {
+      return edit_failure(PersonaEditorErrorCode::cancelled,
+                          "persona write cancelled before publication");
+    }
+    const auto count =
+        ::write(descriptor, text.data() + offset, text.size() - offset);
+    if (count < 0 && errno == EINTR) continue;
+    if (count < 0) {
+      return edit_failure(
+          errno == ENOSPC ? PersonaEditorErrorCode::resource_exhausted
+                          : PersonaEditorErrorCode::io_failure,
+          "persona temporary file could not be written", {}, true);
+    }
+    if (count == 0) {
+      return edit_failure(PersonaEditorErrorCode::io_failure,
+                          "persona temporary write made no progress", {}, true);
+    }
+    offset += static_cast<std::size_t>(count);
+  }
+  return {};
+}
+
+class PreparedPersona final {
+ public:
+  // clang-format off
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Secure file stages.
+  [[nodiscard]] static auto create(const int root_descriptor,
+                                   const std::string_view text,
+                                   const std::stop_token stop_token)
+      -> std::expected<PreparedPersona, persona::PersonaEditorError> {
+    // clang-format on
+    static std::atomic_uint64_t sequence{};
+    for (std::size_t attempt{}; attempt < 128; ++attempt) {
+      auto name = ".aiforge-persona-" + std::to_string(::getpid()) + "-" +
+                  std::to_string(sequence.fetch_add(1));
+      UniqueFd descriptor{create_at(
+          root_descriptor, name.c_str(),
+          O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600)};
+      if (!descriptor && errno == EEXIST) continue;
+      if (!descriptor) {
+        return edit_failure(
+            errno == EACCES ? PersonaEditorErrorCode::permission_denied
+                            : PersonaEditorErrorCode::io_failure,
+            "persona temporary file could not be created", {}, true);
+      }
+      struct stat state{};
+      if (::fstat(descriptor.get(), &state) != 0 || !S_ISREG(state.st_mode) ||
+          state.st_uid != ::geteuid() || state.st_nlink != 1 ||
+          ::fchmod(descriptor.get(), 0600) != 0) {
+        static_cast<void>(::unlinkat(root_descriptor, name.c_str(), 0));
+        return edit_failure(PersonaEditorErrorCode::permission_denied,
+                            "persona temporary file has unsafe attributes");
+      }
+      PreparedPersona prepared{root_descriptor, std::move(name),
+                               std::move(descriptor)};
+      if (auto written =
+              write_all(prepared.m_descriptor.get(), text, stop_token);
+          !written) {
+        return std::unexpected(std::move(written.error()));
+      }
+      if (::fsync(prepared.m_descriptor.get()) != 0) {
+        return edit_failure(
+            errno == ENOSPC ? PersonaEditorErrorCode::resource_exhausted
+                            : PersonaEditorErrorCode::io_failure,
+            "persona temporary file could not be synchronized", {}, true);
+      }
+      struct stat complete{};
+      if (::fstat(prepared.m_descriptor.get(), &complete) != 0 ||
+          complete.st_size < 0 ||
+          static_cast<std::size_t>(complete.st_size) != text.size()) {
+        return edit_failure(PersonaEditorErrorCode::io_failure,
+                            "persona temporary file could not be verified", {},
+                            true);
+      }
+      return prepared;
+    }
+    return edit_failure(PersonaEditorErrorCode::resource_exhausted,
+                        "persona temporary name space is exhausted", {}, true);
+  }
+
+  PreparedPersona(PreparedPersona&& other) noexcept
+      : m_root_descriptor(other.m_root_descriptor),
+        m_name(std::move(other.m_name)),
+        m_descriptor(std::move(other.m_descriptor)) {
+    other.m_name.clear();
+  }
+  PreparedPersona(const PreparedPersona&) = delete;
+  auto operator=(const PreparedPersona&) -> PreparedPersona& = delete;
+  ~PreparedPersona() {
+    if (!m_name.empty())
+      static_cast<void>(::unlinkat(m_root_descriptor, m_name.c_str(), 0));
+  }
+  [[nodiscard]] auto name() const noexcept -> const std::string& {
+    return m_name;
+  }
+  [[nodiscard]] auto path_is_prepared() const noexcept -> bool {
+    struct stat descriptor_state{};
+    struct stat path_state{};
+    return !m_name.empty() &&
+           ::fstat(m_descriptor.get(), &descriptor_state) == 0 &&
+           ::fstatat(m_root_descriptor, m_name.c_str(), &path_state,
+                     AT_SYMLINK_NOFOLLOW) == 0 &&
+           S_ISREG(path_state.st_mode) &&
+           descriptor_state.st_dev == path_state.st_dev &&
+           descriptor_state.st_ino == path_state.st_ino;
+  }
+  auto disarm() noexcept -> void { m_name.clear(); }
+
+ private:
+  PreparedPersona(const int root_descriptor, std::string name,
+                  UniqueFd descriptor)
+      : m_root_descriptor(root_descriptor), m_name(std::move(name)),
+        m_descriptor(std::move(descriptor)) {}
+
+  int m_root_descriptor;
+  std::string m_name;
+  UniqueFd m_descriptor;
+};
+
+[[nodiscard]] auto indexed_for_name(const std::vector<IndexedPersona>& indexed,
+                                    const std::string_view name)
+    -> const IndexedPersona* {
+  const auto canonical = canonical_name(name);
+  const auto found =
+      std::ranges::find(indexed, canonical, &IndexedPersona::canonical);
+  return found == indexed.end() ? nullptr : &*found;
+}
+
+[[nodiscard]] auto editor_index(const int root_descriptor,
+                                const persona::PersonaLimits& limits,
+                                const std::stop_token stop_token)
+    -> std::expected<std::vector<IndexedPersona>, persona::PersonaEditorError> {
+  auto indexed = index_personas(root_descriptor, limits, stop_token);
+  if (!indexed)
+    return std::unexpected(editor_error(std::move(indexed.error())));
+  return std::move(*indexed);
+}
+
+[[nodiscard]] auto editor_load(const int root_descriptor,
+                               const IndexedPersona& indexed,
+                               const persona::PersonaLimits& limits,
+                               const std::stop_token stop_token)
+    -> std::expected<domain::PersonaDocument, persona::PersonaEditorError> {
+  struct stat attributes{};
+  if (::fstatat(root_descriptor, indexed.filename.c_str(), &attributes,
+                AT_SYMLINK_NOFOLLOW) != 0) {
+    return edit_failure(
+        errno == EACCES ? PersonaEditorErrorCode::permission_denied
+                        : PersonaEditorErrorCode::io_failure,
+        "persona file ownership could not be inspected", {}, true);
+  }
+  if (attributes.st_uid != ::geteuid()) {
+    return edit_failure(PersonaEditorErrorCode::permission_denied,
+                        "persona file must be owned by the current user");
+  }
+  auto loaded = load_indexed(root_descriptor, indexed, limits, stop_token);
+  if (!loaded) return std::unexpected(editor_error(std::move(loaded.error())));
+  return std::move(*loaded);
+}
 #endif
+
+[[nodiscard]] auto bounded_description(const std::string_view text,
+                                       const std::size_t maximum)
+    -> std::string {
+  for (const auto raw : text | std::views::split('\n')) {
+    std::string_view line{raw.begin(), raw.end()};
+    while (!line.empty() && (line.front() == ' ' || line.front() == '\t' ||
+                             line.front() == '\r'))
+      line.remove_prefix(1);
+    while (!line.empty() &&
+           (line.back() == ' ' || line.back() == '\t' || line.back() == '\r'))
+      line.remove_suffix(1);
+    if (line.empty()) continue;
+    std::size_t bytes{};
+    while (bytes < line.size() && bytes < maximum) {
+      const auto lead = static_cast<unsigned char>(line[bytes]);
+      const std::size_t length = lead < 0x80U   ? 1U
+                                 : lead < 0xe0U ? 2U
+                                 : lead < 0xf0U ? 3U
+                                                : 4U;
+      if (length > maximum - bytes) break;
+      bytes += length;
+    }
+    return std::string{line.substr(0, bytes)};
+  }
+  return {};
 }
 
 } // namespace
@@ -498,12 +887,12 @@ auto process_persona_root()
     -> std::expected<std::filesystem::path, persona::PersonaError> {
   try {
     config::ConfigPathEnvironment environment;
-    if (const auto* xdg = std::getenv("XDG_CONFIG_HOME")) {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe) -- Startup environment snapshot.
+    if (const auto* xdg = std::getenv("XDG_CONFIG_HOME"))
       environment.xdg_config_home = std::filesystem::path{xdg};
-    }
-    if (const auto* home = std::getenv("HOME")) {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe) -- Startup environment snapshot.
+    if (const auto* home = std::getenv("HOME"))
       environment.home = std::filesystem::path{home};
-    }
     return resolve_persona_root(environment);
   } catch (...) {
     return failure(PersonaErrorCode::invalid_root,
@@ -520,18 +909,30 @@ auto FilesystemPersonaSource::list(const persona::PersonaLimits limits,
       return failure(PersonaErrorCode::invalid_request,
                      "persona limits are invalid");
     }
-    auto indexed = index_personas(m_root, limits, stop_token, true);
+#ifdef _WIN32
+    static_cast<void>(stop_token);
+    return failure(PersonaErrorCode::io_failure,
+                   "filesystem personas are unavailable on this platform");
+#else
+    auto root = open_read_root(m_root, true);
+    if (!root) return std::unexpected(std::move(root.error()));
+    if (!root->has_value()) return std::vector<domain::PersonaSummary>{};
+    auto root_directory = std::move(*root);
+    if (!root_directory) return std::vector<domain::PersonaSummary>{};
+    const int root_descriptor = root_directory->get();
+    auto indexed = index_personas(root_descriptor, limits, stop_token);
     if (!indexed) return std::unexpected(std::move(indexed.error()));
     std::vector<domain::PersonaSummary> result;
     result.reserve(indexed->size());
     for (const auto& entry : *indexed) {
-      auto document = load_indexed(m_root, entry, limits, stop_token);
+      auto document = load_indexed(root_descriptor, entry, limits, stop_token);
       if (!document) return std::unexpected(std::move(document.error()));
       result.push_back({document->reference,
                         bounded_description(document->text,
                                             limits.maximum_description_bytes)});
     }
     return result;
+#endif
   } catch (...) {
     return failure(PersonaErrorCode::internal_failure,
                    "persona listing failed internally");
@@ -552,19 +953,391 @@ auto FilesystemPersonaSource::load(std::string name,
                      "persona name must be a bounded bare name",
                      std::move(name));
     }
-    auto indexed = index_personas(m_root, limits, stop_token, false);
+#ifdef _WIN32
+    static_cast<void>(stop_token);
+    return failure(PersonaErrorCode::io_failure,
+                   "persona loading is unavailable on this platform",
+                   std::move(name));
+#else
+    auto root = open_read_root(m_root, false);
+    if (!root) return std::unexpected(std::move(root.error()));
+    auto root_directory = std::move(*root);
+    if (!root_directory) {
+      return failure(PersonaErrorCode::not_found, "persona root was not found",
+                     std::move(name));
+    }
+    const int root_descriptor = root_directory->get();
+    auto indexed = index_personas(root_descriptor, limits, stop_token);
     if (!indexed) return std::unexpected(std::move(indexed.error()));
-    const auto canonical = canonical_name(name);
-    const auto found =
-        std::ranges::find(*indexed, canonical, &IndexedPersona::canonical);
-    if (found == indexed->end()) {
+    const auto* found = indexed_for_name(*indexed, name);
+    if (found == nullptr) {
       return failure(PersonaErrorCode::not_found, "persona was not found",
                      std::move(name));
     }
-    return load_indexed(m_root, *found, limits, stop_token);
+    return load_indexed(root_descriptor, *found, limits, stop_token);
+#endif
   } catch (...) {
     return failure(PersonaErrorCode::internal_failure,
                    "persona loading failed internally", std::move(name));
+  }
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Atomic create.
+auto FilesystemPersonaSource::create(persona::PersonaCreate request,
+                                     const std::stop_token stop_token)
+    -> std::expected<persona::PersonaWriteReceipt,
+                     persona::PersonaEditorError> {
+  bool published{};
+  try {
+    auto candidate = persona::prepare_persona_create(request);
+    if (!candidate) return std::unexpected(std::move(candidate.error()));
+    if (stop_token.stop_requested()) {
+      return edit_failure(PersonaEditorErrorCode::cancelled,
+                          "persona creation cancelled");
+    }
+#ifdef _WIN32
+    return edit_failure(PersonaEditorErrorCode::io_failure,
+                        "persona creation is unavailable on this platform");
+#else
+    auto root = open_write_root(m_root);
+    if (!root) return std::unexpected(std::move(root.error()));
+    auto lock = acquire_write_lock(root->directory.get(), stop_token);
+    if (!lock) return std::unexpected(std::move(lock.error()));
+    auto indexed =
+        editor_index(root->directory.get(), request.limits, stop_token);
+    if (!indexed) return std::unexpected(std::move(indexed.error()));
+    if (indexed_for_name(*indexed, request.draft.name) != nullptr) {
+      return edit_failure(PersonaEditorErrorCode::already_exists,
+                          "persona name already exists");
+    }
+    if (indexed->size() >= request.limits.maximum_personas) {
+      return edit_failure(PersonaEditorErrorCode::resource_exhausted,
+                          "persona directory has reached its entry limit");
+    }
+    auto prepared = PreparedPersona::create(root->directory.get(),
+                                            request.draft.text, stop_token);
+    if (!prepared) return std::unexpected(std::move(prepared.error()));
+    if (m_checkpoint) {
+      auto checkpoint =
+          m_checkpoint(PersonaFilesystemCheckpointStage::temporary_synced);
+      if (!checkpoint) return std::unexpected(std::move(checkpoint.error()));
+    }
+    indexed = editor_index(root->directory.get(), request.limits, stop_token);
+    if (!indexed) return std::unexpected(std::move(indexed.error()));
+    if (indexed_for_name(*indexed, request.draft.name) != nullptr) {
+      return edit_failure(PersonaEditorErrorCode::already_exists,
+                          "persona name appeared before publication");
+    }
+    if (indexed->size() >= request.limits.maximum_personas) {
+      return edit_failure(PersonaEditorErrorCode::resource_exhausted,
+                          "persona directory reached its entry limit before "
+                          "publication",
+                          {}, true);
+    }
+    if (auto stable = root_unchanged(*root); !stable)
+      return std::unexpected(std::move(stable.error()));
+    if (stop_token.stop_requested()) {
+      return edit_failure(PersonaEditorErrorCode::cancelled,
+                          "persona creation cancelled before publication");
+    }
+    const auto filename = candidate->reference.source_location.substr(9);
+    if (::linkat(root->directory.get(), prepared->name().c_str(),
+                 root->directory.get(), filename.c_str(), 0) != 0) {
+      return edit_failure(
+          errno == EEXIST   ? PersonaEditorErrorCode::already_exists
+          : errno == EACCES ? PersonaEditorErrorCode::permission_denied
+                            : PersonaEditorErrorCode::io_failure,
+          errno == EEXIST ? "persona name collided during publication"
+                          : "persona file could not be published",
+          {}, errno != EEXIST);
+    }
+    published = true;
+    std::optional<persona::PersonaEditorError> post_error;
+    if (::unlinkat(root->directory.get(), prepared->name().c_str(), 0) != 0) {
+      post_error = persona::PersonaEditorError{
+          PersonaEditorErrorCode::io_failure,
+          "persona was published but its temporary link could not be removed",
+          {},
+          true,
+          true};
+    } else {
+      prepared->disarm();
+    }
+    if (m_checkpoint) {
+      auto checkpoint =
+          m_checkpoint(PersonaFilesystemCheckpointStage::published);
+      if (!checkpoint && !post_error) {
+        post_error = std::move(checkpoint.error());
+        post_error->may_have_applied = true;
+      }
+    }
+    if (::fsync(root->directory.get()) != 0 && !post_error) {
+      post_error = persona::PersonaEditorError{
+          PersonaEditorErrorCode::durability_failure,
+          "persona was published but its directory could not be synchronized",
+          {},
+          true,
+          true};
+    }
+    if (post_error) return std::unexpected(std::move(*post_error));
+    auto after_index = editor_index(root->directory.get(), request.limits, {});
+    if (!after_index) {
+      auto error = std::move(after_index.error());
+      error.may_have_applied = true;
+      return std::unexpected(std::move(error));
+    }
+    const auto* resulting = indexed_for_name(*after_index, request.draft.name);
+    if (resulting == nullptr) {
+      return edit_failure(PersonaEditorErrorCode::concurrent_change,
+                          "published persona could not be found", {}, true,
+                          true);
+    }
+    auto loaded =
+        editor_load(root->directory.get(), *resulting, request.limits, {});
+    if (!loaded) {
+      auto error = std::move(loaded.error());
+      error.may_have_applied = true;
+      return std::unexpected(std::move(error));
+    }
+    if (loaded->reference != candidate->reference) {
+      return edit_failure(PersonaEditorErrorCode::concurrent_change,
+                          "published persona did not match its candidate",
+                          loaded->reference, true, true);
+    }
+    if (auto stable = root_unchanged(*root); !stable) {
+      auto error = std::move(stable.error());
+      error.may_have_applied = true;
+      return std::unexpected(std::move(error));
+    }
+    persona::PersonaWriteReceipt receipt{std::nullopt, loaded->reference};
+    if (auto valid = persona::validate_persona_write_receipt(request, receipt);
+        !valid) {
+      auto error = std::move(valid.error());
+      error.may_have_applied = true;
+      return std::unexpected(std::move(error));
+    }
+    return receipt;
+#endif
+  } catch (...) {
+    return edit_failure(PersonaEditorErrorCode::internal_failure,
+                        "persona creation failed internally", {}, false,
+                        published);
+  }
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Exact replace.
+auto FilesystemPersonaSource::replace(persona::PersonaReplace request,
+                                      const std::stop_token stop_token)
+    -> std::expected<persona::PersonaWriteReceipt,
+                     persona::PersonaEditorError> {
+  bool published{};
+  try {
+    auto candidate = persona::prepare_persona_replace(request);
+    if (!candidate) return std::unexpected(std::move(candidate.error()));
+    if (stop_token.stop_requested()) {
+      return edit_failure(PersonaEditorErrorCode::cancelled,
+                          "persona replacement cancelled");
+    }
+#ifdef _WIN32
+    return edit_failure(PersonaEditorErrorCode::io_failure,
+                        "persona replacement is unavailable on this platform");
+#else
+    auto root = open_write_root(m_root);
+    if (!root) return std::unexpected(std::move(root.error()));
+    auto lock = acquire_write_lock(root->directory.get(), stop_token);
+    if (!lock) return std::unexpected(std::move(lock.error()));
+    auto indexed =
+        editor_index(root->directory.get(), request.limits, stop_token);
+    if (!indexed) return std::unexpected(std::move(indexed.error()));
+    const auto* found = indexed_for_name(*indexed, request.expected.name);
+    if (found == nullptr) {
+      return edit_failure(PersonaEditorErrorCode::not_found,
+                          "persona to replace was not found");
+    }
+    auto current =
+        editor_load(root->directory.get(), *found, request.limits, stop_token);
+    if (!current) return std::unexpected(std::move(current.error()));
+    if (current->reference != request.expected) {
+      return edit_failure(PersonaEditorErrorCode::source_mismatch,
+                          "persona replacement precondition no longer matches",
+                          current->reference, true);
+    }
+    auto prepared = PreparedPersona::create(root->directory.get(), request.text,
+                                            stop_token);
+    if (!prepared) return std::unexpected(std::move(prepared.error()));
+    if (m_checkpoint) {
+      auto checkpoint =
+          m_checkpoint(PersonaFilesystemCheckpointStage::temporary_synced);
+      if (!checkpoint) return std::unexpected(std::move(checkpoint.error()));
+    }
+    indexed = editor_index(root->directory.get(), request.limits, stop_token);
+    if (!indexed) return std::unexpected(std::move(indexed.error()));
+    found = indexed_for_name(*indexed, request.expected.name);
+    if (found == nullptr) {
+      return edit_failure(PersonaEditorErrorCode::concurrent_change,
+                          "persona disappeared before replacement", {}, true);
+    }
+    auto final_check =
+        editor_load(root->directory.get(), *found, request.limits, stop_token);
+    if (!final_check) return std::unexpected(std::move(final_check.error()));
+    if (final_check->reference != request.expected) {
+      return edit_failure(PersonaEditorErrorCode::concurrent_change,
+                          "persona changed before replacement",
+                          final_check->reference, true);
+    }
+    if (auto stable = root_unchanged(*root); !stable)
+      return std::unexpected(std::move(stable.error()));
+    if (stop_token.stop_requested()) {
+      return edit_failure(PersonaEditorErrorCode::cancelled,
+                          "persona replacement cancelled before publication");
+    }
+    if (m_checkpoint) {
+      auto checkpoint =
+          m_checkpoint(PersonaFilesystemCheckpointStage::replacement_ready);
+      if (!checkpoint) return std::unexpected(std::move(checkpoint.error()));
+    }
+    const auto target_filename = found->filename;
+    if (exchange_entries(root->directory.get(), prepared->name(),
+                         target_filename) != 0) {
+      return edit_failure(
+          errno == EACCES ? PersonaEditorErrorCode::permission_denied
+                          : PersonaEditorErrorCode::io_failure,
+          errno == ENOTSUP || errno == ENOSYS
+              ? "exact persona replacement is unavailable on this filesystem"
+              : "persona replacement could not be published",
+          {}, true);
+    }
+    published = true;
+
+    const IndexedPersona displaced{canonical_name(request.expected.name),
+                                   request.expected.name, prepared->name()};
+    auto displaced_document =
+        editor_load(root->directory.get(), displaced, request.limits, {});
+    const bool displaced_matches =
+        displaced_document &&
+        displaced_document->reference.persona_id ==
+            request.expected.persona_id &&
+        displaced_document->reference.name == request.expected.name &&
+        displaced_document->reference.content_digest ==
+            request.expected.content_digest;
+    if (!displaced_matches) {
+      std::optional<domain::PersonaReference> observed;
+      if (displaced_document) {
+        observed = displaced_document->reference;
+        observed->source_location = request.expected.source_location;
+      }
+      std::optional<persona::PersonaEditorError> rollback_checkpoint_error;
+      if (m_checkpoint) {
+        auto checkpoint =
+            m_checkpoint(PersonaFilesystemCheckpointStage::rollback_ready);
+        if (!checkpoint) {
+          rollback_checkpoint_error = std::move(checkpoint.error());
+          rollback_checkpoint_error->may_have_applied = true;
+        }
+      }
+      if (exchange_entries(root->directory.get(), prepared->name(),
+                           target_filename) != 0) {
+        prepared->disarm();
+        return edit_failure(
+            PersonaEditorErrorCode::concurrent_change,
+            "persona changed during publication and rollback failed",
+            std::move(observed), true, true);
+      }
+      if (!prepared->path_is_prepared()) {
+        prepared->disarm();
+        return edit_failure(
+            PersonaEditorErrorCode::concurrent_change,
+            "another persona change raced with exact-replacement rollback",
+            std::move(observed), true, true);
+      }
+      if (::unlinkat(root->directory.get(), prepared->name().c_str(), 0) != 0) {
+        return edit_failure(
+            PersonaEditorErrorCode::io_failure,
+            "persona rollback could not remove its prepared candidate",
+            std::move(observed), true, true);
+      }
+      prepared->disarm();
+      if (::fsync(root->directory.get()) != 0) {
+        return edit_failure(PersonaEditorErrorCode::durability_failure,
+                            "persona rollback could not be synchronized",
+                            std::move(observed), true, true);
+      }
+      published = false;
+      if (rollback_checkpoint_error) {
+        return std::unexpected(std::move(*rollback_checkpoint_error));
+      }
+      return edit_failure(PersonaEditorErrorCode::concurrent_change,
+                          "persona changed during exact replacement",
+                          std::move(observed), true);
+    }
+    if (::unlinkat(root->directory.get(), prepared->name().c_str(), 0) != 0) {
+      return edit_failure(
+          PersonaEditorErrorCode::io_failure,
+          "persona was replaced but its displaced file could not be removed",
+          {}, true, true);
+    }
+    prepared->disarm();
+    std::optional<persona::PersonaEditorError> post_error;
+    if (m_checkpoint) {
+      auto checkpoint =
+          m_checkpoint(PersonaFilesystemCheckpointStage::published);
+      if (!checkpoint) {
+        post_error = std::move(checkpoint.error());
+        post_error->may_have_applied = true;
+      }
+    }
+    if (::fsync(root->directory.get()) != 0 && !post_error) {
+      post_error = persona::PersonaEditorError{
+          PersonaEditorErrorCode::durability_failure,
+          "persona was replaced but its directory could not be synchronized",
+          {},
+          true,
+          true};
+    }
+    if (post_error) return std::unexpected(std::move(*post_error));
+    auto after_index = editor_index(root->directory.get(), request.limits, {});
+    if (!after_index) {
+      auto error = std::move(after_index.error());
+      error.may_have_applied = true;
+      return std::unexpected(std::move(error));
+    }
+    const auto* resulting =
+        indexed_for_name(*after_index, request.expected.name);
+    if (resulting == nullptr) {
+      return edit_failure(PersonaEditorErrorCode::concurrent_change,
+                          "replaced persona could not be found", {}, true,
+                          true);
+    }
+    auto loaded =
+        editor_load(root->directory.get(), *resulting, request.limits, {});
+    if (!loaded) {
+      auto error = std::move(loaded.error());
+      error.may_have_applied = true;
+      return std::unexpected(std::move(error));
+    }
+    if (loaded->reference != candidate->reference) {
+      return edit_failure(PersonaEditorErrorCode::concurrent_change,
+                          "replaced persona did not match its candidate",
+                          loaded->reference, true, true);
+    }
+    if (auto stable = root_unchanged(*root); !stable) {
+      auto error = std::move(stable.error());
+      error.may_have_applied = true;
+      return std::unexpected(std::move(error));
+    }
+    persona::PersonaWriteReceipt receipt{request.expected, loaded->reference};
+    if (auto valid = persona::validate_persona_write_receipt(request, receipt);
+        !valid) {
+      auto error = std::move(valid.error());
+      error.may_have_applied = true;
+      return std::unexpected(std::move(error));
+    }
+    return receipt;
+#endif
+  } catch (...) {
+    return edit_failure(PersonaEditorErrorCode::internal_failure,
+                        "persona replacement failed internally", {}, false,
+                        published);
   }
 }
 

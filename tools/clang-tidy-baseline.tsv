@@ -70,15 +70,8 @@ src/adapters/filesystem_artifact_store.cpp	cppcoreguidelines-pro-type-vararg	8fc
 src/adapters/filesystem_artifact_store.cpp	cppcoreguidelines-pro-type-vararg	d66dd70b2fffa3a6c14a	do not call c-style vararg functions
 src/adapters/filesystem_artifact_store.cpp	modernize-use-integer-sign-comparison	40a060bb7bc278d0de71	comparison between 'signed' and 'unsigned' integers
 src/adapters/filesystem_artifact_store.cpp	readability-function-cognitive-complexity	926f4c919418594c066a	function 'get' has cognitive complexity of 24 (threshold 20)
-src/adapters/filesystem_persona_source.cpp	concurrency-mt-unsafe	035ff6b2fa68a98596c1	function is not thread safe
-src/adapters/filesystem_persona_source.cpp	concurrency-mt-unsafe	52bfa384a16930b923ea	function is not thread safe
-src/adapters/filesystem_persona_source.cpp	cppcoreguidelines-pro-type-vararg	f7b838850753c48a1dfa	do not call c-style vararg functions
-src/adapters/filesystem_persona_source.cpp	cppcoreguidelines-pro-type-vararg	fc8f3d209baa315a962e	do not call c-style vararg functions
 src/adapters/filesystem_persona_source.cpp	modernize-use-integer-sign-comparison	f2761ca5d63e604a2bf5	comparison between 'signed' and 'unsigned' integers
-src/adapters/filesystem_persona_source.cpp	readability-function-cognitive-complexity	10146ae1e9b2eff52d46	function 'load_indexed' has cognitive complexity of 36 (threshold 20)
 src/adapters/filesystem_persona_source.cpp	readability-function-cognitive-complexity	2d575b41089c6b98fd06	function 'bounded_description' has cognitive complexity of 29 (threshold 20)
-src/adapters/filesystem_persona_source.cpp	readability-function-cognitive-complexity	53f224377511b22a5246	function 'valid_utf8_text' has cognitive complexity of 29 (threshold 20)
-src/adapters/filesystem_persona_source.cpp	readability-function-cognitive-complexity	d92aeef68803a78fe400	function 'index_personas' has cognitive complexity of 27 (threshold 20)
 src/adapters/git_repository_snapshot_source.cpp	bugprone-unchecked-optional-access	24cf5db87f8e761a8b81	unchecked access to optional value
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	c52c46e315ddd42c4ff5	do not declare C-style arrays, use 'std::array' instead
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	ddedbf9de3163244e942	do not declare C-style arrays, use 'std::array' instead
@@ -344,8 +337,6 @@ src/lib/one_shot.cpp	readability-function-cognitive-complexity	6985728956b7a7597
 src/lib/one_shot.cpp	readability-function-cognitive-complexity	f5b43a857caa7cf1fd69	function 'resolve_persona' has cognitive complexity of 23 (threshold 20)
 src/lib/one_shot.cpp	readability-function-cognitive-complexity	fc6602dfc5c395c12b8a	function 'valid_utf8' has cognitive complexity of 25 (threshold 20)
 src/lib/persona.cpp	bugprone-implicit-widening-of-multiplication-result	3af33fbf819fdcf4f5b3	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
-src/lib/persona.cpp	bugprone-implicit-widening-of-multiplication-result	71c3909c1b288df608a8	performing an implicit widening conversion to type 'size_type' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
-src/lib/persona.cpp	readability-function-cognitive-complexity	678e9a0e3a1ffc811477	function 'valid_utf8_text' has cognitive complexity of 30 (threshold 20)
 src/lib/plan.cpp	bugprone-unchecked-optional-access	26014a008d2e99d11f53	unchecked access to optional value
 src/lib/plan.cpp	bugprone-unchecked-optional-access	2e816405a2a97f868b23	unchecked access to optional value
 src/lib/plan.cpp	bugprone-unchecked-optional-access	a6909089782e9ea76295	unchecked access to optional value

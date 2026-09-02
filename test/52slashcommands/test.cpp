@@ -246,6 +246,15 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   REQUIRE(disabled);
   REQUIRE((*disabled)->action == SlashCommandAction::disable_persona);
 
+  const auto managed = registry.dispatch("/persona manage");
+  REQUIRE(managed);
+  REQUIRE((*managed)->action == SlashCommandAction::manage_personas);
+  const auto active_manager = registry.dispatch(
+      "/persona manage", {.run_active = true, .stop_token = {}});
+  REQUIRE_FALSE(active_manager);
+  REQUIRE(active_manager.error().code ==
+          SlashCommandErrorCode::unavailable_command);
+
   const auto picker = registry.dispatch("/model");
   REQUIRE(picker);
   REQUIRE((*picker)->action == SlashCommandAction::choose_model);
@@ -297,8 +306,9 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
     REQUIRE(rejected.error().code == SlashCommandErrorCode::invalid_arguments);
   }
 
-  for (const auto invalid : {"/persona set", "/persona off now",
-                             "/persona set two names", "/persona unknown"}) {
+  for (const auto invalid :
+       {"/persona set", "/persona off now", "/persona manage now",
+        "/persona set two names", "/persona unknown"}) {
     const auto rejected = registry.dispatch(invalid);
     REQUIRE_FALSE(rejected);
     REQUIRE(rejected.error().code == SlashCommandErrorCode::invalid_arguments);

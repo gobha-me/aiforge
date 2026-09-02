@@ -1,4 +1,5 @@
 #include <aiforge/surfaces/chat_session.hpp>
+#include <aiforge/testing/scripted_persona_editor.hpp>
 #include <aiforge/testing/scripted_persona_source.hpp>
 #include <aiforge/testing/scripted_tool_executor.hpp>
 #include <algorithm>
@@ -208,6 +209,20 @@ auto persona_document(std::string text = "Review carefully.")
            "personas/reviewer.md",
            {"sha256", std::string(64, 'a'), text.size()}},
           std::move(text)};
+}
+
+auto create_receipt(const persona::PersonaCreate& request)
+    -> persona::PersonaWriteReceipt {
+  const auto prepared = persona::prepare_persona_create(request);
+  REQUIRE(prepared);
+  return {std::nullopt, prepared->reference};
+}
+
+auto replace_receipt(const persona::PersonaReplace& request)
+    -> persona::PersonaWriteReceipt {
+  const auto prepared = persona::prepare_persona_replace(request);
+  REQUIRE(prepared);
+  return {request.expected, prepared->reference};
 }
 
 } // namespace
@@ -627,6 +642,194 @@ TEST_CASE("resumed persona changes require an explicit decision",
   REQUIRE(std::get<domain::PersonaSelectionRecorded>(disabled->payload)
               .selection.action == domain::PersonaSelectionAction::disabled);
   drain_to_end(**resumed);
+}
+
+TEST_CASE("interactive persona writes are idle-only and capability separated",
+          "[chat][persona][editor][failure]") {
+  Backend backend;
+  const persona::PersonaCreate create_request{
+      {"reviewer", persona::PersonaFileKind::markdown, "Review carefully."},
+      {}};
+  testing::ScriptedPersonaEditor editor{
+      {{create_request, create_receipt(create_request)}}, {}};
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.persona_editor = &editor;
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
+      backend, backend, nullptr, nullptr, {}, {}, dependencies);
+  REQUIRE(session);
+
+  REQUIRE((*session)->submit("keep running"));
+  const auto rejected = (*session)->create_persona(create_request.draft);
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code == surfaces::ChatSessionErrorCode::run_failed);
+  REQUIRE(editor.recorded_creates().empty());
+  const domain::PersonaReference existing{
+      make_id<domain::PersonaId>("persona:existing"),
+      "existing",
+      "personas/existing.md",
+      {"sha256", std::string(64, 'c'), std::size_t{8}}};
+  const auto rejected_replace =
+      (*session)->replace_persona(existing, "Changed.");
+  REQUIRE_FALSE(rejected_replace);
+  REQUIRE(rejected_replace.error().code ==
+          surfaces::ChatSessionErrorCode::run_failed);
+  REQUIRE(editor.recorded_replaces().empty());
+  drain_to_end(**session);
+
+  const auto created = (*session)->create_persona(create_request.draft);
+  REQUIRE(created);
+  REQUIRE(*created == create_receipt(create_request));
+  REQUIRE(editor.recorded_creates() ==
+          std::vector<persona::PersonaCreate>{create_request});
+  REQUIRE_FALSE((*session)->persona_state().selected);
+  REQUIRE_FALSE((*session)->persona_state().requires_attention);
+
+  surfaces::ChatSessionDependencies unavailable_dependencies;
+  auto unavailable = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
+      backend, backend, nullptr, nullptr, {}, {}, unavailable_dependencies);
+  REQUIRE(unavailable);
+  REQUIRE_FALSE((*unavailable)->create_persona(create_request.draft));
+}
+
+TEST_CASE("editing the selected persona requires an explicit next decision",
+          "[chat][persona][editor][failure]") {
+  Backend backend;
+  const auto original = persona_document();
+  const persona::PersonaReplace replace_request{
+      original.reference, "Changed in manager.", {}};
+  const auto receipt = replace_receipt(replace_request);
+  const domain::PersonaDocument changed{receipt.resulting,
+                                        replace_request.text};
+  testing::ScriptedPersonaSource personas{
+      {},
+      {{"reviewer", original}, {"reviewer", changed}, {"reviewer", changed}}};
+  testing::ScriptedPersonaEditor editor{{}, {{replace_request, receipt}}};
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.persona_source = &personas;
+  dependencies.persona_editor = &editor;
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
+      backend, backend, nullptr, nullptr, {}, {}, dependencies);
+  REQUIRE(session);
+  REQUIRE((*session)->select_persona("reviewer"));
+
+  const auto edited = (*session)->replace_persona(replace_request.expected,
+                                                  replace_request.text);
+  REQUIRE(edited);
+  REQUIRE(*edited == receipt);
+  REQUIRE((*session)->persona_state().selected == original.reference);
+  REQUIRE((*session)->persona_state().requires_attention);
+  REQUIRE_FALSE((*session)->submit("must not run"));
+  REQUIRE(backend.requests.empty());
+  REQUIRE((*session)->event_log().events().empty());
+
+  REQUIRE((*session)->select_persona("reviewer"));
+  REQUIRE_FALSE((*session)->persona_state().requires_attention);
+  REQUIRE((*session)->persona_state().selected == changed.reference);
+  REQUIRE((*session)->submit("use the reviewed edit"));
+  drain_to_end(**session);
+  REQUIRE(backend.requests.size() == 1);
+  const auto system_messages =
+      text_messages(backend.requests.front(), domain::Role::system);
+  REQUIRE(std::ranges::find(system_messages, changed.text) !=
+          system_messages.end());
+}
+
+TEST_CASE("ambiguous selected-persona edits fail closed with attention",
+          "[chat][persona][editor][failure]") {
+  Backend backend;
+  const auto original = persona_document();
+  const persona::PersonaReplace replace_request{
+      original.reference, "Possibly changed.", {}};
+  testing::ScriptedPersonaSource personas{{}, {{"reviewer", original}}};
+  const persona::PersonaEditorError ambiguous{
+      persona::PersonaEditorErrorCode::durability_failure,
+      "persona directory could not be synchronized", std::nullopt, true, true};
+  testing::ScriptedPersonaEditor editor{{}, {{replace_request, ambiguous}}};
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.persona_source = &personas;
+  dependencies.persona_editor = &editor;
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
+      backend, backend, nullptr, nullptr, {}, {}, dependencies);
+  REQUIRE(session);
+  REQUIRE((*session)->select_persona("reviewer"));
+
+  const auto edited = (*session)->replace_persona(replace_request.expected,
+                                                  replace_request.text);
+  REQUIRE_FALSE(edited);
+  REQUIRE(edited.error().effect_may_have_applied);
+  REQUIRE((*session)->persona_state().selected == original.reference);
+  REQUIRE((*session)->persona_state().requires_attention);
+  REQUIRE_FALSE((*session)->submit("must not run"));
+  REQUIRE(backend.requests.empty());
+  REQUIRE((*session)->event_log().events().empty());
+}
+
+TEST_CASE("editing a refreshed selected persona still requires attention",
+          "[chat][persona][editor][failure]") {
+  Backend backend;
+  const auto selected = persona_document();
+  auto refreshed = selected.reference;
+  refreshed.content_digest = {"sha256", std::string(64, 'd'), std::size_t{18}};
+  const persona::PersonaReplace replace_request{
+      refreshed, "Changed after refresh.", {}};
+  const auto receipt = replace_receipt(replace_request);
+  testing::ScriptedPersonaSource personas{{}, {{"reviewer", selected}}};
+  testing::ScriptedPersonaEditor editor{{}, {{replace_request, receipt}}};
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.persona_source = &personas;
+  dependencies.persona_editor = &editor;
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
+      backend, backend, nullptr, nullptr, {}, {}, dependencies);
+  REQUIRE(session);
+  REQUIRE((*session)->select_persona("reviewer"));
+
+  const auto edited = (*session)->replace_persona(replace_request.expected,
+                                                  replace_request.text);
+  REQUIRE(edited);
+  REQUIRE((*session)->persona_state().selected == selected.reference);
+  REQUIRE((*session)->persona_state().requires_attention);
+  REQUIRE_FALSE((*session)->submit("must choose the refreshed persona"));
+  REQUIRE(backend.requests.empty());
+}
+
+TEST_CASE("editing an inactive persona preserves the active selection",
+          "[chat][persona][editor]") {
+  Backend backend;
+  const auto selected = persona_document();
+  const domain::PersonaReference inactive{
+      make_id<domain::PersonaId>("persona:writer"),
+      "writer",
+      "personas/writer.txt",
+      {"sha256", std::string(64, 'b'), std::size_t{13}}};
+  const persona::PersonaReplace replace_request{inactive, "Write clearly.", {}};
+  const auto receipt = replace_receipt(replace_request);
+  testing::ScriptedPersonaSource personas{{}, {{"reviewer", selected}}};
+  testing::ScriptedPersonaEditor editor{{}, {{replace_request, receipt}}};
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.persona_source = &personas;
+  dependencies.persona_editor = &editor;
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
+      backend, backend, nullptr, nullptr, {}, {}, dependencies);
+  REQUIRE(session);
+  REQUIRE((*session)->select_persona("reviewer"));
+
+  const auto edited = (*session)->replace_persona(replace_request.expected,
+                                                  replace_request.text);
+  REQUIRE(edited);
+  REQUIRE((*session)->persona_state().selected == selected.reference);
+  REQUIRE_FALSE((*session)->persona_state().requires_attention);
 }
 
 TEST_CASE("every interactive run records its own provenance once",

@@ -271,17 +271,26 @@ A persona is selected by its bare filename without the extension:
 
 In interactive Chat, `/persona list` shows available personas,
 `/persona set <name>` selects one for the next turn, and `/persona off`
-disables it. New sessions carry the current selection. Resumed sessions reload
-the recorded file and require an explicit `set` or `off` decision when its
-content has changed or disappeared.
+disables it. `/persona manage` opens the idle-only persona manager, where a
+bounded `.md` or `.txt` persona can be created or an existing persona can be
+edited after reviewing its name, portable source path, byte size, prospective
+SHA-256 digest, and selected status. Creation does not select the new persona.
+Editing the selected persona requires an explicit `set` or `off` decision
+before the next inference. New sessions carry the current selection. Resumed
+sessions reload the recorded file and require the same explicit decision when
+its content has changed or disappeared.
 
 Names are ASCII letters or digits followed by letters, digits, `_`, or `-`.
 AIForge accepts at most 256 personas, reads at most 1 MiB per file, rejects
 empty or malformed UTF-8 and unsafe controls, and refuses symlinked roots or
-entries. Case and extension aliases are rejected. Each run records the selected
+entries. Case and extension aliases are rejected. Manager writes use a
+restrictive persona root and files, a same-directory temporary, exact-digest
+replacement checks, and atomic publication. Each run records the selected
 persona's portable source path, byte size, and SHA-256 digest in the append-only
 event stream; persona text enters model context as an attributed persona-layer
-system instruction, not as conversation history.
+system instruction, not as conversation history. The manager cannot edit the
+runtime contract, grant capabilities, delete files, import arbitrary paths, or
+follow recursive includes.
 
 ## Model catalog and picker
 

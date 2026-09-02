@@ -2,6 +2,8 @@
 
 #include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/model/catalog.hpp>
+#include <aiforge/testing/scripted_persona_editor.hpp>
+#include <aiforge/testing/scripted_persona_source.hpp>
 #include <aiforge/testing/tui_scenario.hpp>
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
@@ -1053,6 +1055,31 @@ auto request_settings_scenario() -> testing::TuiScenario {
   return value;
 }
 
+auto persona_manager_cancel_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-persona-manager-cancel-resize";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {120, 20, 1200, 400};
+  const auto key = [](const termforge::Key selected) {
+    return testing::TuiScenarioPost{termforge::KeyEvent{
+        selected, 0, false, false, false, termforge::KeyAction::Press}};
+  };
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/persona manage"}}},
+      {0, key(termforge::Key::Enter)},
+      {1, key(termforge::Key::Enter)},
+      {2, testing::TuiScenarioResize{{8, 3, 80, 60}}},
+      {3, testing::TuiScenarioResize{{120, 20, 1200, 400}}},
+      {4, key(termforge::Key::Escape)},
+      {5, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Char, U'd', true, false, false,
+              termforge::KeyAction::Press}}},
+  };
+  value.limits.maximum_frames = 16;
+  return value;
+}
+
 auto request_settings_apply_scenario() -> testing::TuiScenario {
   testing::TuiScenario value;
   value.scenario_id = "interactive-request-settings-session-apply";
@@ -1239,10 +1266,10 @@ auto chat_factory(
     const bool with_catalog = false, const bool with_persistence = false,
     const bool stale_preview = false, const bool persistence_failure = false,
     std::optional<config::ConfigSource> shadow_source = std::nullopt,
-    const bool report_persist_calls = false)
+    const bool report_persist_calls = false, const bool with_personas = false)
     -> testing::TuiScenarioTargetFactory {
   return [with_catalog, with_persistence, stale_preview, persistence_failure,
-          shadow_source, report_persist_calls](
+          shadow_source, report_persist_calls, with_personas](
              const testing::TuiScenarioPass pass, termforge::ByteSink* output)
              -> std::expected<testing::TuiScenarioTarget,
                               testing::TuiScenarioError> {
@@ -1261,6 +1288,11 @@ auto chat_factory(
     auto frame = std::make_shared<std::string>();
     auto suffix = std::make_shared<std::uint64_t>();
     auto persist_calls = std::make_shared<std::size_t>();
+    auto personas = std::make_shared<testing::ScriptedPersonaSource>(
+        std::vector<testing::PersonaListOutcome>{
+            std::vector<domain::PersonaSummary>{}},
+        std::vector<testing::PersonaLoadExchange>{});
+    auto persona_editor = std::make_shared<testing::ScriptedPersonaEditor>();
     adapters::InteractiveChatAppOptions options;
     options.live_wake_enabled = pass == testing::TuiScenarioPass::record;
     options.poll_worker_updates = false;
@@ -1325,6 +1357,10 @@ auto chat_factory(
     options.session_dependencies.timestamp_source = [] {
       return domain::EventTimestamp{123ms};
     };
+    if (with_personas) {
+      options.session_dependencies.persona_source = personas.get();
+      options.session_dependencies.persona_editor = persona_editor.get();
+    }
     auto app = adapters::make_interactive_chat_app(
         *backend, *backend, nullptr,
         {make_id<domain::ModelId>("model"),
@@ -1342,11 +1378,14 @@ auto chat_factory(
           return raw->configure_terminal_for_scenario(
               termforge::TerminalIo{pipe->read_fd(), -1}, capabilities);
         },
-        [raw, backend, editor, catalog_source, catalog] {
+        [raw, backend, editor, catalog_source, catalog, personas,
+         persona_editor] {
           static_cast<void>(backend);
           static_cast<void>(editor);
           static_cast<void>(catalog_source);
           static_cast<void>(catalog);
+          static_cast<void>(personas);
+          static_cast<void>(persona_editor);
           return raw->run();
         },
         [backend_state](const std::string_view step) {
@@ -1375,11 +1414,13 @@ auto chat_factory(
         },
         [frame] { return *frame; },
         [raw, backend, editor, catalog_source, catalog, persist_calls,
-         report_persist_calls] {
+         report_persist_calls, personas, persona_editor, with_personas] {
           static_cast<void>(backend);
           static_cast<void>(editor);
           static_cast<void>(catalog_source);
           static_cast<void>(catalog);
+          static_cast<void>(personas);
+          static_cast<void>(persona_editor);
           std::ostringstream state;
           state << raw->status_text();
           if (raw->pending_edit()) state << "|pending-edit";
@@ -1391,6 +1432,12 @@ auto chat_factory(
             }
           }
           if (report_persist_calls) state << "|persist=" << *persist_calls;
+          if (with_personas) {
+            state << "|persona-creates="
+                  << persona_editor->recorded_creates().size()
+                  << "|persona-replaces="
+                  << persona_editor->recorded_replaces().size();
+          }
           return std::move(state).str();
         }};
   };
@@ -1934,6 +1981,27 @@ TEST_CASE("request settings panel cancels atomically across tiny resizes",
           std::string::npos);
   REQUIRE(result->recorded.wire_output.find("(provider default)") !=
           std::string::npos);
+}
+
+TEST_CASE("persona manager cancels without writes across tiny resizes",
+          "[scenario][chat][persona][failure]") {
+  const auto result = testing::run_tui_scenario(
+      persona_manager_cancel_scenario(),
+      chat_factory(false, false, false, false, std::nullopt, false, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "Persona creation cancelled|persona-creates=0|"
+          "persona-replaces=0");
+  REQUIRE(result->recorded.wire_output.find("Manage personas") !=
+          std::string::npos);
+  REQUIRE(result->recorded.wire_output.find("Create new") != std::string::npos);
+  REQUIRE(result->recorded.wire_output.find("Create persona") !=
+          std::string::npos);
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames,
+      [](const std::string& frame) { return frame.starts_with("8x3:"); }));
 }
 
 TEST_CASE("request settings panel applies a transient next-inference value",

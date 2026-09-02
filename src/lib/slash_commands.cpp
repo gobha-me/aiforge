@@ -178,6 +178,10 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
     return SlashCommandResult{SlashCommandAction::disable_persona,
                               std::nullopt};
   }
+  if (arguments == "manage") {
+    return SlashCommandResult{SlashCommandAction::manage_personas,
+                              std::nullopt};
+  }
   constexpr std::string_view set{"set"};
   if (arguments.starts_with(set) && arguments.size() > set.size() &&
       (arguments[set.size()] == ' ' || arguments[set.size()] == '\t')) {
@@ -188,7 +192,7 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
     }
   }
   return command_error(SlashCommandErrorCode::invalid_arguments,
-                       "persona accepts list, set <name>, or off");
+                       "persona accepts list, set <name>, off, or manage");
 }
 
 [[nodiscard]] auto model_handler(std::string_view arguments,
@@ -251,8 +255,8 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
       {"session", "session", "[list | resume <session-id> | new]",
        "List, resume, or start interactive sessions.", idle_available,
        session_handler},
-      {"persona", "persona", "[list | set <name> | off]",
-       "List, select, or disable file-backed personas.", idle_available,
+      {"persona", "persona", "[list | set <name> | off | manage]",
+       "List, select, disable, or manage file-backed personas.", idle_available,
        persona_handler},
       {"model", "model", "[model-id]", "Choose a text model for future runs.",
        idle_available, model_handler},

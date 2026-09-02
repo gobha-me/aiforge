@@ -1,6 +1,7 @@
 #pragma once
 
 #include <aiforge/backend/backend.hpp>
+#include <aiforge/persona/editor.hpp>
 #include <aiforge/persona/source.hpp>
 #include <aiforge/runtime/memory_controller.hpp>
 #include <aiforge/runtime/plan_task_controller.hpp>
@@ -35,6 +36,7 @@ struct ChatSessionError {
   ChatSessionErrorCode code{ChatSessionErrorCode::internal_failure};
   std::string message;
   bool retryable{};
+  bool effect_may_have_applied{};
   auto operator==(const ChatSessionError&) const -> bool = default;
 };
 
@@ -84,6 +86,7 @@ struct ChatSessionDependencies {
   runtime::ToolRegistrySnapshot tools{};
   std::shared_ptr<runtime::ToolPolicy> tool_policy;
   persona::PersonaSource* persona_source{};
+  persona::PersonaEditor* persona_editor{};
   persona::PersonaLimits persona_limits{};
   runtime::MemoryController* memory_controller{};
   runtime::MemorySettings memory_settings{};
@@ -147,9 +150,16 @@ class ChatSession final {
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto list_personas()
       -> std::expected<std::vector<domain::PersonaSummary>, ChatSessionError>;
+  [[nodiscard]] auto load_persona(std::string name)
+      -> std::expected<domain::PersonaDocument, ChatSessionError>;
   [[nodiscard]] auto select_persona(std::string name)
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto disable_persona() -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto create_persona(persona::PersonaDraft draft)
+      -> std::expected<persona::PersonaWriteReceipt, ChatSessionError>;
+  [[nodiscard]] auto replace_persona(domain::PersonaReference expected,
+                                     std::string text)
+      -> std::expected<persona::PersonaWriteReceipt, ChatSessionError>;
   [[nodiscard]] auto select_model(domain::ModelId model_id)
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto set_generation_options(
@@ -168,6 +178,7 @@ class ChatSession final {
       PreparedChatGenerationOptions prepared)
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto persona_state() const -> ChatPersonaState;
+  [[nodiscard]] auto persona_limits() const noexcept -> persona::PersonaLimits;
 
   [[nodiscard]] auto plan_task_state(
       std::optional<domain::RepositoryId> repository_id = std::nullopt)

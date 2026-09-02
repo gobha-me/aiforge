@@ -30,6 +30,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   plan_task_controller.cpp
   persona.cpp
   persona_context.cpp
+  persona_editor.cpp
   pricing.cpp
   project_backlog.cpp
   presentation_text.cpp
@@ -50,6 +51,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   scripted_image_generator.cpp
   scripted_language_analysis_source.cpp
   scripted_policy_grant_store.cpp
+  scripted_persona_editor.cpp
   scripted_persona_source.cpp
   scripted_project_instruction_source.cpp
   scripted_repository_snapshot_source.cpp
