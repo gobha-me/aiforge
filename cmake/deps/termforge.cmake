@@ -45,6 +45,7 @@ function(_aiforge_validate_termforge_headers target)
     termforge/drivers/kitty_driver.hpp
     termforge/drivers/terminal_driver.hpp
     termforge/widgets/choice_wizard_dialog.hpp
+    termforge/widgets/button.hpp
     termforge/widgets/composer.hpp
     termforge/widgets/detail/width.hpp
     termforge/widgets/dialog.hpp

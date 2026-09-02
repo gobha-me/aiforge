@@ -1,6 +1,7 @@
 #include <aiforge/adapters/filesystem_persona_source.hpp>
 #include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
+#include <aiforge/adapters/persona_editor_dialog.hpp>
 #include <aiforge/adapters/process_credentials.hpp>
 #include <aiforge/adapters/process_draft_editor.hpp>
 #include <aiforge/adapters/process_interactive.hpp>
@@ -25,6 +26,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <concepts>
 #include <cstdlib>
 #include <format>
 #include <functional>
@@ -1160,6 +1162,204 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
+  auto show_persona_editor(PersonaEditorSubmission submission,
+                           const bool selected) -> void {
+    if (!m_persona_editor_dialog) {
+      m_persona_editor_dialog = std::make_unique<PersonaEditorDialog>();
+    }
+    m_persona_editor_dialog->set_submission(std::move(submission), selected);
+    m_persona_editor_dialog->on_save(
+        [this](PersonaEditorSubmission request)
+            -> std::expected<persona::PersonaWriteReceipt,
+                             persona::PersonaEditorError> {
+          auto written = std::visit(
+              [this](
+                  auto&& value) -> std::expected<persona::PersonaWriteReceipt,
+                                                 surfaces::ChatSessionError> {
+                using Request = std::decay_t<decltype(value)>;
+                if constexpr (std::same_as<Request, persona::PersonaCreate>) {
+                  return m_session->create_persona(std::move(value.draft));
+                } else {
+                  return m_session->replace_persona(std::move(value.expected),
+                                                    std::move(value.text));
+                }
+              },
+              std::move(request));
+          if (!written) {
+            return std::unexpected(persona::PersonaEditorError{
+                persona::PersonaEditorErrorCode::internal_failure,
+                written.error().message, std::nullopt,
+                written.error().retryable,
+                written.error().effect_may_have_applied});
+          }
+          return std::move(*written);
+        });
+    m_persona_editor_dialog->on_result(
+        [this](PersonaEditorDialogResult result) {
+          pop_modal();
+          m_persona_editor_active = false;
+          const auto state = m_session->persona_state();
+          if (state.requires_attention) {
+            m_status = state.message;
+            return;
+          }
+          if (result.effect_may_have_applied) {
+            m_status = "Persona write may have applied; reopen to reload";
+            return;
+          }
+          if (!result.receipt) {
+            m_status = "Persona unchanged";
+            return;
+          }
+          m_status =
+              result.receipt->previous ? "Persona updated" : "Persona created";
+        });
+    m_persona_editor_active = true;
+    push_modal(*m_persona_editor_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                          .dismiss_on_click_outside = false});
+    m_status =
+        selected ? "Edit the selected persona" : "Edit bounded persona content";
+  }
+
+  auto show_persona_create_setup(std::string validation_message = {}) -> void {
+    termforge::ChoiceWizardPage name;
+    name.title = "Create persona";
+    name.text = "Enter a bare name. Names start with an ASCII letter or digit "
+                "and may also contain '_' or '-'.";
+    if (!validation_message.empty()) {
+      name.text += " Previous value rejected: " + validation_message;
+    }
+    name.mode = termforge::ChoiceMode::Single;
+    name.minimum_selected = 1;
+    name.maximum_selected = 1;
+    name.other_enabled = true;
+    name.other_label = "Name";
+    name.other_placeholder = "reviewer";
+    name.other_selected = true;
+
+    termforge::ChoiceWizardPage kind;
+    kind.title = "Persona file type";
+    kind.text = "Choose the exact file extension under the persona root.";
+    kind.mode = termforge::ChoiceMode::Single;
+    kind.minimum_selected = 1;
+    kind.maximum_selected = 1;
+    kind.choices = {{"Markdown (.md)", "Plain UTF-8 Markdown instructions."},
+                    {"Text (.txt)", "Plain UTF-8 text instructions."}};
+    kind.selected_indices = {0};
+    if (!m_persona_manager_dialog->set_pages(
+            {std::move(name), std::move(kind)})) {
+      m_status = "Persona creation dialog rejected its fields";
+      return;
+    }
+    m_persona_manager_dialog->on_result(
+        [this](std::optional<termforge::ChoiceWizardResult> result) {
+          pop_modal();
+          m_persona_manager_active = false;
+          if (!result || result->pages.size() != 2 || !result->pages[0].other ||
+              result->pages[0].other->empty() ||
+              result->pages[1].selected_indices.size() != 1) {
+            m_status = "Persona creation cancelled";
+            return;
+          }
+          const auto kind = result->pages[1].selected_indices.front();
+          if (kind > 1U) {
+            m_status = "Persona creation dialog returned an invalid file type";
+            return;
+          }
+          persona::PersonaCreate request{
+              {std::move(*result->pages[0].other),
+               kind == 0U ? persona::PersonaFileKind::markdown
+                          : persona::PersonaFileKind::text,
+               "validate"},
+              m_session->persona_limits()};
+          auto valid = persona::prepare_persona_create(request);
+          if (!valid) {
+            show_persona_create_setup(valid.error().message);
+            return;
+          }
+          request.draft.text.clear();
+          show_persona_editor(std::move(request), false);
+        });
+    m_persona_manager_active = true;
+    push_modal(*m_persona_manager_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                           .dismiss_on_click_outside = false});
+    m_status = validation_message.empty() ? "Define the new persona"
+                                          : "Correct the rejected persona name";
+  }
+
+  auto show_persona_manager() -> bool {
+    if (m_session->active()) {
+      m_status = "Finish or cancel the active run before managing personas";
+      return false;
+    }
+    auto personas = m_session->list_personas();
+    if (!personas) {
+      m_status = "Personas could not be listed: " + personas.error().message;
+      return false;
+    }
+    if (!m_persona_manager_dialog) {
+      m_persona_manager_dialog =
+          std::make_unique<termforge::ChoiceWizardDialog>();
+    }
+    termforge::ChoiceWizardPage page;
+    page.title = "Manage personas";
+    page.text = "Create a bounded persona or edit one exact existing file. "
+                "Deletion and arbitrary paths are unavailable.";
+    page.mode = termforge::ChoiceMode::Single;
+    page.minimum_selected = 1;
+    page.maximum_selected = 1;
+    page.choices.push_back({"Create new", "Create one .md or .txt persona."});
+    for (const auto& entry : *personas) {
+      page.choices.push_back(
+          {entry.reference.name, entry.reference.source_location});
+    }
+    page.selected_indices = {0};
+    if (!m_persona_manager_dialog->set_pages({std::move(page)})) {
+      m_status = "Persona manager rejected its choices";
+      return false;
+    }
+    m_persona_manager_dialog->on_result(
+        [this, personas = std::move(*personas)](
+            std::optional<termforge::ChoiceWizardResult> result) mutable {
+          pop_modal();
+          m_persona_manager_active = false;
+          if (!result || result->pages.size() != 1 ||
+              result->pages.front().selected_indices.size() != 1) {
+            m_status = "Persona manager closed without changes";
+            return;
+          }
+          const auto selected = result->pages.front().selected_indices.front();
+          if (selected == 0U) {
+            show_persona_create_setup();
+            return;
+          }
+          if (selected > personas.size()) {
+            m_status = "Persona manager returned an invalid choice";
+            return;
+          }
+          auto document =
+              m_session->load_persona(personas[selected - 1].reference.name);
+          if (!document) {
+            m_status =
+                "Persona could not be loaded: " + document.error().message;
+            return;
+          }
+          const auto state = m_session->persona_state();
+          const bool is_selected =
+              state.selected &&
+              state.selected->persona_id == document->reference.persona_id;
+          show_persona_editor(
+              persona::PersonaReplace{document->reference, document->text,
+                                      m_session->persona_limits()},
+              is_selected);
+        });
+    m_persona_manager_active = true;
+    push_modal(*m_persona_manager_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                           .dismiss_on_click_outside = false});
+    m_status = "Choose a persona manager action";
+    return true;
+  }
+
   auto show_usage() -> bool {
     show_panel("Session usage, cost, and spend ceiling",
                usage_panel_lines(m_usage_ledger, m_spend_ceiling),
@@ -1808,6 +2008,10 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_status = "Persona disabled";
         return true;
       }
+      case surfaces::SlashCommandAction::manage_personas:
+        if (!show_persona_manager()) return false;
+        m_composer.clear();
+        return true;
       case surfaces::SlashCommandAction::choose_model: {
         if (command.subject) {
           auto model_id = domain::ModelId::from(*command.subject);
@@ -2056,7 +2260,8 @@ class ChatAppImpl final : public InteractiveChatApp {
   auto request_close(std::function<void()> action = {}) -> void {
     if (!action) action = [this] { quit(); };
     if (m_close_dialog_active || m_plan_review_active ||
-        m_settings_dialog_active) {
+        m_settings_dialog_active || m_persona_manager_active ||
+        m_persona_editor_active) {
       m_status = "Close is unavailable while another decision is open";
       return;
     }
@@ -2637,11 +2842,15 @@ class ChatAppImpl final : public InteractiveChatApp {
   std::size_t m_history_cutoff{};
   std::unique_ptr<ModelPickerDialog> m_model_picker;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_settings_dialog;
+  std::unique_ptr<termforge::ChoiceWizardDialog> m_persona_manager_dialog;
+  std::unique_ptr<PersonaEditorDialog> m_persona_editor_dialog;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_plan_dialog;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_close_dialog;
   bool m_plan_review_active{};
   bool m_close_dialog_active{};
   bool m_settings_dialog_active{};
+  bool m_persona_manager_active{};
+  bool m_persona_editor_active{};
   std::optional<std::pair<domain::SessionId, domain::PlanRevisionId>>
       m_reviewed_plan;
   std::function<void()> m_close_action;
@@ -2967,6 +3176,8 @@ auto ProcessInteractiveCommand::execute(Request request,
       };
     }
     app_options.session_dependencies.persona_source =
+        personas ? &*personas : nullptr;
+    app_options.session_dependencies.persona_editor =
         personas ? &*personas : nullptr;
     app_options.session_dependencies.tools = std::move(tools);
     app_options.session_dependencies.memory_controller =

@@ -30,6 +30,7 @@ enum class SlashCommandAction {
   list_personas,
   select_persona,
   disable_persona,
+  manage_personas,
   choose_model,
   manage_request_settings,
   show_usage,

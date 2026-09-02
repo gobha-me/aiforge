@@ -810,6 +810,12 @@ TEST_CASE("filesystem personas fail closed on aliases symlinks and bad text",
   REQUIRE_FALSE(malformed);
   REQUIRE(malformed.error().code == persona::PersonaErrorCode::malformed_text);
 
+  write_file(root / "unicode-control.md", std::string{"bad\xc2\x85text", 9});
+  const auto unicode_control = source.load("unicode-control");
+  REQUIRE_FALSE(unicode_control);
+  REQUIRE(unicode_control.error().code ==
+          persona::PersonaErrorCode::malformed_text);
+
   write_file(root / "empty.md", "");
   const auto empty = source.load("empty");
   REQUIRE_FALSE(empty);
@@ -834,6 +840,349 @@ TEST_CASE("filesystem personas fail closed on aliases symlinks and bad text",
   REQUIRE_FALSE(nonregular);
   REQUIRE(nonregular.error().code ==
           persona::PersonaErrorCode::unsupported_entry);
+}
+
+TEST_CASE(
+    "filesystem persona creation is restrictive atomic and collision safe",
+    "[adapter][persona][editor]") {
+  TempDirectory temporary{"aiforge-persona-create"};
+  const auto app_root = temporary.path() / "aiforge";
+  const auto root = app_root / "personas";
+  adapters::FilesystemPersonaSource source{root};
+
+  const persona::PersonaCreate request{
+      {"Reviewer", persona::PersonaFileKind::markdown, "Review carefully.\n"}};
+  const auto created = source.create(request);
+  REQUIRE(created);
+  REQUIRE_FALSE(created->previous);
+  REQUIRE(created->resulting.name == "Reviewer");
+  REQUIRE(created->resulting.source_location == "personas/Reviewer.md");
+  REQUIRE(created->resulting.content_digest.byte_size == 18);
+  REQUIRE((std::filesystem::status(app_root).permissions() &
+           std::filesystem::perms::all) == std::filesystem::perms::owner_all);
+  REQUIRE((std::filesystem::status(root).permissions() &
+           std::filesystem::perms::all) == std::filesystem::perms::owner_all);
+  REQUIRE((std::filesystem::status(root / "Reviewer.md").permissions() &
+           std::filesystem::perms::all) ==
+          (std::filesystem::perms::owner_read |
+           std::filesystem::perms::owner_write));
+
+  const auto loaded = source.load("reviewer");
+  REQUIRE(loaded);
+  REQUIRE(loaded->reference == created->resulting);
+  REQUIRE(loaded->text == request.draft.text);
+
+  const auto alias_collision = source.create(
+      {{"reviewer", persona::PersonaFileKind::text, "different"}, {}});
+  REQUIRE_FALSE(alias_collision);
+  REQUIRE(alias_collision.error().code ==
+          persona::PersonaEditorErrorCode::already_exists);
+  REQUIRE_FALSE(alias_collision.error().may_have_applied);
+  REQUIRE(std::filesystem::exists(root / "Reviewer.md"));
+  REQUIRE_FALSE(std::filesystem::exists(root / "reviewer.txt"));
+}
+
+TEST_CASE("filesystem persona replacement checks the exact digest twice",
+          "[adapter][persona][editor][failure]") {
+  TempDirectory temporary{"aiforge-persona-replace"};
+  const auto root = temporary.path() / "personas";
+  REQUIRE(std::filesystem::create_directory(root));
+  std::filesystem::permissions(root, std::filesystem::perms::owner_all);
+  write_file(root / "Reviewer.md", "original");
+  adapters::FilesystemPersonaSource source{root};
+
+  const auto original = source.load("Reviewer");
+  REQUIRE(original);
+  const persona::PersonaReplace request{original->reference, "replacement"};
+  const auto replaced = source.replace(request);
+  REQUIRE(replaced);
+  REQUIRE(replaced->previous == original->reference);
+  REQUIRE(replaced->resulting != original->reference);
+  const auto replacement = source.load("Reviewer");
+  REQUIRE(replacement);
+  REQUIRE(replacement->text == "replacement");
+  REQUIRE((std::filesystem::status(root / "Reviewer.md").permissions() &
+           std::filesystem::perms::all) ==
+          (std::filesystem::perms::owner_read |
+           std::filesystem::perms::owner_write));
+
+  const auto stale = source.replace(request);
+  REQUIRE_FALSE(stale);
+  REQUIRE(stale.error().code ==
+          persona::PersonaEditorErrorCode::source_mismatch);
+  REQUIRE(stale.error().observed == replaced->resulting);
+  REQUIRE_FALSE(stale.error().may_have_applied);
+
+  const auto current = source.load("Reviewer");
+  REQUIRE(current);
+  bool changed{};
+  adapters::FilesystemPersonaSource racing{
+      root,
+      [&](const adapters::PersonaFilesystemCheckpointStage stage)
+          -> std::expected<void, persona::PersonaEditorError> {
+        if (stage ==
+                adapters::PersonaFilesystemCheckpointStage::temporary_synced &&
+            !changed) {
+          changed = true;
+          write_file(root / "Reviewer.md", "external change");
+        }
+        return {};
+      }};
+  const auto concurrent =
+      racing.replace({current->reference, "must not publish"});
+  REQUIRE_FALSE(concurrent);
+  REQUIRE(concurrent.error().code ==
+          persona::PersonaEditorErrorCode::concurrent_change);
+  REQUIRE_FALSE(concurrent.error().may_have_applied);
+  const auto externally_changed = source.load("Reviewer");
+  REQUIRE(externally_changed);
+  REQUIRE(externally_changed->text == "external change");
+
+  bool changed_at_publication{};
+  adapters::FilesystemPersonaSource late_racing{
+      root,
+      [&](const adapters::PersonaFilesystemCheckpointStage stage)
+          -> std::expected<void, persona::PersonaEditorError> {
+        if (stage ==
+                adapters::PersonaFilesystemCheckpointStage::replacement_ready &&
+            !changed_at_publication) {
+          changed_at_publication = true;
+          write_file(root / "Reviewer.md", "last moment change");
+        }
+        return {};
+      }};
+  const auto late = late_racing.replace(
+      {externally_changed->reference, "must roll back atomically"});
+  REQUIRE_FALSE(late);
+  REQUIRE(late.error().code ==
+          persona::PersonaEditorErrorCode::concurrent_change);
+  REQUIRE_FALSE(late.error().may_have_applied);
+  const auto survived = source.load("Reviewer");
+  REQUIRE(survived);
+  REQUIRE(survived->text == "last moment change");
+
+  bool first_race{};
+  bool second_race{};
+  adapters::FilesystemPersonaSource double_racing{
+      root,
+      [&](const adapters::PersonaFilesystemCheckpointStage stage)
+          -> std::expected<void, persona::PersonaEditorError> {
+        if (stage ==
+                adapters::PersonaFilesystemCheckpointStage::replacement_ready &&
+            !first_race) {
+          first_race = true;
+          write_file(root / "Reviewer.md", "first racing change");
+        }
+        if (stage ==
+                adapters::PersonaFilesystemCheckpointStage::rollback_ready &&
+            !second_race) {
+          second_race = true;
+          const auto second = root / ".second-writer";
+          write_file(second, "second racing change");
+          std::filesystem::rename(second, root / "Reviewer.md");
+        }
+        return {};
+      }};
+  const auto double_race = double_racing.replace(
+      {survived->reference, "must preserve the second writer"});
+  REQUIRE_FALSE(double_race);
+  REQUIRE(double_race.error().code ==
+          persona::PersonaEditorErrorCode::concurrent_change);
+  REQUIRE(double_race.error().may_have_applied);
+  const auto restored_first = source.load("Reviewer");
+  REQUIRE(restored_first);
+  REQUIRE(restored_first->text == "first racing change");
+  bool preserved_second{};
+  for (const auto& entry : std::filesystem::directory_iterator{root}) {
+    if (!entry.path().filename().string().starts_with(".aiforge-persona-")) {
+      continue;
+    }
+    std::ifstream input{entry.path(), std::ios::binary};
+    const std::string text{std::istreambuf_iterator<char>{input},
+                           std::istreambuf_iterator<char>{}};
+    preserved_second = preserved_second || text == "second racing change";
+  }
+  REQUIRE(preserved_second);
+}
+
+TEST_CASE("filesystem persona writes recheck the resolved root after publish",
+          "[adapter][persona][editor][failure]") {
+  TempDirectory temporary{"aiforge-persona-root-race"};
+
+  const auto create_root = temporary.path() / "create-app" / "personas";
+  const auto detached_create = temporary.path() / "detached-create";
+  adapters::FilesystemPersonaSource creating{
+      create_root,
+      [&](const adapters::PersonaFilesystemCheckpointStage stage)
+          -> std::expected<void, persona::PersonaEditorError> {
+        if (stage == adapters::PersonaFilesystemCheckpointStage::published) {
+          std::filesystem::rename(create_root, detached_create);
+          REQUIRE(std::filesystem::create_directory(create_root));
+          std::filesystem::permissions(create_root,
+                                       std::filesystem::perms::owner_all);
+        }
+        return {};
+      }};
+  const auto created = creating.create(
+      {{"Reviewer", persona::PersonaFileKind::markdown, "created"}, {}});
+  REQUIRE_FALSE(created);
+  REQUIRE(created.error().code ==
+          persona::PersonaEditorErrorCode::concurrent_change);
+  REQUIRE(created.error().may_have_applied);
+  REQUIRE_FALSE(std::filesystem::exists(create_root / "Reviewer.md"));
+  REQUIRE(std::filesystem::exists(detached_create / "Reviewer.md"));
+
+  const auto replace_root = temporary.path() / "replace-personas";
+  REQUIRE(std::filesystem::create_directory(replace_root));
+  std::filesystem::permissions(replace_root, std::filesystem::perms::owner_all);
+  write_file(replace_root / "Reviewer.md", "original");
+  adapters::FilesystemPersonaSource reader{replace_root};
+  const auto original = reader.load("Reviewer");
+  REQUIRE(original);
+  const auto detached_replace = temporary.path() / "detached-replace";
+  adapters::FilesystemPersonaSource replacing{
+      replace_root,
+      [&](const adapters::PersonaFilesystemCheckpointStage stage)
+          -> std::expected<void, persona::PersonaEditorError> {
+        if (stage == adapters::PersonaFilesystemCheckpointStage::published) {
+          std::filesystem::rename(replace_root, detached_replace);
+          REQUIRE(std::filesystem::create_directory(replace_root));
+          std::filesystem::permissions(replace_root,
+                                       std::filesystem::perms::owner_all);
+        }
+        return {};
+      }};
+  const auto replaced = replacing.replace({original->reference, "replacement"});
+  REQUIRE_FALSE(replaced);
+  REQUIRE(replaced.error().code ==
+          persona::PersonaEditorErrorCode::concurrent_change);
+  REQUIRE(replaced.error().may_have_applied);
+  REQUIRE_FALSE(std::filesystem::exists(replace_root / "Reviewer.md"));
+  REQUIRE(std::filesystem::exists(detached_replace / "Reviewer.md"));
+}
+
+TEST_CASE("filesystem persona checkpoints preserve the publication boundary",
+          "[adapter][persona][editor][failure]") {
+  TempDirectory temporary{"aiforge-persona-checkpoints"};
+  const auto root = temporary.path() / "personas";
+
+  adapters::FilesystemPersonaSource before{
+      root,
+      [](const adapters::PersonaFilesystemCheckpointStage stage)
+          -> std::expected<void, persona::PersonaEditorError> {
+        if (stage ==
+            adapters::PersonaFilesystemCheckpointStage::temporary_synced) {
+          return std::unexpected(persona::PersonaEditorError{
+              persona::PersonaEditorErrorCode::io_failure,
+              "injected pre-publication interruption",
+              {},
+              false,
+              false});
+        }
+        return {};
+      }};
+  const auto interrupted_before = before.create(
+      {{"before", persona::PersonaFileKind::markdown, "complete"}, {}});
+  REQUIRE_FALSE(interrupted_before);
+  REQUIRE_FALSE(interrupted_before.error().may_have_applied);
+  REQUIRE_FALSE(std::filesystem::exists(root / "before.md"));
+  for (const auto& entry : std::filesystem::directory_iterator{root}) {
+    REQUIRE_FALSE(
+        entry.path().filename().string().starts_with(".aiforge-persona-"));
+  }
+
+  adapters::FilesystemPersonaSource after{
+      root,
+      [](const adapters::PersonaFilesystemCheckpointStage stage)
+          -> std::expected<void, persona::PersonaEditorError> {
+        if (stage == adapters::PersonaFilesystemCheckpointStage::published) {
+          return std::unexpected(persona::PersonaEditorError{
+              persona::PersonaEditorErrorCode::io_failure,
+              "injected post-publication interruption",
+              {},
+              false,
+              false});
+        }
+        return {};
+      }};
+  const auto interrupted_after =
+      after.create({{"after", persona::PersonaFileKind::text, "complete"}, {}});
+  REQUIRE_FALSE(interrupted_after);
+  REQUIRE(interrupted_after.error().may_have_applied);
+  const auto published = after.load("after");
+  REQUIRE(published);
+  REQUIRE(published->text == "complete");
+
+  std::size_t persona_entries{};
+  for (const auto& entry : std::filesystem::directory_iterator{root}) {
+    if (entry.path().extension() == ".md" ||
+        entry.path().extension() == ".txt") {
+      ++persona_entries;
+    }
+  }
+  REQUIRE(persona_entries == 1);
+}
+
+TEST_CASE("filesystem persona writes reject unsafe roots and entries",
+          "[adapter][persona][editor][failure]") {
+  TempDirectory temporary{"aiforge-persona-write-hostile"};
+  const auto outside = temporary.path() / "outside";
+  REQUIRE(std::filesystem::create_directory(outside));
+  std::filesystem::permissions(outside, std::filesystem::perms::owner_all);
+  const auto alias = temporary.path() / "alias";
+  std::error_code alias_error;
+  std::filesystem::create_directory_symlink(outside, alias, alias_error);
+  REQUIRE_FALSE(alias_error);
+  adapters::FilesystemPersonaSource symlinked{alias};
+  const auto root_escape = symlinked.create(
+      {{"unsafe", persona::PersonaFileKind::markdown, "text"}, {}});
+  REQUIRE_FALSE(root_escape);
+  REQUIRE(root_escape.error().code ==
+          persona::PersonaEditorErrorCode::path_escape);
+
+  const auto real_parent = temporary.path() / "real-parent";
+  REQUIRE(std::filesystem::create_directory(real_parent));
+  std::filesystem::permissions(real_parent, std::filesystem::perms::owner_all);
+  const auto parent_alias = temporary.path() / "parent-alias";
+  std::error_code parent_alias_error;
+  std::filesystem::create_directory_symlink(real_parent, parent_alias,
+                                            parent_alias_error);
+  REQUIRE_FALSE(parent_alias_error);
+  adapters::FilesystemPersonaSource traversed_parent{parent_alias / "aiforge" /
+                                                     "personas"};
+  const auto parent_escape = traversed_parent.create(
+      {{"unsafe", persona::PersonaFileKind::markdown, "text"}, {}});
+  REQUIRE_FALSE(parent_escape);
+  REQUIRE(parent_escape.error().code ==
+          persona::PersonaEditorErrorCode::path_escape);
+  REQUIRE_FALSE(std::filesystem::exists(real_parent / "aiforge"));
+
+  const auto safe_root = temporary.path() / "safe";
+  REQUIRE(std::filesystem::create_directory(safe_root));
+  std::filesystem::permissions(safe_root, std::filesystem::perms::owner_all);
+  write_file(temporary.path() / "outside.md", "outside");
+  std::error_code entry_error;
+  std::filesystem::create_symlink(temporary.path() / "outside.md",
+                                  safe_root / "escape.md", entry_error);
+  REQUIRE_FALSE(entry_error);
+  adapters::FilesystemPersonaSource escaped_entry{safe_root};
+  const auto entry_escape = escaped_entry.create(
+      {{"safe", persona::PersonaFileKind::markdown, "text"}, {}});
+  REQUIRE_FALSE(entry_escape);
+  REQUIRE(entry_escape.error().code ==
+          persona::PersonaEditorErrorCode::path_escape);
+
+  const auto broad = temporary.path() / "broad";
+  REQUIRE(std::filesystem::create_directory(broad));
+  std::filesystem::permissions(broad, std::filesystem::perms::owner_all |
+                                          std::filesystem::perms::group_read |
+                                          std::filesystem::perms::others_read);
+  adapters::FilesystemPersonaSource insecure{broad / "personas"};
+  const auto denied = insecure.create(
+      {{"denied", persona::PersonaFileKind::markdown, "text"}, {}});
+  REQUIRE_FALSE(denied);
+  REQUIRE(denied.error().code ==
+          persona::PersonaEditorErrorCode::permission_denied);
 }
 
 TEST_CASE("Venice adapter rejects unsupported content without a request",

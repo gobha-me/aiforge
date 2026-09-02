@@ -174,6 +174,20 @@ struct PersonaSetup {
           value.message, value.retryable};
 }
 
+[[nodiscard]] auto persona_editor_error(
+    const persona::PersonaEditorError& value) -> ChatSessionError {
+  return {value.code == persona::PersonaEditorErrorCode::cancelled
+              ? ChatSessionErrorCode::cancelled
+          : value.code == persona::PersonaEditorErrorCode::invalid_request ||
+                  value.code == persona::PersonaEditorErrorCode::invalid_name ||
+                  value.code ==
+                      persona::PersonaEditorErrorCode::invalid_file_kind ||
+                  value.code == persona::PersonaEditorErrorCode::malformed_text
+              ? ChatSessionErrorCode::invalid_input
+              : ChatSessionErrorCode::context_failed,
+          value.message, value.retryable, value.may_have_applied};
+}
+
 [[nodiscard]] auto resolve_persona(persona::PersonaSource* source,
                                    const persona::PersonaLimits limits,
                                    const persona::PersonaDirective& directive,
@@ -277,6 +291,7 @@ struct ChatSession::Impl {
   ChatIdentitySuffixSource identity_suffix_source;
   std::optional<domain::RunProvenance> provenance;
   persona::PersonaSource* persona_source{};
+  persona::PersonaEditor* persona_editor{};
   persona::PersonaLimits persona_limits{};
   std::stop_token stop_token;
   std::optional<domain::PersonaDocument> persona_document;
@@ -460,6 +475,7 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              std::move(dependencies.identity_suffix_source),
              std::move(request.provenance),
              dependencies.persona_source,
+             dependencies.persona_editor,
              dependencies.persona_limits,
              stop_token,
              std::move(persona_setup->document),
@@ -727,6 +743,26 @@ auto ChatSession::list_personas()
   return std::move(*listed);
 }
 
+auto ChatSession::load_persona(std::string name)
+    -> std::expected<domain::PersonaDocument, ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before editing a persona");
+  }
+  if (m_impl->persona_source == nullptr) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "persona source is unavailable");
+  }
+  auto loaded = m_impl->persona_source->load(
+      std::move(name), m_impl->persona_limits, m_impl->stop_token);
+  if (!loaded) return std::unexpected(persona_error(loaded.error()));
+  if (!domain::validate_persona_document(*loaded)) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "persona document is invalid");
+  }
+  return std::move(*loaded);
+}
+
 auto ChatSession::select_persona(std::string name)
     -> std::expected<void, ChatSessionError> {
   if (active()) {
@@ -770,6 +806,73 @@ auto ChatSession::disable_persona() -> std::expected<void, ChatSessionError> {
                                std::nullopt, std::move(previous)};
   m_impl->persona_attention.clear();
   return {};
+}
+
+auto ChatSession::create_persona(persona::PersonaDraft draft)
+    -> std::expected<persona::PersonaWriteReceipt, ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before creating a persona");
+  }
+  if (m_impl->persona_editor == nullptr) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "persona editor is unavailable");
+  }
+  persona::PersonaCreate request{std::move(draft), m_impl->persona_limits};
+  auto written = m_impl->persona_editor->create(request, m_impl->stop_token);
+  if (!written) return std::unexpected(persona_editor_error(written.error()));
+  if (auto valid = persona::validate_persona_write_receipt(request, *written);
+      !valid) {
+    return std::unexpected(persona_editor_error(valid.error()));
+  }
+  return std::move(*written);
+}
+
+auto ChatSession::replace_persona(domain::PersonaReference expected,
+                                  std::string text)
+    -> std::expected<persona::PersonaWriteReceipt, ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before editing a persona");
+  }
+  if (m_impl->persona_editor == nullptr) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "persona editor is unavailable");
+  }
+  const bool selected =
+      m_impl->persona_document &&
+      m_impl->persona_document->reference.persona_id == expected.persona_id;
+  persona::PersonaReplace request{std::move(expected), std::move(text),
+                                  m_impl->persona_limits};
+  auto written = m_impl->persona_editor->replace(request, m_impl->stop_token);
+  if (!written) {
+    const bool observed_changed =
+        written.error()
+            .observed
+            .transform([&request](const auto& observed) {
+              return observed != request.expected;
+            })
+            .value_or(false);
+    if (selected && (written.error().may_have_applied || observed_changed)) {
+      m_impl->persona_attention =
+          "Persona content may have changed during editing; select it again "
+          "or turn it off";
+    }
+    return std::unexpected(persona_editor_error(written.error()));
+  }
+  if (auto valid = persona::validate_persona_write_receipt(request, *written);
+      !valid) {
+    if (selected) {
+      m_impl->persona_attention = "Persona edit returned an invalid result; "
+                                  "select it again or turn it off";
+    }
+    return std::unexpected(persona_editor_error(valid.error()));
+  }
+  if (selected) {
+    m_impl->persona_attention =
+        "Persona changed in the manager; select it again or turn it off";
+  }
+  return std::move(*written);
 }
 
 auto ChatSession::select_model(domain::ModelId model_id)
@@ -917,6 +1020,10 @@ auto ChatSession::persona_state() const -> ChatPersonaState {
                                                             ->reference}
               : std::nullopt,
           !m_impl->persona_attention.empty(), m_impl->persona_attention};
+}
+
+auto ChatSession::persona_limits() const noexcept -> persona::PersonaLimits {
+  return m_impl->persona_limits;
 }
 
 auto ChatSession::plan_task_state(
