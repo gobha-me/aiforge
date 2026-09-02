@@ -499,9 +499,12 @@ OneShotSurface::OneShotSurface(backend::Backend& backend,
       m_limits(limits), m_dependencies(std::move(dependencies)) {
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit run stages.
 auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                          std::ostream& error, const std::stop_token stop_token)
     -> std::expected<OneShotResult, OneShotError> {
+  // clang-format on
   try {
     if (m_limits.maximum_input_bytes == 0 ||
         m_limits.preferred_output_tokens == 0) {
@@ -557,6 +560,15 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
         !supported) {
       return one_shot_error(OneShotErrorCode::model_lookup_failed,
                             supported.error().redacted_message);
+    }
+    if (request.provenance) {
+      if (auto exact = backend::validate_effective_request_options(
+              request.generation_options,
+              request.provenance->effective_request_options);
+          !exact) {
+        return one_shot_error(OneShotErrorCode::invalid_input,
+                              exact.error().redacted_message);
+      }
     }
     request.generation_options.max_output_tokens = output_tokens;
 

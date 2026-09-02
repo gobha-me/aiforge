@@ -31,6 +31,7 @@ enum class SlashCommandAction {
   select_persona,
   disable_persona,
   choose_model,
+  manage_request_settings,
   show_usage,
   show_plan,
   show_tasks,

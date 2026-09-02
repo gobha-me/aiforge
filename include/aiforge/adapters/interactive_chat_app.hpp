@@ -1,5 +1,6 @@
 #pragma once
 
+#include <aiforge/adapters/venice_generation_options.hpp>
 #include <aiforge/backend/backend.hpp>
 #include <aiforge/cli/command_registry.hpp>
 #include <aiforge/domain/events.hpp>
@@ -20,6 +21,22 @@
 
 namespace aiforge::adapters {
 
+struct VeniceRequestSettingSave {
+  std::optional<VeniceWebSearchSetting> web_search;
+  std::optional<VeniceSystemPromptSetting> system_prompt;
+};
+
+struct VenicePreparedPersistedSettings {
+  VeniceConfiguredRequestSettings configured;
+  domain::ConfigurationProvenanceEntry configuration_provenance;
+};
+
+using PreviewVeniceRequestSetting = std::function<
+    auto(const VeniceRequestSettingSave&)
+        ->std::expected<VenicePreparedPersistedSettings, std::string>>;
+using PersistVeniceRequestSetting = std::function<
+    auto(const VeniceRequestSettingSave&)->std::expected<void, std::string>>;
+
 struct InteractiveChatAppOptions {
   surfaces::ChatSessionDependencies session_dependencies{};
   termforge::ByteSink* rendered_output{};
@@ -30,6 +47,9 @@ struct InteractiveChatAppOptions {
   bool live_wake_enabled{true};
   bool poll_worker_updates{true};
   model::CatalogService* model_catalog{};
+  VeniceConfiguredRequestSettings configured_request_settings;
+  PreviewVeniceRequestSetting preview_request_setting;
+  PersistVeniceRequestSetting persist_request_setting;
 };
 
 struct InteractiveModelPickerAppOptions {

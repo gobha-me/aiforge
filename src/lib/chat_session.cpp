@@ -294,6 +294,8 @@ ChatSession::ChatSession(std::unique_ptr<Impl> impl) : m_impl(std::move(impl)) {
 }
 ChatSession::~ChatSession() = default;
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit durable checks.
 auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
                        backend::ModelContextProvider& model_context,
                        storage::SessionStore* session_store,
@@ -302,6 +304,7 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
                        const ChatSessionLimits limits,
                        ChatSessionDependencies dependencies)
     -> std::expected<std::unique_ptr<ChatSession>, ChatSessionError> {
+  // clang-format on
   try {
     if (limits.maximum_input_bytes == 0 ||
         limits.preferred_output_tokens == 0) {
@@ -350,6 +353,15 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
         !supported) {
       return error(ChatSessionErrorCode::model_lookup_failed,
                    supported.error().redacted_message);
+    }
+    if (request.provenance) {
+      if (auto exact = backend::validate_effective_request_options(
+              request.generation_options,
+              request.provenance->effective_request_options);
+          !exact) {
+        return error(ChatSessionErrorCode::invalid_input,
+                     exact.error().redacted_message);
+      }
     }
     request.generation_options.max_output_tokens = output_tokens;
 
@@ -802,6 +814,103 @@ auto ChatSession::select_model(domain::ModelId model_id)
   return {};
 }
 
+auto ChatSession::set_generation_options(
+    backend::GenerationOptions options,
+    std::vector<domain::EffectiveRequestOption> effective_request_options,
+    std::optional<std::vector<domain::ConfigurationProvenanceEntry>>
+        configuration) -> std::expected<void, ChatSessionError> {
+  auto prepared = prepare_generation_options(
+      std::move(options), std::move(effective_request_options),
+      std::move(configuration));
+  if (!prepared) return std::unexpected(std::move(prepared.error()));
+  return commit_generation_options(std::move(*prepared));
+}
+
+auto ChatSession::prepare_generation_options(
+    backend::GenerationOptions options,
+    std::vector<domain::EffectiveRequestOption> effective_request_options,
+    std::optional<std::vector<domain::ConfigurationProvenanceEntry>>
+        configuration)
+    -> std::expected<PreparedChatGenerationOptions, ChatSessionError> {
+  if (active()) {
+    return error(
+        ChatSessionErrorCode::run_failed,
+        "finish or cancel the active run before changing request settings");
+  }
+  if (m_impl->model_context == nullptr) {
+    return error(ChatSessionErrorCode::model_lookup_failed,
+                 "model catalog is unavailable");
+  }
+  auto model =
+      m_impl->model_context->lookup(m_impl->model_id, m_impl->stop_token);
+  if (!model) {
+    return error(model.error().kind == backend::BackendErrorKind::cancelled
+                     ? ChatSessionErrorCode::cancelled
+                     : ChatSessionErrorCode::model_lookup_failed,
+                 model.error().redacted_message, model.error().retryable);
+  }
+  if (model->model_id != m_impl->model_id ||
+      model->context_window_tokens == 0) {
+    return error(ChatSessionErrorCode::model_lookup_failed,
+                 "selected model context metadata is invalid");
+  }
+  auto output_tokens = m_impl->limits.preferred_output_tokens;
+  if (model->maximum_output_tokens) {
+    output_tokens = std::min(output_tokens, *model->maximum_output_tokens);
+  }
+  if (output_tokens == 0 || output_tokens >= model->context_window_tokens) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "selected model context capacity is too small");
+  }
+  if (auto supported =
+          backend::validate_generation_requirements(options, *model);
+      !supported) {
+    return error(ChatSessionErrorCode::model_lookup_failed,
+                 supported.error().redacted_message);
+  }
+  if (auto exact = backend::validate_effective_request_options(
+          options, effective_request_options);
+      !exact) {
+    return error(ChatSessionErrorCode::invalid_input,
+                 exact.error().redacted_message);
+  }
+  options.max_output_tokens = output_tokens;
+  auto provenance = m_impl->provenance;
+  if (provenance) {
+    provenance->effective_request_options =
+        std::move(effective_request_options);
+    if (configuration) {
+      provenance->configuration = std::move(*configuration);
+    }
+    if (auto valid = domain::validate_run_provenance(*provenance); !valid) {
+      return error(ChatSessionErrorCode::invalid_input,
+                   "effective request option provenance is invalid");
+    }
+  }
+  return PreparedChatGenerationOptions{m_impl->model_id, std::move(*model),
+                                       output_tokens, std::move(options),
+                                       std::move(provenance)};
+}
+
+auto ChatSession::commit_generation_options(
+    PreparedChatGenerationOptions prepared)
+    -> std::expected<void, ChatSessionError> {
+  if (active()) {
+    return error(
+        ChatSessionErrorCode::run_failed,
+        "finish or cancel the active run before changing request settings");
+  }
+  if (prepared.m_model_id != m_impl->model_id) {
+    return error(ChatSessionErrorCode::model_lookup_failed,
+                 "selected model changed while request settings were saved");
+  }
+  m_impl->model = std::move(prepared.m_model);
+  m_impl->output_tokens = prepared.m_output_tokens;
+  m_impl->generation_options = std::move(prepared.m_options);
+  m_impl->provenance = std::move(prepared.m_provenance);
+  return {};
+}
+
 auto ChatSession::persona_state() const -> ChatPersonaState {
   return {m_impl->persona_document
               ? std::optional<domain::PersonaReference>{m_impl->persona_document
@@ -949,6 +1058,11 @@ auto ChatSession::session_id() const noexcept -> const domain::SessionId& {
 
 auto ChatSession::model_id() const noexcept -> const domain::ModelId& {
   return m_impl->model_id;
+}
+
+auto ChatSession::model_info() const noexcept
+    -> const backend::ModelContextInfo& {
+  return m_impl->model;
 }
 
 auto ChatSession::durable() const noexcept -> bool {

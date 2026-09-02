@@ -199,6 +199,64 @@ namespace {
   return {};
 }
 
+[[nodiscard]] auto valid_request_option_source(
+    const RequestOptionSource source) noexcept -> bool {
+  switch (source) {
+    case RequestOptionSource::provider_default:
+    case RequestOptionSource::configuration:
+    case RequestOptionSource::session_override: return true;
+  }
+  return false;
+}
+
+[[nodiscard]] auto validate_request_options(
+    const std::vector<EffectiveRequestOption>& request_options,
+    const RunProvenanceLimits& limits)
+    -> std::expected<void, RunProvenanceError> {
+  if (request_options.size() > limits.maximum_request_options) {
+    return failure(RunProvenanceErrorCode::too_many_entries,
+                   "the request option entry count exceeds its limit");
+  }
+  std::set<std::string_view> keys;
+  for (const auto& entry : request_options) {
+    if (!valid_configuration_key(entry.key,
+                                 limits.maximum_request_option_key_bytes)) {
+      return failure(RunProvenanceErrorCode::invalid_request_option,
+                     "a request option key is empty, oversized, or malformed");
+    }
+    if (!keys.insert(entry.key).second) {
+      return failure(RunProvenanceErrorCode::duplicate_key,
+                     "request option key '" + entry.key + "' is duplicated");
+    }
+    if (!valid_request_option_source(entry.source)) {
+      return failure(RunProvenanceErrorCode::invalid_request_option,
+                     "request option '" + entry.key +
+                         "' has an unknown source");
+    }
+    const bool provider_default =
+        entry.source == RequestOptionSource::provider_default;
+    if (provider_default == entry.value.has_value()) {
+      return failure(RunProvenanceErrorCode::invalid_request_option,
+                     "request option '" + entry.key +
+                         "' has a value inconsistent with its source");
+    }
+    if (entry.value &&
+        entry.value->size() > limits.maximum_request_option_value_bytes) {
+      return failure(RunProvenanceErrorCode::value_too_large,
+                     "request option '" + entry.key +
+                         "' has an oversized value");
+    }
+    if (entry.value &&
+        !bounded_text(*entry.value, limits.maximum_request_option_value_bytes,
+                      true)) {
+      return failure(RunProvenanceErrorCode::invalid_request_option,
+                     "request option '" + entry.key +
+                         "' has a malformed value");
+    }
+  }
+  return {};
+}
+
 [[nodiscard]] auto total_bytes(const RunProvenance& provenance) -> std::size_t {
   std::size_t total = provenance.aiforge_version.size() +
                       provenance.backend_id.size() +
@@ -220,6 +278,10 @@ namespace {
       total += scope.kind.size() + scope.value.size();
     }
   }
+  for (const auto& option : provenance.effective_request_options) {
+    total += option.key.size();
+    if (option.value) total += option.value->size();
+  }
   return total;
 }
 
@@ -233,7 +295,11 @@ auto validate_run_provenance(const RunProvenance& provenance,
       limits.maximum_key_bytes == 0 || limits.maximum_value_bytes == 0 ||
       limits.maximum_identity_bytes == 0 || limits.maximum_components == 0 ||
       limits.maximum_tools == 0 || limits.maximum_effects_per_tool == 0 ||
-      limits.maximum_scopes_per_tool == 0 || limits.maximum_total_bytes == 0) {
+      limits.maximum_scopes_per_tool == 0 ||
+      limits.maximum_request_options == 0 ||
+      limits.maximum_request_option_key_bytes == 0 ||
+      limits.maximum_request_option_value_bytes == 0 ||
+      limits.maximum_total_bytes == 0) {
     return failure(RunProvenanceErrorCode::invalid_limits,
                    "a provenance limit is zero");
   }
@@ -276,6 +342,11 @@ auto validate_run_provenance(const RunProvenance& provenance,
   }
   if (auto tools = validate_tools(provenance.tools, limits); !tools) {
     return tools;
+  }
+  if (auto options = validate_request_options(
+          provenance.effective_request_options, limits);
+      !options) {
+    return options;
   }
   if (total_bytes(provenance) > limits.maximum_total_bytes) {
     return failure(RunProvenanceErrorCode::resource_exhausted,

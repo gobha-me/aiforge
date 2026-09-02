@@ -304,6 +304,17 @@ unknown capability values fail before a provider request. `off` explicitly
 disables search, while omitting the option preserves the provider default.
 Interactive model changes recheck this requirement before changing models.
 
+Interactive Chat `/settings` opens an idle-only request-settings panel. Web
+search can inherit its configured value or use a transient `auto`, `on`, or
+`off` session override. Venice system-prompt inclusion can inherit the provider
+default or be explicitly included or excluded. Each change names its configured
+source, session override, effective winner, selected-model support, and
+next-inference timing. A setting may instead be saved as one atomic user-config
+update; command-line and environment values retain precedence. Session
+overrides are not restored as configuration when switching or resuming
+sessions. Media safe mode is intentionally absent from Chat and belongs only to
+image or video operations that expose the matching neutral capability.
+
 The bounded catalog cache is
 `$XDG_CACHE_HOME/aiforge/model-catalog.json`, or
 `$HOME/.cache/aiforge/model-catalog.json` when the XDG location is unset. A
@@ -492,6 +503,9 @@ AIForge resolves registered settings in command-line, environment, file, then
 compiled-default order and retains the winning source. Registered application
 settings include the optional `model` value, bound to `AIFORGE_MODEL`, and the
 optional `venice.web_search` value, bound to `AIFORGE_VENICE_WEB_SEARCH`.
+`venice.include_system_prompt`, bound to
+`AIFORGE_VENICE_INCLUDE_SYSTEM_PROMPT`, is an optional boolean; absence
+preserves Venice's default and explicit `false` remains distinct from absence.
 
 ```bash
 aiforge config show
@@ -499,6 +513,7 @@ aiforge config get model
 aiforge config set model model-id
 aiforge config unset model
 aiforge config set venice.web_search auto
+aiforge config set venice.include_system_prompt false
 ```
 
 The configuration file is `$XDG_CONFIG_HOME/aiforge/config.json`, or
@@ -571,7 +586,9 @@ Every run may record a `run.provenance_recorded` event immediately after
 `run.started`, so a replayed run explains what produced it: resolved
 configuration with its precedence decisions, backend and model identity, the
 credential source, the tool declarations the run actually offered, and runtime
-component versions. Each run carries its own record, including each interactive
+component versions. Each run also snapshots its effective neutral request
+options, distinguishing provider default, configuration, and transient session
+override sources. Each run carries its own record, including each interactive
 turn.
 
 A sensitive configuration key contributes presence, source, and its decision

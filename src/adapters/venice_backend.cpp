@@ -242,47 +242,64 @@ constexpr std::string_view tool_thought_signature_media_type{
   return {};
 }
 
-[[nodiscard]] auto web_search_mode(const backend::GenerationOptions& options)
-    -> std::expected<std::optional<std::string>, backend::BackendError> {
+struct VeniceRequestOptions {
+  std::optional<std::string> web_search;
+  std::optional<bool> include_system_prompt;
+};
+
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit extension checks.
+[[nodiscard]] auto request_options(const backend::GenerationOptions& options)
+    -> std::expected<VeniceRequestOptions, backend::BackendError> {
+  // clang-format on
   constexpr std::size_t maximum_extension_data_bytes{16};
   constexpr std::size_t maximum_required_capabilities{64};
-  if (options.extensions.size() > 1 ||
+  if (options.extensions.size() > 2 ||
       options.required_model_capabilities.size() >
           maximum_required_capabilities) {
     return std::unexpected(
         request_error("Venice generation options exceed supported bounds"));
   }
 
-  std::optional<std::string> result;
+  VeniceRequestOptions result;
   for (const auto& [name, value] : options.extensions) {
-    if (name != venice_web_search_extension) {
+    if (name != venice_web_search_extension &&
+        name != venice_system_prompt_extension) {
       return std::unexpected(
           request_error("Venice extension namespace is unsupported"));
     }
     if (value.media_type != "application/json") {
       return std::unexpected(
-          request_error("Venice web-search extension media type is invalid"));
+          request_error("Venice extension media type is invalid"));
     }
     if (value.data.size() > maximum_extension_data_bytes) {
       return std::unexpected(
-          request_error("Venice web-search extension value is too large"));
+          request_error("Venice extension value is too large"));
     }
     const auto parsed = nlohmann::json::parse(value.data, nullptr, false);
-    if (!parsed.is_string()) {
-      return std::unexpected(
-          request_error("Venice web-search extension value is invalid"));
+    if (name == venice_system_prompt_extension) {
+      if (!parsed.is_boolean()) {
+        return std::unexpected(
+            request_error("Venice system-prompt extension value is invalid"));
+      }
+      result.include_system_prompt = parsed.get<bool>();
+    } else {
+      if (!parsed.is_string()) {
+        return std::unexpected(
+            request_error("Venice web-search extension value is invalid"));
+      }
+      auto mode = parsed.get<std::string>();
+      if (mode != "auto" && mode != "on" && mode != "off") {
+        return std::unexpected(
+            request_error("Venice web-search extension value is invalid"));
+      }
+      result.web_search = std::move(mode);
     }
-    auto mode = parsed.get<std::string>();
-    if (mode != "auto" && mode != "on" && mode != "off") {
-      return std::unexpected(
-          request_error("Venice web-search extension value is invalid"));
-    }
-    result = std::move(mode);
   }
 
   const auto requirements = std::ranges::count(
       options.required_model_capabilities, web_search_model_capability);
-  const bool requires_search = result && *result != "off";
+  const bool requires_search = result.web_search && *result.web_search != "off";
   if ((requires_search && requirements != 1) ||
       (!requires_search && requirements != 0)) {
     return std::unexpected(
@@ -291,10 +308,13 @@ constexpr std::string_view tool_thought_signature_media_type{
   return result;
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit request mapping.
 [[nodiscard]] auto make_request(const backend::BackendRequest& request)
     -> std::expected<venice::ChatRequest, backend::BackendError> {
-  auto search_mode = web_search_mode(request.options);
-  if (!search_mode) return std::unexpected(std::move(search_mode.error()));
+  // clang-format on
+  auto extensions = request_options(request.options);
+  if (!extensions) return std::unexpected(std::move(extensions.error()));
   if (request.options.max_output_tokens &&
       *request.options.max_output_tokens >
           static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
@@ -316,9 +336,12 @@ constexpr std::string_view tool_thought_signature_media_type{
   if (request.options.seed) {
     result.seed = static_cast<std::int64_t>(*request.options.seed);
   }
-  if (*search_mode) {
+  if (extensions->web_search || extensions->include_system_prompt) {
     result.venice_parameters.emplace();
-    result.venice_parameters->enable_web_search = std::move(**search_mode);
+    result.venice_parameters->enable_web_search =
+        std::move(extensions->web_search);
+    result.venice_parameters->include_venice_system_prompt =
+        extensions->include_system_prompt;
   }
 
   result.messages.reserve(request.context.entries.size());

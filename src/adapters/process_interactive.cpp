@@ -14,6 +14,7 @@
 #include <aiforge/adapters/venice_generation_options.hpp>
 #include <aiforge/config/config.hpp>
 #include <aiforge/config/file_store.hpp>
+#include <aiforge/config/provenance.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/runtime/memory_controller.hpp>
 #include <aiforge/runtime/memory_tool.hpp>
@@ -65,6 +66,32 @@ class CredentialUnavailableBackend final : public backend::Backend {
 };
 
 constexpr std::size_t interactive_session_list_limit = 100U;
+
+[[nodiscard]] auto web_search_setting_name(const VeniceWebSearchSetting setting)
+    -> std::string_view {
+  switch (setting) {
+    case VeniceWebSearchSetting::inherit: return "inherit/provider default";
+    case VeniceWebSearchSetting::automatic: return "auto";
+    case VeniceWebSearchSetting::on: return "on";
+    case VeniceWebSearchSetting::off: return "off";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] auto system_prompt_setting_name(
+    const VeniceSystemPromptSetting setting) -> std::string_view {
+  switch (setting) {
+    case VeniceSystemPromptSetting::inherit: return "inherit/provider default";
+    case VeniceSystemPromptSetting::include: return "include";
+    case VeniceSystemPromptSetting::exclude: return "exclude";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] auto configured_source_name(
+    const std::optional<config::ConfigSource> source) -> std::string_view {
+  return source ? config::config_source_name(*source) : "provider default";
+}
 
 [[nodiscard]] auto failure(const cli::CommandFailureKind kind,
                            std::string message)
@@ -189,11 +216,15 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
   return value.substr(first, last - first + 1);
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit precedence checks.
 [[nodiscard]] auto load_config(
     std::ostream& diagnostics,
     const std::optional<std::string>& requested_model,
-    const std::optional<std::string>& requested_web_search)
+    const std::optional<std::string>& requested_web_search,
+    std::optional<config::ConfigCandidate> file_override = std::nullopt)
     -> std::expected<config::ResolvedConfig, cli::CommandFailure> {
+  // clang-format on
   const auto& registry = config::builtin_config_registry();
   std::vector<config::ConfigLayer> layers;
   std::vector<config::ConfigCandidate> command_line;
@@ -218,6 +249,9 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
   layers.push_back(std::move(*environment));
   auto path = config::process_config_path();
   if (!path) {
+    if (file_override) {
+      return failure(cli::CommandFailureKind::runtime, path.error().message);
+    }
     if (!warning(diagnostics, path.error().message)) {
       return failure(cli::CommandFailureKind::runtime,
                      "diagnostic output failed");
@@ -225,7 +259,17 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
   } else {
     auto file = config::JsonConfigFileStore{*path}.load(registry);
     if (file) {
+      if (file_override) {
+        std::erase_if(file->candidates, [&](const auto& candidate) {
+          return candidate.key == file_override->key;
+        });
+        if (file_override->value) {
+          file->candidates.push_back(std::move(*file_override));
+        }
+      }
       layers.push_back(std::move(*file));
+    } else if (file_override) {
+      return failure(cli::CommandFailureKind::runtime, file.error().message);
     } else if (!warning(diagnostics, file.error().message)) {
       return failure(cli::CommandFailureKind::runtime,
                      "diagnostic output failed");
@@ -243,6 +287,48 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
     }
   }
   return std::move(*resolved);
+}
+
+struct VeniceConfigMutation {
+  std::string key;
+  std::optional<config::ConfigValue> value;
+};
+
+[[nodiscard]] auto venice_config_mutation(const VeniceRequestSettingSave& save)
+    -> std::expected<VeniceConfigMutation, std::string> {
+  const bool web = save.web_search.has_value();
+  const bool prompt = save.system_prompt.has_value();
+  if (web == prompt) {
+    return std::unexpected(
+        "exactly one request setting must be saved at a time");
+  }
+  if (web) {
+    switch (*save.web_search) {
+      case VeniceWebSearchSetting::inherit:
+        return VeniceConfigMutation{"venice.web_search", std::nullopt};
+      case VeniceWebSearchSetting::automatic:
+        return VeniceConfigMutation{"venice.web_search",
+                                    config::ConfigValue{std::string{"auto"}}};
+      case VeniceWebSearchSetting::on:
+        return VeniceConfigMutation{"venice.web_search",
+                                    config::ConfigValue{std::string{"on"}}};
+      case VeniceWebSearchSetting::off:
+        return VeniceConfigMutation{"venice.web_search",
+                                    config::ConfigValue{std::string{"off"}}};
+    }
+    return std::unexpected("Venice web-search setting is invalid");
+  }
+  switch (*save.system_prompt) {
+    case VeniceSystemPromptSetting::inherit:
+      return VeniceConfigMutation{"venice.include_system_prompt", std::nullopt};
+    case VeniceSystemPromptSetting::include:
+      return VeniceConfigMutation{"venice.include_system_prompt",
+                                  config::ConfigValue{true}};
+    case VeniceSystemPromptSetting::exclude:
+      return VeniceConfigMutation{"venice.include_system_prompt",
+                                  config::ConfigValue{false}};
+  }
+  return std::unexpected("Venice system-prompt setting is invalid");
 }
 
 [[nodiscard]] auto configured_model(const config::ResolvedConfig& resolved)
@@ -628,6 +714,9 @@ class ChatAppImpl final : public InteractiveChatApp {
               InteractiveChatAppOptions options)
       : m_backend(backend), m_model_context(model_context),
         m_session_store(session_store), m_model_catalog(options.model_catalog),
+        m_configured_request_settings(options.configured_request_settings),
+        m_preview_request_setting(std::move(options.preview_request_setting)),
+        m_persist_request_setting(std::move(options.persist_request_setting)),
         m_open_template(std::move(open)),
         m_session_dependencies(std::move(options.session_dependencies)),
         m_bridge(*this, options.live_wake_enabled,
@@ -1566,6 +1655,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     }
 
     m_session = std::move(*candidate);
+    m_request_setting_overrides = {};
     m_usage_ledger = std::move(*candidate_usage);
     m_spend_ceiling = std::move(*candidate_ceiling);
     m_help_visible = false;
@@ -1625,7 +1715,10 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
+  // clang-format off
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit command guards.
   auto execute_command(const surfaces::SlashCommandResult& command) -> bool {
+    // clang-format on
     switch (command.action) {
       case surfaces::SlashCommandAction::show_help:
         if (!show_help(command.subject)) return false;
@@ -1736,6 +1829,10 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_composer.clear();
         return true;
       }
+      case surfaces::SlashCommandAction::manage_request_settings:
+        if (!show_request_settings()) return false;
+        m_composer.clear();
+        return true;
       case surfaces::SlashCommandAction::show_usage:
         show_usage();
         m_composer.clear();
@@ -1958,7 +2055,8 @@ class ChatAppImpl final : public InteractiveChatApp {
 
   auto request_close(std::function<void()> action = {}) -> void {
     if (!action) action = [this] { quit(); };
-    if (m_close_dialog_active || m_plan_review_active) {
+    if (m_close_dialog_active || m_plan_review_active ||
+        m_settings_dialog_active) {
       m_status = "Close is unavailable while another decision is open";
       return;
     }
@@ -2147,6 +2245,324 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
+  [[nodiscard]] auto request_setting_summary(const bool web_search) const
+      -> std::string {
+    std::string result;
+    if (web_search) {
+      const auto configured = m_configured_request_settings.web_search;
+      const auto overridden = m_request_setting_overrides.web_search;
+      const auto effective = overridden.value_or(configured);
+      result =
+          "Configured: " + std::string{web_search_setting_name(configured)} +
+          " (" +
+          std::string{configured_source_name(
+              m_configured_request_settings.web_search_source)} +
+          ")\nSession override: " +
+          (overridden ? std::string{web_search_setting_name(*overridden)}
+                      : std::string{"none"}) +
+          "\nEffective winner: " +
+          std::string{web_search_setting_name(effective)} +
+          (overridden
+               ? " (session override)"
+               : " (" +
+                     std::string{configured_source_name(
+                         m_configured_request_settings.web_search_source)} +
+                     ")");
+      const auto found = m_session->model_info().capabilities.find(
+          std::string{web_search_model_capability});
+      result += "\nSelected-model support: ";
+      if (found == m_session->model_info().capabilities.end() ||
+          !found->second) {
+        result += "unknown";
+      } else {
+        result += found->second.value_or(false) ? "true" : "false";
+      }
+    } else {
+      const auto configured = m_configured_request_settings.system_prompt;
+      const auto overridden = m_request_setting_overrides.system_prompt;
+      const auto effective = overridden.value_or(configured);
+      result =
+          "Configured: " + std::string{system_prompt_setting_name(configured)} +
+          " (" +
+          std::string{configured_source_name(
+              m_configured_request_settings.system_prompt_source)} +
+          ")\nSession override: " +
+          (overridden ? std::string{system_prompt_setting_name(*overridden)}
+                      : std::string{"none"}) +
+          "\nEffective winner: " +
+          std::string{system_prompt_setting_name(effective)} +
+          (overridden
+               ? " (session override)"
+               : " (" +
+                     std::string{configured_source_name(
+                         m_configured_request_settings.system_prompt_source)} +
+                     ")") +
+          "\nSelected-model support: Venice chat operation";
+    }
+    result += "\nTakes effect: next inference";
+    return result;
+  }
+
+  // clang-format off
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit commit stages.
+  auto apply_request_setting(const bool web_search, const std::size_t value,
+                             const bool persist) -> void {
+    // clang-format on
+    auto overrides = m_request_setting_overrides;
+    VeniceRequestSettingSave save;
+    if (web_search) {
+      const auto selected = value == 0   ? VeniceWebSearchSetting::inherit
+                            : value == 1 ? VeniceWebSearchSetting::automatic
+                            : value == 2 ? VeniceWebSearchSetting::on
+                                         : VeniceWebSearchSetting::off;
+      if (persist) {
+        save.web_search = selected;
+      } else if (selected == VeniceWebSearchSetting::inherit) {
+        overrides.web_search.reset();
+      } else {
+        overrides.web_search = selected;
+      }
+    } else {
+      const auto selected = value == 0   ? VeniceSystemPromptSetting::inherit
+                            : value == 1 ? VeniceSystemPromptSetting::include
+                                         : VeniceSystemPromptSetting::exclude;
+      if (persist) {
+        save.system_prompt = selected;
+      } else if (selected == VeniceSystemPromptSetting::inherit) {
+        overrides.system_prompt.reset();
+      } else {
+        overrides.system_prompt = selected;
+      }
+    }
+
+    auto candidate_configured = m_configured_request_settings;
+    std::optional<std::vector<domain::ConfigurationProvenanceEntry>>
+        candidate_configuration;
+    if (persist) {
+      if (!m_preview_request_setting || !m_persist_request_setting) {
+        m_status = "Persisted request settings are unavailable";
+        return;
+      }
+      auto previewed = m_preview_request_setting(save);
+      if (!previewed) {
+        m_status = previewed.error();
+        return;
+      }
+      if (web_search) {
+        candidate_configured.web_search = previewed->configured.web_search;
+        candidate_configured.web_search_source =
+            previewed->configured.web_search_source;
+        overrides.web_search.reset();
+      } else {
+        candidate_configured.system_prompt =
+            previewed->configured.system_prompt;
+        candidate_configured.system_prompt_source =
+            previewed->configured.system_prompt_source;
+        overrides.system_prompt.reset();
+      }
+      if (m_open_template.provenance) {
+        auto& configuration = candidate_configuration.emplace(
+            m_open_template.provenance->configuration);
+        auto existing = std::ranges::find(
+            configuration, previewed->configuration_provenance.key,
+            &domain::ConfigurationProvenanceEntry::key);
+        if (existing == configuration.end()) {
+          configuration.push_back(
+              std::move(previewed->configuration_provenance));
+        } else {
+          *existing = std::move(previewed->configuration_provenance);
+        }
+      }
+    }
+
+    auto options = venice_generation_options(candidate_configured, overrides);
+    if (!options) {
+      m_status = options.error();
+      return;
+    }
+    auto effective =
+        venice_effective_request_options(candidate_configured, overrides);
+    if (!effective) {
+      m_status = effective.error();
+      return;
+    }
+    auto prepared = m_session->prepare_generation_options(
+        std::move(*options), std::move(*effective), candidate_configuration);
+    if (!prepared) {
+      m_status = prepared.error().message;
+      return;
+    }
+    if (persist) {
+      auto saved = m_persist_request_setting(save);
+      if (!saved) {
+        m_status = saved.error();
+        return;
+      }
+    }
+    auto committed = m_session->commit_generation_options(std::move(*prepared));
+    if (!committed) {
+      m_status = persist ? "Request default was saved, but the live session "
+                           "changed before it could be applied"
+                         : committed.error().message;
+      return;
+    }
+    m_configured_request_settings = candidate_configured;
+    m_request_setting_overrides = overrides;
+    if (persist) {
+      auto template_options =
+          venice_generation_options(m_configured_request_settings);
+      auto template_effective =
+          venice_effective_request_options(m_configured_request_settings);
+      if (template_options && template_effective) {
+        m_open_template.generation_options = std::move(*template_options);
+        if (m_open_template.provenance) {
+          m_open_template.provenance->effective_request_options =
+              std::move(*template_effective);
+          m_open_template.provenance->configuration =
+              candidate_configuration.value_or(
+                  m_open_template.provenance->configuration);
+        }
+      }
+    }
+    const auto winning_source =
+        web_search ? m_configured_request_settings.web_search_source
+                   : m_configured_request_settings.system_prompt_source;
+    const bool shadowed =
+        persist && winning_source &&
+        (*winning_source == config::ConfigSource::command_line ||
+         *winning_source == config::ConfigSource::environment);
+    const auto active_source =
+        winning_source.value_or(config::ConfigSource::file);
+    m_status =
+        !persist ? "Session request override updated; applies next inference"
+        : shadowed
+            ? "Saved request default; active " +
+                  std::string{config::config_source_name(active_source)} +
+                  " value still wins next inference"
+            : "Saved request default; applies next inference";
+  }
+
+  // clang-format off
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit provider choices.
+  auto show_request_setting_values(const bool web_search) -> void {
+    // clang-format on
+    termforge::ChoiceWizardPage value;
+    value.title = web_search ? "Web search" : "Venice system prompt";
+    value.text = request_setting_summary(web_search);
+    value.mode = termforge::ChoiceMode::Single;
+    value.minimum_selected = 1;
+    value.maximum_selected = 1;
+    if (web_search) {
+      value.choices = {{"Inherit", "Use the configured or provider default."},
+                       {"Auto", "Let Venice decide when to search."},
+                       {"On", "Enable web search for each request."},
+                       {"Off", "Explicitly disable web search."}};
+      const auto current = m_request_setting_overrides.web_search;
+      value.selected_indices = {!current ? 0U
+                                : *current == VeniceWebSearchSetting::automatic
+                                    ? 1U
+                                : *current == VeniceWebSearchSetting::on ? 2U
+                                                                         : 3U};
+    } else {
+      value.choices = {
+          {"Inherit", "Use the configured or provider default."},
+          {"Include", "Include the Venice system prompt."},
+          {"Exclude", "Explicitly exclude the Venice system prompt."}};
+      const auto current = m_request_setting_overrides.system_prompt;
+      value.selected_indices = {!current ? 0U
+                                : *current == VeniceSystemPromptSetting::include
+                                    ? 1U
+                                    : 2U};
+    }
+    termforge::ChoiceWizardPage target;
+    target.title = "Apply request setting";
+    target.text = "Session overrides are transient. Saved defaults update one "
+                  "registered configuration key atomically.";
+    target.mode = termforge::ChoiceMode::Single;
+    target.minimum_selected = 1;
+    target.maximum_selected = 1;
+    target.choices = {
+        {"This session", "Apply only until this live session is replaced."}};
+    if (m_preview_request_setting && m_persist_request_setting) {
+      target.choices.push_back(
+          {"Save default", "Persist this setting in the user config file."});
+    }
+    target.selected_indices = {0};
+    if (!m_settings_dialog->set_pages({std::move(value), std::move(target)})) {
+      m_status = "Request settings dialog rejected its choices";
+      return;
+    }
+    m_settings_dialog->on_result(
+        [this,
+         web_search](std::optional<termforge::ChoiceWizardResult> result) {
+          pop_modal();
+          m_settings_dialog_active = false;
+          if (!result || result->pages.size() != 2 ||
+              result->pages[0].selected_indices.size() != 1 ||
+              result->pages[1].selected_indices.size() != 1) {
+            m_status = "Request settings unchanged";
+            return;
+          }
+          const auto value = result->pages[0].selected_indices.front();
+          const auto target = result->pages[1].selected_indices.front();
+          if (value >= (web_search ? 4U : 3U) || target >= 2U ||
+              (target == 1U &&
+               (!m_preview_request_setting || !m_persist_request_setting))) {
+            m_status = "Request settings dialog returned an invalid choice";
+            return;
+          }
+          apply_request_setting(web_search, value, target == 1U);
+        });
+    m_settings_dialog_active = true;
+    push_modal(*m_settings_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                    .dismiss_on_click_outside = false});
+  }
+
+  auto show_request_settings() -> bool {
+    if (m_session->active()) {
+      m_status = "Finish or cancel the active run before changing settings";
+      return false;
+    }
+    if (!m_settings_dialog) {
+      m_settings_dialog = std::make_unique<termforge::ChoiceWizardDialog>();
+    }
+    termforge::ChoiceWizardPage page;
+    page.title = "Request settings";
+    page.text = "Choose one Chat request setting. Safe mode is not a Chat "
+                "setting and is available only to media operations.";
+    page.mode = termforge::ChoiceMode::Single;
+    page.minimum_selected = 1;
+    page.maximum_selected = 1;
+    page.choices = {{"Web search", request_setting_summary(true)},
+                    {"Venice system prompt", request_setting_summary(false)}};
+    page.selected_indices = {0};
+    if (!m_settings_dialog->set_pages({std::move(page)})) {
+      m_status = "Request settings dialog rejected its choices";
+      return false;
+    }
+    m_settings_dialog->on_result(
+        [this](std::optional<termforge::ChoiceWizardResult> result) {
+          pop_modal();
+          m_settings_dialog_active = false;
+          if (!result || result->pages.size() != 1 ||
+              result->pages.front().selected_indices.size() != 1) {
+            m_status = "Request settings unchanged";
+            return;
+          }
+          const auto selected = result->pages.front().selected_indices.front();
+          if (selected > 1U) {
+            m_status = "Request settings dialog returned an invalid choice";
+            return;
+          }
+          show_request_setting_values(selected == 0U);
+        });
+    m_settings_dialog_active = true;
+    push_modal(*m_settings_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                    .dismiss_on_click_outside = false});
+    m_status = "Inspect request settings";
+    return true;
+  }
+
   [[nodiscard]] auto apply_events(const std::vector<domain::RunEvent>& events)
       -> bool {
     for (const auto& event : events) {
@@ -2191,6 +2607,10 @@ class ChatAppImpl final : public InteractiveChatApp {
   backend::ModelContextProvider& m_model_context;
   storage::SessionStore* m_session_store{};
   model::CatalogService* m_model_catalog{};
+  VeniceConfiguredRequestSettings m_configured_request_settings;
+  VeniceRequestSettingOverrides m_request_setting_overrides;
+  PreviewVeniceRequestSetting m_preview_request_setting;
+  PersistVeniceRequestSetting m_persist_request_setting;
   surfaces::ChatSessionOpen m_open_template;
   surfaces::ChatSessionDependencies m_session_dependencies;
   TermForgeRunBridge m_bridge;
@@ -2216,10 +2636,12 @@ class ChatAppImpl final : public InteractiveChatApp {
   bool m_history_enabled{true};
   std::size_t m_history_cutoff{};
   std::unique_ptr<ModelPickerDialog> m_model_picker;
+  std::unique_ptr<termforge::ChoiceWizardDialog> m_settings_dialog;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_plan_dialog;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_close_dialog;
   bool m_plan_review_active{};
   bool m_close_dialog_active{};
+  bool m_settings_dialog_active{};
   std::optional<std::pair<domain::SessionId, domain::PlanRevisionId>>
       m_reviewed_plan;
   std::function<void()> m_close_action;
@@ -2347,11 +2769,14 @@ auto make_interactive_chat_app(
                                        std::move(options));
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit startup boundaries.
 auto ProcessInteractiveCommand::execute(Request request,
                                         cli::CommandEnvironment& environment,
                                         std::ostream& output,
                                         std::ostream& diagnostics)
     -> std::expected<void, cli::CommandFailure> {
+  // clang-format on
   try {
     static_cast<void>(output);
     if (!environment.input_is_terminal || !environment.output_is_terminal) {
@@ -2421,6 +2846,19 @@ auto ProcessInteractiveCommand::execute(Request request,
     }();
     auto provenance = process_run_provenance(*resolved, *model, "venice",
                                              std::move(credential_source));
+    auto request_settings = venice_configured_request_settings(*resolved);
+    if (!request_settings) {
+      return failure(cli::CommandFailureKind::runtime,
+                     request_settings.error());
+    }
+    auto effective_request_options =
+        venice_effective_request_options(*request_settings);
+    if (!effective_request_options) {
+      return failure(cli::CommandFailureKind::runtime,
+                     effective_request_options.error());
+    }
+    provenance.effective_request_options =
+        std::move(*effective_request_options);
     auto persona_root = process_persona_root();
     std::optional<FilesystemPersonaSource> personas;
     if (persona_root) personas.emplace(std::move(*persona_root));
@@ -2487,6 +2925,47 @@ auto ProcessInteractiveCommand::execute(Request request,
 
     InteractiveChatAppOptions app_options;
     app_options.model_catalog = &(*catalog)->service();
+    app_options.configured_request_settings = *request_settings;
+    if (auto config_path = config::process_config_path(); config_path) {
+      app_options.preview_request_setting =
+          [requested_model = request.model,
+           requested_web_search = request.web_search,
+           &diagnostics](const VeniceRequestSettingSave& save)
+          -> std::expected<VenicePreparedPersistedSettings, std::string> {
+        auto mutation = venice_config_mutation(save);
+        if (!mutation) return std::unexpected(std::move(mutation.error()));
+        auto resolved =
+            load_config(diagnostics, requested_model, requested_web_search,
+                        config::ConfigCandidate{mutation->key, mutation->value,
+                                                std::nullopt});
+        if (!resolved) return std::unexpected(resolved.error().message);
+        auto configured = venice_configured_request_settings(*resolved);
+        if (!configured) return std::unexpected(std::move(configured.error()));
+        auto provenance = config::configuration_provenance(*resolved);
+        auto selected =
+            std::ranges::find(provenance, mutation->key,
+                              &domain::ConfigurationProvenanceEntry::key);
+        if (selected == provenance.end()) {
+          return std::unexpected(
+              "persisted request setting has no configuration provenance");
+        }
+        return VenicePreparedPersistedSettings{*configured,
+                                               std::move(*selected)};
+      };
+      app_options.persist_request_setting =
+          [path = *config_path](const VeniceRequestSettingSave& save)
+          -> std::expected<void, std::string> {
+        auto mutation = venice_config_mutation(save);
+        if (!mutation) return std::unexpected(std::move(mutation.error()));
+        config::JsonConfigFileStore store{path};
+        const auto& registry = config::builtin_config_registry();
+        auto changed = mutation->value ? store.set(registry, mutation->key,
+                                                   *mutation->value)
+                                       : store.unset(registry, mutation->key);
+        if (!changed) return std::unexpected(changed.error().message);
+        return {};
+      };
+    }
     app_options.session_dependencies.persona_source =
         personas ? &*personas : nullptr;
     app_options.session_dependencies.tools = std::move(tools);

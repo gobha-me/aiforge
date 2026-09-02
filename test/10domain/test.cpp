@@ -58,7 +58,11 @@ auto provenance() -> RunProvenance {
                          {{ProvenanceSource::environment,
                            ProvenanceDisposition::selected, std::nullopt}}}},
                        {{"aiforge", "0.10.0"}},
-                       {}};
+                       {},
+                       {{"venice.chat.web-search", std::string{"on"},
+                         RequestOptionSource::configuration},
+                        {"venice.chat.include-system-prompt", std::nullopt,
+                         RequestOptionSource::provider_default}}};
 }
 
 } // namespace
@@ -315,6 +319,71 @@ TEST_CASE("run provenance validation bounds identity, credentials, and tools",
   }
   REQUIRE(validate_run_provenance(exhausted).error().code ==
           RunProvenanceErrorCode::resource_exhausted);
+}
+
+TEST_CASE("run provenance bounds effective request option snapshots",
+          "[domain][failure][provenance][request-options]") {
+  auto session = provenance();
+  session.effective_request_options.push_back(
+      {"venice.chat.safe-mode", std::string{"off"},
+       RequestOptionSource::session_override});
+  REQUIRE(validate_run_provenance(session));
+
+  auto inconsistent_default = provenance();
+  inconsistent_default.effective_request_options.back().value = "on";
+  REQUIRE(validate_run_provenance(inconsistent_default).error().code ==
+          RunProvenanceErrorCode::invalid_request_option);
+
+  auto inconsistent_configuration = provenance();
+  inconsistent_configuration.effective_request_options.front().value.reset();
+  REQUIRE(validate_run_provenance(inconsistent_configuration).error().code ==
+          RunProvenanceErrorCode::invalid_request_option);
+
+  auto unknown_source = provenance();
+  unknown_source.effective_request_options.front().source =
+      static_cast<RequestOptionSource>(999);
+  REQUIRE(validate_run_provenance(unknown_source).error().code ==
+          RunProvenanceErrorCode::invalid_request_option);
+
+  auto malformed_key = provenance();
+  malformed_key.effective_request_options.front().key = "request option";
+  REQUIRE(validate_run_provenance(malformed_key).error().code ==
+          RunProvenanceErrorCode::invalid_request_option);
+
+  auto duplicate = provenance();
+  duplicate.effective_request_options.push_back(
+      duplicate.effective_request_options.front());
+  REQUIRE(validate_run_provenance(duplicate).error().code ==
+          RunProvenanceErrorCode::duplicate_key);
+
+  auto malformed_value = provenance();
+  malformed_value.effective_request_options.front().value = "on\nsecret";
+  REQUIRE(validate_run_provenance(malformed_value).error().code ==
+          RunProvenanceErrorCode::invalid_request_option);
+
+  auto oversized_value = provenance();
+  oversized_value.effective_request_options.front().value =
+      std::string(4097, 'x');
+  REQUIRE(validate_run_provenance(oversized_value).error().code ==
+          RunProvenanceErrorCode::value_too_large);
+
+  auto too_many = provenance();
+  too_many.effective_request_options.assign(
+      65, {"option", std::string{"on"}, RequestOptionSource::configuration});
+  REQUIRE(validate_run_provenance(too_many).error().code ==
+          RunProvenanceErrorCode::too_many_entries);
+
+  auto exhausted = provenance();
+  exhausted.effective_request_options.front().value = std::string(65520, 'x');
+  RunProvenanceLimits expanded_value;
+  expanded_value.maximum_request_option_value_bytes = 65536;
+  REQUIRE(validate_run_provenance(exhausted, expanded_value).error().code ==
+          RunProvenanceErrorCode::resource_exhausted);
+
+  RunProvenanceLimits zero_limit;
+  zero_limit.maximum_request_options = 0;
+  REQUIRE(validate_run_provenance(provenance(), zero_limit).error().code ==
+          RunProvenanceErrorCode::invalid_limits);
 }
 
 TEST_CASE(

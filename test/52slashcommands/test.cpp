@@ -177,7 +177,7 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   const auto& registry = builtin_slash_command_registry();
   const auto listed = registry.describe();
   REQUIRE(listed);
-  REQUIRE(listed->size() == 11);
+  REQUIRE(listed->size() == 12);
   REQUIRE((*listed)[0].name == "help");
   REQUIRE((*listed)[1].name == "quit");
   REQUIRE((*listed)[2].name == "clear");
@@ -185,10 +185,11 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   REQUIRE((*listed)[4].name == "session");
   REQUIRE((*listed)[5].name == "persona");
   REQUIRE((*listed)[6].name == "model");
-  REQUIRE((*listed)[7].name == "usage");
-  REQUIRE((*listed)[8].name == "plan");
-  REQUIRE((*listed)[9].name == "tasks");
-  REQUIRE((*listed)[10].name == "memory");
+  REQUIRE((*listed)[7].name == "settings");
+  REQUIRE((*listed)[8].name == "usage");
+  REQUIRE((*listed)[9].name == "plan");
+  REQUIRE((*listed)[10].name == "tasks");
+  REQUIRE((*listed)[11].name == "memory");
 
   const auto memory = registry.dispatch("/memory search convention");
   REQUIRE(memory);
@@ -263,6 +264,19 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   const auto usage = registry.dispatch("/usage");
   REQUIRE(usage);
   REQUIRE((*usage)->action == SlashCommandAction::show_usage);
+
+  const auto settings = registry.dispatch("/settings");
+  REQUIRE(settings);
+  REQUIRE((*settings)->action == SlashCommandAction::manage_request_settings);
+  const auto invalid_settings = registry.dispatch("/settings now");
+  REQUIRE_FALSE(invalid_settings);
+  REQUIRE(invalid_settings.error().code ==
+          SlashCommandErrorCode::invalid_arguments);
+  const auto active_settings =
+      registry.dispatch("/settings", {.run_active = true, .stop_token = {}});
+  REQUIRE_FALSE(active_settings);
+  REQUIRE(active_settings.error().code ==
+          SlashCommandErrorCode::unavailable_command);
 
   const auto invalid_usage = registry.dispatch("/usage now");
   REQUIRE_FALSE(invalid_usage);

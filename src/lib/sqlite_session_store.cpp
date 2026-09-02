@@ -2374,6 +2374,42 @@ template <typename IdType>
                            {"unrecognized", Kind::unrecognized}});
 }
 
+[[nodiscard]] auto request_option_source_name(
+    const domain::RequestOptionSource value) -> std::string_view {
+  switch (value) {
+    case domain::RequestOptionSource::provider_default:
+      return "provider_default";
+    case domain::RequestOptionSource::configuration: return "configuration";
+    case domain::RequestOptionSource::session_override:
+      return "session_override";
+  }
+  throw CodecFailure{"invalid request option source"};
+}
+
+[[nodiscard]] auto parse_request_option_source(const Json& value)
+    -> domain::RequestOptionSource {
+  using Source = domain::RequestOptionSource;
+  const auto name = value.get<std::string>();
+  return enum_value<Source>(name,
+                            {{"provider_default", Source::provider_default},
+                             {"configuration", Source::configuration},
+                             {"session_override", Source::session_override}});
+}
+
+[[nodiscard]] auto effective_request_option_json(
+    const domain::EffectiveRequestOption& option) -> Json {
+  return {{"key", option.key},
+          {"value", option.value ? Json(*option.value) : Json(nullptr)},
+          {"source", request_option_source_name(option.source)}};
+}
+
+[[nodiscard]] auto parse_effective_request_option(const Json& value)
+    -> domain::EffectiveRequestOption {
+  return {value.at("key").get<std::string>(),
+          parse_optional_string(value.at("value")),
+          parse_request_option_source(value.at("source"))};
+}
+
 [[nodiscard]] auto configuration_entry_json(
     const domain::ConfigurationProvenanceEntry& entry) -> Json {
   auto decisions = Json::array();
@@ -2445,21 +2481,29 @@ template <typename IdType>
          {"declared_effects", effects_json(tool.declared_effects)},
          {"capability_scopes", scopes_json(tool.capability_scopes)}});
   }
-  return {{"aiforge_version", provenance.aiforge_version},
-          {"backend_id", provenance.backend_id},
-          {"backend_version", provenance.backend_version
-                                  ? Json(*provenance.backend_version)
-                                  : Json(nullptr)},
-          {"model_id", id_text(provenance.model_id)},
-          {"credential_source",
-           provenance.credential_source
-               ? Json{{"kind", credential_kind_name(
-                                   provenance.credential_source->kind)},
-                      {"identity", provenance.credential_source->identity}}
-               : Json(nullptr)},
-          {"configuration", std::move(configuration)},
-          {"components", std::move(components)},
-          {"tools", std::move(tools)}};
+  auto effective_request_options = Json::array();
+  for (const auto& option : provenance.effective_request_options) {
+    effective_request_options.push_back(effective_request_option_json(option));
+  }
+  Json result{{"aiforge_version", provenance.aiforge_version},
+              {"backend_id", provenance.backend_id},
+              {"backend_version", provenance.backend_version
+                                      ? Json(*provenance.backend_version)
+                                      : Json(nullptr)},
+              {"model_id", id_text(provenance.model_id)},
+              {"credential_source",
+               provenance.credential_source
+                   ? Json{{"kind", credential_kind_name(
+                                       provenance.credential_source->kind)},
+                          {"identity", provenance.credential_source->identity}}
+                   : Json(nullptr)},
+              {"configuration", std::move(configuration)},
+              {"components", std::move(components)},
+              {"tools", std::move(tools)}};
+  if (!effective_request_options.empty()) {
+    result["effective_request_options"] = std::move(effective_request_options);
+  }
+  return result;
 }
 
 [[nodiscard]] auto parse_run_provenance(const Json& value)
@@ -2477,6 +2521,7 @@ template <typename IdType>
       std::nullopt,
       parse_id<domain::ModelId>(value.at("model_id")),
       std::nullopt,
+      {},
       {},
       {},
       {}};
@@ -2503,6 +2548,17 @@ template <typename IdType>
     provenance.tools.push_back({tool.at("tool_name").get<std::string>(),
                                 parse_effects(tool.at("declared_effects")),
                                 parse_scopes(tool.at("capability_scopes"))});
+  }
+  if (const auto options = value.find("effective_request_options");
+      options != value.end()) {
+    if (!options->is_array()) {
+      throw CodecFailure{"effective request option list is invalid"};
+    }
+    provenance.effective_request_options.reserve(options->size());
+    for (const auto& option : *options) {
+      provenance.effective_request_options.push_back(
+          parse_effective_request_option(option));
+    }
   }
   if (!domain::validate_run_provenance(provenance)) {
     throw CodecFailure{"run provenance is invalid"};
