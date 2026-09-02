@@ -1015,7 +1015,7 @@ auto startup_model_scenario(const bool cancel) -> testing::TuiScenario {
                              : "interactive-startup-model-select-resize";
   value.corpus_version = "1";
   value.application_revision = "test-revision";
-  value.initial_size = {40, 12, 400, 240};
+  value.initial_size = {100, 28, 1000, 560};
   const auto key = [](const termforge::Key selected) {
     return testing::TuiScenarioPost{termforge::KeyEvent{
         selected, 0, false, false, false, termforge::KeyAction::Press}};
@@ -1025,11 +1025,16 @@ auto startup_model_scenario(const bool cancel) -> testing::TuiScenario {
   } else {
     value.steps = {
         {0, testing::TuiScenarioResize{{8, 3, 80, 60}}},
-        {1, testing::TuiScenarioResize{{40, 12, 400, 240}}},
-        {2, testing::TuiScenarioPost{termforge::PasteEvent{"alternate"}}},
-        {3, key(termforge::Key::Tab)},
-        {3, key(termforge::Key::Enter)},
+        {1, testing::TuiScenarioResize{{50, 12, 500, 240}}},
+        {2, testing::TuiScenarioResize{{100, 28, 1000, 560}}},
     };
+    for (const char character : std::string_view{"cap:tools=false"}) {
+      value.steps.push_back(
+          {3, testing::TuiScenarioPost{termforge::KeyEvent{
+                  termforge::Key::Char, static_cast<char32_t>(character), false,
+                  false, false, termforge::KeyAction::Press}}});
+    }
+    value.steps.push_back({4, key(termforge::Key::Enter)});
   }
   value.limits.maximum_frames = 16;
   return value;
@@ -1050,10 +1055,14 @@ auto startup_model_factory(
     model::CatalogEntry first{make_id<domain::ModelId>("model"), "text"};
     first.name = "Current model";
     first.context_window_tokens = 8192;
+    first.maximum_output_tokens = 1024;
+    first.capabilities.push_back({model::Capability::tool_calling, true});
     model::CatalogEntry alternate{make_id<domain::ModelId>("alternate"),
                                   "text"};
     alternate.name = "Alternate model";
     alternate.context_window_tokens = 8192;
+    alternate.maximum_output_tokens = 2048;
+    alternate.capabilities.push_back({model::Capability::tool_calling, false});
     model::CatalogSnapshot snapshot{
         std::chrono::sys_time<std::chrono::milliseconds>{123ms},
         {std::move(first), std::move(alternate)}};
@@ -1730,6 +1739,14 @@ TEST_CASE("startup model selection is keyboard-only and resize deterministic",
     REQUIRE(result->recorded.semantic_state == "selected:alternate");
     REQUIRE(result->recorded.wire_output.find("Select model") !=
             std::string::npos);
+    const auto expected = origin == model::CatalogOrigin::live
+                              ? "Catalog: live"
+                              : (origin == model::CatalogOrigin::fresh_cache
+                                     ? "Catalog: fresh cache"
+                                     : "Catalog: stale cache");
+    REQUIRE(result->recorded.wire_output.find("tools false") !=
+            std::string::npos);
+    REQUIRE(result->recorded.wire_output.find(expected) != std::string::npos);
   }
 }
 
