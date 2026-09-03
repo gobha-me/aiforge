@@ -2434,6 +2434,90 @@ template <typename IdType>
               value.at("persona_maximum_profile_id"))};
 }
 
+[[nodiscard]] auto tool_restriction_name(
+    const domain::ToolRestrictionLevel value) -> std::string_view {
+  switch (value) {
+    case domain::ToolRestrictionLevel::high: return "high";
+    case domain::ToolRestrictionLevel::medium: return "medium";
+    case domain::ToolRestrictionLevel::low: return "low";
+    case domain::ToolRestrictionLevel::none: return "none";
+  }
+  throw CodecFailure{"invalid tool restriction level"};
+}
+
+[[nodiscard]] auto parse_tool_restriction(const Json& value)
+    -> domain::ToolRestrictionLevel {
+  using Level = domain::ToolRestrictionLevel;
+  return enum_value<Level>(value.get<std::string>(), {{"high", Level::high},
+                                                      {"medium", Level::medium},
+                                                      {"low", Level::low},
+                                                      {"none", Level::none}});
+}
+
+[[nodiscard]] auto tool_approval_mode_name(const domain::ToolApprovalMode value)
+    -> std::string_view {
+  switch (value) {
+    case domain::ToolApprovalMode::prompt: return "prompt";
+    case domain::ToolApprovalMode::automatic: return "automatic";
+    case domain::ToolApprovalMode::allow_all: return "allow_all";
+  }
+  throw CodecFailure{"invalid tool approval mode"};
+}
+
+[[nodiscard]] auto parse_tool_approval_mode(const Json& value)
+    -> domain::ToolApprovalMode {
+  using Mode = domain::ToolApprovalMode;
+  return enum_value<Mode>(value.get<std::string>(),
+                          {{"prompt", Mode::prompt},
+                           {"automatic", Mode::automatic},
+                           {"allow_all", Mode::allow_all}});
+}
+
+[[nodiscard]] auto tool_policy_provenance_json(
+    const domain::ToolPolicyProvenance& policy) -> Json {
+  return {
+      {"identity", policy.identity},
+      {"permission_profile_id", id_text(policy.permission_profile_id)},
+      {"restriction_level", tool_restriction_name(policy.restriction_level)},
+      {"approval_mode", tool_approval_mode_name(policy.approval_mode)},
+      {"effect_ceiling", effects_json(policy.effect_ceiling)},
+      {"capability_ceiling", scopes_json(policy.capability_ceiling)},
+      {"automatically_eligible_tools", policy.automatically_eligible_tools}};
+}
+
+[[nodiscard]] auto parse_tool_policy_provenance(const Json& value)
+    -> domain::ToolPolicyProvenance {
+  if (!value.is_object() || value.size() != 7 || !value.contains("identity") ||
+      !value.contains("permission_profile_id") ||
+      !value.contains("restriction_level") ||
+      !value.contains("approval_mode") || !value.contains("effect_ceiling") ||
+      !value.contains("capability_ceiling") ||
+      !value.contains("automatically_eligible_tools") ||
+      !value.at("effect_ceiling").is_array() ||
+      !value.at("capability_ceiling").is_array() ||
+      !value.at("automatically_eligible_tools").is_array()) {
+    throw CodecFailure{"tool policy provenance is invalid"};
+  }
+  for (const auto& scope : value.at("capability_ceiling")) {
+    if (!scope.is_object() || scope.size() != 3 || !scope.contains("effect") ||
+        !scope.contains("kind") || !scope.contains("value")) {
+      throw CodecFailure{"tool policy capability ceiling is invalid"};
+    }
+  }
+  domain::ToolPolicyProvenance policy{
+      value.at("identity").get<std::string>(),
+      parse_id<domain::PermissionProfileId>(value.at("permission_profile_id")),
+      parse_tool_restriction(value.at("restriction_level")),
+      parse_tool_approval_mode(value.at("approval_mode")),
+      parse_effects(value.at("effect_ceiling")),
+      parse_scopes(value.at("capability_ceiling")),
+      {}};
+  for (const auto& name : value.at("automatically_eligible_tools")) {
+    policy.automatically_eligible_tools.push_back(name.get<std::string>());
+  }
+  return policy;
+}
+
 [[nodiscard]] auto configuration_entry_json(
     const domain::ConfigurationProvenanceEntry& entry) -> Json {
   auto decisions = Json::array();
@@ -2534,6 +2618,10 @@ template <typename IdType>
     result["tool_profile"] =
         tool_profile_provenance_json(*provenance.tool_profile);
   }
+  if (provenance.tool_policy) {
+    result["tool_policy"] =
+        tool_policy_provenance_json(*provenance.tool_policy);
+  }
   return result;
 }
 
@@ -2599,6 +2687,9 @@ template <typename IdType>
   }
   if (const auto profile = value.find("tool_profile"); profile != value.end()) {
     provenance.tool_profile = parse_tool_profile_provenance(*profile);
+  }
+  if (const auto policy = value.find("tool_policy"); policy != value.end()) {
+    provenance.tool_policy = parse_tool_policy_provenance(*policy);
   }
   if (!domain::validate_run_provenance(provenance)) {
     throw CodecFailure{"run provenance is invalid"};

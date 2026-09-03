@@ -5,8 +5,15 @@
 namespace aiforge::testing {
 
 ScriptedRepositorySnapshotSource::ScriptedRepositorySnapshotSource(
-    std::vector<RepositorySnapshotExchange> exchanges)
-    : m_exchanges(std::move(exchanges)) {
+    std::vector<RepositorySnapshotExchange> exchanges,
+    const bool guarantees_read_only_observation)
+    : m_exchanges(std::move(exchanges)),
+      m_guarantees_read_only_observation(guarantees_read_only_observation) {
+}
+
+auto ScriptedRepositorySnapshotSource::guarantees_read_only_observation()
+    const noexcept -> bool {
+  return m_guarantees_read_only_observation;
 }
 
 auto ScriptedRepositorySnapshotSource::observe(

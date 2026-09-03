@@ -38,7 +38,8 @@ auto RunProjection::find_message(const MessageId& message_id)
 
 auto RunProjection::require_running() const
     -> std::expected<void, ProjectionError> {
-  if (m_status != RunStatus::running && m_status != RunStatus::awaiting_input) {
+  if (m_status != RunStatus::running && m_status != RunStatus::awaiting_input &&
+      m_status != RunStatus::awaiting_approval) {
     return transition_error("event requires a live run");
   }
   return {};
@@ -115,7 +116,9 @@ auto RunProjection::apply(const RunEvent& event)
             return {};
           },
           [&](const RunAwaitingInput&) -> std::expected<void, ProjectionError> {
-            if (m_status != RunStatus::running || m_active_inference_id) {
+            if ((m_status != RunStatus::running &&
+                 m_status != RunStatus::awaiting_approval) ||
+                m_active_inference_id) {
               return transition_error(
                   "a run may await input only between inferences");
             }
@@ -126,7 +129,39 @@ auto RunProjection::apply(const RunEvent& event)
             if (m_status != RunStatus::awaiting_input) {
               return transition_error("only an awaiting run may resume");
             }
-            m_status = RunStatus::running;
+            m_status = m_pending_approval_ids.empty()
+                           ? RunStatus::running
+                           : RunStatus::awaiting_approval;
+            return {};
+          },
+          [&](const ToolApprovalRequested& requested)
+              -> std::expected<void, ProjectionError> {
+            if ((m_status != RunStatus::running &&
+                 m_status != RunStatus::awaiting_approval &&
+                 m_status != RunStatus::awaiting_input) ||
+                m_active_inference_id ||
+                !m_pending_approval_ids.insert(requested.invocation_id)
+                     .second) {
+              return transition_error(
+                  "tool approval request is duplicated or out of order");
+            }
+            if (m_status == RunStatus::running) {
+              m_status = RunStatus::awaiting_approval;
+            }
+            return {};
+          },
+          [&](const ToolApprovalDecided& decided)
+              -> std::expected<void, ProjectionError> {
+            if ((m_status != RunStatus::awaiting_approval &&
+                 m_status != RunStatus::awaiting_input) ||
+                m_pending_approval_ids.erase(decided.invocation_id) != 1) {
+              return transition_error(
+                  "tool approval decision has no pending request");
+            }
+            if (m_status == RunStatus::awaiting_approval &&
+                m_pending_approval_ids.empty()) {
+              m_status = RunStatus::running;
+            }
             return {};
           },
           [&](const PlanRevisionProposed&)
@@ -174,9 +209,8 @@ auto RunProjection::apply(const RunEvent& event)
           },
           [&](const RunCompleted&) -> std::expected<void, ProjectionError> {
             if (auto live = require_running(); !live) return live;
-            if (m_active_inference_id) {
-              return transition_error(
-                  "a run cannot complete with an active inference");
+            if (m_active_inference_id || !m_pending_approval_ids.empty()) {
+              return transition_error("a run cannot complete with active work");
             }
             m_status = RunStatus::completed;
             return {};
@@ -187,6 +221,7 @@ auto RunProjection::apply(const RunEvent& event)
             m_active_model_id.reset();
             m_active_inference_cost_recorded = false;
             m_active_inference_pricing_recorded = false;
+            m_pending_approval_ids.clear();
             m_status = RunStatus::failed;
             return {};
           },
@@ -204,6 +239,7 @@ auto RunProjection::apply(const RunEvent& event)
             m_active_model_id.reset();
             m_active_inference_cost_recorded = false;
             m_active_inference_pricing_recorded = false;
+            m_pending_approval_ids.clear();
             m_status = RunStatus::cancelled;
             return {};
           },

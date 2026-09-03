@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <ranges>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <utility>
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include <aiforge/runtime/run_kernel.hpp>
+#include <aiforge/runtime/tool_launch_policy.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
 #include <aiforge/testing/scripted_policy_grant_store.hpp>
@@ -94,6 +96,17 @@ auto run_start(backend::BackendRequest backend_request) -> runtime::RunStart {
                       {domain::TextBlock{"hello"}},
                       std::nullopt},
       std::move(backend_request)};
+}
+
+auto provenance() -> domain::RunProvenance {
+  return {"test-version",
+          "test-backend",
+          std::nullopt,
+          make_id<domain::ModelId>("model"),
+          std::nullopt,
+          {},
+          {},
+          {}};
 }
 
 auto pricing_observation() -> domain::PricingObservation {
@@ -232,6 +245,58 @@ class CountingExecutor final : public runtime::ToolExecutor {
 
   mutable std::size_t validations{};
   std::size_t starts{};
+};
+
+class MemoryStore final : public storage::SessionStore {
+ public:
+  domain::SessionId session_id{make_id<domain::SessionId>("session")};
+  domain::EventTimestamp created{std::chrono::milliseconds{1}};
+  std::vector<domain::RunEvent> events;
+
+  auto create_session(storage::SessionCreate session, std::stop_token)
+      -> std::expected<void, storage::SessionStoreError> override {
+    session_id = std::move(session.session_id);
+    created = session.created_at;
+    return {};
+  }
+
+  auto open_session(const domain::SessionId& requested, std::stop_token)
+      -> std::expected<storage::SessionInfo,
+                       storage::SessionStoreError> override {
+    if (requested != session_id) {
+      return std::unexpected(storage::SessionStoreError{
+          storage::SessionStoreErrorCode::not_found, "missing", false});
+    }
+    const auto last =
+        events.empty() ? created : events.back().metadata.timestamp;
+    return storage::SessionInfo{
+        session_id, created, last,
+        events.empty() ? 0 : events.back().metadata.sequence};
+  }
+
+  auto list_sessions(std::size_t, std::stop_token)
+      -> std::expected<std::vector<storage::SessionInfo>,
+                       storage::SessionStoreError> override {
+    return std::vector<storage::SessionInfo>{};
+  }
+
+  auto append_events(const domain::SessionId& requested,
+                     std::span<const domain::RunEvent> additions,
+                     std::stop_token)
+      -> std::expected<void, storage::SessionStoreError> override {
+    if (requested != session_id) {
+      return std::unexpected(storage::SessionStoreError{
+          storage::SessionStoreErrorCode::not_found, "missing", false});
+    }
+    events.insert(events.end(), additions.begin(), additions.end());
+    return {};
+  }
+
+  auto replay_events(const domain::SessionId&, std::stop_token)
+      -> std::expected<std::vector<domain::RunEvent>,
+                       storage::SessionStoreError> override {
+    return events;
+  }
 };
 
 class ImmediateStream final : public runtime::ToolExecutionStream {
@@ -412,6 +477,13 @@ TEST_CASE(
   invalid.capability_scopes.front().effect = domain::Effect::write;
   result = registry.register_tool(invalid, executor);
   REQUIRE_FALSE(result);
+
+  invalid = declaration();
+  invalid.capability_scopes.clear();
+  result = registry.register_tool(invalid, executor);
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code ==
+          runtime::ToolRegistryErrorCode::invalid_declaration);
 
   result = registry.register_tool(declaration("invalid-contract"), executor, {},
                                   runtime::ToolExecutorContract{"", "1"});
@@ -765,6 +837,13 @@ TEST_CASE("policy and approval decisions are one-shot and cannot widen scope",
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
 
+  REQUIRE(kernel.pending_tool_approval() ==
+          (runtime::PendingToolApproval{make_id<domain::RunId>("run"),
+                                        invocation,
+                                        "lookup",
+                                        {domain::Effect::read},
+                                        {scope}}));
+
   const domain::CapabilityScope widened{domain::Effect::read, "filesystem.root",
                                         "/outside"};
   auto decision =
@@ -778,6 +857,7 @@ TEST_CASE("policy and approval decisions are one-shot and cannot widen scope",
 
   REQUIRE(kernel.decide_approval(make_id<domain::RunId>("run"), invocation,
                                  {domain::ApprovalDecision::denied, {}}));
+  REQUIRE_FALSE(kernel.pending_tool_approval());
   decision = kernel.decide_approval(make_id<domain::RunId>("run"), invocation,
                                     {domain::ApprovalDecision::denied, {}});
   REQUIRE_FALSE(decision);
@@ -792,6 +872,78 @@ TEST_CASE("policy and approval decisions are one-shot and cannot widen scope",
   REQUIRE(std::get<domain::TextBlock>(messages->front().content.front()).text ==
           "tool invocation denied");
   REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "test cleanup"));
+}
+
+TEST_CASE("durable pending approval is reconstructed without execution",
+          "[tools][policy][storage][replay][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("call");
+  const auto profile =
+      make_id<domain::PermissionProfileId>("tools-medium-prompt-v1");
+  auto executor = std::make_shared<CountingExecutor>();
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      declaration(), executor, {},
+      runtime::ToolExecutorContract{"test.lookup", "1"}));
+  const auto tools = snapshot_of(registry);
+  const auto make_policy = [&] {
+    return runtime::make_tool_launch_policy(tools,
+                                            {profile,
+                                             runtime::RestrictionLevel::medium,
+                                             runtime::ApprovalMode::prompt,
+                                             {}});
+  };
+  auto policy = make_policy();
+  REQUIRE(policy);
+  auto initial = request("inference-1", "assistant-1", tools.declarations());
+  testing::ScriptedBackend backend{{
+      {initial, tool_call_script(invocation)},
+  }};
+  MemoryStore store;
+  WakeCounter wake;
+  auto kernel = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::create, store.created},
+      store, backend, &wake, {}, {}, tools, *policy);
+  REQUIRE(kernel);
+  auto caller_owned = run_start(initial);
+  caller_owned.attributes.permission_profile_id = profile;
+  caller_owned.provenance = provenance();
+  caller_owned.provenance->tool_policy = *(*policy)->provenance();
+  auto rejected = (*kernel)->start(std::move(caller_owned));
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code == runtime::RunKernelErrorCode::invalid_start);
+
+  auto start = run_start(initial);
+  start.attributes.permission_profile_id = profile;
+  start.provenance = provenance();
+  REQUIRE((*kernel)->start(std::move(start)));
+  drain_to_inference_boundary(**kernel, wake);
+  REQUIRE((*kernel)->projection(make_id<domain::RunId>("run"))->status() ==
+          domain::RunStatus::awaiting_approval);
+  REQUIRE((*kernel)->pending_tool_approval());
+  REQUIRE(executor->validations == 1);
+  REQUIRE(executor->starts == 0);
+  kernel->reset();
+
+  auto replay_policy = make_policy();
+  REQUIRE(replay_policy);
+  testing::ScriptedBackend replay_backend{{}};
+  WakeCounter replay_wake;
+  auto replayed = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::resume, store.created},
+      store, replay_backend, &replay_wake, {}, {}, tools, *replay_policy);
+  REQUIRE(replayed);
+  REQUIRE((*replayed)->projection(make_id<domain::RunId>("run"))->status() ==
+          domain::RunStatus::awaiting_approval);
+  REQUIRE((*replayed)->pending_tool_approval());
+  REQUIRE((*replayed)->pending_tool_approval()->invocation_id == invocation);
+  REQUIRE(executor->validations == 1);
+  REQUIRE(executor->starts == 0);
+  REQUIRE((*replayed)->decide_approval(make_id<domain::RunId>("run"),
+                                       invocation,
+                                       {domain::ApprovalDecision::denied, {}}));
+  REQUIRE_FALSE((*replayed)->pending_tool_approval());
+  REQUIRE(executor->starts == 0);
+  REQUIRE((*replayed)->cancel_run(make_id<domain::RunId>("run"), "cleanup"));
 }
 
 TEST_CASE("invalid arguments fail before policy without leaking validator text",

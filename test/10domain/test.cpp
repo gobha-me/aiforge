@@ -181,6 +181,51 @@ TEST_CASE("run projection rejects illegal inference and terminal ordering",
       projection.apply(event(8, UnknownEvent{"future.after-terminal"}, "e8")));
 }
 
+TEST_CASE("tool approval projection remains orthogonal to question input",
+          "[domain][tools][approval][failure]") {
+  RunProjection projection;
+  const auto first = make_id<InvocationId>("first");
+  const auto second = make_id<InvocationId>("second");
+  const auto question = make_id<QuestionId>("question");
+  const CapabilityScope scope{Effect::read, "filesystem.root", "/repo"};
+
+  REQUIRE(projection.apply(event(1, started(), "start")));
+  REQUIRE(projection.apply(
+      event(2, ToolApprovalRequested{first, {scope}}, "first-request")));
+  REQUIRE(projection.status() == RunStatus::awaiting_approval);
+  REQUIRE_FALSE(projection.apply(
+      event(3, ToolApprovalRequested{first, {scope}}, "duplicate-request")));
+  REQUIRE(projection.apply(
+      event(3, ToolApprovalRequested{second, {scope}}, "second-request")));
+  REQUIRE(projection.apply(event(4, RunAwaitingInput{question}, "awaiting")));
+  REQUIRE(projection.status() == RunStatus::awaiting_input);
+  REQUIRE(projection.apply(
+      event(5,
+            ToolApprovalDecided{first,
+                                ApprovalDecision::denied,
+                                {},
+                                ApprovalGrantLifetime::invocation},
+            "first-decision")));
+  REQUIRE(projection.status() == RunStatus::awaiting_input);
+  REQUIRE(projection.apply(event(6, RunResumed{question}, "resumed")));
+  REQUIRE(projection.status() == RunStatus::awaiting_approval);
+  REQUIRE(projection.apply(
+      event(7,
+            ToolApprovalDecided{second,
+                                ApprovalDecision::denied,
+                                {},
+                                ApprovalGrantLifetime::invocation},
+            "second-decision")));
+  REQUIRE(projection.status() == RunStatus::running);
+  REQUIRE_FALSE(projection.apply(
+      event(8,
+            ToolApprovalDecided{second,
+                                ApprovalDecision::denied,
+                                {},
+                                ApprovalGrantLifetime::invocation},
+            "repeated-decision")));
+}
+
 TEST_CASE("run provenance is recorded once, after a start, on a live run",
           "[domain][failure][provenance]") {
   RunProjection projection;
@@ -461,6 +506,73 @@ TEST_CASE("run provenance validates optional tool registration digests",
   value.tools.front().registration_digest = std::string(71, 'a');
   REQUIRE(validate_run_provenance(value).error().code ==
           RunProvenanceErrorCode::invalid_tool);
+}
+
+TEST_CASE("run provenance bounds exact launch policy authority",
+          "[domain][failure][provenance][tool-policy]") {
+  auto value = provenance();
+  value.tool_policy = ToolPolicyProvenance{
+      "aiforge.tool-launch-policy.v1",
+      make_id<PermissionProfileId>("tools-medium-prompt-v1"),
+      ToolRestrictionLevel::medium,
+      ToolApprovalMode::prompt,
+      {Effect::read},
+      {{Effect::read, "filesystem.root", "/repo"}},
+      {}};
+  REQUIRE(validate_run_provenance(value));
+  REQUIRE(validate_tool_policy_provenance(*value.tool_policy));
+
+  auto malformed = value;
+  malformed.tool_policy->identity = "aiforge.tool-launch-policy.v2";
+  REQUIRE(validate_run_provenance(malformed).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  malformed = value;
+  malformed.tool_policy->restriction_level =
+      static_cast<ToolRestrictionLevel>(99);
+  REQUIRE(validate_run_provenance(malformed).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  malformed = value;
+  malformed.tool_policy->approval_mode = static_cast<ToolApprovalMode>(99);
+  REQUIRE(validate_run_provenance(malformed).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  malformed = value;
+  malformed.tool_policy->effect_ceiling.push_back(Effect::write);
+  REQUIRE(validate_run_provenance(malformed).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  malformed = value;
+  malformed.tool_policy->capability_ceiling.clear();
+  REQUIRE(validate_run_provenance(malformed).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  malformed = value;
+  malformed.tool_policy->capability_ceiling.push_back(
+      {Effect::write, "filesystem.root", "/repo"});
+  REQUIRE(validate_run_provenance(malformed).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  malformed = value;
+  malformed.tool_policy->automatically_eligible_tools = {"read"};
+  REQUIRE(validate_run_provenance(malformed).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+
+  auto automatic = value;
+  automatic.tool_policy->approval_mode = ToolApprovalMode::automatic;
+  automatic.tool_policy->automatically_eligible_tools = {"read", "read"};
+  REQUIRE(validate_run_provenance(automatic).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  automatic.tool_policy->automatically_eligible_tools = {"read"};
+  REQUIRE(validate_run_provenance(automatic));
+
+  RunProvenanceLimits bounded;
+  bounded.maximum_policy_scopes = 1;
+  malformed = value;
+  malformed.tool_policy->capability_ceiling.push_back(
+      {Effect::read, "filesystem.root", "/repo/src"});
+  REQUIRE(validate_run_provenance(malformed, bounded).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  bounded = {};
+  bounded.maximum_total_bytes = 16;
+  REQUIRE(validate_tool_policy_provenance(*value.tool_policy, bounded)
+              .error()
+              .code == RunProvenanceErrorCode::resource_exhausted);
 }
 
 TEST_CASE(

@@ -1,5 +1,6 @@
 #include <aiforge/adapters/ask_user_dialog.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
+#include <aiforge/adapters/git_exact_source_editor.hpp>
 #include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
 #include <aiforge/adapters/persona_editor_dialog.hpp>
@@ -12,6 +13,7 @@
 #include <aiforge/adapters/provider_character_picker_dialog.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/termforge_run_bridge.hpp>
+#include <aiforge/adapters/tool_approval_dialog.hpp>
 #include <aiforge/adapters/transcript_view.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
 #include <aiforge/adapters/venice_generation_options.hpp>
@@ -22,6 +24,8 @@
 #include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/runtime/memory_controller.hpp>
 #include <aiforge/runtime/memory_tool.hpp>
+#include <aiforge/runtime/repository_read_tool.hpp>
+#include <aiforge/runtime/tool_launch_policy.hpp>
 #include <aiforge/runtime/tool_profiles.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
@@ -92,6 +96,55 @@ constexpr std::size_t interactive_session_list_limit = 100U;
     case VeniceSystemPromptSetting::exclude: return "exclude";
   }
   return "unknown";
+}
+
+[[nodiscard]] auto tool_restriction(const std::optional<std::string>& requested)
+    -> std::expected<runtime::RestrictionLevel, std::string> {
+  if (!requested || *requested == "high") {
+    return runtime::RestrictionLevel::high;
+  }
+  if (*requested == "medium") return runtime::RestrictionLevel::medium;
+  if (*requested == "low") return runtime::RestrictionLevel::low;
+  if (*requested == "none") return runtime::RestrictionLevel::none;
+  return std::unexpected("tool restriction must be none, low, medium, or high");
+}
+
+[[nodiscard]] auto tool_approval(const std::optional<std::string>& requested)
+    -> std::expected<runtime::ApprovalMode, std::string> {
+  if (!requested || *requested == "prompt") {
+    return runtime::ApprovalMode::prompt;
+  }
+  if (*requested == "auto") return runtime::ApprovalMode::automatic;
+  if (*requested == "allow-all") return runtime::ApprovalMode::allow_all;
+  return std::unexpected("tool approval must be prompt, auto, or allow-all");
+}
+
+[[nodiscard]] auto tool_launch_profile_id(
+    const runtime::RestrictionLevel restriction,
+    const runtime::ApprovalMode approval)
+    -> std::optional<domain::PermissionProfileId> {
+  const auto restriction_name = [restriction]() -> std::string_view {
+    switch (restriction) {
+      case runtime::RestrictionLevel::high: return "high";
+      case runtime::RestrictionLevel::medium: return "medium";
+      case runtime::RestrictionLevel::low: return "low";
+      case runtime::RestrictionLevel::none: return "none";
+    }
+    return "invalid";
+  }();
+  const auto approval_name = [approval]() -> std::string_view {
+    switch (approval) {
+      case runtime::ApprovalMode::prompt: return "prompt";
+      case runtime::ApprovalMode::automatic: return "auto";
+      case runtime::ApprovalMode::allow_all: return "allow-all";
+    }
+    return "invalid";
+  }();
+  auto profile = domain::PermissionProfileId::from(
+      "tools-" + std::string{restriction_name} + "-" +
+      std::string{approval_name} + "-v1");
+  if (!profile) return std::nullopt;
+  return std::move(*profile);
 }
 
 [[nodiscard]] auto configured_source_name(
@@ -836,7 +889,8 @@ class ChatAppImpl final : public InteractiveChatApp {
   auto on_start() -> void override {
     if (m_rendered_output != nullptr) driver().set_output(m_rendered_output);
     sync_composer_focus();
-    if (ensure_question_dialog() && !m_question_dialog_active) {
+    if (ensure_tool_approval_dialog() && !m_tool_approval_dialog_active &&
+        ensure_question_dialog() && !m_question_dialog_active) {
       ensure_plan_review();
     }
   }
@@ -846,14 +900,17 @@ class ChatAppImpl final : public InteractiveChatApp {
   auto on_event(const termforge::Event& event) -> void override {
     // clang-format on
     if (!m_session) return;
-    if (m_question_dialog_active) {
+    if (m_question_dialog_active || m_tool_approval_dialog_active) {
       if (const auto* key = std::get_if<termforge::KeyEvent>(&event);
           key != nullptr && key->action == termforge::KeyAction::Press &&
           key->ctrl && key->key == termforge::Key::Char && key->ch == U'c') {
         pop_modal();
         m_question_dialog_active = false;
+        m_tool_approval_dialog_active = false;
         m_question_controller.reset();
         m_question_dialog.reset();
+        m_tool_approval_controller.reset();
+        m_tool_approval_dialog.reset();
         auto cancelled = m_session->cancel_active("interrupt");
         if (!cancelled) {
           fail(session_error(cancelled.error()));
@@ -977,8 +1034,11 @@ class ChatAppImpl final : public InteractiveChatApp {
       }
       if (!apply_events(*drained)) return;
     }
-    if (!ensure_question_dialog()) return;
-    if (!m_question_dialog_active) ensure_plan_review();
+    if (!ensure_tool_approval_dialog()) return;
+    if (!m_tool_approval_dialog_active && !ensure_question_dialog()) return;
+    if (!m_tool_approval_dialog_active && !m_question_dialog_active) {
+      ensure_plan_review();
+    }
     if (m_stop_token.stop_requested()) {
       if (m_session->active()) {
         auto cancelled = m_session->cancel_active("interrupt");
@@ -3113,7 +3173,8 @@ class ChatAppImpl final : public InteractiveChatApp {
       profile_ids.push_back(profile.profile_id);
       std::string description = profile.tool_names.empty()
                                     ? "Advertise no model-callable tools."
-                                    : "Zero-authority tools:";
+                                    : "Advertised tools (authority is governed "
+                                      "by launch policy):";
       for (const auto& tool : profile.tool_names)
         description += " " + tool;
       page.choices.push_back({profile.name, std::move(description)});
@@ -3147,6 +3208,65 @@ class ChatAppImpl final : public InteractiveChatApp {
     push_modal(*m_tool_profile_dialog, {.backdrop = termforge::Backdrop::Dim,
                                         .dismiss_on_click_outside = false});
     m_status = "Choose a Chat tool profile";
+    return true;
+  }
+
+  auto ensure_tool_approval_dialog() -> bool {
+    if (m_tool_approval_dialog_active) return true;
+    const auto pending = m_session->pending_tool_approval();
+    if (!pending) return true;
+    if (modal()) {
+      m_status = "A tool approval is waiting for the active dialog to close";
+      return true;
+    }
+    if (!m_tool_approval_dialog) {
+      m_tool_approval_dialog =
+          std::make_unique<termforge::ChoiceWizardDialog>();
+      m_tool_approval_controller =
+          std::make_unique<ToolApprovalDialogController>(
+              *m_tool_approval_dialog);
+    }
+    const auto run_id = pending->run_id;
+    const auto invocation_id = pending->invocation_id;
+    auto presented = m_tool_approval_controller->present(
+        {pending->tool_name, pending->effects, pending->scopes},
+        [this, run_id,
+         invocation_id](runtime::ToolApprovalResolution resolution) {
+          const auto decision = resolution.decision;
+          pop_modal();
+          m_tool_approval_dialog_active = false;
+          auto decided = m_session->decide_tool_approval(run_id, invocation_id,
+                                                         std::move(resolution));
+          if (!decided) {
+            fail(session_error(decided.error()));
+            return;
+          }
+          auto events = m_session->drain();
+          if (!events) {
+            fail(session_error(events.error()));
+            return;
+          }
+          if (!apply_events(*events)) return;
+          switch (decision) {
+            case domain::ApprovalDecision::approved:
+              m_status = "Tool approved once; continuing run";
+              break;
+            case domain::ApprovalDecision::denied:
+              m_status = "Tool denied; continuing run";
+              break;
+            case domain::ApprovalDecision::cancelled:
+              m_status = "Tool approval cancelled; continuing run";
+              break;
+          }
+        });
+    if (!presented) {
+      m_status = presented.error().message;
+      return false;
+    }
+    m_tool_approval_dialog_active = true;
+    push_modal(*m_tool_approval_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                         .dismiss_on_click_outside = false});
+    m_status = "Tool approval required";
     return true;
   }
 
@@ -3226,7 +3346,8 @@ class ChatAppImpl final : public InteractiveChatApp {
       }
     }
     sync_composer_focus();
-    return ensure_question_dialog();
+    return ensure_tool_approval_dialog() &&
+           (m_tool_approval_dialog_active || ensure_question_dialog());
   }
 
   auto fail(cli::CommandFailure value) -> void {
@@ -3271,6 +3392,8 @@ class ChatAppImpl final : public InteractiveChatApp {
   std::unique_ptr<ProviderCharacterPickerDialog> m_provider_character_picker;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_settings_dialog;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_tool_profile_dialog;
+  std::unique_ptr<termforge::ChoiceWizardDialog> m_tool_approval_dialog;
+  std::unique_ptr<ToolApprovalDialogController> m_tool_approval_controller;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_question_dialog;
   std::unique_ptr<AskUserDialogController> m_question_controller;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_persona_manager_dialog;
@@ -3281,6 +3404,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   bool m_close_dialog_active{};
   bool m_settings_dialog_active{};
   bool m_tool_profile_dialog_active{};
+  bool m_tool_approval_dialog_active{};
   bool m_question_dialog_active{};
   bool m_persona_manager_active{};
   bool m_persona_editor_active{};
@@ -3535,10 +3659,30 @@ auto ProcessInteractiveCommand::execute(Request request,
       return failure(cli::CommandFailureKind::runtime,
                      memory_settings.error().message);
     }
+    auto restriction = tool_restriction(request.tool_restriction);
+    if (!restriction) {
+      return failure(cli::CommandFailureKind::usage,
+                     std::move(restriction.error()));
+    }
+    auto approval = tool_approval(request.tool_approval);
+    if (!approval) {
+      return failure(cli::CommandFailureKind::usage,
+                     std::move(approval.error()));
+    }
+    auto permission_profile_id =
+        tool_launch_profile_id(*restriction, *approval);
+    if (!permission_profile_id) {
+      return failure(cli::CommandFailureKind::runtime,
+                     "tool launch policy identity is invalid");
+    }
     std::optional<domain::RepositoryId> repository_id;
+    std::optional<domain::RepositorySnapshot> repository_snapshot;
     if (auto snapshot = observe_process_repository(environment.stop_token)) {
       repository_id = snapshot->root.repository_id;
+      repository_snapshot = std::move(*snapshot);
     }
+    std::optional<GitRepositorySnapshotSource> repository_source;
+    std::optional<GitExactSourceEditor> repository_editor;
     std::unique_ptr<runtime::MemoryController> memory_controller;
     runtime::ToolRegistry tool_registry;
     runtime::ToolRegistrySnapshot tools;
@@ -3566,12 +3710,43 @@ auto ProcessInteractiveCommand::execute(Request request,
       return failure(cli::CommandFailureKind::runtime,
                      registered.error().message);
     }
+    if (repository_snapshot && repository_snapshot->vcs &&
+        repository_snapshot->vcs->system == "git") {
+      auto source =
+          open_process_repository_source(GitCommandPolicy::isolated_read_only);
+      if (source) {
+        repository_source.emplace(std::move(*source));
+        repository_editor.emplace(
+            *repository_source,
+            GitExactSourceReadPolicy::tracked_regular_files);
+        if (auto registered = runtime::register_repository_read_tool(
+                tool_registry, *repository_source, *repository_editor,
+                {repository_snapshot->root.canonical_path});
+            !registered) {
+          return failure(cli::CommandFailureKind::runtime,
+                         registered.error().message);
+        }
+      }
+    }
     auto tool_snapshot = tool_registry.snapshot();
     if (!tool_snapshot) {
       return failure(cli::CommandFailureKind::runtime,
                      tool_snapshot.error().message);
     }
     tools = std::move(*tool_snapshot);
+    runtime::ToolLaunchPolicyConfiguration policy_configuration{
+        *permission_profile_id, *restriction, *approval, {}};
+    if (*approval == runtime::ApprovalMode::automatic &&
+        tools.find("read_repository_file") != nullptr) {
+      policy_configuration.automatically_eligible_tools = {
+          "read_repository_file"};
+    }
+    auto tool_policy = runtime::make_tool_launch_policy(
+        tools, std::move(policy_configuration));
+    if (!tool_policy) {
+      return failure(cli::CommandFailureKind::runtime,
+                     tool_policy.error().message);
+    }
 
     InteractiveChatAppOptions app_options;
     app_options.model_catalog = &(*catalog)->service();
@@ -3622,6 +3797,9 @@ auto ProcessInteractiveCommand::execute(Request request,
     app_options.session_dependencies.persona_editor =
         personas ? &*personas : nullptr;
     app_options.session_dependencies.tools = std::move(tools);
+    app_options.session_dependencies.tool_policy = std::move(*tool_policy);
+    app_options.session_dependencies.permission_profile_id =
+        std::move(permission_profile_id);
     app_options.session_dependencies.memory_controller =
         memory_controller.get();
     app_options.session_dependencies.memory_settings = *memory_settings;

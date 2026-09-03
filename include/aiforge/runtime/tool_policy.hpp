@@ -70,6 +70,15 @@ class ToolPolicy {
   [[nodiscard]] virtual auto approve(const ToolPolicyRequest& request,
                                      ToolPolicyApproval approval)
       -> std::expected<ToolPolicyResolution, ToolPolicyError> = 0;
+
+  // A null result means this policy cannot support durable recovery of
+  // nonterminal authority-bearing work. Implementations that do support it
+  // expose a stable, bounded neutral description owned by the policy and must
+  // evaluate identical requests deterministically for that description.
+  [[nodiscard]] virtual auto provenance() const noexcept
+      -> const domain::ToolPolicyProvenance* {
+    return nullptr;
+  }
 };
 
 class CapabilityPolicy final : public ToolPolicy {

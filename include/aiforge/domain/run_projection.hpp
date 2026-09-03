@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <expected>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,7 @@ enum class RunStatus {
   not_started,
   running,
   awaiting_input,
+  awaiting_approval,
   awaiting_plan_decision,
   awaiting_plan_revision,
   completed,
@@ -105,6 +107,7 @@ class RunProjection final {
   std::optional<RunProvenance> m_provenance;
   std::optional<PersonaId> m_persona_id;
   std::optional<PersonaSelection> m_persona_selection;
+  std::set<InvocationId> m_pending_approval_ids;
   std::uint64_t m_last_sequence{};
 };
 

@@ -766,7 +766,7 @@ TEST_CASE("tool fragments assemble once and undeclared tools fail",
       "Lookup",
       {"application/schema+json", R"({"type":"object"})"},
       {domain::Effect::network},
-      {}};
+      {{domain::Effect::network, "network.host", "example.test"}}};
   runtime::ToolRegistry registry;
   REQUIRE(registry.register_tool(declaration,
                                  std::make_shared<PassiveToolExecutor>()));

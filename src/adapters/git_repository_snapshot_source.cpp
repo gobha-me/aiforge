@@ -601,7 +601,15 @@ using ExactErrorCode = repository::ExactSourceEditErrorCode;
   RepositorySnapshotLimits result;
   result.maximum_path_bytes = limits.maximum_path_bytes;
   result.maximum_file_bytes = limits.maximum_source_bytes;
-  result.observation_timeout = limits.timeout;
+  if (limits.maximum_source_bytes <= 1024U * 1024U) {
+    result.maximum_entries = 16384;
+    result.maximum_total_bytes = 64U * 1024U * 1024U;
+    result.maximum_command_output_bytes = 4U * 1024U * 1024U;
+    result.command_timeout = std::chrono::seconds{5};
+    result.observation_timeout = std::chrono::seconds{15};
+  }
+  result.observation_timeout =
+      std::min(result.observation_timeout, limits.timeout);
   result.command_timeout = std::min(result.command_timeout, limits.timeout);
   return result;
 }
@@ -638,6 +646,11 @@ struct ExactFileRead {
   ino_t inode{};
 };
 
+struct TrackedFileIdentity {
+  std::string object_id;
+  auto operator==(const TrackedFileIdentity&) const -> bool = default;
+};
+
 [[nodiscard]] auto errno_exact_failure(const std::string_view operation,
                                        const bool retryable = false,
                                        const bool may_have_applied = false)
@@ -649,67 +662,134 @@ struct ExactFileRead {
                        retryable, may_have_applied);
 }
 
-[[nodiscard]] auto secure_source_path(const std::filesystem::path& root,
-                                      const std::string& relative)
-    -> std::expected<std::filesystem::path, ExactError> {
-  auto current = root;
-  const std::filesystem::path requested{relative};
-  for (auto iterator = requested.begin(); iterator != requested.end();
-       ++iterator) {
-    current /= *iterator;
-    std::error_code error;
-    const auto status = std::filesystem::symlink_status(current, error);
-    if (error == std::errc::no_such_file_or_directory) {
-      return exact_failure(ExactErrorCode::not_found,
-                           "exact-source target was not found");
-    }
-    if (error == std::errc::permission_denied) {
-      return exact_failure(ExactErrorCode::permission_denied,
-                           "exact-source target could not be inspected");
-    }
-    if (error) {
-      return exact_failure(ExactErrorCode::io_failure,
-                           "exact-source target could not be inspected", {}, {},
-                           true);
-    }
-    if (std::filesystem::is_symlink(status)) {
-      return exact_failure(
-          ExactErrorCode::outside_repository,
-          "exact-source target cannot traverse a symbolic link");
-    }
-    const auto next = std::next(iterator);
-    if (next != requested.end() && !std::filesystem::is_directory(status)) {
-      return exact_failure(ExactErrorCode::not_found,
-                           "exact-source parent is not a directory");
-    }
-    if (next == requested.end() && !std::filesystem::is_regular_file(status)) {
-      return exact_failure(ExactErrorCode::unsupported_entry,
-                           "exact-source target is not a regular file");
-    }
+struct OpenDirectory {
+  OwnedDescriptor descriptor;
+  struct stat before{};
+  std::string name_in_parent;
+};
+
+[[nodiscard]] auto opening_exact_failure(const std::string_view operation)
+    -> std::unexpected<ExactError> {
+  if (errno == ENOENT) {
+    return exact_failure(ExactErrorCode::not_found,
+                         "exact-source target was not found");
   }
-  return current;
+  if (errno == ELOOP || errno == ENOTDIR) {
+    return exact_failure(ExactErrorCode::outside_repository,
+                         "exact-source target cannot traverse a symbolic link");
+  }
+  return errno_exact_failure(operation, true);
+}
+
+[[nodiscard]] auto same_file_state(const struct stat& left,
+                                   const struct stat& right) noexcept -> bool {
+  return left.st_dev == right.st_dev && left.st_ino == right.st_ino &&
+         left.st_mode == right.st_mode && left.st_nlink == right.st_nlink &&
+         left.st_size == right.st_size &&
+         left.st_mtim.tv_sec == right.st_mtim.tv_sec &&
+         left.st_mtim.tv_nsec == right.st_mtim.tv_nsec &&
+         left.st_ctim.tv_sec == right.st_ctim.tv_sec &&
+         left.st_ctim.tv_nsec == right.st_ctim.tv_nsec;
+}
+
+[[nodiscard]] auto open_exact_root(const std::filesystem::path& root)
+    -> std::expected<OpenDirectory, ExactError> {
+  OpenDirectory result{
+      OwnedDescriptor{::open(root.c_str(),
+                             O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)},
+      {},
+      {}};
+  if (result.descriptor.get() < 0) {
+    return opening_exact_failure("opening exact-source root");
+  }
+  if (::fstat(result.descriptor.get(), &result.before) != 0) {
+    return errno_exact_failure("inspecting exact-source root", true);
+  }
+  struct stat path_state{};
+  if (::lstat(root.c_str(), &path_state) != 0) {
+    return errno_exact_failure("inspecting exact-source root", true);
+  }
+  if (!same_file_state(result.before, path_state) ||
+      !S_ISDIR(path_state.st_mode)) {
+    return exact_failure(ExactErrorCode::concurrent_change,
+                         "exact-source root changed while being opened", {}, {},
+                         true);
+  }
+  return result;
+}
+
+[[nodiscard]] auto exact_root_unchanged(const OpenDirectory& root_anchor,
+                                        const std::filesystem::path& root)
+    -> std::expected<void, ExactError> {
+  struct stat descriptor_state{};
+  struct stat path_state{};
+  if (::fstat(root_anchor.descriptor.get(), &descriptor_state) != 0 ||
+      ::lstat(root.c_str(), &path_state) != 0) {
+    return errno_exact_failure("rechecking exact-source root", true);
+  }
+  if (!same_file_state(root_anchor.before, descriptor_state) ||
+      !same_file_state(descriptor_state, path_state) ||
+      !S_ISDIR(path_state.st_mode)) {
+    return exact_failure(ExactErrorCode::concurrent_change,
+                         "exact-source root changed during the read", {}, {},
+                         true);
+  }
+  return {};
 }
 
 [[nodiscard]] auto read_exact_file(
     const std::filesystem::path& root, const std::string& relative,
     const repository::ExactSourceEditLimits& limits,
     const std::stop_token stop_token,
-    const std::chrono::steady_clock::time_point deadline)
+    const std::chrono::steady_clock::time_point deadline,
+    const OpenDirectory* supplied_root_anchor = nullptr)
     -> std::expected<ExactFileRead, ExactError> {
-  auto resolved = secure_source_path(root, relative);
-  if (!resolved) return std::unexpected(std::move(resolved.error()));
-  OwnedDescriptor descriptor{
-      ::open(resolved->c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
-  if (descriptor.get() < 0) {
-    if (errno == ENOENT) {
-      return exact_failure(ExactErrorCode::not_found,
-                           "exact-source target disappeared");
+  std::optional<OpenDirectory> local_root_anchor;
+  if (supplied_root_anchor == nullptr) {
+    auto opened = open_exact_root(root);
+    if (!opened) return std::unexpected(std::move(opened.error()));
+    local_root_anchor.emplace(std::move(*opened));
+    supplied_root_anchor = &*local_root_anchor;
+  }
+  std::vector<OpenDirectory> directories;
+  directories.push_back(
+      {OwnedDescriptor{
+           ::fcntl(supplied_root_anchor->descriptor.get(), F_DUPFD_CLOEXEC, 0)},
+       supplied_root_anchor->before,
+       {}});
+  if (directories.back().descriptor.get() < 0) {
+    return errno_exact_failure("duplicating exact-source root", true);
+  }
+
+  const std::filesystem::path requested{relative};
+  auto component = requested.begin();
+  while (std::next(component) != requested.end()) {
+    const auto name = component->string();
+    OpenDirectory next{OwnedDescriptor{::openat(
+                           directories.back().descriptor.get(), name.c_str(),
+                           O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)},
+                       {},
+                       name};
+    if (next.descriptor.get() < 0) {
+      return opening_exact_failure("opening exact-source parent");
     }
-    if (errno == ELOOP) {
+    if (::fstat(next.descriptor.get(), &next.before) != 0) {
+      return errno_exact_failure("inspecting exact-source parent", true);
+    }
+    if (!S_ISDIR(next.before.st_mode)) {
       return exact_failure(ExactErrorCode::outside_repository,
-                           "exact-source target became a symbolic link");
+                           "exact-source parent is not a directory");
     }
-    return errno_exact_failure("opening exact-source target", true);
+    directories.push_back(std::move(next));
+    ++component;
+  }
+
+  const auto final_name = component->string();
+  OwnedDescriptor descriptor{
+      ::openat(directories.back().descriptor.get(), final_name.c_str(),
+               O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)};
+  if (descriptor.get() < 0) {
+    return opening_exact_failure("opening exact-source target");
   }
   struct stat before{};
   if (::fstat(descriptor.get(), &before) != 0) {
@@ -759,21 +839,45 @@ struct ExactFileRead {
   struct stat after{};
   struct stat path_state{};
   if (::fstat(descriptor.get(), &after) != 0 ||
-      ::lstat(resolved->c_str(), &path_state) != 0) {
+      ::fstatat(directories.back().descriptor.get(), final_name.c_str(),
+                &path_state, AT_SYMLINK_NOFOLLOW) != 0) {
     return errno_exact_failure("rechecking exact-source target", true);
   }
-  if (before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
-      before.st_size != after.st_size ||
-      before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
-      before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
-      before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
-      before.st_ctim.tv_nsec != after.st_ctim.tv_nsec ||
-      after.st_dev != path_state.st_dev || after.st_ino != path_state.st_ino ||
-      S_ISLNK(path_state.st_mode)) {
+  if (!same_file_state(before, after) || !same_file_state(after, path_state) ||
+      !S_ISREG(path_state.st_mode) || path_state.st_nlink != 1) {
     return exact_failure(ExactErrorCode::concurrent_change,
                          "exact-source target changed while being read", {}, {},
                          true);
   }
+  for (std::size_t index{}; index < directories.size(); ++index) {
+    struct stat descriptor_state{};
+    struct stat path_state{};
+    if (::fstat(directories[index].descriptor.get(), &descriptor_state) != 0) {
+      return errno_exact_failure("rechecking exact-source parent", true);
+    }
+    if (!same_file_state(directories[index].before, descriptor_state)) {
+      return exact_failure(ExactErrorCode::concurrent_change,
+                           "exact-source path changed while being read", {}, {},
+                           true);
+    }
+    if (index == 0) {
+      if (::lstat(root.c_str(), &path_state) != 0) {
+        return errno_exact_failure("rechecking exact-source root", true);
+      }
+    } else if (::fstatat(directories[index - 1].descriptor.get(),
+                         directories[index].name_in_parent.c_str(), &path_state,
+                         AT_SYMLINK_NOFOLLOW) != 0) {
+      return errno_exact_failure("rechecking exact-source parent", true);
+    }
+    if (!same_file_state(descriptor_state, path_state) ||
+        !S_ISDIR(path_state.st_mode)) {
+      return exact_failure(ExactErrorCode::concurrent_change,
+                           "exact-source path changed while being read", {}, {},
+                           true);
+    }
+  }
+  auto root_stable = exact_root_unchanged(*supplied_root_anchor, root);
+  if (!root_stable) return std::unexpected(std::move(root_stable.error()));
   return ExactFileRead{std::move(content), before.st_mode, before.st_dev,
                        before.st_ino};
 }
@@ -935,10 +1039,11 @@ class PreparedReplacement final {
 } // namespace
 
 struct GitRepositorySnapshotSource::Impl {
-  explicit Impl(std::string executable)
-      : git_executable(std::move(executable)) {}
+  Impl(std::string executable, const GitCommandPolicy policy)
+      : git_executable(std::move(executable)), command_policy(policy) {}
 
   std::string git_executable;
+  GitCommandPolicy command_policy;
 
   [[nodiscard]] auto git(const std::vector<std::string>& arguments,
                          const std::string_view input,
@@ -946,8 +1051,65 @@ struct GitRepositorySnapshotSource::Impl {
                          const std::stop_token stop_token,
                          const ObservationDeadline deadline) const
       -> std::expected<CommandResult, RepositorySnapshotError> {
-    return run_command(git_executable, arguments, input, limits, stop_token,
+    if (command_policy == GitCommandPolicy::standard) {
+      return run_command(git_executable, arguments, input, limits, stop_token,
+                         deadline);
+    }
+    std::vector<std::string> isolated{"--no-pager", "--no-optional-locks",
+                                      "-c",         "core.fsmonitor=false",
+                                      "-c",         "core.untrackedCache=false",
+                                      "-c",         "core.hooksPath=/dev/null",
+                                      "-c",         "diff.external="};
+    isolated.insert(isolated.end(), arguments.begin(), arguments.end());
+    return run_command(git_executable, isolated, input, limits, stop_token,
                        deadline);
+  }
+
+  [[nodiscard]] auto tracked_regular_file(
+      const std::string& root, const std::string& relative_path,
+      const RepositorySnapshotLimits& limits, const std::stop_token stop_token,
+      const ObservationDeadline deadline) const
+      -> std::expected<std::optional<TrackedFileIdentity>,
+                       RepositorySnapshotError> {
+    auto result = git({"-C", root, "--literal-pathspecs", "ls-files", "--stage",
+                       "-z", "--", relative_path},
+                      {}, limits, stop_token, deadline);
+    if (!result) return std::unexpected(std::move(result.error()));
+    if (result->exit_code != 0) {
+      return failure(RepositorySnapshotErrorCode::vcs_failure,
+                     "Git could not inspect repository membership", true);
+    }
+    const auto records = split_nul(result->output);
+    if (records.empty()) return std::optional<TrackedFileIdentity>{};
+    if (records.size() != 1) return std::optional<TrackedFileIdentity>{};
+    const auto tab = records.front().find('\t');
+    if (tab == std::string_view::npos) {
+      return failure(RepositorySnapshotErrorCode::vcs_failure,
+                     "Git returned malformed repository membership data");
+    }
+    const auto metadata = records.front().substr(0, tab);
+    const auto first_space = metadata.find(' ');
+    if (first_space == std::string_view::npos) {
+      return failure(RepositorySnapshotErrorCode::vcs_failure,
+                     "Git returned malformed repository membership data");
+    }
+    const auto second_space = metadata.find(' ', first_space + 1);
+    if (second_space == std::string_view::npos ||
+        metadata.find(' ', second_space + 1) != std::string_view::npos) {
+      return failure(RepositorySnapshotErrorCode::vcs_failure,
+                     "Git returned malformed repository membership data");
+    }
+    const auto mode = metadata.substr(0, first_space);
+    const auto object_id =
+        metadata.substr(first_space + 1, second_space - first_space - 1);
+    const auto stage = metadata.substr(second_space + 1);
+    const auto path = records.front().substr(tab + 1);
+    if ((mode != "100644" && mode != "100755") || stage != "0" ||
+        path != relative_path || object_id.empty()) {
+      return std::optional<TrackedFileIdentity>{};
+    }
+    return std::optional<TrackedFileIdentity>{
+        TrackedFileIdentity{std::string{object_id}}};
   }
 
   [[nodiscard]] auto hash_bytes(const std::string_view bytes,
@@ -1071,9 +1233,17 @@ struct GitRepositorySnapshotSource::Impl {
                                       const ObservationDeadline deadline) const
       -> std::expected<RepositorySnapshot, RepositorySnapshotError> {
     const std::string algorithm = "git-" + object_format;
-    auto status = git({"-C", root, "status", "--porcelain=v2", "--branch", "-z",
-                       "--untracked-files=all"},
-                      {}, limits, stop_token, deadline);
+    std::vector<std::string> status_arguments{"-C",
+                                              root,
+                                              "status",
+                                              "--porcelain=v2",
+                                              "--branch",
+                                              "-z",
+                                              "--untracked-files=all"};
+    if (command_policy == GitCommandPolicy::isolated_read_only) {
+      status_arguments.push_back("--ignore-submodules=all");
+    }
+    auto status = git(status_arguments, {}, limits, stop_token, deadline);
     if (!status) return std::unexpected(std::move(status.error()));
     if (status->exit_code != 0) {
       return failure(RepositorySnapshotErrorCode::vcs_failure,
@@ -1321,11 +1491,13 @@ struct GitRepositorySnapshotSource::Impl {
   }
 };
 
-auto GitRepositorySnapshotSource::open(std::string git_executable)
+auto GitRepositorySnapshotSource::open(std::string git_executable,
+                                       const GitCommandPolicy command_policy)
     -> std::expected<GitRepositorySnapshotSource, RepositorySnapshotError> {
   try {
 #ifdef _WIN32
     static_cast<void>(git_executable);
+    static_cast<void>(command_policy);
     return failure(
         RepositorySnapshotErrorCode::vcs_failure,
         "Git repository observation is unavailable on this platform");
@@ -1333,7 +1505,9 @@ auto GitRepositorySnapshotSource::open(std::string git_executable)
     const std::filesystem::path executable{git_executable};
     std::error_code error;
     const auto status = std::filesystem::symlink_status(executable, error);
-    if (git_executable.empty() || !executable.is_absolute() || error ||
+    if ((command_policy != GitCommandPolicy::standard &&
+         command_policy != GitCommandPolicy::isolated_read_only) ||
+        git_executable.empty() || !executable.is_absolute() || error ||
         !std::filesystem::is_regular_file(status) ||
         ::access(git_executable.c_str(), X_OK) != 0) {
       return failure(
@@ -1341,7 +1515,7 @@ auto GitRepositorySnapshotSource::open(std::string git_executable)
           "Git executable must be an executable absolute regular file");
     }
     return GitRepositorySnapshotSource{
-        std::make_unique<Impl>(std::move(git_executable))};
+        std::make_unique<Impl>(std::move(git_executable), command_policy)};
 #endif
   } catch (...) {
     return failure(RepositorySnapshotErrorCode::internal_failure,
@@ -1353,12 +1527,29 @@ GitRepositorySnapshotSource::GitRepositorySnapshotSource(
     std::unique_ptr<Impl> impl)
     : m_impl(std::move(impl)) {
 }
+
+auto GitRepositorySnapshotSource::command_policy() const noexcept
+    -> GitCommandPolicy {
+  return m_impl ? m_impl->command_policy : GitCommandPolicy::standard;
+}
+
+auto GitRepositorySnapshotSource::guarantees_read_only_observation()
+    const noexcept -> bool {
+  return command_policy() == GitCommandPolicy::isolated_read_only;
+}
+
 GitRepositorySnapshotSource::GitRepositorySnapshotSource(
     GitRepositorySnapshotSource&&) noexcept = default;
 auto GitRepositorySnapshotSource::operator=(
     GitRepositorySnapshotSource&&) noexcept
     -> GitRepositorySnapshotSource& = default;
 GitRepositorySnapshotSource::~GitRepositorySnapshotSource() = default;
+
+auto GitExactSourceEditor::guarantees_read_only_execution() const noexcept
+    -> bool {
+  return m_snapshot_source.command_policy() ==
+         GitCommandPolicy::isolated_read_only;
+}
 
 auto GitRepositorySnapshotSource::observe(
     repository::RepositorySnapshotRequest request,
@@ -1476,6 +1667,11 @@ auto GitExactSourceEditor::read(repository::ExactSourceReadRequest request,
   try {
     const auto valid = repository::validate_exact_source_read_request(request);
     if (!valid) return std::unexpected(valid.error());
+    if (m_read_policy != GitExactSourceReadPolicy::any_regular_file &&
+        m_read_policy != GitExactSourceReadPolicy::tracked_regular_files) {
+      return exact_failure(ExactErrorCode::invalid_request,
+                           "exact-source read policy is invalid");
+    }
     if (stop_token.stop_requested()) {
       return exact_failure(ExactErrorCode::cancelled,
                            "exact-source read cancelled");
@@ -1488,6 +1684,10 @@ auto GitExactSourceEditor::read(repository::ExactSourceReadRequest request,
     const auto deadline =
         std::chrono::steady_clock::now() + request.limits.timeout;
     const auto snapshot_limits = exact_snapshot_limits(request.limits);
+    auto root_anchor = open_exact_root(request.baseline.root.canonical_path);
+    if (!root_anchor) {
+      return std::unexpected(std::move(root_anchor.error()));
+    }
     auto observe = [&]() -> std::expected<RepositorySnapshot, ExactError> {
       auto result = m_snapshot_source.observe(
           {request.baseline.root.canonical_path, snapshot_limits}, stop_token);
@@ -1496,14 +1696,37 @@ auto GitExactSourceEditor::read(repository::ExactSourceReadRequest request,
     };
     auto before = observe();
     if (!before) return std::unexpected(std::move(before.error()));
+    auto stable_root = exact_root_unchanged(
+        *root_anchor, request.baseline.root.canonical_path);
+    if (!stable_root) {
+      return std::unexpected(std::move(stable_root.error()));
+    }
     if (!same_repository_state(*before, request.baseline)) {
       return exact_failure(ExactErrorCode::stale_snapshot,
                            "repository changed before exact-source read",
                            domain::snapshot_identity(*before), {}, true);
     }
+    std::optional<TrackedFileIdentity> tracked_before;
+    if (m_read_policy == GitExactSourceReadPolicy::tracked_regular_files) {
+      if (!before->vcs || before->vcs->system != "git") {
+        return exact_failure(
+            ExactErrorCode::unsupported_entry,
+            "exact-source tracked reads require a Git repository");
+      }
+      auto tracked = m_snapshot_source.m_impl->tracked_regular_file(
+          request.baseline.root.canonical_path, request.relative_path,
+          snapshot_limits, stop_token, deadline);
+      if (!tracked) return std::unexpected(exact_error(tracked.error()));
+      if (!tracked->has_value()) {
+        return exact_failure(
+            ExactErrorCode::unsupported_entry,
+            "exact-source target is not a tracked regular file");
+      }
+      tracked_before = std::move(**tracked);
+    }
     auto file = read_exact_file(request.baseline.root.canonical_path,
                                 request.relative_path, request.limits,
-                                stop_token, deadline);
+                                stop_token, deadline, &*root_anchor);
     if (!file) return std::unexpected(std::move(file.error()));
 
     const auto algorithm = request.baseline.vcs
@@ -1520,16 +1743,42 @@ auto GitExactSourceEditor::read(repository::ExactSourceReadRequest request,
 
     auto after = observe();
     if (!after) return std::unexpected(std::move(after.error()));
+    stable_root = exact_root_unchanged(*root_anchor,
+                                       request.baseline.root.canonical_path);
+    if (!stable_root) {
+      return std::unexpected(std::move(stable_root.error()));
+    }
     if (!same_repository_state(*after, request.baseline)) {
       return exact_failure(ExactErrorCode::concurrent_change,
                            "repository changed during exact-source read",
                            domain::snapshot_identity(*after), {}, true);
     }
+    if (m_read_policy == GitExactSourceReadPolicy::tracked_regular_files) {
+      auto tracked = m_snapshot_source.m_impl->tracked_regular_file(
+          request.baseline.root.canonical_path, request.relative_path,
+          snapshot_limits, stop_token, deadline);
+      if (!tracked) return std::unexpected(exact_error(tracked.error()));
+      if (!tracked->has_value() || **tracked != *tracked_before) {
+        return exact_failure(
+            ExactErrorCode::concurrent_change,
+            "exact-source target changed repository membership while being "
+            "read",
+            domain::snapshot_identity(*after), {}, true);
+      }
+    }
+    stable_root = exact_root_unchanged(*root_anchor,
+                                       request.baseline.root.canonical_path);
+    if (!stable_root) {
+      return std::unexpected(std::move(stable_root.error()));
+    }
     const auto changed =
         std::ranges::find(request.baseline.changes, request.relative_path,
                           &RepositoryChange::relative_path);
-    if (changed != request.baseline.changes.end() && changed->worktree_digest &&
-        *changed->worktree_digest != *digest) {
+    const auto content_mismatch =
+        changed != request.baseline.changes.end() && changed->worktree_digest
+            ? *changed->worktree_digest != *digest
+            : tracked_before && tracked_before->object_id != digest->value;
+    if (content_mismatch) {
       domain::RepositorySourceIdentity observed{
           domain::snapshot_identity(*after),
           request.relative_path,

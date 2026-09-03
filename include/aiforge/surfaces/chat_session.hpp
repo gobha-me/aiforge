@@ -86,6 +86,9 @@ struct ChatSessionDependencies {
   runtime::RunKernelLimits run_limits{};
   runtime::ToolRegistrySnapshot tools{};
   std::shared_ptr<runtime::ToolPolicy> tool_policy;
+  // When present, every interactive run uses this stable launch-policy
+  // identity. The default preserves the legacy per-run observe identity.
+  std::optional<domain::PermissionProfileId> permission_profile_id;
   persona::PersonaSource* persona_source{};
   persona::PersonaEditor* persona_editor{};
   persona::PersonaLimits persona_limits{};
@@ -151,6 +154,12 @@ class ChatSession final {
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto pending_question_input() const
       -> std::optional<runtime::PendingQuestionInput>;
+  [[nodiscard]] auto pending_tool_approval() const
+      -> std::optional<runtime::PendingToolApproval>;
+  [[nodiscard]] auto decide_tool_approval(
+      const domain::RunId& run_id, const domain::InvocationId& invocation_id,
+      runtime::ToolApprovalResolution resolution)
+      -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto answer_questions(
       const domain::RunId& run_id, const domain::InvocationId& invocation_id,
       std::vector<domain::QuestionAnswer> answers)

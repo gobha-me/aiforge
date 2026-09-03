@@ -53,6 +53,26 @@ namespace {
 
 } // namespace
 
+auto open_process_repository_source()
+    -> std::expected<GitRepositorySnapshotSource, std::string> {
+  return open_process_repository_source(GitCommandPolicy::standard);
+}
+
+auto open_process_repository_source(const GitCommandPolicy policy)
+    -> std::expected<GitRepositorySnapshotSource, std::string> {
+#ifdef _WIN32
+  static_cast<void>(policy);
+  return std::unexpected(
+      "Git repository observation is unavailable on this platform");
+#else
+  auto git = resolve_git();
+  if (!git) return std::unexpected(std::move(git.error()));
+  auto source = GitRepositorySnapshotSource::open(std::move(*git), policy);
+  if (!source) return std::unexpected(source.error().message);
+  return std::move(*source);
+#endif
+}
+
 auto observe_process_repository(const std::stop_token stop_token)
     -> std::expected<domain::RepositorySnapshot, std::string> {
 #ifdef _WIN32
@@ -60,10 +80,8 @@ auto observe_process_repository(const std::stop_token stop_token)
   return std::unexpected(
       "Git repository observation is unavailable on this platform");
 #else
-  auto git = resolve_git();
-  if (!git) return std::unexpected(std::move(git.error()));
-  auto source = GitRepositorySnapshotSource::open(std::move(*git));
-  if (!source) return std::unexpected(source.error().message);
+  auto source = open_process_repository_source();
+  if (!source) return std::unexpected(std::move(source.error()));
   std::error_code path_error;
   auto root = std::filesystem::current_path(path_error);
   if (path_error) {

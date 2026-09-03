@@ -449,6 +449,7 @@ struct ChatSession::Impl {
   backend::GenerationOptions generation_options;
   runtime::ToolRegistrySnapshot available_tools;
   domain::ToolProfileId tool_profile_id;
+  std::optional<domain::PermissionProfileId> permission_profile_id;
   ChatSessionLimits limits;
   bool is_durable{};
   ChatIdentitySuffixSource identity_suffix_source;
@@ -647,6 +648,7 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              std::move(request.generation_options),
              std::move(available_tools),
              std::move(*initial_tool_profile),
+             std::move(dependencies.permission_profile_id),
              limits,
              durable,
              std::move(dependencies.identity_suffix_source),
@@ -765,8 +767,16 @@ auto ChatSession::submit(std::string prompt)
         make_id<domain::ContextSourceId>("user-source", suffix);
     auto surface_id = make_id<domain::SurfaceId>("interactive", suffix);
     auto workspace_id = make_id<domain::WorkspaceId>("chat", suffix);
-    auto permission_id =
-        make_id<domain::PermissionProfileId>("observe", suffix);
+    auto permission_id = m_impl->permission_profile_id;
+    if (!permission_id) {
+      auto generated_permission_id =
+          make_id<domain::PermissionProfileId>("observe", suffix);
+      if (!generated_permission_id) {
+        return error(ChatSessionErrorCode::internal_failure,
+                     "interactive permission identity generation failed");
+      }
+      permission_id = std::move(*generated_permission_id);
+    }
     if (!run_id || !inference_id || !user_message_id || !assistant_message_id ||
         !runtime_message_id || !runtime_entry_id || !user_entry_id ||
         !runtime_source_id || !user_source_id || !surface_id || !workspace_id ||
@@ -925,6 +935,7 @@ auto ChatSession::continue_if_ready()
   // clang-format on
   const auto run_id = m_impl->kernel->active_run_id();
   if (!run_id || m_impl->kernel->active_inference_id() ||
+      m_impl->kernel->pending_tool_approval() ||
       m_impl->kernel->pending_question_input()) {
     return std::vector<domain::RunEvent>{};
   }
@@ -1114,6 +1125,26 @@ auto ChatSession::cancel_active(std::optional<std::string> reason)
 auto ChatSession::pending_question_input() const
     -> std::optional<runtime::PendingQuestionInput> {
   return m_impl->kernel->pending_question_input();
+}
+
+auto ChatSession::pending_tool_approval() const
+    -> std::optional<runtime::PendingToolApproval> {
+  return m_impl->kernel->pending_tool_approval();
+}
+
+auto ChatSession::decide_tool_approval(
+    const domain::RunId& run_id, const domain::InvocationId& invocation_id,
+    runtime::ToolApprovalResolution resolution)
+    -> std::expected<void, ChatSessionError> {
+  const auto before = m_impl->kernel->event_log().events().size();
+  auto decided = m_impl->kernel->decide_approval(run_id, invocation_id,
+                                                 std::move(resolution));
+  if (!decided) return std::unexpected(kernel_error(decided.error()));
+  const auto events = m_impl->kernel->event_log().events();
+  for (std::size_t index = before; index < events.size(); ++index) {
+    m_impl->pending_surface_events.push_back(events[index]);
+  }
+  return {};
 }
 
 auto ChatSession::answer_questions(const domain::RunId& run_id,

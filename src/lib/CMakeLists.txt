@@ -38,6 +38,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   project_instructions.cpp
   provenance.cpp
   repository_knowledge.cpp
+  repository_read_tool.cpp
   repository_snapshot.cpp
   review_gate.cpp
   review_receipt.cpp
@@ -63,6 +64,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   sqlite_session_store.cpp
   task_scheduler.cpp
   transcript_projection.cpp
+  tool_launch_policy.cpp
   tool_policy.cpp
   tool_profiles.cpp
   tool_registry.cpp
