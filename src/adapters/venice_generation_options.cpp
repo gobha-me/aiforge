@@ -1,8 +1,26 @@
 #include <aiforge/adapters/venice_generation_options.hpp>
 
+#include <aiforge/backend/provider_character_catalog.hpp>
+
+#include <nlohmann/json.hpp>
+
+#include <ranges>
 #include <utility>
 
 namespace aiforge::adapters {
+
+auto detail::is_valid_venice_character_slug(
+    const std::string_view value) noexcept -> bool {
+  return !value.empty() &&
+         value.size() <= domain::ProviderCharacterId::max_size &&
+         std::ranges::all_of(value, [](const unsigned char character) {
+           return (character >= 'A' && character <= 'Z') ||
+                  (character >= 'a' && character <= 'z') ||
+                  (character >= '0' && character <= '9') || character == '.' ||
+                  character == '_' || character == '~' || character == '-';
+         });
+}
+
 namespace {
 
 [[nodiscard]] auto configured_web_search(const config::ResolvedConfig& resolved)
@@ -108,6 +126,25 @@ auto venice_generation_options(
               system_prompt == VeniceSystemPromptSetting::include ? "true"
                                                                   : "false"});
     }
+    if (overrides.character_slug) {
+      if (!detail::is_valid_venice_character_slug(
+              overrides.character_slug->value())) {
+        return std::unexpected(
+            "Venice character slug is invalid for provider transport");
+      }
+      const backend::ProviderCharacterSummary summary{
+          *overrides.character_slug};
+      if (auto checked = backend::validate_provider_character_summary(summary);
+          !checked) {
+        return std::unexpected(
+            "Venice character slug is invalid for provider transport");
+      }
+      result.extensions.emplace(
+          std::string{venice_character_slug_extension},
+          domain::StructuredDataBlock{
+              "application/json",
+              nlohmann::json(overrides.character_slug->value()).dump()});
+    }
     return result;
   } catch (...) {
     return std::unexpected(
@@ -119,6 +156,11 @@ auto venice_effective_request_options(
     const VeniceConfiguredRequestSettings& configured,
     const VeniceRequestSettingOverrides& overrides)
     -> std::expected<std::vector<domain::EffectiveRequestOption>, std::string> {
+  if (overrides.character_slug && !detail::is_valid_venice_character_slug(
+                                      overrides.character_slug->value())) {
+    return std::unexpected(
+        "Venice character slug is invalid for request provenance");
+  }
   const auto web_search = overrides.web_search.value_or(configured.web_search);
   const auto system_prompt =
       overrides.system_prompt.value_or(configured.system_prompt);
@@ -132,6 +174,9 @@ auto venice_effective_request_options(
       : configured.system_prompt == VeniceSystemPromptSetting::inherit
           ? domain::RequestOptionSource::provider_default
           : domain::RequestOptionSource::configuration;
+  const auto character_source =
+      overrides.character_slug ? domain::RequestOptionSource::session_override
+                               : domain::RequestOptionSource::provider_default;
   const auto web_value = [&]() -> std::optional<std::string> {
     switch (web_search) {
       case VeniceWebSearchSetting::inherit: return std::nullopt;
@@ -155,7 +200,12 @@ auto venice_effective_request_options(
   return std::vector<domain::EffectiveRequestOption>{
       {std::string{venice_web_search_extension}, web_value, web_source},
       {std::string{venice_system_prompt_extension}, prompt_value,
-       prompt_source}};
+       prompt_source},
+      {std::string{venice_character_slug_extension},
+       overrides.character_slug ? std::optional<std::string>{std::string{
+                                      overrides.character_slug->value()}}
+                                : std::nullopt,
+       character_source}};
 }
 
 auto venice_generation_options(const config::ResolvedConfig& resolved)

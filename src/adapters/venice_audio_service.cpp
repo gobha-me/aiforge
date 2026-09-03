@@ -41,6 +41,11 @@ namespace {
       return {Code::protocol,
               "Venice " + std::string{operation} + " response was invalid",
               false, error.status};
+    case venice::ErrorKind::ResponseTooLarge:
+      return {Code::protocol,
+              "Venice " + std::string{operation} +
+                  " response exceeded its byte limit",
+              false, error.status};
     case venice::ErrorKind::Cancelled:
       return {Code::cancelled,
               "Venice " + std::string{operation} + " was cancelled", false,

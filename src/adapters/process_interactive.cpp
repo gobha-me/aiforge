@@ -8,6 +8,7 @@
 #include <aiforge/adapters/process_model_catalog.hpp>
 #include <aiforge/adapters/process_provenance.hpp>
 #include <aiforge/adapters/process_repository.hpp>
+#include <aiforge/adapters/provider_character_picker_dialog.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/termforge_run_bridge.hpp>
 #include <aiforge/adapters/transcript_view.hpp>
@@ -716,6 +717,7 @@ class ChatAppImpl final : public InteractiveChatApp {
               InteractiveChatAppOptions options)
       : m_backend(backend), m_model_context(model_context),
         m_session_store(session_store), m_model_catalog(options.model_catalog),
+        m_provider_character_catalog(options.provider_character_catalog),
         m_configured_request_settings(options.configured_request_settings),
         m_preview_request_setting(std::move(options.preview_request_setting)),
         m_persist_request_setting(std::move(options.persist_request_setting)),
@@ -2012,6 +2014,21 @@ class ChatAppImpl final : public InteractiveChatApp {
         if (!show_persona_manager()) return false;
         m_composer.clear();
         return true;
+      case surfaces::SlashCommandAction::choose_provider_character: {
+        if (!command.subject) {
+          if (!show_provider_characters()) return false;
+          m_composer.clear();
+          return true;
+        }
+        auto character = domain::ProviderCharacterId::from(*command.subject);
+        if (!character) {
+          m_status = "Provider character ID is invalid";
+          return false;
+        }
+        return select_provider_character(*character);
+      }
+      case surfaces::SlashCommandAction::disable_provider_character:
+        return commit_provider_character(std::nullopt);
       case surfaces::SlashCommandAction::choose_model: {
         if (command.subject) {
           auto model_id = domain::ModelId::from(*command.subject);
@@ -2019,6 +2036,8 @@ class ChatAppImpl final : public InteractiveChatApp {
             m_status = "Model ID is invalid";
             return false;
           }
+          if (!validate_model_change_for_provider_character(*model_id))
+            return false;
           auto selected = m_session->select_model(std::move(*model_id));
           if (!selected) {
             m_status = selected.error().message;
@@ -2436,6 +2455,37 @@ class ChatAppImpl final : public InteractiveChatApp {
     m_status = "Resolve session cleanup before leaving";
   }
 
+  auto validate_model_change_for_provider_character(
+      const domain::ModelId& target) -> bool {
+    if (!m_request_setting_overrides.character_slug) return true;
+    const auto& selected = *m_request_setting_overrides.character_slug;
+    const auto reject = [this, &selected](std::string reason) {
+      m_status = std::move(reason) + "; disable provider character " +
+                 std::string{selected.value()} +
+                 " with /character off before changing models";
+      return false;
+    };
+    if (m_provider_character_catalog == nullptr)
+      return reject("Provider character catalog is unavailable");
+    auto current =
+        m_provider_character_catalog->lookup(selected, {}, m_stop_token);
+    if (!current)
+      return reject("Selected provider character could not be revalidated: " +
+                    current.error().message);
+    if (auto valid = backend::validate_provider_character_summary(*current);
+        !valid)
+      return reject("Selected provider character is invalid: " +
+                    valid.error().message);
+    if (current->id != selected)
+      return reject("Provider character lookup returned a different character");
+    if (!current->model_id)
+      return reject("Selected provider character has no model metadata");
+    if (*current->model_id != target)
+      return reject("Selected provider character requires model " +
+                    std::string{current->model_id->value()});
+    return true;
+  }
+
   auto show_models() -> bool {
     if (m_model_catalog == nullptr) {
       m_status = "Model catalog is unavailable";
@@ -2455,6 +2505,8 @@ class ChatAppImpl final : public InteractiveChatApp {
               m_status = "Model selection cancelled";
               return;
             }
+            if (!validate_model_change_for_provider_character(*selected))
+              return;
             auto changed = m_session->select_model(std::move(*selected));
             if (!changed) {
               m_status = changed.error().message;
@@ -2471,6 +2523,157 @@ class ChatAppImpl final : public InteractiveChatApp {
       m_status = snapshot->get().warnings.back();
     else
       m_status = "Choose a model";
+    return true;
+  }
+
+  auto commit_provider_character(
+      std::optional<domain::ProviderCharacterId> character) -> bool {
+    auto overrides = m_request_setting_overrides;
+    overrides.character_slug = std::move(character);
+    auto options =
+        venice_generation_options(m_configured_request_settings, overrides);
+    if (!options) {
+      m_status = options.error();
+      return false;
+    }
+    auto effective = venice_effective_request_options(
+        m_configured_request_settings, overrides);
+    if (!effective) {
+      m_status = effective.error();
+      return false;
+    }
+    auto prepared = m_session->prepare_generation_options(
+        std::move(*options), std::move(*effective));
+    if (!prepared) {
+      m_status = prepared.error().message;
+      return false;
+    }
+    auto committed = m_session->commit_generation_options(std::move(*prepared));
+    if (!committed) {
+      m_status = committed.error().message;
+      return false;
+    }
+    m_request_setting_overrides = std::move(overrides);
+    m_help_visible = false;
+    m_composer.clear();
+    m_status =
+        m_request_setting_overrides.character_slug
+            ? "Selected provider character " +
+                  std::string{
+                      m_request_setting_overrides.character_slug->value()} +
+                  "; applies next inference"
+            : "Provider character disabled; applies next inference";
+    return true;
+  }
+
+  auto select_provider_character(
+      const domain::ProviderCharacterId& requested,
+      std::optional<domain::ModelId> expected_model = std::nullopt) -> bool {
+    if (m_provider_character_catalog == nullptr) {
+      m_status = "Provider character catalog is unavailable";
+      return false;
+    }
+    auto character =
+        m_provider_character_catalog->lookup(requested, {}, m_stop_token);
+    if (!character) {
+      m_status = "Provider character could not be selected: " +
+                 character.error().message;
+      return false;
+    }
+    if (auto valid = backend::validate_provider_character_summary(*character);
+        !valid) {
+      m_status =
+          "Provider character could not be selected: " + valid.error().message;
+      return false;
+    }
+    if (character->id != requested) {
+      m_status = "Provider character lookup returned a different character";
+      return false;
+    }
+    if (expected_model && character->model_id != expected_model) {
+      m_status = "Provider character model changed; reopen /character";
+      return false;
+    }
+    if (!character->model_id) {
+      m_status = "Provider character has no model metadata";
+      return false;
+    }
+    if (*character->model_id != m_session->model_id()) {
+      m_status = "Provider character " + std::string{requested.value()} +
+                 " requires model " +
+                 std::string{character->model_id->value()} +
+                 "; select that model first";
+      return false;
+    }
+    if (m_model_catalog == nullptr) {
+      m_status = "Model catalog is unavailable";
+      return false;
+    }
+    auto snapshot = m_model_catalog->snapshot(m_stop_token);
+    if (!snapshot) {
+      m_status = snapshot.error().message;
+      return false;
+    }
+    const auto* model =
+        model::find_model(snapshot->get(), *character->model_id, "text");
+    if (model == nullptr || model->offline || !model->context_window_tokens) {
+      m_status = "Provider character's required model is unavailable";
+      return false;
+    }
+    return commit_provider_character(character->id);
+  }
+
+  auto show_provider_characters() -> bool {
+    if (m_provider_character_catalog == nullptr) {
+      m_status = "Provider character catalog is unavailable";
+      return false;
+    }
+    if (m_model_catalog == nullptr) {
+      m_status = "Model catalog is unavailable";
+      return false;
+    }
+    auto characters = m_provider_character_catalog->list({}, m_stop_token);
+    if (!characters) {
+      m_status = "Provider characters could not be listed: " +
+                 characters.error().message;
+      return false;
+    }
+    if (auto valid = backend::validate_provider_character_catalog(*characters);
+        !valid) {
+      m_status =
+          "Provider characters could not be listed: " + valid.error().message;
+      return false;
+    }
+    auto models = m_model_catalog->snapshot(m_stop_token);
+    if (!models) {
+      m_status = models.error().message;
+      return false;
+    }
+    if (!m_provider_character_picker) {
+      m_provider_character_picker =
+          std::make_unique<ProviderCharacterPickerDialog>();
+      m_provider_character_picker->on_close([this] { pop_modal(); });
+      m_provider_character_picker->on_result(
+          [this](std::optional<ProviderCharacterPickerResult> result) {
+            if (!result) {
+              m_status = "Provider character selection cancelled";
+              return;
+            }
+            if (!result->selection) {
+              static_cast<void>(commit_provider_character(std::nullopt));
+              return;
+            }
+            static_cast<void>(select_provider_character(
+                result->selection->id, result->selection->model_id));
+          });
+    }
+    m_provider_character_picker->set_characters(
+        *characters, models->get(), m_session->model_id(),
+        m_request_setting_overrides.character_slug);
+    push_modal(*m_provider_character_picker,
+               {.backdrop = termforge::Backdrop::Dim,
+                .dismiss_on_click_outside = false});
+    m_status = "Choose a provider character; no model will be switched";
     return true;
   }
 
@@ -2836,6 +3039,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   backend::ModelContextProvider& m_model_context;
   storage::SessionStore* m_session_store{};
   model::CatalogService* m_model_catalog{};
+  backend::ProviderCharacterCatalogSource* m_provider_character_catalog{};
   VeniceConfiguredRequestSettings m_configured_request_settings;
   VeniceRequestSettingOverrides m_request_setting_overrides;
   PreviewVeniceRequestSetting m_preview_request_setting;
@@ -2865,6 +3069,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   bool m_history_enabled{true};
   std::size_t m_history_cutoff{};
   std::unique_ptr<ModelPickerDialog> m_model_picker;
+  std::unique_ptr<ProviderCharacterPickerDialog> m_provider_character_picker;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_settings_dialog;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_persona_manager_dialog;
   std::unique_ptr<PersonaEditorDialog> m_persona_editor_dialog;
@@ -3055,11 +3260,14 @@ auto ProcessInteractiveCommand::execute(Request request,
     if (!credential) return std::unexpected(std::move(credential.error()));
     std::optional<domain::CredentialSourceReference> credential_source;
     std::unique_ptr<backend::Backend> backend;
+    backend::ProviderCharacterCatalogSource* provider_character_catalog{};
     if (credential->credential) {
       auto resolved_credential = std::move(*credential->credential);
       credential_source = resolved_credential.source;
-      backend = std::make_unique<VeniceBackend>(
+      auto venice_backend = std::make_unique<VeniceBackend>(
           std::move(resolved_credential.secret));
+      provider_character_catalog = venice_backend.get();
+      backend = std::move(venice_backend);
     } else {
       backend = std::make_unique<CredentialUnavailableBackend>();
     }
@@ -3158,6 +3366,7 @@ auto ProcessInteractiveCommand::execute(Request request,
 
     InteractiveChatAppOptions app_options;
     app_options.model_catalog = &(*catalog)->service();
+    app_options.provider_character_catalog = provider_character_catalog;
     app_options.configured_request_settings = *request_settings;
     if (auto config_path = config::process_config_path(); config_path) {
       app_options.preview_request_setting =

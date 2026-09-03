@@ -30,6 +30,7 @@ namespace {
       return {model::CatalogErrorCode::cancelled,
               "Venice model catalog request cancelled", false};
     case venice::ErrorKind::Parse:
+    case venice::ErrorKind::ResponseTooLarge:
       return {model::CatalogErrorCode::invalid_data,
               "Venice returned an invalid model catalog", false};
     case venice::ErrorKind::Network:
@@ -37,6 +38,7 @@ namespace {
       return {model::CatalogErrorCode::unavailable,
               "Venice model catalog is unavailable", true};
     case venice::ErrorKind::Auth:
+    case venice::ErrorKind::PaymentRequired:
     case venice::ErrorKind::InvalidArg:
     case venice::ErrorKind::Http:
     default:

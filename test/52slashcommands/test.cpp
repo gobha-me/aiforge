@@ -177,20 +177,21 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   const auto& registry = builtin_slash_command_registry();
   const auto listed = registry.describe();
   REQUIRE(listed);
-  REQUIRE(listed->size() == 13);
+  REQUIRE(listed->size() == 14);
   REQUIRE((*listed)[0].name == "help");
   REQUIRE((*listed)[1].name == "quit");
   REQUIRE((*listed)[2].name == "clear");
   REQUIRE((*listed)[3].name == "edit");
   REQUIRE((*listed)[4].name == "session");
   REQUIRE((*listed)[5].name == "persona");
-  REQUIRE((*listed)[6].name == "model");
-  REQUIRE((*listed)[7].name == "settings");
-  REQUIRE((*listed)[8].name == "reasoning");
-  REQUIRE((*listed)[9].name == "usage");
-  REQUIRE((*listed)[10].name == "plan");
-  REQUIRE((*listed)[11].name == "tasks");
-  REQUIRE((*listed)[12].name == "memory");
+  REQUIRE((*listed)[6].name == "character");
+  REQUIRE((*listed)[7].name == "model");
+  REQUIRE((*listed)[8].name == "settings");
+  REQUIRE((*listed)[9].name == "reasoning");
+  REQUIRE((*listed)[10].name == "usage");
+  REQUIRE((*listed)[11].name == "plan");
+  REQUIRE((*listed)[12].name == "tasks");
+  REQUIRE((*listed)[13].name == "memory");
 
   const auto memory = registry.dispatch("/memory search convention");
   REQUIRE(memory);
@@ -254,6 +255,29 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
       "/persona manage", {.run_active = true, .stop_token = {}});
   REQUIRE_FALSE(active_manager);
   REQUIRE(active_manager.error().code ==
+          SlashCommandErrorCode::unavailable_command);
+
+  const auto character_picker = registry.dispatch("/character");
+  REQUIRE(character_picker);
+  REQUIRE((*character_picker)->action ==
+          SlashCommandAction::choose_provider_character);
+  REQUIRE_FALSE((*character_picker)->subject);
+
+  const auto character = registry.dispatch("/character set alan-watts");
+  REQUIRE(character);
+  REQUIRE((*character)->action ==
+          SlashCommandAction::choose_provider_character);
+  REQUIRE((*character)->subject == "alan-watts");
+
+  const auto disabled_character = registry.dispatch("/character off");
+  REQUIRE(disabled_character);
+  REQUIRE((*disabled_character)->action ==
+          SlashCommandAction::disable_provider_character);
+
+  const auto active_character =
+      registry.dispatch("/character", {.run_active = true, .stop_token = {}});
+  REQUIRE_FALSE(active_character);
+  REQUIRE(active_character.error().code ==
           SlashCommandErrorCode::unavailable_command);
 
   const auto picker = registry.dispatch("/model");
@@ -330,6 +354,14 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   for (const auto invalid :
        {"/persona set", "/persona off now", "/persona manage now",
         "/persona set two names", "/persona unknown"}) {
+    const auto rejected = registry.dispatch(invalid);
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error().code == SlashCommandErrorCode::invalid_arguments);
+  }
+
+  for (const auto invalid :
+       {"/character set", "/character off now", "/character set two slugs",
+        "/character unknown"}) {
     const auto rejected = registry.dispatch(invalid);
     REQUIRE_FALSE(rejected);
     REQUIRE(rejected.error().code == SlashCommandErrorCode::invalid_arguments);
