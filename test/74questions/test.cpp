@@ -13,6 +13,7 @@
 
 #include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
+#include <aiforge/runtime/tool_launch_policy.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
 #include <aiforge/testing/scripted_tool_executor.hpp>
 
@@ -313,9 +314,20 @@ TEST_CASE("ask_user resolves once and continues inference in the same run",
   REQUIRE_FALSE(kernel.answer_questions(
       id<domain::RunId>("run"), invocation,
       {{id<domain::QuestionId>("format"), {"short"}, std::nullopt}}));
-  const auto continued =
-      kernel.continue_run(id<domain::RunId>("run"), continuation);
-  INFO((continued ? std::string{} : continued.error().message));
+  bool continued{};
+  for (int attempt = 0; attempt < 100 && !continued; ++attempt) {
+    auto result = kernel.continue_run(id<domain::RunId>("run"), continuation);
+    if (result) {
+      continued = true;
+      break;
+    }
+    INFO(result.error().message);
+    REQUIRE(result.error().code ==
+            runtime::RunKernelErrorCode::continuation_not_ready);
+    const auto generation = wake.generation();
+    REQUIRE(kernel.drain());
+    if (!continued) wake.wait(generation);
+  }
   REQUIRE(continued);
   drain_until_done(kernel, wake);
   REQUIRE(backend.remaining_exchanges() == 0);
@@ -595,7 +607,7 @@ TEST_CASE("pending ask_user replay retains the run tool subset",
 }
 
 TEST_CASE("ask_user blocks a queued tool until the question resolves",
-          "[questions][runtime][ordering]") {
+          "[questions][runtime][ordering][replay][approval][failure]") {
   const auto ask = id<domain::InvocationId>("ask-call");
   const auto queued = id<domain::InvocationId>("queued-call");
   const runtime::ToolExecutionLimits limits{4096, 4, 1s};
@@ -605,8 +617,9 @@ TEST_CASE("ask_user blocks a queued tool until the question resolves",
                queued,
                std::nullopt,
                "after_question",
-               runtime::ValidatedToolArguments{{"application/json", "{}"}},
-               {},
+               runtime::ValidatedToolArguments{
+                   {"application/json", "{}"}, {}, {domain::Effect::read}},
+               {{domain::Effect::read, "filesystem.root", "/repo"}},
                limits},
            testing::ToolStreamScript{{
                runtime::ToolExecutionEvent{
@@ -619,12 +632,23 @@ TEST_CASE("ask_user blocks a queued tool until the question resolves",
       {"after_question",
        "Run after the question",
        {"application/schema+json", R"({"type":"object"})"},
-       {},
-       {}},
+       {domain::Effect::read},
+       {{domain::Effect::read, "filesystem.root", "/repo"}}},
       queued_executor, limits,
       runtime::ToolExecutorContract{"test.after_question", "1"}));
   auto tools = registry.snapshot();
   REQUIRE(tools);
+  const auto profile =
+      id<domain::PermissionProfileId>("tools-medium-prompt-v1");
+  const auto make_policy = [&] {
+    return runtime::make_tool_launch_policy(*tools,
+                                            {profile,
+                                             runtime::RestrictionLevel::medium,
+                                             runtime::ApprovalMode::prompt,
+                                             {}});
+  };
+  auto policy = make_policy();
+  REQUIRE(policy);
   auto initial = request("inference-1", "assistant-1", *tools);
   testing::ScriptedBackend backend{{
       {initial,
@@ -637,40 +661,155 @@ TEST_CASE("ask_user blocks a queued tool until the question resolves",
        }}},
   }};
   Wake wake;
-  runtime::RunKernel kernel{
-      id<domain::SessionId>("session"), backend, &wake, {}, {}, *tools};
-  auto start = runtime::RunStart{
-      id<domain::RunId>("run"),
-      {id<domain::SurfaceId>("tui"), id<domain::WorkspaceId>("chat"),
-       id<domain::PermissionProfileId>("observe"), std::nullopt},
-      {id<domain::MessageId>("user"),
-       domain::Role::user,
-       {domain::TextBlock{"hello"}},
-       std::nullopt},
-      initial};
+  runtime::RunKernel kernel{id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            *tools,
+                            *policy};
+  auto start = runtime::RunStart{id<domain::RunId>("run"),
+                                 {id<domain::SurfaceId>("tui"),
+                                  id<domain::WorkspaceId>("chat"), profile,
+                                  std::nullopt},
+                                 {id<domain::MessageId>("user"),
+                                  domain::Role::user,
+                                  {domain::TextBlock{"hello"}},
+                                  std::nullopt},
+                                 initial};
   start.provenance = provenance();
   REQUIRE(kernel.start(std::move(start)));
   drain_until_questions(kernel, wake);
+  REQUIRE(kernel.pending_tool_approval());
+  REQUIRE(kernel.pending_tool_approval()->invocation_id == queued);
   REQUIRE(queued_executor->recorded_invocations().empty());
 
   MemoryStore store;
   store.events = kernel.event_log().events();
+
+  auto drift_policy =
+      runtime::make_tool_launch_policy(*tools, {profile,
+                                                runtime::RestrictionLevel::high,
+                                                runtime::ApprovalMode::prompt,
+                                                {}});
+  REQUIRE(drift_policy);
+  testing::ScriptedBackend drift_backend{{}};
+  Wake drift_wake;
+  auto drifted = runtime::RunKernel::open_durable(
+      {id<domain::SessionId>("session"), runtime::DurableSessionMode::resume,
+       store.created},
+      store, drift_backend, &drift_wake, {}, {}, *tools, *drift_policy);
+  REQUIRE_FALSE(drifted);
+  REQUIRE(drifted.error().code == runtime::RunKernelErrorCode::replay_rejected);
+
+  auto legacy_store = store;
+  for (auto& event : legacy_store.events) {
+    if (auto* recorded =
+            std::get_if<domain::RunProvenanceRecorded>(&event.payload)) {
+      recorded->provenance.tool_policy.reset();
+    }
+  }
+  auto legacy_policy = make_policy();
+  REQUIRE(legacy_policy);
+  testing::ScriptedBackend legacy_backend{{}};
+  Wake legacy_wake;
+  auto legacy = runtime::RunKernel::open_durable(
+      {id<domain::SessionId>("session"), runtime::DurableSessionMode::resume,
+       legacy_store.created},
+      legacy_store, legacy_backend, &legacy_wake, {}, {}, *tools,
+      *legacy_policy);
+  REQUIRE_FALSE(legacy);
+  REQUIRE(legacy.error().code == runtime::RunKernelErrorCode::replay_rejected);
+
+  auto tampered_store = store;
+  for (auto& event : tampered_store.events) {
+    if (auto* requested =
+            std::get_if<domain::ToolApprovalRequested>(&event.payload)) {
+      requested->requested_scopes = {
+          {domain::Effect::read, "filesystem.root", "/repo/narrow"}};
+    }
+  }
+  auto tampered_policy = make_policy();
+  REQUIRE(tampered_policy);
+  testing::ScriptedBackend tampered_backend{{}};
+  Wake tampered_wake;
+  auto tampered = runtime::RunKernel::open_durable(
+      {id<domain::SessionId>("session"), runtime::DurableSessionMode::resume,
+       tampered_store.created},
+      tampered_store, tampered_backend, &tampered_wake, {}, {}, *tools,
+      *tampered_policy);
+  REQUIRE_FALSE(tampered);
+  REQUIRE(tampered.error().code ==
+          runtime::RunKernelErrorCode::replay_rejected);
+
+  auto bypass_store = store;
+  std::erase_if(bypass_store.events, [&](const auto& event) {
+    const auto* requested =
+        std::get_if<domain::ToolApprovalRequested>(&event.payload);
+    return requested != nullptr && requested->invocation_id == queued;
+  });
+  for (auto& event : bypass_store.events) {
+    if (auto* decided = std::get_if<domain::ToolPolicyDecided>(&event.payload);
+        decided != nullptr && decided->invocation_id == queued) {
+      decided->decision = domain::PolicyDecision::allow;
+    }
+  }
+  auto bypass_policy = make_policy();
+  REQUIRE(bypass_policy);
+  testing::ScriptedBackend bypass_backend{{}};
+  Wake bypass_wake;
+  auto bypass = runtime::RunKernel::open_durable(
+      {id<domain::SessionId>("session"), runtime::DurableSessionMode::resume,
+       bypass_store.created},
+      bypass_store, bypass_backend, &bypass_wake, {}, {}, *tools,
+      *bypass_policy);
+  REQUIRE_FALSE(bypass);
+  REQUIRE(bypass.error().code == runtime::RunKernelErrorCode::replay_rejected);
+
+  auto replay_policy = make_policy();
+  REQUIRE(replay_policy);
   testing::ScriptedBackend replay_backend{{}};
   Wake resumed_wake;
   auto resumed = runtime::RunKernel::open_durable(
       {id<domain::SessionId>("session"), runtime::DurableSessionMode::resume,
        store.created},
-      store, replay_backend, &resumed_wake, {}, {}, *tools);
+      store, replay_backend, &resumed_wake, {}, {}, *tools, *replay_policy);
   REQUIRE(resumed);
   REQUIRE((*resumed)->pending_question_input());
+  REQUIRE((*resumed)->pending_tool_approval());
+  REQUIRE((*resumed)->pending_tool_approval()->invocation_id == queued);
   REQUIRE(queued_executor->recorded_invocations().empty());
+
+  REQUIRE((*resumed)->decide_approval(
+      id<domain::RunId>("run"), queued,
+      {domain::ApprovalDecision::approved,
+       {{domain::Effect::read, "filesystem.root", "/repo"}}}));
+  REQUIRE_FALSE((*resumed)->pending_tool_approval());
+  REQUIRE((*resumed)->pending_question_input());
+  REQUIRE(queued_executor->recorded_invocations().empty());
+
+  auto approved_drift_policy =
+      runtime::make_tool_launch_policy(*tools, {profile,
+                                                runtime::RestrictionLevel::high,
+                                                runtime::ApprovalMode::prompt,
+                                                {}});
+  REQUIRE(approved_drift_policy);
+  testing::ScriptedBackend approved_drift_backend{{}};
+  Wake approved_drift_wake;
+  auto approved_drift = runtime::RunKernel::open_durable(
+      {id<domain::SessionId>("session"), runtime::DurableSessionMode::resume,
+       store.created},
+      store, approved_drift_backend, &approved_drift_wake, {}, {}, *tools,
+      *approved_drift_policy);
+  REQUIRE_FALSE(approved_drift);
+  REQUIRE(approved_drift.error().code ==
+          runtime::RunKernelErrorCode::replay_rejected);
 
   REQUIRE((*resumed)->answer_questions(
       id<domain::RunId>("run"), ask,
       {{id<domain::QuestionId>("format"), {"short"}, std::nullopt}}));
   for (int attempt = 0;
-       attempt < 100 && queued_executor->remaining_exchanges() != 0;
-       ++attempt) {
+       attempt < 10 && queued_executor->remaining_exchanges() != 0; ++attempt) {
     const auto generation = resumed_wake.generation();
     REQUIRE((*resumed)->drain());
     if (queued_executor->remaining_exchanges() != 0) {
@@ -678,7 +817,7 @@ TEST_CASE("ask_user blocks a queued tool until the question resolves",
     }
   }
   REQUIRE(queued_executor->remaining_exchanges() == 0);
-  for (int attempt = 0; attempt < 100; ++attempt) {
+  for (int attempt = 0; attempt < 10; ++attempt) {
     REQUIRE((*resumed)->drain());
     const auto results =
         runtime::tool_result_messages((*resumed)->event_log().events());

@@ -89,6 +89,22 @@ class ExactSourceEditor {
  public:
   virtual ~ExactSourceEditor() = default;
 
+  // True only when read() rejects paths that are not tracked regular files.
+  [[nodiscard]] virtual auto guarantees_tracked_regular_files() const noexcept
+      -> bool {
+    return false;
+  }
+  // True only when read() performs no effectful subordinate discovery.
+  [[nodiscard]] virtual auto guarantees_read_only_execution() const noexcept
+      -> bool {
+    return false;
+  }
+  // True only when read() validates against this exact observation source.
+  [[nodiscard]] virtual auto is_coupled_to(
+      const RepositorySnapshotSource&) const noexcept -> bool {
+    return false;
+  }
+
   [[nodiscard]] virtual auto read(ExactSourceReadRequest request,
                                   std::stop_token stop_token = {})
       -> std::expected<ExactSourceReadResult, ExactSourceEditError> = 0;

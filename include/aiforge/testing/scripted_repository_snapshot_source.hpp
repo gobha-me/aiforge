@@ -22,7 +22,11 @@ class ScriptedRepositorySnapshotSource final
     : public repository::RepositorySnapshotSource {
  public:
   explicit ScriptedRepositorySnapshotSource(
-      std::vector<RepositorySnapshotExchange> exchanges = {});
+      std::vector<RepositorySnapshotExchange> exchanges = {},
+      bool guarantees_read_only_observation = true);
+
+  [[nodiscard]] auto guarantees_read_only_observation() const noexcept
+      -> bool override;
 
   [[nodiscard]] auto observe(repository::RepositorySnapshotRequest request,
                              std::stop_token stop_token = {})
@@ -36,6 +40,7 @@ class ScriptedRepositorySnapshotSource final
  private:
   std::vector<RepositorySnapshotExchange> m_exchanges;
   std::vector<repository::RepositorySnapshotRequest> m_recorded_requests;
+  bool m_guarantees_read_only_observation{};
   std::size_t m_next_exchange{};
 };
 

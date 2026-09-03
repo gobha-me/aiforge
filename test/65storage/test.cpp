@@ -17,6 +17,7 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -241,6 +242,14 @@ auto run_provenance() -> domain::RunProvenance {
       make_id<domain::ToolProfileId>("essentials"),
       make_id<domain::ToolProfileId>("model-safe"),
       make_id<domain::ToolProfileId>("persona-safe")};
+  result.tool_policy = domain::ToolPolicyProvenance{
+      "aiforge.tool-launch-policy.v1",
+      make_id<domain::PermissionProfileId>("tools-medium-auto-v1"),
+      domain::ToolRestrictionLevel::medium,
+      domain::ToolApprovalMode::automatic,
+      {domain::Effect::read},
+      {{domain::Effect::read, "filesystem.root", "/workspace"}},
+      {"read"}};
   return result;
 }
 
@@ -1289,6 +1298,63 @@ TEST_CASE("tool registration digests round-trip and legacy absence is readable",
   replayed = store->replay_events(session);
   REQUIRE_FALSE(replayed);
   REQUIRE(replayed.error().code == storage::SessionStoreErrorCode::corrupt);
+}
+
+TEST_CASE(
+    "tool policy provenance round-trips strictly and reads legacy records",
+    "[storage][sqlite][codec][provenance][tool-policy][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "session", 100);
+  REQUIRE(store->append_events(
+      session,
+      std::array{event(1, started(), "start"),
+                 event(2, domain::RunProvenanceRecorded{run_provenance()},
+                       "policy")}));
+
+  auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  const auto* recorded =
+      std::get_if<domain::RunProvenanceRecorded>(&replayed->at(1).payload);
+  REQUIRE(recorded != nullptr);
+  REQUIRE(recorded->provenance.tool_policy == run_provenance().tool_policy);
+  store.reset();
+
+  execute_sql(path, "UPDATE events SET payload_json=json_remove(payload_json,"
+                    "'$.provenance.tool_policy') WHERE event_id='policy'");
+  store = open_store(path);
+  replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  recorded =
+      std::get_if<domain::RunProvenanceRecorded>(&replayed->at(1).payload);
+  REQUIRE(recorded != nullptr);
+  REQUIRE_FALSE(recorded->provenance.tool_policy);
+  store.reset();
+
+  const auto set_policy = [&](const std::string_view policy) {
+    execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                      "'$.provenance.tool_policy',json('" +
+                          std::string{policy} + "')) WHERE event_id='policy'");
+  };
+  set_policy(
+      R"({"identity":"aiforge.tool-launch-policy.v1","permission_profile_id":"tools-medium-auto-v1","restriction_level":"future","approval_mode":"automatic","effect_ceiling":["read"],"capability_ceiling":[{"effect":"read","kind":"filesystem.root","value":"/workspace"}],"automatically_eligible_tools":["read"]})");
+  store = open_store(path);
+  REQUIRE_FALSE(store->replay_events(session));
+  store.reset();
+
+  set_policy(
+      R"({"identity":"aiforge.tool-launch-policy.v1","permission_profile_id":"tools-medium-auto-v1","restriction_level":"medium","approval_mode":"automatic","effect_ceiling":["read"],"capability_ceiling":[{"effect":"read","kind":"filesystem.root","value":"/workspace","extra":true}],"automatically_eligible_tools":["read"]})");
+  store = open_store(path);
+  REQUIRE_FALSE(store->replay_events(session));
+  store.reset();
+
+  set_policy(
+      R"({"identity":"aiforge.tool-launch-policy.v1","permission_profile_id":"tools-medium-auto-v1","restriction_level":"medium","approval_mode":"automatic","effect_ceiling":["read"],"capability_ceiling":[{"effect":"read","kind":"filesystem.root","value":"/workspace"}],"automatically_eligible_tools":"read"})");
+  store = open_store(path);
+  const auto wrong_shape = store->replay_events(session);
+  REQUIRE_FALSE(wrong_shape);
+  REQUIRE(wrong_shape.error().code == storage::SessionStoreErrorCode::corrupt);
 }
 
 TEST_CASE("bounded SQLite writer contention is retryable",

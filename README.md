@@ -96,6 +96,7 @@ export VENICE_API_KEY=your-key      # takes precedence over the stored key
 ./build/src/bin/aiforge --model model-id "Use this model"
 ./build/src/bin/aiforge --web-search on "Use Venice web search"
 ./build/src/bin/aiforge --session-max-spend 5.00 "Bound this session"
+./build/src/bin/aiforge --tool-restriction medium --tool-approval prompt
 ./build/src/bin/aiforge models
 ./build/src/bin/aiforge image generate --model image-model "A blue square"
 ./build/src/bin/aiforge image show --session image-session-id
@@ -510,6 +511,26 @@ Filesystem roots are capability-policy authority and constrain the working
 directory; they are not an operating-system sandbox. The current one-shot
 surface does not register `run_process` because it has no process approval or
 artifact-storage profile.
+
+## Repository reads and launch authority
+
+Interactive Chat can opt into the `repository-read` tool profile with
+`/tools profile repository-read`. The profile adds `read_repository_file`,
+which accepts one normalized relative path and reads only a bounded, tracked,
+regular UTF-8 file from the repository root selected at launch. Repository metadata,
+ignored and untracked files, traversal, symbolic links, stale snapshots, and
+changing files fail closed.
+
+Authority is fixed for the application lifetime with
+`--tool-restriction <none|low|medium|high>` and
+`--tool-approval <prompt|auto|allow-all>`. Defaults are `high` and `prompt`;
+`high` grants no effectful authority and `medium` admits bounded reads. Prompt
+mode shows the exact tool, effects, and normalized path scope and grants only
+that invocation. `auto` implicitly approves configured tool allow-list members;
+`allow-all` implicitly approves selected tools within the restriction and their
+declared capability ceilings. None of these modes supplies ambient authority,
+and durable pending work fails closed if its recorded policy or tool contracts
+do not match the current launch.
 
 ## Structured user questions
 

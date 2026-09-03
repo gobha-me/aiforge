@@ -55,6 +55,14 @@ class RepositorySnapshotSource {
  public:
   virtual ~RepositorySnapshotSource() = default;
 
+  // False unless observe() is guaranteed not to run effectful discovery hooks,
+  // update repository metadata, or recurse into independently configured
+  // repositories.
+  [[nodiscard]] virtual auto guarantees_read_only_observation() const noexcept
+      -> bool {
+    return false;
+  }
+
   [[nodiscard]] virtual auto observe(RepositorySnapshotRequest request,
                                      std::stop_token stop_token = {})
       -> std::expected<domain::RepositorySnapshot, RepositorySnapshotError> = 0;

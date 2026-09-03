@@ -246,6 +246,173 @@ namespace {
   return {};
 }
 
+[[nodiscard]] auto valid_effect(const Effect effect) noexcept -> bool {
+  switch (effect) {
+    case Effect::read:
+    case Effect::write:
+    case Effect::remove:
+    case Effect::execute:
+    case Effect::network:
+    case Effect::communicate:
+    case Effect::spend:
+    case Effect::change_infrastructure:
+    case Effect::change_privileges: return true;
+  }
+  return false;
+}
+
+[[nodiscard]] auto effect_within_restriction(
+    const Effect effect, const ToolRestrictionLevel restriction) noexcept
+    -> bool {
+  switch (restriction) {
+    case ToolRestrictionLevel::high: return false;
+    case ToolRestrictionLevel::medium: return effect == Effect::read;
+    case ToolRestrictionLevel::low:
+      return effect != Effect::change_infrastructure &&
+             effect != Effect::change_privileges;
+    case ToolRestrictionLevel::none: return true;
+  }
+  return false;
+}
+
+[[nodiscard]] auto valid_restriction(
+    const ToolRestrictionLevel restriction) noexcept -> bool {
+  switch (restriction) {
+    case ToolRestrictionLevel::high:
+    case ToolRestrictionLevel::medium:
+    case ToolRestrictionLevel::low:
+    case ToolRestrictionLevel::none: return true;
+  }
+  return false;
+}
+
+[[nodiscard]] auto valid_approval_mode(const ToolApprovalMode mode) noexcept
+    -> bool {
+  switch (mode) {
+    case ToolApprovalMode::prompt:
+    case ToolApprovalMode::automatic:
+    case ToolApprovalMode::allow_all: return true;
+  }
+  return false;
+}
+
+[[nodiscard]] auto add_policy_bytes(const std::size_t amount,
+                                    const std::size_t maximum,
+                                    std::size_t& total) -> bool {
+  if (amount > maximum - std::min(total, maximum)) return false;
+  total += amount;
+  return true;
+}
+
+[[nodiscard]] auto validate_policy_effects(const ToolPolicyProvenance& policy)
+    -> std::expected<std::set<Effect>, RunProvenanceError> {
+  std::set<Effect> effects;
+  for (const auto effect : policy.effect_ceiling) {
+    if (!valid_effect(effect) ||
+        !effect_within_restriction(effect, policy.restriction_level) ||
+        !effects.insert(effect).second) {
+      return failure(RunProvenanceErrorCode::invalid_tool_policy,
+                     "the tool policy effect ceiling is invalid");
+    }
+  }
+  return effects;
+}
+
+[[nodiscard]] auto validate_policy_scopes(const ToolPolicyProvenance& policy,
+                                          const RunProvenanceLimits& limits,
+                                          const std::set<Effect>& effects,
+                                          std::size_t& total)
+    -> std::expected<void, RunProvenanceError> {
+  std::vector<CapabilityScope> scopes;
+  for (const auto& scope : policy.capability_ceiling) {
+    if (!effects.contains(scope.effect) ||
+        !bounded_text(scope.kind, limits.maximum_identity_bytes) ||
+        !bounded_text(scope.value, limits.maximum_value_bytes) ||
+        std::ranges::find(scopes, scope) != scopes.end()) {
+      return failure(RunProvenanceErrorCode::invalid_tool_policy,
+                     "the tool policy capability ceiling is invalid");
+    }
+    if (!add_policy_bytes(scope.kind.size(), limits.maximum_total_bytes,
+                          total) ||
+        !add_policy_bytes(scope.value.size(), limits.maximum_total_bytes,
+                          total)) {
+      return failure(
+          RunProvenanceErrorCode::resource_exhausted,
+          "the tool policy provenance exceeds its total byte budget");
+    }
+    scopes.push_back(scope);
+  }
+  if (std::ranges::any_of(effects, [&](const auto effect) {
+        return std::ranges::none_of(scopes, [effect](const auto& scope) {
+          return scope.effect == effect;
+        });
+      })) {
+    return failure(
+        RunProvenanceErrorCode::invalid_tool_policy,
+        "every tool policy effect requires an explicit capability scope");
+  }
+  return {};
+}
+
+[[nodiscard]] auto validate_automatic_tools(const ToolPolicyProvenance& policy,
+                                            const RunProvenanceLimits& limits,
+                                            std::size_t& total)
+    -> std::expected<void, RunProvenanceError> {
+  std::set<std::string_view> automatic_tools;
+  for (const auto& name : policy.automatically_eligible_tools) {
+    if (!bounded_text(name, limits.maximum_identity_bytes) ||
+        !automatic_tools.insert(name).second) {
+      return failure(RunProvenanceErrorCode::invalid_tool_policy,
+                     "the automatic tool policy list is invalid");
+    }
+    if (!add_policy_bytes(name.size(), limits.maximum_total_bytes, total)) {
+      return failure(
+          RunProvenanceErrorCode::resource_exhausted,
+          "the tool policy provenance exceeds its total byte budget");
+    }
+  }
+  return {};
+}
+
+[[nodiscard]] auto validate_tool_policy_impl(
+    const std::optional<ToolPolicyProvenance>& policy,
+    const RunProvenanceLimits& limits)
+    -> std::expected<void, RunProvenanceError> {
+  if (!policy) return {};
+  if (policy->identity != "aiforge.tool-launch-policy.v1" ||
+      !valid_identity(policy->permission_profile_id.value(),
+                      limits.maximum_identity_bytes) ||
+      !valid_restriction(policy->restriction_level) ||
+      !valid_approval_mode(policy->approval_mode) ||
+      policy->effect_ceiling.size() > limits.maximum_policy_effects ||
+      policy->capability_ceiling.size() > limits.maximum_policy_scopes ||
+      policy->automatically_eligible_tools.size() >
+          limits.maximum_automatic_tools) {
+    return failure(RunProvenanceErrorCode::invalid_tool_policy,
+                   "the tool policy provenance is malformed or unbounded");
+  }
+  if (policy->approval_mode != ToolApprovalMode::automatic &&
+      !policy->automatically_eligible_tools.empty()) {
+    return failure(RunProvenanceErrorCode::invalid_tool_policy,
+                   "automatic tool eligibility conflicts with approval mode");
+  }
+  std::size_t total{};
+  if (!add_policy_bytes(policy->identity.size(), limits.maximum_total_bytes,
+                        total) ||
+      !add_policy_bytes(policy->permission_profile_id.value().size(),
+                        limits.maximum_total_bytes, total)) {
+    return failure(RunProvenanceErrorCode::resource_exhausted,
+                   "the tool policy provenance exceeds its total byte budget");
+  }
+  auto effects = validate_policy_effects(*policy);
+  if (!effects) return std::unexpected(effects.error());
+  if (auto scopes = validate_policy_scopes(*policy, limits, *effects, total);
+      !scopes) {
+    return scopes;
+  }
+  return validate_automatic_tools(*policy, limits, total);
+}
+
 [[nodiscard]] auto valid_request_option_source(
     const RequestOptionSource source) noexcept -> bool {
   switch (source) {
@@ -304,6 +471,76 @@ namespace {
   return {};
 }
 
+[[nodiscard]] auto configuration_bytes(
+    const std::vector<ConfigurationProvenanceEntry>& configuration)
+    -> std::size_t {
+  std::size_t total{};
+  for (const auto& entry : configuration) {
+    total += entry.key.size();
+    if (entry.value) total += entry.value->size();
+  }
+  return total;
+}
+
+[[nodiscard]] auto component_bytes(
+    const std::vector<RuntimeComponentVersion>& components) -> std::size_t {
+  std::size_t total{};
+  for (const auto& component : components) {
+    total += component.component.size() + component.version.size();
+  }
+  return total;
+}
+
+[[nodiscard]] auto tool_bytes(const std::vector<ToolProvenanceEntry>& tools)
+    -> std::size_t {
+  std::size_t total{};
+  for (const auto& tool : tools) {
+    total += tool.tool_name.size();
+    if (tool.registration_digest) total += tool.registration_digest->size();
+    for (const auto& scope : tool.capability_scopes) {
+      total += scope.kind.size() + scope.value.size();
+    }
+  }
+  return total;
+}
+
+[[nodiscard]] auto request_option_bytes(
+    const std::vector<EffectiveRequestOption>& options) -> std::size_t {
+  std::size_t total{};
+  for (const auto& option : options) {
+    total += option.key.size();
+    if (option.value) total += option.value->size();
+  }
+  return total;
+}
+
+[[nodiscard]] auto tool_profile_bytes(
+    const std::optional<ToolProfileProvenance>& profile) -> std::size_t {
+  if (!profile) return 0;
+  std::size_t total = profile->selected_profile_id.value().size();
+  if (profile->model_maximum_profile_id) {
+    total += profile->model_maximum_profile_id->value().size();
+  }
+  if (profile->persona_maximum_profile_id) {
+    total += profile->persona_maximum_profile_id->value().size();
+  }
+  return total;
+}
+
+[[nodiscard]] auto tool_policy_bytes(
+    const std::optional<ToolPolicyProvenance>& policy) -> std::size_t {
+  if (!policy) return 0;
+  std::size_t total =
+      policy->identity.size() + policy->permission_profile_id.value().size();
+  for (const auto& scope : policy->capability_ceiling) {
+    total += scope.kind.size() + scope.value.size();
+  }
+  for (const auto& name : policy->automatically_eligible_tools) {
+    total += name.size();
+  }
+  return total;
+}
+
 [[nodiscard]] auto total_bytes(const RunProvenance& provenance) -> std::size_t {
   std::size_t total = provenance.aiforge_version.size() +
                       provenance.backend_id.size() +
@@ -312,39 +549,30 @@ namespace {
   if (provenance.credential_source) {
     total += provenance.credential_source->identity.size();
   }
-  for (const auto& entry : provenance.configuration) {
-    total += entry.key.size();
-    if (entry.value) total += entry.value->size();
-  }
-  for (const auto& component : provenance.components) {
-    total += component.component.size() + component.version.size();
-  }
-  for (const auto& tool : provenance.tools) {
-    total += tool.tool_name.size();
-    if (tool.registration_digest) total += tool.registration_digest->size();
-    for (const auto& scope : tool.capability_scopes) {
-      total += scope.kind.size() + scope.value.size();
-    }
-  }
-  for (const auto& option : provenance.effective_request_options) {
-    total += option.key.size();
-    if (option.value) total += option.value->size();
-  }
-  if (provenance.tool_profile) {
-    total += provenance.tool_profile->selected_profile_id.value().size();
-    if (provenance.tool_profile->model_maximum_profile_id) {
-      total +=
-          provenance.tool_profile->model_maximum_profile_id->value().size();
-    }
-    if (provenance.tool_profile->persona_maximum_profile_id) {
-      total +=
-          provenance.tool_profile->persona_maximum_profile_id->value().size();
-    }
-  }
+  total += configuration_bytes(provenance.configuration);
+  total += component_bytes(provenance.components);
+  total += tool_bytes(provenance.tools);
+  total += request_option_bytes(provenance.effective_request_options);
+  total += tool_profile_bytes(provenance.tool_profile);
+  total += tool_policy_bytes(provenance.tool_policy);
   return total;
 }
 
 } // namespace
+
+auto validate_tool_policy_provenance(const ToolPolicyProvenance& provenance,
+                                     const RunProvenanceLimits limits)
+    -> std::expected<void, RunProvenanceError> {
+  if (limits.maximum_identity_bytes == 0 || limits.maximum_value_bytes == 0 ||
+      limits.maximum_total_bytes == 0 || limits.maximum_policy_effects == 0 ||
+      limits.maximum_policy_scopes == 0 ||
+      limits.maximum_automatic_tools == 0) {
+    return failure(RunProvenanceErrorCode::invalid_limits,
+                   "a tool policy provenance limit is zero");
+  }
+  return validate_tool_policy_impl(
+      std::optional<ToolPolicyProvenance>{provenance}, limits);
+}
 
 auto validate_run_provenance(const RunProvenance& provenance,
                              const RunProvenanceLimits limits)
@@ -358,7 +586,9 @@ auto validate_run_provenance(const RunProvenance& provenance,
       limits.maximum_request_options == 0 ||
       limits.maximum_request_option_key_bytes == 0 ||
       limits.maximum_request_option_value_bytes == 0 ||
-      limits.maximum_total_bytes == 0) {
+      limits.maximum_total_bytes == 0 || limits.maximum_policy_effects == 0 ||
+      limits.maximum_policy_scopes == 0 ||
+      limits.maximum_automatic_tools == 0) {
     return failure(RunProvenanceErrorCode::invalid_limits,
                    "a provenance limit is zero");
   }
@@ -405,6 +635,10 @@ auto validate_run_provenance(const RunProvenance& provenance,
   if (auto profile = validate_tool_profile(provenance.tool_profile, limits);
       !profile) {
     return profile;
+  }
+  if (auto policy = validate_tool_policy_impl(provenance.tool_policy, limits);
+      !policy) {
+    return policy;
   }
   if (auto options = validate_request_options(
           provenance.effective_request_options, limits);

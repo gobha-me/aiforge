@@ -219,6 +219,7 @@ auto version_handler(CommandContext& context) -> int {
   return values;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Legacy routing.
 auto one_shot_handler(CommandContext& context,
                       const std::string_view argument_id,
                       const bool allow_empty_for_interactive) -> int {
@@ -242,6 +243,10 @@ auto one_shot_handler(CommandContext& context,
       context.invocation, std::string{option_prefix} + "web-search");
   const auto requested_spend_ceiling = parsed_text_values(
       context.invocation, std::string{option_prefix} + "session-max-spend");
+  const auto requested_tool_restriction = parsed_text_values(
+      context.invocation, std::string{option_prefix} + "tool-restriction");
+  const auto requested_tool_approval = parsed_text_values(
+      context.invocation, std::string{option_prefix} + "tool-approval");
   const bool no_persona =
       parsed_argument(context.invocation,
                       std::string{option_prefix} + "no-persona") != nullptr;
@@ -268,6 +273,25 @@ auto one_shot_handler(CommandContext& context,
                                 requested_web_search->front() != "on" &&
                                 requested_web_search->front() != "off"))) {
     context.error << "aiforge: --web-search requires auto, on, or off\n";
+    return usage_exit_code;
+  }
+  if (requested_tool_restriction &&
+      (requested_tool_restriction->size() != 1 ||
+       (requested_tool_restriction->front() != "none" &&
+        requested_tool_restriction->front() != "low" &&
+        requested_tool_restriction->front() != "medium" &&
+        requested_tool_restriction->front() != "high"))) {
+    context.error << "aiforge: --tool-restriction requires none, low, medium, "
+                     "or high\n";
+    return usage_exit_code;
+  }
+  if (requested_tool_approval &&
+      (requested_tool_approval->size() != 1 ||
+       (requested_tool_approval->front() != "prompt" &&
+        requested_tool_approval->front() != "auto" &&
+        requested_tool_approval->front() != "allow-all"))) {
+    context.error
+        << "aiforge: --tool-approval requires prompt, auto, or allow-all\n";
     return usage_exit_code;
   }
   std::optional<domain::SessionSpendCeiling> session_spend_ceiling;
@@ -330,6 +354,12 @@ auto one_shot_handler(CommandContext& context,
            session_spend_ceiling,
            requested_web_search
                ? std::optional<std::string>{requested_web_search->front()}
+               : std::nullopt,
+           requested_tool_restriction
+               ? std::optional<std::string>{requested_tool_restriction->front()}
+               : std::nullopt,
+           requested_tool_approval
+               ? std::optional<std::string>{requested_tool_approval->front()}
                : std::nullopt},
           context.environment, context.output, context.error);
       if (result) return success_exit_code;
@@ -347,6 +377,10 @@ auto one_shot_handler(CommandContext& context,
   }
   if (prompt->size() != 1 || prompt->front().empty()) {
     context.error << "aiforge: prompt must be nonempty\n";
+    return usage_exit_code;
+  }
+  if (requested_tool_restriction || requested_tool_approval) {
+    context.error << "aiforge: tool launch controls require interactive mode\n";
     return usage_exit_code;
   }
   if (context.environment.one_shot == nullptr) {
@@ -1003,6 +1037,23 @@ auto builtin_command_registry() -> const CommandRegistry& {
           1},
          "USD",
          "Set or narrow the durable session inference spend ceiling."},
+        {{std::string{prefix} + ".tool-restriction",
+          {"--tool-restriction"},
+          ArgumentValueKind::text,
+          0,
+          1},
+         "none|low|medium|high",
+         "Set the interactive application-lifetime tool restriction ceiling "
+         "(default: high; high grants no effectful authority)."},
+        {{std::string{prefix} + ".tool-approval",
+          {"--tool-approval"},
+          ArgumentValueKind::text,
+          0,
+          1},
+         "prompt|auto|allow-all",
+         "Set the interactive application-lifetime tool approval mode "
+         "(default: prompt; allow-all remains within the restriction "
+         "ceiling)."},
         {{std::string{prefix} + ".no-persona",
           {"--no-persona"},
           ArgumentValueKind::flag,

@@ -31,9 +31,33 @@ namespace {
 
 ScriptedExactSourceEditor::ScriptedExactSourceEditor(
     std::vector<ExactSourceReadExchange> read_exchanges,
-    std::vector<ExactSourceEditExchange> edit_exchanges)
+    std::vector<ExactSourceEditExchange> edit_exchanges,
+    const bool guarantees_tracked_regular_files)
     : m_read_exchanges(std::move(read_exchanges)),
-      m_edit_exchanges(std::move(edit_exchanges)) {
+      m_edit_exchanges(std::move(edit_exchanges)),
+      m_guarantees_tracked_regular_files(guarantees_tracked_regular_files) {
+}
+
+auto ScriptedExactSourceEditor::guarantees_tracked_regular_files()
+    const noexcept -> bool {
+  return m_guarantees_tracked_regular_files;
+}
+
+auto ScriptedExactSourceEditor::guarantees_read_only_execution() const noexcept
+    -> bool {
+  return true;
+}
+
+auto ScriptedExactSourceEditor::is_coupled_to(
+    const repository::RepositorySnapshotSource& source) const noexcept -> bool {
+  return m_snapshot_source == &source;
+}
+
+void ScriptedExactSourceEditor::couple_to(
+    const repository::RepositorySnapshotSource& source,
+    const bool guarantees_tracked_regular_files) noexcept {
+  m_snapshot_source = &source;
+  m_guarantees_tracked_regular_files = guarantees_tracked_regular_files;
 }
 
 auto ScriptedExactSourceEditor::read(repository::ExactSourceReadRequest request,

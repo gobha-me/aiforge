@@ -118,6 +118,13 @@ constexpr std::size_t kMaximumExecutorContractBytes{128};
       return invalid("tool capability scopes are invalid or duplicated");
     }
   }
+  if (std::ranges::any_of(effects, [&](const auto effect) {
+        return std::ranges::none_of(scopes, [effect](const auto& scope) {
+          return scope.first == effect;
+        });
+      })) {
+    return invalid("every tool effect requires an explicit capability scope");
+  }
   return {};
 }
 

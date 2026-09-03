@@ -107,6 +107,15 @@ struct ToolApprovalResolution {
   auto operator==(const ToolApprovalResolution&) const -> bool = default;
 };
 
+struct PendingToolApproval {
+  domain::RunId run_id;
+  domain::InvocationId invocation_id;
+  std::string tool_name;
+  std::vector<domain::Effect> effects;
+  std::vector<domain::CapabilityScope> scopes;
+  auto operator==(const PendingToolApproval&) const -> bool = default;
+};
+
 struct SessionSpendCeilingChange {
   domain::RunId run_id;
   domain::RunStarted attributes;
@@ -324,6 +333,8 @@ class RunKernel final {
   // this instead of re-resolving mutable profile or model metadata.
   [[nodiscard]] auto active_tool_declarations() const noexcept
       -> const std::vector<backend::ToolDeclaration>*;
+  [[nodiscard]] auto pending_tool_approval() const
+      -> std::optional<PendingToolApproval>;
   [[nodiscard]] auto pending_question_input() const
       -> std::optional<PendingQuestionInput>;
   [[nodiscard]] auto pending_plan_decision() const

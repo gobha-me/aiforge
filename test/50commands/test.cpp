@@ -70,6 +70,8 @@ class FakeInteractive final : public InteractiveCommand {
     seen_model = std::move(request.model);
     seen_spend_ceiling = std::move(request.session_spend_ceiling);
     seen_web_search = std::move(request.web_search);
+    seen_tool_restriction = std::move(request.tool_restriction);
+    seen_tool_approval = std::move(request.tool_approval);
     output << "interactive";
     if (failure) return std::unexpected(*failure);
     return {};
@@ -81,6 +83,8 @@ class FakeInteractive final : public InteractiveCommand {
   std::optional<std::string> seen_model;
   std::optional<aiforge::domain::SessionSpendCeiling> seen_spend_ceiling;
   std::optional<std::string> seen_web_search;
+  std::optional<std::string> seen_tool_restriction;
+  std::optional<std::string> seen_tool_approval;
   std::optional<CommandFailure> failure;
 };
 
@@ -378,6 +382,16 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
   REQUIRE(audio != schema->root.subcommands.end());
   REQUIRE(audio->subcommands.size() == 3);
 
+  const auto root_help =
+      render_help(registry, std::vector<std::string>{"root"});
+  REQUIRE(root_help);
+  REQUIRE(root_help->find("default: high") != std::string::npos);
+  REQUIRE(root_help->find("high grants no effectful authority") !=
+          std::string::npos);
+  REQUIRE(root_help->find("default: prompt") != std::string::npos);
+  REQUIRE(root_help->find("allow-all remains within the restriction ceiling") !=
+          std::string::npos);
+
   std::string output;
   std::string error;
   REQUIRE(dispatch(registry, {"chat"}, output, error) == 2);
@@ -649,6 +663,49 @@ TEST_CASE("one-shot session options are explicit and mutually exclusive",
               registry, std::vector<std::string_view>{"--web-search", "auto"},
               environment, output, error) == 0);
   REQUIRE(interactive.seen_web_search == "auto");
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"--tool-restriction", "medium",
+                                            "--tool-approval", "auto"},
+              environment, output, error) == 0);
+  REQUIRE(interactive.seen_tool_restriction == "medium");
+  REQUIRE(interactive.seen_tool_approval == "auto");
+
+  for (const auto value : {"strict", "HIGH", ""}) {
+    output.str({});
+    error.str({});
+    CAPTURE(value);
+    REQUIRE(CommandDispatcher{}.dispatch(
+                registry,
+                std::vector<std::string_view>{"--tool-restriction", value},
+                environment, output, error) == 2);
+    REQUIRE(error.str().find("requires none, low, medium, or high") !=
+            std::string::npos);
+  }
+
+  for (const auto value : {"always", "AUTO", ""}) {
+    output.str({});
+    error.str({});
+    CAPTURE(value);
+    REQUIRE(CommandDispatcher{}.dispatch(
+                registry,
+                std::vector<std::string_view>{"--tool-approval", value},
+                environment, output, error) == 2);
+    REQUIRE(error.str().find("requires prompt, auto, or allow-all") !=
+            std::string::npos);
+  }
+
+  output.str({});
+  error.str({});
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"--tool-restriction", "medium",
+                                            "one-shot"},
+              environment, output, error) == 2);
+  REQUIRE(error.str().find("require interactive mode") != std::string::npos);
 }
 
 TEST_CASE("models command uses its dedicated service and preserves streams",

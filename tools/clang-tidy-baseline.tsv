@@ -91,7 +91,6 @@ src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-varar
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	4a94538fb7d7dacd2ca7	do not call c-style vararg functions
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	559847b11a3c8df9d9bd	do not call c-style vararg functions
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	ad1351ed1d0ecfaf0cc3	do not call c-style vararg functions
-src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	b33bddb778c68f747d5e	do not call c-style vararg functions
 src/adapters/git_repository_snapshot_source.cpp	modernize-use-integer-sign-comparison	26b24ff743c699515bd0	comparison between 'signed' and 'unsigned' integers
 src/adapters/git_repository_snapshot_source.cpp	modernize-use-integer-sign-comparison	84b47d22b7e97a187e44	comparison between 'signed' and 'unsigned' integers
 src/adapters/git_repository_snapshot_source.cpp	readability-else-after-return	dac9994d6c168c7e8ac9	do not use 'else' after 'return'
@@ -237,7 +236,6 @@ src/lib/command_registry.cpp	misc-no-recursion	f3370e651e7c4d4673a4	function 'pa
 src/lib/command_registry.cpp	performance-move-const-arg	d258feb7a06deccc2cae	std::move of the expression of the trivially-copyable type 'aiforge::domain::SessionSpendCeiling' has no effect; remove std::move()
 src/lib/command_registry.cpp	readability-function-cognitive-complexity	36fba92a6cc692469490	function 'dispatch' has cognitive complexity of 21 (threshold 20)
 src/lib/command_registry.cpp	readability-function-cognitive-complexity	d690ef18c4696d750038	function 'render_help' has cognitive complexity of 22 (threshold 20)
-src/lib/command_registry.cpp	readability-function-cognitive-complexity	fd30ebadbd7117c4c7dd	function 'one_shot_handler' has cognitive complexity of 66 (threshold 20)
 src/lib/config.cpp	concurrency-mt-unsafe	6d18d706b10e599beb3c	function is not thread safe
 src/lib/config.cpp	readability-function-cognitive-complexity	241d8821a6e026eb8108	function 'resolve_config' has cognitive complexity of 61 (threshold 20)
 src/lib/config.cpp	readability-function-cognitive-complexity	5f2f3d0c6f1b7e5298ba	function 'valid_utf8' has cognitive complexity of 24 (threshold 20)
@@ -423,7 +421,6 @@ src/lib/run_kernel.cpp	readability-implicit-bool-conversion	3fa0b8b0af4af3d82b9b
 src/lib/run_kernel.cpp	readability-implicit-bool-conversion	cccf256ebaf939f4e427	implicit conversion 'const aiforge::domain::ReviewReceiptDrafted *' -> 'bool'
 src/lib/run_kernel.cpp	readability-implicit-bool-conversion	d1bc4e7c5e7723e59ffb	implicit conversion 'const aiforge::domain::ReviewRequested *' -> 'bool'
 src/lib/run_kernel.cpp	readability-make-member-function-const	bc82d4f9771a97c8d344	method 'make_event' can be made const
-src/lib/run_projection.cpp	readability-function-cognitive-complexity	7538335c1bdf55e60418	function 'apply' has cognitive complexity of 141 (threshold 20)
 src/lib/slash_commands.cpp	readability-function-cognitive-complexity	1d81730e0627741cf249	function 'valid_utf8_text' has cognitive complexity of 28 (threshold 20)
 src/lib/slash_commands.cpp	readability-simplify-boolean-expr	6c8df12388880a7b3e86	boolean expression can be simplified by DeMorgan's theorem
 src/lib/sqlite_session_store.cpp	bugprone-misplaced-widening-cast	e2f1f80ec254a941d095	either cast from 'std::size_t' (aka 'unsigned long') to 'sqlite3_int64' (aka 'long long') is ineffective, or there is loss of precision before the conversion

@@ -5,8 +5,10 @@
 #include <aiforge/backend/provider_character_catalog.hpp>
 #include <aiforge/model/catalog.hpp>
 #include <aiforge/runtime/ask_user_tool.hpp>
+#include <aiforge/runtime/tool_launch_policy.hpp>
 #include <aiforge/testing/scripted_persona_editor.hpp>
 #include <aiforge/testing/scripted_persona_source.hpp>
+#include <aiforge/testing/scripted_tool_executor.hpp>
 #include <aiforge/testing/tui_scenario.hpp>
 #include <algorithm>
 #include <array>
@@ -901,6 +903,329 @@ class QuestionBackend final : public backend::Backend,
   std::shared_ptr<QuestionBackendState> m_state;
 };
 
+class ApprovalBackendState final {
+ public:
+  ApprovalBackendState() {
+    const auto invocation = make_id<domain::InvocationId>("approval-call");
+    m_events = {
+        backend::BackendEvent{backend::ResponseStarted{"approval-response"}},
+        backend::BackendEvent{
+            backend::ToolCallDelta{invocation, "read_repository_file",
+                                   R"({"relative_path":"README.md"})"}},
+        backend::BackendEvent{
+            backend::ResponseFinished{domain::FinishReason::tool_call}},
+        std::nullopt,
+        backend::BackendEvent{
+            backend::ResponseStarted{"approval-continuation-response"}},
+        backend::BackendEvent{backend::ContentDelta{
+            make_id<domain::MessageId>("approval-continuation-assistant"),
+            domain::TextBlock{"continued after approval"}}},
+        backend::BackendEvent{
+            backend::ResponseFinished{domain::FinishReason::stop}},
+        std::nullopt,
+    };
+  }
+
+  auto start(backend::BackendRequest request)
+      -> std::expected<std::size_t, backend::BackendError> {
+    std::lock_guard lock{m_mutex};
+    if (m_requests.size() >= 2) {
+      return std::unexpected(backend::BackendError{
+          backend::BackendErrorKind::script_exhausted,
+          "approval backend was started too many times", false, std::nullopt});
+    }
+    if (request.tools.size() != 1 ||
+        request.tools.front().name != "read_repository_file") {
+      m_valid = false;
+    }
+    if (!m_requests.empty()) {
+      m_events[5] = backend::BackendEvent{
+          backend::ContentDelta{request.assistant_message_id,
+                                domain::TextBlock{"continued after approval"}}};
+      if (request.tools != m_requests.front().tools ||
+          !std::ranges::any_of(request.context.entries, [](const auto& entry) {
+            return entry.kind == domain::ContextEntryKind::tool_result;
+          })) {
+        m_valid = false;
+      }
+    }
+    const auto offset = m_requests.size() * 4U;
+    m_requests.push_back(std::move(request));
+    m_condition.notify_all();
+    return offset;
+  }
+
+  auto next(const std::size_t offset, std::size_t& local_index,
+            std::stop_token token)
+      -> std::expected<std::optional<backend::BackendEvent>,
+                       backend::BackendError> {
+    std::unique_lock lock{m_mutex};
+    const auto index = offset + local_index;
+    ++m_waiting_calls;
+    m_condition.notify_all();
+    if (!m_condition.wait(lock, token, [&] { return m_released > index; })) {
+      return backend::BackendEvent{backend::ResponseCancelled{"cancelled"}};
+    }
+    auto result = m_events.at(index);
+    ++local_index;
+    if (!result) ++m_ended_streams;
+    m_condition.notify_all();
+    return result;
+  }
+
+  auto release(const std::string_view description, const bool wait_for_wake)
+      -> std::expected<void, std::string> {
+    static const std::array expected{
+        std::string_view{"approval-started"},
+        std::string_view{"approval-call"},
+        std::string_view{"approval-finished"},
+        std::string_view{"approval-end"},
+        std::string_view{"continuation-started"},
+        std::string_view{"continuation-delta"},
+        std::string_view{"continuation-finished"},
+        std::string_view{"continuation-end"},
+    };
+    std::unique_lock lock{m_mutex};
+    if (!m_condition.wait_for(lock, 1s,
+                              [&] { return m_waiting_calls > m_released; })) {
+      return std::unexpected("approval backend did not reach boundary " +
+                             std::string{description} +
+                             " (released=" + std::to_string(m_released) +
+                             ", waiting=" + std::to_string(m_waiting_calls) +
+                             ", requests=" + std::to_string(m_requests.size()) +
+                             ", wakes=" + std::to_string(m_wakes) + ")");
+    }
+    if (m_released >= expected.size() || description != expected[m_released]) {
+      return std::unexpected("approval backend descriptor mismatch");
+    }
+    ++m_released;
+    const auto released = m_released;
+    m_condition.notify_all();
+    const bool ended = released == 4 || released == 8;
+    const auto expected_ended = released == 4 ? 1U : 2U;
+    if (!m_condition.wait_for(lock, 1s, [&] {
+          return ended ? m_ended_streams >= expected_ended
+                       : m_waiting_calls >= released + 1U;
+        })) {
+      return std::unexpected(
+          "approval backend did not acknowledge " + std::string{description} +
+          " (released=" + std::to_string(m_released) +
+          ", waiting=" + std::to_string(m_waiting_calls) +
+          ", ended=" + std::to_string(m_ended_streams) + ")");
+    }
+    if (wait_for_wake &&
+        !m_condition.wait_for(lock, 1s, [&] { return m_wakes >= released; })) {
+      return std::unexpected("approval backend update was not posted");
+    }
+    return {};
+  }
+
+  auto observe_wake() -> void {
+    std::lock_guard lock{m_mutex};
+    ++m_wakes;
+    m_condition.notify_all();
+  }
+
+  [[nodiscard]] auto semantic_state() -> std::string {
+    std::lock_guard lock{m_mutex};
+    return "requests=" + std::to_string(m_requests.size()) +
+           (m_valid ? "|valid" : "|invalid");
+  }
+
+ private:
+  std::mutex m_mutex;
+  std::condition_variable_any m_condition;
+  std::vector<std::optional<backend::BackendEvent>> m_events;
+  std::vector<backend::BackendRequest> m_requests;
+  std::size_t m_waiting_calls{};
+  std::size_t m_released{};
+  std::size_t m_wakes{};
+  std::size_t m_ended_streams{};
+  bool m_valid{true};
+};
+
+class ApprovalStream final : public backend::BackendStream {
+ public:
+  ApprovalStream(std::shared_ptr<ApprovalBackendState> state,
+                 const std::size_t offset)
+      : m_state(std::move(state)), m_offset(offset) {}
+
+  auto next(std::stop_token token)
+      -> std::expected<std::optional<backend::BackendEvent>,
+                       backend::BackendError> override {
+    return m_state->next(m_offset, m_index, token);
+  }
+
+ private:
+  std::shared_ptr<ApprovalBackendState> m_state;
+  std::size_t m_offset{};
+  std::size_t m_index{};
+};
+
+class ApprovalBackend final : public backend::Backend,
+                              public backend::ModelContextProvider {
+ public:
+  explicit ApprovalBackend(std::shared_ptr<ApprovalBackendState> state)
+      : m_state(std::move(state)) {}
+
+  auto lookup(const domain::ModelId& model_id, std::stop_token)
+      -> std::expected<backend::ModelContextInfo,
+                       backend::BackendError> override {
+    return backend::ModelContextInfo{
+        model_id, 8192, 1024, pricing_observation(),
+        backend::ModelCapabilityMap{{"tools", true}}};
+  }
+
+  auto start(backend::BackendRequest request, std::stop_token)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    auto offset = m_state->start(std::move(request));
+    if (!offset) return std::unexpected(std::move(offset.error()));
+    return std::make_unique<ApprovalStream>(m_state, *offset);
+  }
+
+ private:
+  std::shared_ptr<ApprovalBackendState> m_state;
+};
+
+class ApprovalToolGate final {
+ public:
+  [[nodiscard]] auto await_release(const std::stop_token stop_token) -> bool {
+    std::unique_lock lock{m_mutex};
+    const auto index = m_waiting++;
+    m_condition.notify_all();
+    return m_condition.wait(lock, stop_token,
+                            [&] { return m_released > index; });
+  }
+
+  auto acknowledge() -> void {
+    std::lock_guard lock{m_mutex};
+    ++m_acknowledged;
+    m_condition.notify_all();
+  }
+
+  auto release(const std::string_view description)
+      -> std::expected<void, std::string> {
+    static constexpr std::array expected{
+        std::string_view{"approval-tool-result"},
+        std::string_view{"approval-tool-end"}};
+    std::unique_lock lock{m_mutex};
+    if (!m_condition.wait_for(lock, 1s,
+                              [&] { return m_waiting > m_released; })) {
+      return std::unexpected("approval tool did not reach its boundary");
+    }
+    if (m_released >= expected.size() || description != expected[m_released]) {
+      return std::unexpected("approval tool descriptor mismatch");
+    }
+    const auto wakes_before_release = m_wakes;
+    ++m_released;
+    const auto released = m_released;
+    m_condition.notify_all();
+    if (!m_condition.wait_for(lock, 1s,
+                              [&] { return m_acknowledged >= released; })) {
+      return std::unexpected("approval tool did not acknowledge its step");
+    }
+    if (!m_condition.wait_for(lock, 1s,
+                              [&] { return m_wakes > wakes_before_release; })) {
+      return std::unexpected("approval tool update was not posted");
+    }
+    return {};
+  }
+
+  auto observe_wake() -> void {
+    std::lock_guard lock{m_mutex};
+    ++m_wakes;
+    m_condition.notify_all();
+  }
+
+ private:
+  std::mutex m_mutex;
+  std::condition_variable_any m_condition;
+  std::size_t m_waiting{};
+  std::size_t m_released{};
+  std::size_t m_acknowledged{};
+  std::size_t m_wakes{};
+};
+
+class GatedApprovalToolStream final : public runtime::ToolExecutionStream {
+ public:
+  GatedApprovalToolStream(std::unique_ptr<runtime::ToolExecutionStream> inner,
+                          std::shared_ptr<ApprovalToolGate> gate)
+      : m_inner(std::move(inner)), m_gate(std::move(gate)) {}
+
+  auto next(const std::stop_token stop_token)
+      -> std::expected<std::optional<runtime::ToolExecutionEvent>,
+                       runtime::ToolExecutionError> override {
+    if (!m_gate->await_release(stop_token)) {
+      return std::unexpected(runtime::ToolExecutionError{
+          runtime::ToolExecutionErrorCode::cancelled,
+          "approval scenario tool was cancelled", false});
+    }
+    auto result = m_inner->next(stop_token);
+    m_gate->acknowledge();
+    return result;
+  }
+
+ private:
+  std::unique_ptr<runtime::ToolExecutionStream> m_inner;
+  std::shared_ptr<ApprovalToolGate> m_gate;
+};
+
+class ApprovalToolExecutor final : public runtime::ToolExecutor {
+ public:
+  ApprovalToolExecutor(domain::StructuredDataBlock expected_arguments,
+                       domain::CapabilityScope requested_scope,
+                       std::vector<testing::ScriptedToolExchange> exchanges)
+      : m_expected_arguments(std::move(expected_arguments)),
+        m_requested_scope(std::move(requested_scope)),
+        m_script(std::move(exchanges)) {}
+
+  [[nodiscard]] auto validate(const domain::StructuredDataBlock& arguments)
+      const -> std::expected<runtime::ValidatedToolArguments,
+                             runtime::ToolExecutionError> override {
+    if (arguments != m_expected_arguments) {
+      return std::unexpected(runtime::ToolExecutionError{
+          runtime::ToolExecutionErrorCode::invalid_arguments,
+          "approval scenario received unexpected arguments", false});
+    }
+    return runtime::ValidatedToolArguments{
+        arguments, {m_requested_scope}, {domain::Effect::read}};
+  }
+
+  [[nodiscard]] auto start(runtime::ToolInvocation invocation,
+                           std::stop_token stop_token)
+      -> std::expected<std::unique_ptr<runtime::ToolExecutionStream>,
+                       runtime::ToolExecutionError> override {
+    auto started = m_script.start(std::move(invocation), stop_token);
+    if (!started) return std::unexpected(std::move(started.error()));
+    return std::make_unique<GatedApprovalToolStream>(std::move(*started),
+                                                     m_gate);
+  }
+
+  auto release(const std::string_view description)
+      -> std::expected<void, std::string> {
+    return m_gate->release(description);
+  }
+
+  auto observe_wake() -> void { m_gate->observe_wake(); }
+
+  [[nodiscard]] auto recorded_invocations() const noexcept
+      -> const std::vector<runtime::ToolInvocation>& {
+    return m_script.recorded_invocations();
+  }
+
+  [[nodiscard]] auto remaining_exchanges() const noexcept -> std::size_t {
+    return m_script.remaining_exchanges();
+  }
+
+ private:
+  domain::StructuredDataBlock m_expected_arguments;
+  domain::CapabilityScope m_requested_scope;
+  testing::ScriptedToolExecutor m_script;
+  std::shared_ptr<ApprovalToolGate> m_gate{
+      std::make_shared<ApprovalToolGate>()};
+};
+
 struct ModalState {
   std::string result{"pending"};
   int columns{};
@@ -1162,6 +1487,106 @@ auto question_cancel_scenario() -> testing::TuiScenario {
   return value;
 }
 
+enum class ApprovalScenarioAction {
+  allow_once,
+  deny,
+  dismiss,
+  interrupt,
+};
+
+auto approval_scenario(const ApprovalScenarioAction action)
+    -> testing::TuiScenario {
+  testing::TuiScenario value;
+  switch (action) {
+    case ApprovalScenarioAction::allow_once:
+      value.scenario_id = "interactive-tool-approval-allow-once";
+      break;
+    case ApprovalScenarioAction::deny:
+      value.scenario_id = "interactive-tool-approval-default-deny";
+      break;
+    case ApprovalScenarioAction::dismiss:
+      value.scenario_id = "interactive-tool-approval-dismiss";
+      break;
+    case ApprovalScenarioAction::interrupt:
+      value.scenario_id = "interactive-tool-approval-interrupt";
+      break;
+  }
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 24, 1000, 480};
+  value.backend_script = {"approval-started", "approval-call",
+                          "approval-finished", "approval-end"};
+  if (action == ApprovalScenarioAction::allow_once) {
+    value.tool_script = {"approval-tool-result", "approval-tool-end"};
+  }
+  if (action != ApprovalScenarioAction::interrupt) {
+    value.backend_script.insert(value.backend_script.end(),
+                                {"continuation-started", "continuation-delta",
+                                 "continuation-finished", "continuation-end"});
+  }
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{
+              "/tools profile repository-read"}}},
+      {0, enter},
+      {2, testing::TuiScenarioPost{termforge::PasteEvent{"read file"}}},
+      {2, enter},
+      {3, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {4, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {5, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {6, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {8, testing::TuiScenarioResize{{12, 4, 120, 80}}},
+      {9, testing::TuiScenarioResize{{100, 24, 1000, 480}}},
+  };
+  switch (action) {
+    case ApprovalScenarioAction::allow_once:
+      value.steps.push_back({11, testing::TuiScenarioPost{termforge::KeyEvent{
+                                     termforge::Key::Down, 0, false, false,
+                                     false, termforge::KeyAction::Press}}});
+      value.steps.push_back({11, enter});
+      value.steps.push_back({12, testing::TuiScenarioRelease{
+                                     testing::TuiScenarioProducer::tool}});
+      value.steps.push_back({13, testing::TuiScenarioRelease{
+                                     testing::TuiScenarioProducer::tool}});
+      break;
+    case ApprovalScenarioAction::deny:
+      value.steps.push_back({11, enter});
+      break;
+    case ApprovalScenarioAction::dismiss:
+      value.steps.push_back({11, testing::TuiScenarioPost{termforge::KeyEvent{
+                                     termforge::Key::Escape, 0, false, false,
+                                     false, termforge::KeyAction::Press}}});
+      break;
+    case ApprovalScenarioAction::interrupt:
+      value.steps.push_back({11, testing::TuiScenarioPost{termforge::KeyEvent{
+                                     termforge::Key::Char, U'c', true, false,
+                                     false, termforge::KeyAction::Press}}});
+      break;
+  }
+  if (action == ApprovalScenarioAction::interrupt) {
+    value.steps.push_back(
+        {14, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}});
+    value.steps.push_back({14, enter});
+  } else {
+    const auto continuation_frame =
+        action == ApprovalScenarioAction::allow_once ? 15U : 13U;
+    for (std::uint64_t frame = continuation_frame;
+         frame < continuation_frame + 4U; ++frame) {
+      value.steps.push_back(
+          {frame,
+           testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}});
+    }
+    value.steps.push_back(
+        {continuation_frame + 7U,
+         testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}});
+    value.steps.push_back({continuation_frame + 7U, enter});
+  }
+  value.limits.maximum_frames = 48;
+  return value;
+}
+
 auto tool_profile_scenario() -> testing::TuiScenario {
   testing::TuiScenario value;
   value.scenario_id = "interactive-tool-profile-session-local";
@@ -1184,6 +1609,7 @@ auto tool_profile_scenario() -> testing::TuiScenario {
       {4, enter},
       {5, testing::TuiScenarioResize{{8, 3, 80, 60}}},
       {6, testing::TuiScenarioResize{{100, 18, 1000, 360}}},
+      {7, down},
       {7, down},
       {8, enter},
       {10, testing::TuiScenarioPost{termforge::PasteEvent{
@@ -2002,6 +2428,179 @@ auto question_factory() -> testing::TuiScenarioTargetFactory {
   };
 }
 
+auto approval_factory() -> testing::TuiScenarioTargetFactory {
+  return [](const testing::TuiScenarioPass pass, termforge::ByteSink* output)
+             -> std::expected<testing::TuiScenarioTarget,
+                              testing::TuiScenarioError> {
+    auto pipe = std::make_shared<Pipe>();
+    if (!pipe->ok()) {
+      return std::unexpected(testing::TuiScenarioError{
+          testing::TuiScenarioErrorCode::target_failure,
+          "approval scenario pipe setup failed"});
+    }
+    auto state = std::make_shared<ApprovalBackendState>();
+    auto backend = std::make_shared<ApprovalBackend>(state);
+    auto editor = std::make_shared<NoEditor>();
+    auto frame = std::make_shared<std::string>();
+    auto suffix = std::make_shared<std::uint64_t>();
+    const auto invocation = make_id<domain::InvocationId>("approval-call");
+    const domain::CapabilityScope declared_scope{
+        domain::Effect::read, "filesystem.root", "/work/repository"};
+    const domain::CapabilityScope requested_scope{
+        domain::Effect::read, "filesystem.root", "/work/repository/README.md"};
+    const runtime::ToolExecutionLimits limits{4096, 8, 1s};
+    const domain::StructuredDataBlock arguments{
+        "application/json", R"({"relative_path":"README.md"})"};
+    auto executor = std::make_shared<ApprovalToolExecutor>(
+        arguments, requested_scope,
+        std::vector<testing::ScriptedToolExchange>{
+            {runtime::ToolInvocation{
+                 invocation,
+                 std::nullopt,
+                 "read_repository_file",
+                 runtime::ValidatedToolArguments{
+                     arguments, {requested_scope}, {domain::Effect::read}},
+                 {requested_scope},
+                 limits},
+             testing::ToolStreamScript{
+                 {runtime::ToolExecutionEvent{runtime::ToolResult{
+                      {domain::TextBlock{"repository contents"}}}},
+                  testing::ToolEndOfStream{}}}}});
+    runtime::ToolRegistry registry;
+    auto registered = registry.register_tool(
+        backend::ToolDeclaration{
+            "read_repository_file",
+            "Read one repository file",
+            {"application/schema+json", R"({"type":"object"})"},
+            {domain::Effect::read},
+            {declared_scope}},
+        executor, limits,
+        runtime::ToolExecutorContract{"scenario.repository-read", "1"});
+    if (!registered) {
+      return std::unexpected(testing::TuiScenarioError{
+          testing::TuiScenarioErrorCode::target_failure,
+          registered.error().message});
+    }
+    auto tools = registry.snapshot();
+    if (!tools) {
+      return std::unexpected(testing::TuiScenarioError{
+          testing::TuiScenarioErrorCode::target_failure,
+          tools.error().message});
+    }
+    const auto permission_profile =
+        make_id<domain::PermissionProfileId>("approval-scenario");
+    auto policy = runtime::make_tool_launch_policy(
+        *tools, {permission_profile,
+                 runtime::RestrictionLevel::medium,
+                 runtime::ApprovalMode::prompt,
+                 {}});
+    if (!policy) {
+      return std::unexpected(testing::TuiScenarioError{
+          testing::TuiScenarioErrorCode::target_failure,
+          policy.error().message});
+    }
+
+    adapters::InteractiveChatAppOptions options;
+    options.live_wake_enabled = pass == testing::TuiScenarioPass::record;
+    options.poll_worker_updates = false;
+    options.wake_observer = [state, executor] {
+      state->observe_wake();
+      executor->observe_wake();
+    };
+    options.rendered_output = output;
+    options.rendered_frame = [frame](const termforge::Screen& screen) {
+      *frame = normalized_screen(screen);
+    };
+    options.session_dependencies.identity_suffix_source = [suffix] {
+      return ++*suffix;
+    };
+    options.session_dependencies.timestamp_source = [] {
+      return domain::EventTimestamp{123ms};
+    };
+    options.session_dependencies.tools = *tools;
+    options.session_dependencies.tool_policy = std::move(*policy);
+    options.session_dependencies.permission_profile_id = permission_profile;
+    auto app = adapters::make_interactive_chat_app(
+        *backend, *backend, nullptr,
+        {make_id<domain::ModelId>("model"),
+         surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
+        *editor, {}, std::move(options));
+    if (!app->ready()) {
+      return std::unexpected(testing::TuiScenarioError{
+          testing::TuiScenarioErrorCode::target_failure,
+          app->setup_error().message});
+    }
+    auto* raw = app.get();
+    return testing::TuiScenarioTarget{
+        std::move(app),
+        [raw, pipe](const termforge::Capabilities& capabilities) {
+          return raw->configure_terminal_for_scenario(
+              termforge::TerminalIo{pipe->read_fd(), -1}, capabilities);
+        },
+        [raw, backend, editor] {
+          static_cast<void>(backend);
+          static_cast<void>(editor);
+          return raw->run();
+        },
+        [state, pass](const std::string_view step) {
+          return state->release(step, pass == testing::TuiScenarioPass::record);
+        },
+        [executor](const std::string_view step) {
+          return executor->release(step);
+        },
+        [frame] { return *frame; },
+        [raw, state, backend, editor, executor] {
+          static_cast<void>(backend);
+          static_cast<void>(editor);
+          auto terminal = std::string{"active"};
+          auto decision = std::string{"none"};
+          bool started{};
+          for (const auto& event : raw->events()) {
+            if (const auto* approved =
+                    std::get_if<domain::ToolApprovalDecided>(&event.payload)) {
+              switch (approved->decision) {
+                case domain::ApprovalDecision::approved:
+                  decision = "approved";
+                  break;
+                case domain::ApprovalDecision::denied:
+                  decision = "denied";
+                  break;
+                case domain::ApprovalDecision::cancelled:
+                  decision = "cancelled";
+                  break;
+              }
+              if (approved->lifetime !=
+                      domain::ApprovalGrantLifetime::invocation ||
+                  (approved->decision == domain::ApprovalDecision::approved &&
+                   approved->granted_scopes !=
+                       std::vector<domain::CapabilityScope>{
+                           {domain::Effect::read, "filesystem.root",
+                            "/work/repository/README.md"}}) ||
+                  (approved->decision != domain::ApprovalDecision::approved &&
+                   !approved->granted_scopes.empty())) {
+                decision += "-invalid";
+              }
+            }
+            if (std::holds_alternative<domain::ToolStarted>(event.payload)) {
+              started = true;
+            }
+            if (std::holds_alternative<domain::RunCompleted>(event.payload)) {
+              terminal = "completed";
+            } else if (std::holds_alternative<domain::RunCancelled>(
+                           event.payload)) {
+              terminal = "cancelled";
+            }
+          }
+          return state->semantic_state() + "|decision=" + decision +
+                 "|started=" + (started ? "yes" : "no") + "|executions=" +
+                 std::to_string(executor->recorded_invocations().size()) +
+                 "|remaining=" +
+                 std::to_string(executor->remaining_exchanges()) + "|" +
+                 terminal + "|" + std::string{raw->status_text()};
+        }};
+  };
+}
+
 auto session_success_scenario() -> testing::TuiScenario {
   testing::TuiScenario value;
   value.scenario_id = "interactive-session-list-resume-new";
@@ -2550,6 +3149,71 @@ TEST_CASE("interactive ask_user Ctrl+C cancels instead of quitting silently",
   REQUIRE(result->recorded == result->replayed);
   REQUIRE(result->recorded.semantic_state.find("requests=1|valid|cancelled") !=
           std::string::npos);
+}
+
+TEST_CASE("interactive tool approval shows exact authority and allows once",
+          "[scenario][chat][tools][approval]") {
+  const auto result = testing::run_tui_scenario(
+      approval_scenario(ApprovalScenarioAction::allow_once),
+      approval_factory());
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state.find(
+              "requests=2|valid|decision=approved|started=yes|executions=1|"
+              "remaining=0|completed") != std::string::npos);
+  for (const auto expected :
+       {"Approve tool action", "Tool: read_repository_file", "Effects: read",
+        "filesystem.root", "/work/repository/README.md", "Deny",
+        "Allow once"}) {
+    CAPTURE(expected);
+    CHECK(result->recorded.wire_output.find(expected) != std::string::npos);
+  }
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames,
+      [](const std::string& frame) { return frame.starts_with("12x4:"); }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("continued after approval") != std::string::npos;
+      }));
+}
+
+TEST_CASE("interactive tool approval defaults to deny and dismissal continues",
+          "[scenario][chat][tools][approval][cancellation]") {
+  const std::vector<std::pair<ApprovalScenarioAction, std::string_view>> cases{
+      {ApprovalScenarioAction::deny, "decision=denied"},
+      {ApprovalScenarioAction::dismiss, "decision=cancelled"},
+  };
+  for (const auto& [action, expected] : cases) {
+    const auto result = testing::run_tui_scenario(approval_scenario(action),
+                                                  approval_factory());
+    INFO((result ? std::string{} : result.error().message));
+    REQUIRE(result);
+    REQUIRE(result->recorded == result->replayed);
+    REQUIRE(result->recorded.semantic_state.find("requests=2|valid|") !=
+            std::string::npos);
+    REQUIRE(result->recorded.semantic_state.find(expected) !=
+            std::string::npos);
+    REQUIRE(result->recorded.semantic_state.find(
+                "started=no|executions=0|remaining=1|completed") !=
+            std::string::npos);
+    REQUIRE(std::ranges::any_of(
+        result->recorded.normalized_frames, [](const std::string& frame) {
+          return frame.find("continued after approval") != std::string::npos;
+        }));
+  }
+}
+
+TEST_CASE("interactive tool approval Ctrl+C cancels the active run",
+          "[scenario][chat][tools][approval][cancellation]") {
+  const auto result = testing::run_tui_scenario(
+      approval_scenario(ApprovalScenarioAction::interrupt), approval_factory());
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state.find(
+              "requests=1|valid|decision=none|started=no|executions=0|"
+              "remaining=1|cancelled") != std::string::npos);
 }
 
 TEST_CASE("interactive tool profile commands remain session local",

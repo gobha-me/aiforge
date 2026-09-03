@@ -1,6 +1,7 @@
 #include <aiforge/adapters/git_exact_source_editor.hpp>
 #include <aiforge/adapters/git_project_instruction_source.hpp>
 #include <aiforge/adapters/git_repository_snapshot_source.hpp>
+#include <aiforge/runtime/repository_read_tool.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -153,6 +154,86 @@ TEST_CASE("Git repository source validates executable and root failures") {
   REQUIRE_FALSE(stopped);
   REQUIRE(stopped.error().code ==
           repository::RepositorySnapshotErrorCode::cancelled);
+
+  auto invalid_policy = adapters::GitRepositorySnapshotSource::open(
+      REPOSITORY_TEST_GIT, static_cast<adapters::GitCommandPolicy>(255));
+  REQUIRE_FALSE(invalid_policy);
+  CHECK(invalid_policy.error().code ==
+        repository::RepositorySnapshotErrorCode::invalid_request);
+}
+
+TEST_CASE("isolated Git observation disables hooks writes and submodule "
+          "recursion") {
+  auto directory = initialized_repository();
+  const auto marker = directory.path() / "fsmonitor-ran";
+  const auto hook = directory.path() / "fsmonitor-hook";
+  write_executable(hook,
+                   "#!/bin/sh\n: > " + shell_quote(marker) + "\nexit 1\n");
+  git(directory.path(), "config core.fsmonitor " + shell_quote(hook));
+  const auto index = directory.path() / ".git/index";
+  const auto index_time = std::filesystem::last_write_time(index);
+
+  auto opened = adapters::GitRepositorySnapshotSource::open(
+      REPOSITORY_TEST_GIT, adapters::GitCommandPolicy::isolated_read_only);
+  REQUIRE(opened);
+  const auto observed = opened->observe({directory.path().string(), {}});
+  INFO((observed ? std::string{} : observed.error().message));
+  REQUIRE(observed);
+  CHECK_FALSE(std::filesystem::exists(marker));
+  CHECK(
+      static_cast<bool>(std::filesystem::last_write_time(index) == index_time));
+
+  TemporaryDirectory scripted;
+  const auto fake_git = scripted.path() / "git";
+  const auto arguments = scripted.path() / "arguments";
+  const auto canonical = std::filesystem::canonical(scripted.path()).string();
+  write_executable(
+      fake_git, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " +
+                    shell_quote(arguments) +
+                    "\ncase \"$*\" in\n"
+                    "  *--show-toplevel*) printf '%s\\n' '" +
+                    canonical +
+                    "' ;;\n"
+                    "  *--show-object-format*) printf 'sha1\\n' ;;\n"
+                    "  *status*) printf '# branch.oid "
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\0# branch.head "
+                    "main\\0' ;;\n"
+                    "  *hash-object*) cat >/dev/null; printf "
+                    "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n' ;;\n"
+                    "  *) exit 1 ;;\n"
+                    "esac\n");
+  auto isolated = adapters::GitRepositorySnapshotSource::open(
+      fake_git.string(), adapters::GitCommandPolicy::isolated_read_only);
+  REQUIRE(isolated);
+  REQUIRE(isolated->observe({scripted.path().string(), {}}));
+  const auto invoked = read_file(arguments);
+  CHECK(invoked.find("--no-optional-locks") != std::string::npos);
+  CHECK(invoked.find("core.fsmonitor=false") != std::string::npos);
+  CHECK(invoked.find("core.hooksPath=/dev/null") != std::string::npos);
+  CHECK(invoked.find("--ignore-submodules=all") != std::string::npos);
+}
+
+TEST_CASE("repository-read registration rejects unsafe or mismatched Git "
+          "observers") {
+  auto standard = adapters::GitRepositorySnapshotSource::open(
+      REPOSITORY_TEST_GIT, adapters::GitCommandPolicy::standard);
+  auto isolated = adapters::GitRepositorySnapshotSource::open(
+      REPOSITORY_TEST_GIT, adapters::GitCommandPolicy::isolated_read_only);
+  auto other_isolated = adapters::GitRepositorySnapshotSource::open(
+      REPOSITORY_TEST_GIT, adapters::GitCommandPolicy::isolated_read_only);
+  REQUIRE(standard);
+  REQUIRE(isolated);
+  REQUIRE(other_isolated);
+  adapters::GitExactSourceEditor editor{
+      *isolated, adapters::GitExactSourceReadPolicy::tracked_regular_files};
+  runtime::ToolRegistry registry;
+
+  REQUIRE_FALSE(runtime::register_repository_read_tool(
+      registry, *standard, editor, {std::filesystem::current_path().string()}));
+  REQUIRE_FALSE(runtime::register_repository_read_tool(
+      registry, *other_isolated, editor,
+      {std::filesystem::current_path().string()}));
+  REQUIRE(registry.snapshot()->empty());
 }
 
 TEST_CASE(
@@ -561,7 +642,8 @@ TEST_CASE(
   const auto baseline = observer.observe({directory.path().string(), {}});
   INFO((baseline ? std::string{} : baseline.error().message));
   REQUIRE(baseline);
-  adapters::GitExactSourceEditor editor{observer};
+  adapters::GitExactSourceEditor editor{
+      observer, adapters::GitExactSourceReadPolicy::any_regular_file};
 
   const auto missing = editor.read({*baseline, "missing.cpp", {}});
   REQUIRE_FALSE(missing);
@@ -587,6 +669,117 @@ TEST_CASE(
   REQUIRE_FALSE(traversal);
   REQUIRE(traversal.error().code ==
           repository::ExactSourceEditErrorCode::invalid_request);
+}
+
+TEST_CASE("tracked exact-source reads exclude metadata ignored and untracked "
+          "files",
+          "[repository][edit][failure]") {
+  auto directory = initialized_repository();
+  write_file(directory.path() / "ignored.txt", "ignored secret\n");
+  write_file(directory.path() / "untracked.txt", "untracked secret\n");
+  write_file(directory.path() / "tracked-link-target.txt", "linked secret\n");
+  std::filesystem::create_symlink("tracked-link-target.txt",
+                                  directory.path() / "tracked-link.txt");
+  git(directory.path(), "add tracked-link.txt");
+
+  auto observer = source();
+  const auto baseline = observer.observe({directory.path().string(), {}});
+  REQUIRE(baseline);
+  adapters::GitExactSourceEditor editor{
+      observer, adapters::GitExactSourceReadPolicy::tracked_regular_files};
+
+  const auto tracked = editor.read({*baseline, "tracked.txt", {}});
+  REQUIRE(tracked);
+  CHECK(tracked->content == "first\n");
+
+  adapters::GitExactSourceEditor invalid_policy{
+      observer, static_cast<adapters::GitExactSourceReadPolicy>(255)};
+  const auto invalid = invalid_policy.read({*baseline, "tracked.txt", {}});
+  REQUIRE_FALSE(invalid);
+  CHECK(invalid.error().code ==
+        repository::ExactSourceEditErrorCode::invalid_request);
+
+  for (const auto* relative :
+       {"ignored.txt", "untracked.txt", ".git/config", "tracked-link.txt"}) {
+    const auto rejected = editor.read({*baseline, relative, {}});
+    INFO(relative);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code ==
+          repository::ExactSourceEditErrorCode::unsupported_entry);
+  }
+}
+
+TEST_CASE("exact-source reads reject a replaced repository root",
+          "[repository][edit][concurrency]") {
+  TemporaryDirectory container;
+  const auto root = container.path() / "repository";
+  const auto displaced = container.path() / "displaced";
+  const auto outside = container.path() / "outside";
+  std::filesystem::create_directories(root);
+  std::filesystem::create_directories(outside);
+  git(root, "init -q");
+  git(root, "config user.email test@example.invalid");
+  git(root, "config user.name Test");
+  write_file(root / "tracked.txt", "inside\n");
+  git(root, "add tracked.txt");
+  git(root, "commit -qm initial");
+  write_file(outside / "tracked.txt", "outside secret\n");
+
+  auto observer = source();
+  const auto baseline = observer.observe({root.string(), {}});
+  REQUIRE(baseline);
+  adapters::GitExactSourceEditor editor{observer};
+
+  std::filesystem::rename(root, displaced);
+  std::filesystem::create_directory_symlink(outside, root);
+  const auto rejected = editor.read({*baseline, "tracked.txt", {}});
+  std::filesystem::remove(root);
+  std::filesystem::rename(displaced, root);
+
+  REQUIRE_FALSE(rejected);
+  CHECK(rejected.error().code ==
+        repository::ExactSourceEditErrorCode::outside_repository);
+}
+
+TEST_CASE("tracked reads reject bytes raced between index checks",
+          "[repository][edit][concurrency][security]") {
+  auto directory = initialized_repository();
+  TemporaryDirectory controls;
+  const auto marker = controls.path() / "race-triggered";
+  const auto wrapper = controls.path() / "git-wrapper";
+  const auto tracked = directory.path() / "tracked.txt";
+  write_executable(wrapper,
+                   "#!/bin/sh\n"
+                   "case \" $* \" in\n"
+                   "  *\" ls-files --stage \"*)\n"
+                   "    if [ ! -e " +
+                       shell_quote(marker) +
+                       " ]; then printf 'outside secret\\n' > " +
+                       shell_quote(tracked) + "; : > " + shell_quote(marker) +
+                       "; fi ;;\n"
+                       "  *\" hash-object --stdin \"*)\n"
+                       "    if [ -e " +
+                       shell_quote(marker) + " ]; then printf 'first\\n' > " +
+                       shell_quote(tracked) +
+                       "; fi ;;\n"
+                       "esac\n"
+                       "exec " +
+                       shell_quote(std::filesystem::path{REPOSITORY_TEST_GIT}) +
+                       " \"$@\"\n");
+
+  auto observer = adapters::GitRepositorySnapshotSource::open(wrapper.string());
+  REQUIRE(observer);
+  const auto baseline = observer->observe({directory.path().string(), {}});
+  REQUIRE(baseline);
+  adapters::GitExactSourceEditor editor{
+      *observer, adapters::GitExactSourceReadPolicy::tracked_regular_files};
+
+  const auto rejected = editor.read({*baseline, "tracked.txt", {}});
+  REQUIRE_FALSE(rejected);
+  CHECK(rejected.error().code ==
+        repository::ExactSourceEditErrorCode::source_mismatch);
+  CHECK(read_file(tracked) == "first\n");
+  CHECK(std::filesystem::exists(marker));
 }
 
 TEST_CASE(

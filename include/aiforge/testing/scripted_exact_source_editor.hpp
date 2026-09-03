@@ -30,7 +30,18 @@ class ScriptedExactSourceEditor final : public repository::ExactSourceEditor {
  public:
   explicit ScriptedExactSourceEditor(
       std::vector<ExactSourceReadExchange> read_exchanges = {},
-      std::vector<ExactSourceEditExchange> edit_exchanges = {});
+      std::vector<ExactSourceEditExchange> edit_exchanges = {},
+      bool guarantees_tracked_regular_files = false);
+
+  [[nodiscard]] auto guarantees_tracked_regular_files() const noexcept
+      -> bool override;
+  [[nodiscard]] auto guarantees_read_only_execution() const noexcept
+      -> bool override;
+  [[nodiscard]] auto is_coupled_to(
+      const repository::RepositorySnapshotSource& source) const noexcept
+      -> bool override;
+  void couple_to(const repository::RepositorySnapshotSource& source,
+                 bool guarantees_tracked_regular_files) noexcept;
 
   [[nodiscard]] auto read(repository::ExactSourceReadRequest request,
                           std::stop_token stop_token = {})
@@ -54,6 +65,8 @@ class ScriptedExactSourceEditor final : public repository::ExactSourceEditor {
   std::vector<ExactSourceEditExchange> m_edit_exchanges;
   std::vector<repository::ExactSourceReadRequest> m_recorded_read_requests;
   std::vector<repository::ExactSourceEditRequest> m_recorded_edit_requests;
+  const repository::RepositorySnapshotSource* m_snapshot_source{};
+  bool m_guarantees_tracked_regular_files{};
   std::size_t m_next_read_exchange{};
   std::size_t m_next_edit_exchange{};
 };

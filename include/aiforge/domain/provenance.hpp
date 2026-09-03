@@ -106,6 +106,36 @@ struct ToolProfileProvenance {
   auto operator==(const ToolProfileProvenance&) const -> bool = default;
 };
 
+// Launch policy is durable authority metadata, not presentation state. These
+// closed values intentionally mirror the user-visible launch controls without
+// depending on the runtime policy implementation.
+enum class ToolRestrictionLevel {
+  high,
+  medium,
+  low,
+  none,
+};
+
+enum class ToolApprovalMode {
+  prompt,
+  automatic,
+  allow_all,
+};
+
+// The identity versions the interpretation of the closed fields. Tool
+// registration provenance separately binds the exact per-run declarations;
+// this record binds the application-lifetime ceiling that constrained them.
+struct ToolPolicyProvenance {
+  std::string identity;
+  PermissionProfileId permission_profile_id;
+  ToolRestrictionLevel restriction_level{ToolRestrictionLevel::high};
+  ToolApprovalMode approval_mode{ToolApprovalMode::prompt};
+  std::vector<Effect> effect_ceiling;
+  std::vector<CapabilityScope> capability_ceiling;
+  std::vector<std::string> automatically_eligible_tools;
+  auto operator==(const ToolPolicyProvenance&) const -> bool = default;
+};
+
 // Effective request options distinguish provider defaults from values selected
 // by durable configuration or the active interactive session. This is a
 // deliberately closed domain enum rather than a configuration-layer type so
@@ -133,11 +163,12 @@ struct RunProvenance {
   std::optional<CredentialSourceReference> credential_source;
   std::vector<ConfigurationProvenanceEntry> configuration;
   std::vector<RuntimeComponentVersion> components;
-  // Owned by the run kernel, which fills it from the run's tool registry
-  // snapshot. A caller submits this empty.
+  // Tool registration and launch-policy provenance are owned by the run
+  // kernel. A caller submits both empty.
   std::vector<ToolProvenanceEntry> tools;
   std::vector<EffectiveRequestOption> effective_request_options{};
   std::optional<ToolProfileProvenance> tool_profile{};
+  std::optional<ToolPolicyProvenance> tool_policy{};
   auto operator==(const RunProvenance&) const -> bool = default;
 };
 
@@ -155,6 +186,9 @@ struct RunProvenanceLimits {
   std::size_t maximum_request_option_key_bytes{128};
   std::size_t maximum_request_option_value_bytes{std::size_t{4} * 1024U};
   std::size_t maximum_total_bytes{std::size_t{64} * 1024U};
+  std::size_t maximum_policy_effects{16};
+  std::size_t maximum_policy_scopes{1024};
+  std::size_t maximum_automatic_tools{256};
   auto operator==(const RunProvenanceLimits&) const -> bool = default;
 };
 
@@ -173,6 +207,7 @@ enum class RunProvenanceErrorCode {
   invalid_request_option,
   resource_exhausted,
   invalid_tool_profile,
+  invalid_tool_policy,
 };
 
 struct RunProvenanceError {
@@ -182,6 +217,10 @@ struct RunProvenanceError {
   std::string message;
   auto operator==(const RunProvenanceError&) const -> bool = default;
 };
+
+[[nodiscard]] auto validate_tool_policy_provenance(
+    const ToolPolicyProvenance& provenance, RunProvenanceLimits limits = {})
+    -> std::expected<void, RunProvenanceError>;
 
 [[nodiscard]] auto validate_run_provenance(const RunProvenance& provenance,
                                            RunProvenanceLimits limits = {})

@@ -68,6 +68,9 @@ namespace {
 const std::array kBuiltinProfiles{
     ToolProfile{
         make_id("essentials"), "Essentials", {"ask_user", "propose_memory"}},
+    ToolProfile{make_id("repository-read"),
+                "Repository read",
+                {"ask_user", "propose_memory", "read_repository_file"}},
     ToolProfile{make_id("off"), "Off", {}},
 };
 // clang-format on

@@ -75,6 +75,8 @@ class InteractiveCommand {
     std::optional<std::string> model;
     std::optional<domain::SessionSpendCeiling> session_spend_ceiling;
     std::optional<std::string> web_search;
+    std::optional<std::string> tool_restriction;
+    std::optional<std::string> tool_approval;
   };
 
   [[nodiscard]] virtual auto execute(Request request,

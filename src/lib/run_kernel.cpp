@@ -2402,14 +2402,18 @@ auto RunKernel::open_durable(DurableSessionOpen session,
 
       std::optional<domain::RunId> awaiting_run;
       std::optional<domain::RunId> awaiting_plan_run;
+      bool awaiting_tool_approval{};
       for (const auto& [run_id, projection] : projections) {
-        if (projection.status() == domain::RunStatus::awaiting_input) {
+        if (projection.status() == domain::RunStatus::awaiting_input ||
+            projection.status() == domain::RunStatus::awaiting_approval) {
           if (awaiting_run || awaiting_plan_run) {
             return std::unexpected(kernel_error(
                 RunKernelErrorCode::replay_rejected,
                 "durable session contains multiple awaiting runs"));
           }
           awaiting_run = run_id;
+          awaiting_tool_approval =
+              projection.status() == domain::RunStatus::awaiting_approval;
         } else if (projection.status() ==
                        domain::RunStatus::awaiting_plan_decision ||
                    projection.status() ==
@@ -2430,22 +2434,26 @@ auto RunKernel::open_durable(DurableSessionOpen session,
         }
       }
       if (awaiting_run) {
-        std::optional<domain::InvocationId> invocation_id;
+        std::optional<domain::InvocationId> question_invocation_id;
         std::optional<domain::RunStarted> started;
         std::optional<std::vector<domain::ToolProvenanceEntry>>
             provenance_tools;
+        std::optional<domain::ToolPolicyProvenance> provenance_policy;
         std::vector<domain::InvocationId> current_batch;
         std::map<domain::InvocationId, domain::ToolProposed> proposals;
         std::map<domain::InvocationId, domain::PolicyDecision> policy_decisions;
         std::map<domain::InvocationId, std::vector<domain::CapabilityScope>>
             policy_scopes;
+        std::map<domain::InvocationId, domain::PolicyDecisionSource>
+            policy_sources;
         std::map<domain::InvocationId, domain::ApprovalDecision>
             approval_decisions;
         std::map<domain::InvocationId, std::vector<domain::CapabilityScope>>
             approval_scopes;
         std::map<domain::InvocationId, domain::ApprovalGrantLifetime>
             approval_lifetimes;
-        std::set<domain::InvocationId> approval_requested;
+        std::map<domain::InvocationId, std::vector<domain::CapabilityScope>>
+            approval_requests;
         std::map<domain::InvocationId, std::vector<domain::QuestionDefinition>>
             questions;
         std::map<domain::InvocationId, domain::MessageId> terminal_message_ids;
@@ -2460,16 +2468,18 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                          std::get_if<domain::RunProvenanceRecorded>(
                              &event.payload)) {
             provenance_tools = value->provenance.tools;
+            provenance_policy = value->provenance.tool_policy;
           } else if (std::holds_alternative<domain::InferenceStarted>(
                          event.payload)) {
             current_batch.clear();
             proposals.clear();
             policy_decisions.clear();
             policy_scopes.clear();
+            policy_sources.clear();
             approval_decisions.clear();
             approval_scopes.clear();
             approval_lifetimes.clear();
-            approval_requested.clear();
+            approval_requests.clear();
             questions.clear();
             terminal_message_ids.clear();
             tool_started.clear();
@@ -2488,6 +2498,8 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                 !policy_decisions.emplace(value->invocation_id, value->decision)
                      .second ||
                 !policy_scopes.emplace(value->invocation_id, value->scopes)
+                     .second ||
+                !policy_sources.emplace(value->invocation_id, value->source)
                      .second) {
               return std::unexpected(kernel_error(
                   RunKernelErrorCode::replay_rejected,
@@ -2500,7 +2512,9 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             if (!proposals.contains(value->invocation_id) ||
                 policy == policy_decisions.end() ||
                 policy->second != domain::PolicyDecision::require_approval ||
-                !approval_requested.insert(value->invocation_id).second) {
+                !approval_requests
+                     .emplace(value->invocation_id, value->requested_scopes)
+                     .second) {
               return std::unexpected(kernel_error(
                   RunKernelErrorCode::replay_rejected,
                   "queued tool history repeats or misorders approval"));
@@ -2508,7 +2522,7 @@ auto RunKernel::open_durable(DurableSessionOpen session,
           } else if (const auto* value =
                          std::get_if<domain::ToolApprovalDecided>(
                              &event.payload)) {
-            if (!approval_requested.contains(value->invocation_id) ||
+            if (!approval_requests.contains(value->invocation_id) ||
                 !approval_decisions
                      .emplace(value->invocation_id, value->decision)
                      .second ||
@@ -2548,18 +2562,19 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             }
           } else if (std::holds_alternative<domain::RunAwaitingInput>(
                          event.payload)) {
-            invocation_id = event.metadata.invocation_id;
+            question_invocation_id = event.metadata.invocation_id;
           }
         }
-        if (!invocation_id || !started) {
+        if (!started || (!awaiting_tool_approval && !question_invocation_id)) {
           return std::unexpected(
               kernel_error(RunKernelErrorCode::replay_rejected,
-                           "awaiting question history lacks runtime identity"));
+                           "awaiting tool history lacks runtime identity"));
         }
-        if (!proposals.contains(*invocation_id) ||
-            !tool_started.contains(*invocation_id) ||
-            tool_terminal.contains(*invocation_id) ||
-            !valid_question_definitions(questions[*invocation_id])) {
+        if (!awaiting_tool_approval &&
+            (!proposals.contains(*question_invocation_id) ||
+             !tool_started.contains(*question_invocation_id) ||
+             tool_terminal.contains(*question_invocation_id) ||
+             !valid_question_definitions(questions[*question_invocation_id]))) {
           return std::unexpected(
               kernel_error(RunKernelErrorCode::replay_rejected,
                            "awaiting question history is incomplete"));
@@ -2568,6 +2583,25 @@ auto RunKernel::open_durable(DurableSessionOpen session,
           return std::unexpected(kernel_error(
               RunKernelErrorCode::replay_rejected,
               "pending tool recovery requires registration provenance"));
+        }
+        const bool nonterminal_authority =
+            std::ranges::any_of(current_batch, [&](const auto& invocation_id) {
+              const auto proposal = proposals.find(invocation_id);
+              return proposal != proposals.end() &&
+                     !tool_terminal.contains(invocation_id) &&
+                     !proposal->second.declared_effects.empty();
+            });
+        const auto* current_policy_provenance =
+            kernel->m_impl->policy->provenance();
+        if (nonterminal_authority) {
+          if (!provenance_policy || current_policy_provenance == nullptr ||
+              *provenance_policy != *current_policy_provenance ||
+              provenance_policy->permission_profile_id !=
+                  started->permission_profile_id) {
+            return std::unexpected(kernel_error(
+                RunKernelErrorCode::replay_rejected,
+                "pending tool authority policy changed during replay"));
+          }
         }
         std::vector<std::string> names;
         names.reserve(provenance_tools->size());
@@ -2600,6 +2634,7 @@ auto RunKernel::open_durable(DurableSessionOpen session,
         }
         auto active_tools = std::move(*selected_tools);
         std::map<domain::InvocationId, Impl::PendingInvocation> invocations;
+        std::size_t pending_approval_count{};
         for (const auto& current_id : current_batch) {
           const auto proposed = proposals.find(current_id);
           if (proposed == proposals.end()) {
@@ -2617,10 +2652,10 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                   "queued tool was not declared for the originating run"));
             }
             return std::unexpected(kernel_error(
-                current_id == *invocation_id
+                question_invocation_id && current_id == *question_invocation_id
                     ? RunKernelErrorCode::interactive_input_unavailable
                     : RunKernelErrorCode::replay_rejected,
-                current_id == *invocation_id
+                question_invocation_id && current_id == *question_invocation_id
                     ? "pending ask_user input is unavailable on this surface"
                     : "queued tool is unavailable during replay"));
           }
@@ -2670,6 +2705,48 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                   RunKernelErrorCode::replay_rejected,
                   "queued tool policy scopes are invalid during replay"));
             }
+            const auto approval_request = approval_requests.find(current_id);
+            if ((policy->second == domain::PolicyDecision::require_approval) !=
+                    (approval_request != approval_requests.end()) ||
+                (approval_request != approval_requests.end() &&
+                 approval_request->second != scopes)) {
+              return std::unexpected(
+                  kernel_error(RunKernelErrorCode::replay_rejected,
+                               "queued tool approval request scopes are "
+                               "invalid during replay"));
+            }
+          }
+          if (!tool_terminal.contains(current_id) &&
+              !proposed->second.declared_effects.empty()) {
+            if (policy == policy_decisions.end()) {
+              return std::unexpected(kernel_error(
+                  RunKernelErrorCode::replay_rejected,
+                  "queued authority has no policy decision during replay"));
+            }
+            std::expected<ToolPolicyResolution, ToolPolicyError>
+                current_resolution = std::unexpected(ToolPolicyError{
+                    ToolPolicyErrorCode::internal_failure,
+                    "tool policy replay validation failed internally", false});
+            try {
+              current_resolution = kernel->m_impl->policy->evaluate(
+                  ToolPolicyRequest{event_log.session_id(), *awaiting_run,
+                                    current_id, started->permission_profile_id,
+                                    proposed->second.tool_name,
+                                    proposed->second.declared_effects,
+                                    proposed->second.requested_scopes});
+            } catch (...) {
+              current_resolution = std::unexpected(ToolPolicyError{
+                  ToolPolicyErrorCode::internal_failure,
+                  "tool policy replay validation failed internally", false});
+            }
+            if (!current_resolution ||
+                current_resolution->decision != policy->second ||
+                current_resolution->scopes != policy_scopes.at(current_id) ||
+                current_resolution->source != policy_sources.at(current_id)) {
+              return std::unexpected(kernel_error(
+                  RunKernelErrorCode::replay_rejected,
+                  "queued tool policy decision changed during replay"));
+            }
           }
           const auto approval = approval_decisions.find(current_id);
           if (approval != approval_decisions.end()) {
@@ -2697,7 +2774,8 @@ auto RunKernel::open_durable(DurableSessionOpen session,
           std::optional<ToolPolicyRequest> policy_request;
           if (tool_terminal.contains(current_id)) {
             state = Impl::InvocationState::terminal;
-          } else if (current_id == *invocation_id) {
+          } else if (question_invocation_id &&
+                     current_id == *question_invocation_id) {
             if (proposed->second.tool_name != "ask_user" ||
                 !policy_decisions.contains(current_id) ||
                 policy_decisions.at(current_id) !=
@@ -2728,12 +2806,13 @@ auto RunKernel::open_durable(DurableSessionOpen session,
           } else if (policy_decisions.contains(current_id) &&
                      policy_decisions.at(current_id) ==
                          domain::PolicyDecision::require_approval) {
-            if (!approval_requested.contains(current_id)) {
+            if (!approval_requests.contains(current_id)) {
               return std::unexpected(kernel_error(
                   RunKernelErrorCode::replay_rejected,
                   "queued tool approval request is missing during replay"));
             }
             state = Impl::InvocationState::awaiting_approval;
+            ++pending_approval_count;
             policy_request =
                 ToolPolicyRequest{event_log.session_id(),
                                   *awaiting_run,
@@ -2782,6 +2861,11 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                   std::move(policy_request), state, 0, 0,
                   tool_terminal.contains(current_id),
                   std::move(invocation_questions)});
+        }
+        if (awaiting_tool_approval && pending_approval_count == 0) {
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::replay_rejected,
+              "awaiting approval history has no pending invocation"));
         }
         kernel->m_impl->active = Impl::ActiveRun{*awaiting_run,
                                                  started->permission_profile_id,
@@ -2893,6 +2977,7 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
       requested_tool_names.push_back(declaration.name);
     }
     auto effective_tools = m_impl->tools.subset(requested_tool_names);
+    const auto* policy_provenance = m_impl->policy->provenance();
     if (start.user_message.role != domain::Role::user ||
         !start.user_message.tool_calls.empty() ||
         start.request.assistant_message_id == start.user_message.message_id ||
@@ -2906,6 +2991,14 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
       return std::unexpected(kernel_error(
           RunKernelErrorCode::invalid_start,
           "run start contains invalid identity or tool declarations"));
+    }
+    if ((policy_provenance != nullptr &&
+         policy_provenance->permission_profile_id !=
+             start.attributes.permission_profile_id) ||
+        (start.provenance && start.provenance->tool_policy)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "run start policy provenance is inconsistent or caller-owned"));
     }
     std::vector<domain::ToolProvenanceEntry> effective_tool_provenance;
     effective_tool_provenance.reserve(effective_tools->size());
@@ -2990,6 +3083,9 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
                          "run provenance tool identity is kernel-owned"));
       }
       start.provenance->tools = std::move(effective_tool_provenance);
+      if (policy_provenance != nullptr) {
+        start.provenance->tool_policy = *policy_provenance;
+      }
       // Validated before anything is recorded so an ephemeral run cannot carry
       // a sensitive value into the in-memory log either.
       if (auto valid = domain::validate_run_provenance(*start.provenance);
@@ -4542,6 +4638,21 @@ auto RunKernel::active_inference_id() const noexcept
 auto RunKernel::active_tool_declarations() const noexcept
     -> const std::vector<backend::ToolDeclaration>* {
   return m_impl->active ? &m_impl->active->tools.declarations() : nullptr;
+}
+
+auto RunKernel::pending_tool_approval() const
+    -> std::optional<PendingToolApproval> {
+  if (!m_impl->active) return std::nullopt;
+  for (const auto& invocation_id : m_impl->active->invocation_order) {
+    const auto& invocation = m_impl->active->invocations.at(invocation_id);
+    if (invocation.state == Impl::InvocationState::awaiting_approval &&
+        !invocation.terminal_event_seen) {
+      return PendingToolApproval{
+          m_impl->active->run_id, invocation_id, invocation.declaration.name,
+          invocation.requested_effects, invocation.requested_scopes};
+    }
+  }
+  return std::nullopt;
 }
 
 auto RunKernel::pending_question_input() const

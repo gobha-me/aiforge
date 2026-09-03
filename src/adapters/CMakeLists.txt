@@ -23,6 +23,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   process_image.cpp
   termforge_run_bridge.cpp
   termforge_image_renderer.cpp
+  tool_approval_dialog.cpp
   transcript_view.cpp
   tui_scenario.cpp
   venice_backend.cpp
