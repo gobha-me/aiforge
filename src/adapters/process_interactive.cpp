@@ -1,3 +1,4 @@
+#include <aiforge/adapters/ask_user_dialog.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
 #include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
@@ -18,8 +19,10 @@
 #include <aiforge/config/file_store.hpp>
 #include <aiforge/config/provenance.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
+#include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/runtime/memory_controller.hpp>
 #include <aiforge/runtime/memory_tool.hpp>
+#include <aiforge/runtime/tool_profiles.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
 #include <aiforge/surfaces/slash_commands.hpp>
@@ -833,11 +836,41 @@ class ChatAppImpl final : public InteractiveChatApp {
   auto on_start() -> void override {
     if (m_rendered_output != nullptr) driver().set_output(m_rendered_output);
     sync_composer_focus();
-    ensure_plan_review();
+    if (ensure_question_dialog() && !m_question_dialog_active) {
+      ensure_plan_review();
+    }
   }
 
+  // clang-format off
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit modal input routing preserves deterministic precedence.
   auto on_event(const termforge::Event& event) -> void override {
+    // clang-format on
     if (!m_session) return;
+    if (m_question_dialog_active) {
+      if (const auto* key = std::get_if<termforge::KeyEvent>(&event);
+          key != nullptr && key->action == termforge::KeyAction::Press &&
+          key->ctrl && key->key == termforge::Key::Char && key->ch == U'c') {
+        pop_modal();
+        m_question_dialog_active = false;
+        m_question_controller.reset();
+        m_question_dialog.reset();
+        auto cancelled = m_session->cancel_active("interrupt");
+        if (!cancelled) {
+          fail(session_error(cancelled.error()));
+          return;
+        }
+        auto events = m_session->drain();
+        if (!events) {
+          fail(session_error(events.error()));
+          return;
+        }
+        if (!apply_events(*events)) return;
+        m_status = "Run cancelled";
+        return;
+      }
+      termforge::App::on_event(event);
+      return;
+    }
     auto bridged = m_bridge.handle(event, *m_session);
     if (!bridged) {
       fail(session_error(bridged.error()));
@@ -944,7 +977,8 @@ class ChatAppImpl final : public InteractiveChatApp {
       }
       if (!apply_events(*drained)) return;
     }
-    ensure_plan_review();
+    if (!ensure_question_dialog()) return;
+    if (!m_question_dialog_active) ensure_plan_review();
     if (m_stop_token.stop_requested()) {
       if (m_session->active()) {
         auto cancelled = m_session->cancel_active("interrupt");
@@ -2056,6 +2090,18 @@ class ChatAppImpl final : public InteractiveChatApp {
         if (!show_request_settings()) return false;
         m_composer.clear();
         return true;
+      case surfaces::SlashCommandAction::manage_tool_profile:
+        if (!show_tool_profiles()) return false;
+        m_composer.clear();
+        return true;
+      case surfaces::SlashCommandAction::select_tool_profile:
+        if (!command.subject) {
+          m_status = "A tool profile is required";
+          return false;
+        }
+        return select_tool_profile(*command.subject);
+      case surfaces::SlashCommandAction::disable_tools:
+        return select_tool_profile("off");
       case surfaces::SlashCommandAction::set_reasoning_visibility: {
         if (!command.subject) {
           m_status = "Reasoning visibility is required";
@@ -2995,6 +3041,158 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
+  [[nodiscard]] auto tool_profile_summary(
+      const runtime::ToolProfileResolution& state) const -> std::string {
+    std::string summary = "Selected " + state.selected_profile.name + ".";
+    if (state.effective_tools.empty()) {
+      summary += " Effective tools: none.";
+    } else {
+      summary += " Effective tools:";
+      for (const auto& declaration : state.effective_tools.declarations()) {
+        summary += " " + declaration.name;
+      }
+      summary += ".";
+    }
+    for (const auto& availability : state.tool_availability) {
+      if (availability.reason ==
+          runtime::ToolProfileAvailabilityReason::available) {
+        continue;
+      }
+      summary += " " + availability.tool_name + ": ";
+      summary +=
+          runtime::tool_profile_availability_reason_text(availability.reason);
+      summary += ".";
+    }
+    return summary;
+  }
+
+  auto select_tool_profile(const std::string_view profile) -> bool {
+    auto profile_id = domain::ToolProfileId::from(std::string{profile});
+    if (!profile_id) {
+      m_status = "Tool profile identity is invalid";
+      return false;
+    }
+    auto selected = m_session->select_tool_profile(std::move(*profile_id));
+    if (!selected) {
+      m_status = selected.error().message;
+      return false;
+    }
+    auto state = m_session->tool_profile_state();
+    if (!state) {
+      m_status = state.error().message;
+      return false;
+    }
+    m_help_visible = false;
+    m_composer.clear();
+    m_status = tool_profile_summary(*state);
+    return true;
+  }
+
+  auto show_tool_profiles() -> bool {
+    if (m_session->active()) {
+      m_status = "Finish or cancel the active run before selecting tools";
+      return false;
+    }
+    auto state = m_session->tool_profile_state();
+    if (!state) {
+      m_status = state.error().message;
+      return false;
+    }
+    if (!m_tool_profile_dialog) {
+      m_tool_profile_dialog = std::make_unique<termforge::ChoiceWizardDialog>();
+    }
+    termforge::ChoiceWizardPage page;
+    page.title = "Chat tools";
+    page.text = tool_profile_summary(*state) +
+                " Selection changes declarations only; it grants no authority.";
+    page.mode = termforge::ChoiceMode::Single;
+    page.minimum_selected = 1;
+    page.maximum_selected = 1;
+    std::vector<domain::ToolProfileId> profile_ids;
+    for (const auto& profile : runtime::builtin_tool_profiles()) {
+      profile_ids.push_back(profile.profile_id);
+      std::string description = profile.tool_names.empty()
+                                    ? "Advertise no model-callable tools."
+                                    : "Zero-authority tools:";
+      for (const auto& tool : profile.tool_names)
+        description += " " + tool;
+      page.choices.push_back({profile.name, std::move(description)});
+      if (profile.profile_id == state->selected_profile.profile_id) {
+        page.selected_indices = {profile_ids.size() - 1};
+      }
+    }
+    if (page.selected_indices.empty() ||
+        !m_tool_profile_dialog->set_pages({std::move(page)})) {
+      m_status = "Tool profile dialog rejected its choices";
+      return false;
+    }
+    m_tool_profile_dialog->on_result(
+        [this, profile_ids = std::move(profile_ids)](
+            std::optional<termforge::ChoiceWizardResult> result) mutable {
+          pop_modal();
+          m_tool_profile_dialog_active = false;
+          if (!result || result->pages.size() != 1 ||
+              result->pages.front().selected_indices.size() != 1) {
+            m_status = "Tool profile unchanged";
+            return;
+          }
+          const auto selected = result->pages.front().selected_indices.front();
+          if (selected >= profile_ids.size()) {
+            m_status = "Tool profile dialog returned an invalid choice";
+            return;
+          }
+          static_cast<void>(select_tool_profile(profile_ids[selected].value()));
+        });
+    m_tool_profile_dialog_active = true;
+    push_modal(*m_tool_profile_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                        .dismiss_on_click_outside = false});
+    m_status = "Choose a Chat tool profile";
+    return true;
+  }
+
+  auto ensure_question_dialog() -> bool {
+    if (m_question_dialog_active) return true;
+    const auto pending = m_session->pending_question_input();
+    if (!pending) return true;
+    if (modal()) {
+      m_status = "A model question is waiting for the active dialog to close";
+      return true;
+    }
+    if (!m_question_dialog) {
+      m_question_dialog = std::make_unique<termforge::ChoiceWizardDialog>();
+      m_question_controller =
+          std::make_unique<AskUserDialogController>(*m_question_dialog);
+    }
+    auto presented =
+        m_question_controller->present(*pending, *m_session, [this] {
+          const bool was_cancelled = m_question_controller->was_cancelled();
+          pop_modal();
+          m_question_dialog_active = false;
+          if (const auto& failure = m_question_controller->last_error();
+              failure) {
+            fail({cli::CommandFailureKind::runtime, failure->message});
+            return;
+          }
+          auto events = m_session->drain();
+          if (!events) {
+            fail(session_error(events.error()));
+            return;
+          }
+          if (!apply_events(*events)) return;
+          m_status = was_cancelled ? "Question cancelled; continuing run"
+                                   : "Answer recorded; continuing run";
+        });
+    if (!presented) {
+      m_status = presented.error().message;
+      return false;
+    }
+    m_question_dialog_active = true;
+    push_modal(*m_question_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                    .dismiss_on_click_outside = false});
+    m_status = "The model needs input";
+    return true;
+  }
+
   [[nodiscard]] auto apply_events(const std::vector<domain::RunEvent>& events)
       -> bool {
     for (const auto& event : events) {
@@ -3014,7 +3212,8 @@ class ChatAppImpl final : public InteractiveChatApp {
       auto applied = m_transcript.apply(event);
       if (!applied) {
         fail({cli::CommandFailureKind::runtime,
-              "interactive transcript update failed"});
+              "interactive transcript update failed: " +
+                  applied.error().message});
         return false;
       }
       if (std::holds_alternative<domain::RunCompleted>(event.payload)) {
@@ -3027,7 +3226,7 @@ class ChatAppImpl final : public InteractiveChatApp {
       }
     }
     sync_composer_focus();
-    return true;
+    return ensure_question_dialog();
   }
 
   auto fail(cli::CommandFailure value) -> void {
@@ -3071,6 +3270,9 @@ class ChatAppImpl final : public InteractiveChatApp {
   std::unique_ptr<ModelPickerDialog> m_model_picker;
   std::unique_ptr<ProviderCharacterPickerDialog> m_provider_character_picker;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_settings_dialog;
+  std::unique_ptr<termforge::ChoiceWizardDialog> m_tool_profile_dialog;
+  std::unique_ptr<termforge::ChoiceWizardDialog> m_question_dialog;
+  std::unique_ptr<AskUserDialogController> m_question_controller;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_persona_manager_dialog;
   std::unique_ptr<PersonaEditorDialog> m_persona_editor_dialog;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_plan_dialog;
@@ -3078,6 +3280,8 @@ class ChatAppImpl final : public InteractiveChatApp {
   bool m_plan_review_active{};
   bool m_close_dialog_active{};
   bool m_settings_dialog_active{};
+  bool m_tool_profile_dialog_active{};
+  bool m_question_dialog_active{};
   bool m_persona_manager_active{};
   bool m_persona_editor_active{};
   std::optional<std::pair<domain::SessionId, domain::PlanRevisionId>>
@@ -3355,14 +3559,19 @@ auto ProcessInteractiveCommand::execute(Request request,
           return failure(cli::CommandFailureKind::runtime,
                          registered.error().message);
         }
-        auto snapshot = tool_registry.snapshot();
-        if (!snapshot) {
-          return failure(cli::CommandFailureKind::runtime,
-                         snapshot.error().message);
-        }
-        tools = std::move(*snapshot);
       }
     }
+    if (auto registered = runtime::register_ask_user_tool(tool_registry, true);
+        !registered) {
+      return failure(cli::CommandFailureKind::runtime,
+                     registered.error().message);
+    }
+    auto tool_snapshot = tool_registry.snapshot();
+    if (!tool_snapshot) {
+      return failure(cli::CommandFailureKind::runtime,
+                     tool_snapshot.error().message);
+    }
+    tools = std::move(*tool_snapshot);
 
     InteractiveChatAppOptions app_options;
     app_options.model_catalog = &(*catalog)->service();

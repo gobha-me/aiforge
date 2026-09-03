@@ -64,6 +64,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   task_scheduler.cpp
   transcript_projection.cpp
   tool_policy.cpp
+  tool_profiles.cpp
   tool_registry.cpp
   usage_ledger.cpp
   verification_evidence.cpp

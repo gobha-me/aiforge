@@ -6,6 +6,7 @@
 #include <aiforge/runtime/memory_controller.hpp>
 #include <aiforge/runtime/plan_task_controller.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
+#include <aiforge/runtime/tool_profiles.hpp>
 #include <aiforge/storage/session_store.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -148,6 +149,16 @@ class ChatSession final {
   [[nodiscard]] auto cancel_active(
       std::optional<std::string> reason = std::nullopt)
       -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto pending_question_input() const
+      -> std::optional<runtime::PendingQuestionInput>;
+  [[nodiscard]] auto answer_questions(
+      const domain::RunId& run_id, const domain::InvocationId& invocation_id,
+      std::vector<domain::QuestionAnswer> answers)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto cancel_questions(
+      const domain::RunId& run_id, const domain::InvocationId& invocation_id,
+      std::optional<std::string> reason = std::nullopt)
+      -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto list_personas()
       -> std::expected<std::vector<domain::PersonaSummary>, ChatSessionError>;
   [[nodiscard]] auto load_persona(std::string name)
@@ -162,6 +173,10 @@ class ChatSession final {
       -> std::expected<persona::PersonaWriteReceipt, ChatSessionError>;
   [[nodiscard]] auto select_model(domain::ModelId model_id)
       -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto select_tool_profile(domain::ToolProfileId profile_id)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto tool_profile_state() const
+      -> std::expected<runtime::ToolProfileResolution, ChatSessionError>;
   [[nodiscard]] auto set_generation_options(
       backend::GenerationOptions options,
       std::vector<domain::EffectiveRequestOption> effective_request_options,
@@ -216,6 +231,8 @@ class ChatSession final {
  private:
   struct Impl;
   explicit ChatSession(std::unique_ptr<Impl> impl);
+  [[nodiscard]] auto continue_if_ready()
+      -> std::expected<std::vector<domain::RunEvent>, ChatSessionError>;
   std::unique_ptr<Impl> m_impl;
 };
 

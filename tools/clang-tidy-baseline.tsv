@@ -153,7 +153,6 @@ src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	1
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	1cae3bdecf86de8b0b0d	function 'manage_memory' has cognitive complexity of 84 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	36028207f0f5b9ba595e	function 'switch_session' has cognitive complexity of 23 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	39b0e565bfcd66520988	function 'request_close' has cognitive complexity of 50 (threshold 20)
-src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	50ab4a6afac48443a492	function 'on_event' has cognitive complexity of 65 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	7c3209940c7bc6a277b6	function 'on_render' has cognitive complexity of 27 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	c8e01de8f7f20ca090b4	function 'ensure_plan_review' has cognitive complexity of 64 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	d2b512e48c1c32a25b60	lambda has cognitive complexity of 21 (threshold 20)
@@ -216,10 +215,7 @@ src/bin/main.cpp	cert-err33-c	6488486f4873d7938b30	the value returned by this fu
 src/bin/main.cpp	cert-err33-c	88da32cc434672ed2e09	the value returned by this function should not be disregarded; neglecting it may lead to errors
 src/bin/main.cpp	cppcoreguidelines-avoid-non-const-global-variables	6849333b1e05cb93612c	variable 'interrupted' is non-const and globally accessible, consider making it const
 src/bin/main.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	e771ad95c8d631892314	do not use pointer arithmetic
-src/lib/ask_user_tool.cpp	bugprone-implicit-widening-of-multiplication-result	d5535abf95dc1937beae	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
-src/lib/ask_user_tool.cpp	bugprone-use-after-move	02b6b71b563a472583e9	'limits' used after it was moved
 src/lib/ask_user_tool.cpp	modernize-use-nodiscard	6634eee7ceab98f2be84	function 'validate' should be marked [[nodiscard]]
-src/lib/ask_user_tool.cpp	performance-move-const-arg	24bc059c9393fe068e9a	std::move of the variable 'limits' of the trivially-copyable type 'AskUserLimits' has no effect; remove std::move()
 src/lib/ask_user_tool.cpp	readability-function-cognitive-complexity	52c8f2142ac2285dec2d	function 'parse_questions' has cognitive complexity of 61 (threshold 20)
 src/lib/audio.cpp	bugprone-implicit-widening-of-multiplication-result	7f547056314198b60a88	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
 src/lib/audio.cpp	readability-function-cognitive-complexity	1bd75b322e3c80fbb842	function 'safe_text' has cognitive complexity of 29 (threshold 20)
@@ -227,7 +223,6 @@ src/lib/audio.cpp	readability-function-cognitive-complexity	52574834ef08acc90990
 src/lib/chat_session.cpp	bugprone-unchecked-optional-access	a49a1bd5858647682b73	unchecked access to optional value
 src/lib/chat_session.cpp	readability-function-cognitive-complexity	5a91a13d2f8e47a8bf57	function 'resolve_persona' has cognitive complexity of 25 (threshold 20)
 src/lib/chat_session.cpp	readability-function-cognitive-complexity	9bf2f4958c19db25569c	function 'valid_text' has cognitive complexity of 27 (threshold 20)
-src/lib/chat_session.cpp	readability-function-cognitive-complexity	c31b605c79cee1347400	function 'submit' has cognitive complexity of 45 (threshold 20)
 src/lib/child_run.cpp	bugprone-implicit-widening-of-multiplication-result	3d926d461e3e723d7de6	performing an implicit widening conversion to type 'const std::uint64_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
 src/lib/child_run.cpp	bugprone-implicit-widening-of-multiplication-result	732bfd9ff6055e8d5862	performing an implicit widening conversion to type 'const std::uint64_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
 src/lib/child_run.cpp	bugprone-implicit-widening-of-multiplication-result	f450e2863188357a5a82	performing an implicit widening conversion to type 'size_type' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
@@ -316,8 +311,6 @@ src/lib/memory_projection.cpp	readability-implicit-bool-conversion	22cf9d9288e93
 src/lib/memory_projection.cpp	readability-implicit-bool-conversion	7012bedb39c15fcbe109	implicit conversion 'const ProjectedMemoryRecord *' -> 'bool'
 src/lib/memory_projection.cpp	readability-implicit-bool-conversion	93ec71e74e41d06915d7	implicit conversion 'const ProjectedMemoryRecord *' -> 'bool'
 src/lib/memory_projection.cpp	readability-implicit-bool-conversion	c61087491e9974557052	implicit conversion 'const ProjectedMemoryProposal *' -> 'bool'
-src/lib/memory_tool.cpp	bugprone-implicit-widening-of-multiplication-result	9ece2841a9afdea6b0d9	performing an implicit widening conversion to type 'std::size_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
-src/lib/memory_tool.cpp	bugprone-implicit-widening-of-multiplication-result	afcf3ef9dd96d5781db1	performing an implicit widening conversion to type 'size_type' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
 src/lib/memory_tool.cpp	modernize-use-nodiscard	6634eee7ceab98f2be84	function 'validate' should be marked [[nodiscard]]
 src/lib/memory_tool.cpp	performance-move-const-arg	e4bccf215a945393b561	std::move of the variable 'configuration' of the trivially-copyable type 'MemoryToolConfiguration' has no effect; remove std::move()
 src/lib/memory_tool.cpp	readability-function-cognitive-complexity	15973404797c5353026d	function 'parse_draft' has cognitive complexity of 36 (threshold 20)
@@ -414,7 +407,6 @@ src/lib/run_kernel.cpp	performance-move-const-arg	2e39eadd6d726edeadbb	std::move
 src/lib/run_kernel.cpp	performance-move-const-arg	d7d200ab6d2e3e5f3206	std::move of the variable 'consumption' of the trivially-copyable type 'domain::ChildRunConsumption' has no effect; remove std::move()
 src/lib/run_kernel.cpp	performance-unnecessary-copy-initialization	ea1fd8518f768802cccf	the const qualified variable 'selected_task' is copy-constructed from a const reference; consider making it a const reference
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	03b69a2d9ed28ddd33a4	function 'valid_question_definitions' has cognitive complexity of 30 (threshold 20)
-src/lib/run_kernel.cpp	readability-function-cognitive-complexity	06881eb50cd04132fbec	function 'open_durable' has cognitive complexity of 196 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	14848f7bc8598abd459e	function 'process_tool_update' has cognitive complexity of 65 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	1e14684fe20b926fc8d6	lambda has cognitive complexity of 45 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	36081bf7427e30fbfcd3	function 'dispatch_child' has cognitive complexity of 78 (threshold 20)
@@ -423,12 +415,10 @@ src/lib/run_kernel.cpp	readability-function-cognitive-complexity	3d85f609b90077c
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	48605afeb0e02c0af334	function 'launch_next_tool' has cognitive complexity of 24 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	87a60ae0ea874695253e	function 'valid_question_answers' has cognitive complexity of 27 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	8bcc548cf36e891cfb4b	function 'process_child_result' has cognitive complexity of 25 (threshold 20)
-src/lib/run_kernel.cpp	readability-function-cognitive-complexity	8d429577b58c5e8b508e	function 'drain' has cognitive complexity of 31 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	9783d0140f61cd2e8374	function 'decide_approval' has cognitive complexity of 35 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	9d500c9fef0ef4da1dfa	function 'decide_plan' has cognitive complexity of 36 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	b9007823d8405300b62e	function 'evaluate_pending_policies' has cognitive complexity of 38 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	bb99b5aae5f74e09593f	function 'continue_run' has cognitive complexity of 22 (threshold 20)
-src/lib/run_kernel.cpp	readability-function-cognitive-complexity	f23521b803bf92e25343	function 'start' has cognitive complexity of 59 (threshold 20)
 src/lib/run_kernel.cpp	readability-implicit-bool-conversion	3fa0b8b0af4af3d82b9b	implicit conversion 'const aiforge::domain::ReviewReceiptDrafted *' -> 'bool'
 src/lib/run_kernel.cpp	readability-implicit-bool-conversion	cccf256ebaf939f4e427	implicit conversion 'const aiforge::domain::ReviewReceiptDrafted *' -> 'bool'
 src/lib/run_kernel.cpp	readability-implicit-bool-conversion	d1bc4e7c5e7723e59ffb	implicit conversion 'const aiforge::domain::ReviewRequested *' -> 'bool'
@@ -461,9 +451,6 @@ src/lib/tool_policy.cpp	bugprone-unchecked-optional-access	5f8dcd4cbad338e75cb1	
 src/lib/tool_policy.cpp	performance-no-automatic-move	ef4326693ff20df215d3	constness of 'normalized' prevents automatic move
 src/lib/tool_policy.cpp	readability-function-cognitive-complexity	7256458726bd54e83127	function 'evaluate' has cognitive complexity of 22 (threshold 20)
 src/lib/tool_policy.cpp	readability-simplify-boolean-expr	7b8beafecb64c9c02386	boolean expression can be simplified by DeMorgan's theorem
-src/lib/tool_registry.cpp	bugprone-implicit-widening-of-multiplication-result	073e69eee95375d04b28	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
-src/lib/tool_registry.cpp	bugprone-implicit-widening-of-multiplication-result	420c57ebaf289ae0d825	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
-src/lib/tool_registry.cpp	bugprone-implicit-widening-of-multiplication-result	5db5827898e5b2dda274	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
 src/lib/tool_registry.cpp	bugprone-unchecked-optional-access	87048f563e207973c579	unchecked access to optional value
 src/lib/tool_registry.cpp	readability-function-cognitive-complexity	aa03b6ee8e2b0a3b70c9	function 'tool_continuation_messages' has cognitive complexity of 67 (threshold 20)
 src/lib/transcript_projection.cpp	bugprone-branch-clone	4c97e1a55f3c841acfac	switch has 2 consecutive identical branches

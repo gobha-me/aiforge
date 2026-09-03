@@ -77,10 +77,12 @@ struct RunStart {
   domain::RunId run_id;
   domain::RunStarted attributes;
   domain::Message user_message;
+  // Tools must be an exact registry-ordered subset of the kernel snapshot.
+  // The chosen subset remains fixed for every continuation of this run.
   backend::BackendRequest request;
   // Recorded after `run.started` when present. Submit it with `tools` empty:
-  // the kernel fills that section from its own registry snapshot so recorded
-  // tool identity is the run's actual tool set.
+  // the kernel fills that section from the validated effective registry subset
+  // so recorded tool identity is the run's actual tool set.
   std::optional<domain::RunProvenance> provenance{};
   // Recorded atomically with run start when a persona is selected or explicitly
   // disabled. The kernel verifies it against attributes and constructed
@@ -318,6 +320,10 @@ class RunKernel final {
   [[nodiscard]] auto active_child_run_ids() const -> std::vector<domain::RunId>;
   [[nodiscard]] auto active_inference_id() const noexcept
       -> std::optional<domain::InferenceId>;
+  // The exact run-owned declaration snapshot. Continuation callers must use
+  // this instead of re-resolving mutable profile or model metadata.
+  [[nodiscard]] auto active_tool_declarations() const noexcept
+      -> const std::vector<backend::ToolDeclaration>*;
   [[nodiscard]] auto pending_question_input() const
       -> std::optional<PendingQuestionInput>;
   [[nodiscard]] auto pending_plan_decision() const

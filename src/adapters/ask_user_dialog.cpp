@@ -15,11 +15,36 @@ namespace {
 } // namespace
 
 auto AskUserDialogController::present(runtime::PendingQuestionInput input,
-                                      runtime::RunKernel& kernel)
+                                      runtime::RunKernel& kernel,
+                                      std::function<void()> on_resolved)
+    -> std::expected<void, AskUserDialogError> {
+  const auto current = kernel.pending_question_input();
+  if (!current || *current != input) {
+    return invalid("question dialog request is stale or unavailable");
+  }
+  m_kernel = &kernel;
+  m_session = nullptr;
+  return prepare(std::move(input), std::move(on_resolved));
+}
+
+auto AskUserDialogController::present(runtime::PendingQuestionInput input,
+                                      surfaces::ChatSession& session,
+                                      std::function<void()> on_resolved)
+    -> std::expected<void, AskUserDialogError> {
+  const auto current = session.pending_question_input();
+  if (!current || *current != input) {
+    return invalid("question dialog request is stale or unavailable");
+  }
+  m_kernel = nullptr;
+  m_session = &session;
+  return prepare(std::move(input), std::move(on_resolved));
+}
+
+auto AskUserDialogController::prepare(runtime::PendingQuestionInput input,
+                                      std::function<void()> on_resolved)
     -> std::expected<void, AskUserDialogError> {
   try {
-    const auto current = kernel.pending_question_input();
-    if (!current || *current != input || input.questions.empty()) {
+    if (input.questions.empty()) {
       return invalid("question dialog request is stale or unavailable");
     }
 
@@ -57,10 +82,11 @@ auto AskUserDialogController::present(runtime::PendingQuestionInput input,
     if (!m_dialog.set_pages(std::move(pages))) {
       return invalid("question dialog rejected its pages");
     }
-    m_kernel = &kernel;
     m_input = std::move(input);
     m_last_error.reset();
+    m_on_resolved = std::move(on_resolved);
     m_resolved = false;
+    m_cancelled = false;
     m_dialog.on_result(
         [this](std::optional<termforge::ChoiceWizardResult> result) {
           resolve(std::move(result));
@@ -71,18 +97,34 @@ auto AskUserDialogController::present(runtime::PendingQuestionInput input,
   }
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicitly validates and routes every dialog resolution state.
 auto AskUserDialogController::resolve(
     std::optional<termforge::ChoiceWizardResult> result) -> void {
-  if (m_resolved || m_kernel == nullptr || !m_input) return;
+  // clang-format on
+  if (m_resolved || (m_kernel == nullptr && m_session == nullptr) || !m_input)
+    return;
   m_resolved = true;
-  std::expected<void, runtime::RunKernelError> resolved;
   if (!result) {
-    resolved = m_kernel->cancel_questions(
-        m_input->run_id, m_input->invocation_id, "dialog cancelled");
+    m_cancelled = true;
+    if (m_kernel != nullptr) {
+      auto resolved = m_kernel->cancel_questions(
+          m_input->run_id, m_input->invocation_id, "dialog cancelled");
+      if (!resolved) {
+        m_last_error = {AskUserDialogErrorCode::runtime_failure,
+                        resolved.error().message};
+      }
+    } else {
+      auto resolved = m_session->cancel_questions(
+          m_input->run_id, m_input->invocation_id, "dialog cancelled");
+      if (!resolved) {
+        m_last_error = {AskUserDialogErrorCode::runtime_failure,
+                        resolved.error().message};
+      }
+    }
   } else if (result->pages.size() != m_input->questions.size()) {
     m_last_error = {AskUserDialogErrorCode::invalid_request,
                     "question dialog returned the wrong page count"};
-    return;
   } else {
     std::vector<domain::QuestionAnswer> answers;
     answers.reserve(result->pages.size());
@@ -96,6 +138,7 @@ auto AskUserDialogController::resolve(
         if (option_index >= question.options.size()) {
           m_last_error = {AskUserDialogErrorCode::invalid_request,
                           "question dialog returned an invalid option"};
+          finish();
           return;
         }
         selected_ids.push_back(question.options[option_index].option_id);
@@ -103,13 +146,27 @@ auto AskUserDialogController::resolve(
       answers.push_back(
           {question.question_id, std::move(selected_ids), page.other});
     }
-    resolved = m_kernel->answer_questions(
-        m_input->run_id, m_input->invocation_id, std::move(answers));
+    if (m_kernel != nullptr) {
+      auto resolved = m_kernel->answer_questions(
+          m_input->run_id, m_input->invocation_id, std::move(answers));
+      if (!resolved) {
+        m_last_error = {AskUserDialogErrorCode::runtime_failure,
+                        resolved.error().message};
+      }
+    } else {
+      auto resolved = m_session->answer_questions(
+          m_input->run_id, m_input->invocation_id, std::move(answers));
+      if (!resolved) {
+        m_last_error = {AskUserDialogErrorCode::runtime_failure,
+                        resolved.error().message};
+      }
+    }
   }
-  if (!resolved) {
-    m_last_error = {AskUserDialogErrorCode::runtime_failure,
-                    resolved.error().message};
-  }
+  finish();
+}
+
+auto AskUserDialogController::finish() -> void {
+  if (m_on_resolved) m_on_resolved();
 }
 
 } // namespace aiforge::adapters

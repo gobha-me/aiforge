@@ -1552,7 +1552,8 @@ auto register_process_tool(runtime::ToolRegistry& registry,
         runtime::ToolExecutionLimits{event_bytes, limits.progress_events,
                                      limits.timeout +
                                          4 * limits.termination_grace +
-                                         std::chrono::seconds{1}});
+                                         std::chrono::seconds{1}},
+        runtime::ToolExecutorContract{"aiforge.adapters.run_process", "1"});
 #endif
   } catch (...) {
     return std::unexpected(

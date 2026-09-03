@@ -1045,11 +1045,20 @@ TEST_CASE("run provenance is validated and completed before it is recorded",
       {domain::Effect::network},
       {{domain::Effect::network, "network.host", "example.test"}}};
   runtime::ToolRegistry registry;
-  REQUIRE(registry.register_tool(declaration,
-                                 std::make_shared<PassiveToolExecutor>()));
+  REQUIRE(registry.register_tool(
+      declaration, std::make_shared<PassiveToolExecutor>(), {},
+      runtime::ToolExecutorContract{"test.lookup", "1"}));
+  auto hidden = declaration;
+  hidden.name = "hidden";
+  REQUIRE(registry.register_tool(
+      hidden, std::make_shared<PassiveToolExecutor>(), {},
+      runtime::ToolExecutorContract{"test.hidden", "1"}));
   auto snapshot = registry.snapshot();
   REQUIRE(snapshot);
-  auto backend_request = request({declaration});
+  const std::vector<std::string> selected_names{"lookup"};
+  auto selected = snapshot->subset(selected_names);
+  REQUIRE(selected);
+  auto backend_request = request(selected->declarations());
   testing::ScriptedBackend fake{{testing::ScriptedExchange{
       backend_request,
       testing::StreamScript{{
@@ -1085,7 +1094,8 @@ TEST_CASE("run provenance is validated and completed before it is recorded",
   REQUIRE(kernel.event_log().events().empty());
   REQUIRE_FALSE(kernel.active_run_id());
 
-  // The kernel remains usable, and fills tool identity from its own registry.
+  // The kernel remains usable, and fills tool identity from the run's exact
+  // effective subset rather than every registered tool.
   auto valid = run_start(backend_request);
   valid.provenance = provenance();
   REQUIRE(kernel.start(std::move(valid)));
@@ -1102,6 +1112,9 @@ TEST_CASE("run provenance is validated and completed before it is recorded",
           declaration.effects);
   REQUIRE(recorded->provenance.tools.front().capability_scopes ==
           declaration.capability_scopes);
+  REQUIRE(recorded->provenance.tools.front().registration_digest);
+  REQUIRE(recorded->provenance.tools.front().registration_digest->starts_with(
+      "sha256:"));
   REQUIRE(events[1].metadata.run_id == events[0].metadata.run_id);
   REQUIRE(events[1].metadata.sequence > events[0].metadata.sequence);
 
@@ -1174,6 +1187,8 @@ TEST_CASE("resume restores recorded provenance and rejects a duplicate record",
           "[runtime][provenance][failure]") {
   const auto session = make_id<domain::SessionId>("session");
   const auto run = make_id<domain::RunId>("run");
+  auto legacy_provenance = provenance();
+  legacy_provenance.tools = {{"legacy_tool", {}, {}}};
   const auto history = [&](const bool duplicate) {
     std::vector<domain::RunEvent> events{
         durable_event(
@@ -1183,12 +1198,13 @@ TEST_CASE("resume restores recorded provenance and rejects a duplicate record",
                                make_id<domain::PermissionProfileId>("observe"),
                                std::nullopt}),
         durable_event(run, 2, "e2",
-                      domain::RunProvenanceRecorded{provenance()}),
+                      domain::RunProvenanceRecorded{legacy_provenance}),
         durable_event(run, 3, "e3", domain::RunCompleted{})};
     if (duplicate) {
-      events.insert(events.begin() + 2,
-                    durable_event(run, 3, "e2b",
-                                  domain::RunProvenanceRecorded{provenance()}));
+      events.insert(
+          events.begin() + 2,
+          durable_event(run, 3, "e2b",
+                        domain::RunProvenanceRecorded{legacy_provenance}));
       events.back().metadata.sequence = 4;
     }
     return events;
@@ -1206,7 +1222,7 @@ TEST_CASE("resume restores recorded provenance and rejects a duplicate record",
        domain::EventTimestamp{std::chrono::milliseconds{100}}},
       store, fake);
   REQUIRE(resumed);
-  REQUIRE((*resumed)->projection(run)->provenance() == provenance());
+  REQUIRE((*resumed)->projection(run)->provenance() == legacy_provenance);
 
   const storage::SessionInfo duplicate_info{
       session, domain::EventTimestamp{std::chrono::milliseconds{100}},

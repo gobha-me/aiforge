@@ -210,6 +210,9 @@ TEST_CASE("process declaration and validation fail closed",
   REQUIRE(snapshot);
   const auto* registration = snapshot->find("run_process");
   REQUIRE(registration != nullptr);
+  const runtime::ToolExecutorContract process_contract{
+      "aiforge.adapters.run_process", "1"};
+  REQUIRE(registration->executor_contract == process_contract);
   auto* executor = registration->executor.get();
 
   for (auto malformed :
