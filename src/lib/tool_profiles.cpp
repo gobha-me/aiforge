@@ -63,19 +63,23 @@ namespace {
   return *domain::ToolProfileId::from(std::string{value});
 }
 
+// clang-format off
 // NOLINTNEXTLINE(cert-err58-cpp) -- Built-in allocation failure is process-fatal.
 const std::array kBuiltinProfiles{
     ToolProfile{
         make_id("essentials"), "Essentials", {"ask_user", "propose_memory"}},
     ToolProfile{make_id("off"), "Off", {}},
 };
+// clang-format on
 
 } // namespace
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Validates catalog bounds.
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicitly validates every bounded catalog invariant.
 auto validate_tool_profiles(const std::span<const ToolProfile> profiles,
                             const ToolProfileLimits limits)
     -> std::expected<void, ToolProfileError> {
+  // clang-format on
   try {
     if (!valid_limits(limits)) {
       return error(ToolProfileErrorCode::invalid_limits,
