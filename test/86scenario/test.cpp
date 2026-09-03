@@ -1088,6 +1088,89 @@ class ApprovalBackend final : public backend::Backend,
   std::shared_ptr<ApprovalBackendState> m_state;
 };
 
+class ApprovalToolGate final {
+ public:
+  [[nodiscard]] auto await_release(const std::stop_token stop_token) -> bool {
+    std::unique_lock lock{m_mutex};
+    const auto index = m_waiting++;
+    m_condition.notify_all();
+    return m_condition.wait(lock, stop_token,
+                            [&] { return m_released > index; });
+  }
+
+  auto acknowledge() -> void {
+    std::lock_guard lock{m_mutex};
+    ++m_acknowledged;
+    m_condition.notify_all();
+  }
+
+  auto release(const std::string_view description)
+      -> std::expected<void, std::string> {
+    static constexpr std::array expected{
+        std::string_view{"approval-tool-result"},
+        std::string_view{"approval-tool-end"}};
+    std::unique_lock lock{m_mutex};
+    if (!m_condition.wait_for(lock, 1s,
+                              [&] { return m_waiting > m_released; })) {
+      return std::unexpected("approval tool did not reach its boundary");
+    }
+    if (m_released >= expected.size() || description != expected[m_released]) {
+      return std::unexpected("approval tool descriptor mismatch");
+    }
+    const auto wakes_before_release = m_wakes;
+    ++m_released;
+    const auto released = m_released;
+    m_condition.notify_all();
+    if (!m_condition.wait_for(lock, 1s,
+                              [&] { return m_acknowledged >= released; })) {
+      return std::unexpected("approval tool did not acknowledge its step");
+    }
+    if (!m_condition.wait_for(lock, 1s,
+                              [&] { return m_wakes > wakes_before_release; })) {
+      return std::unexpected("approval tool update was not posted");
+    }
+    return {};
+  }
+
+  auto observe_wake() -> void {
+    std::lock_guard lock{m_mutex};
+    ++m_wakes;
+    m_condition.notify_all();
+  }
+
+ private:
+  std::mutex m_mutex;
+  std::condition_variable_any m_condition;
+  std::size_t m_waiting{};
+  std::size_t m_released{};
+  std::size_t m_acknowledged{};
+  std::size_t m_wakes{};
+};
+
+class GatedApprovalToolStream final : public runtime::ToolExecutionStream {
+ public:
+  GatedApprovalToolStream(std::unique_ptr<runtime::ToolExecutionStream> inner,
+                          std::shared_ptr<ApprovalToolGate> gate)
+      : m_inner(std::move(inner)), m_gate(std::move(gate)) {}
+
+  auto next(const std::stop_token stop_token)
+      -> std::expected<std::optional<runtime::ToolExecutionEvent>,
+                       runtime::ToolExecutionError> override {
+    if (!m_gate->await_release(stop_token)) {
+      return std::unexpected(runtime::ToolExecutionError{
+          runtime::ToolExecutionErrorCode::cancelled,
+          "approval scenario tool was cancelled", false});
+    }
+    auto result = m_inner->next(stop_token);
+    m_gate->acknowledge();
+    return result;
+  }
+
+ private:
+  std::unique_ptr<runtime::ToolExecutionStream> m_inner;
+  std::shared_ptr<ApprovalToolGate> m_gate;
+};
+
 class ApprovalToolExecutor final : public runtime::ToolExecutor {
  public:
   ApprovalToolExecutor(domain::StructuredDataBlock expected_arguments,
@@ -1113,8 +1196,18 @@ class ApprovalToolExecutor final : public runtime::ToolExecutor {
                            std::stop_token stop_token)
       -> std::expected<std::unique_ptr<runtime::ToolExecutionStream>,
                        runtime::ToolExecutionError> override {
-    return m_script.start(std::move(invocation), stop_token);
+    auto started = m_script.start(std::move(invocation), stop_token);
+    if (!started) return std::unexpected(std::move(started.error()));
+    return std::make_unique<GatedApprovalToolStream>(std::move(*started),
+                                                     m_gate);
   }
+
+  auto release(const std::string_view description)
+      -> std::expected<void, std::string> {
+    return m_gate->release(description);
+  }
+
+  auto observe_wake() -> void { m_gate->observe_wake(); }
 
   [[nodiscard]] auto recorded_invocations() const noexcept
       -> const std::vector<runtime::ToolInvocation>& {
@@ -1129,6 +1222,8 @@ class ApprovalToolExecutor final : public runtime::ToolExecutor {
   domain::StructuredDataBlock m_expected_arguments;
   domain::CapabilityScope m_requested_scope;
   testing::ScriptedToolExecutor m_script;
+  std::shared_ptr<ApprovalToolGate> m_gate{
+      std::make_shared<ApprovalToolGate>()};
 };
 
 struct ModalState {
@@ -1421,6 +1516,9 @@ auto approval_scenario(const ApprovalScenarioAction action)
   value.initial_size = {100, 24, 1000, 480};
   value.backend_script = {"approval-started", "approval-call",
                           "approval-finished", "approval-end"};
+  if (action == ApprovalScenarioAction::allow_once) {
+    value.tool_script = {"approval-tool-result", "approval-tool-end"};
+  }
   if (action != ApprovalScenarioAction::interrupt) {
     value.backend_script.insert(value.backend_script.end(),
                                 {"continuation-started", "continuation-delta",
@@ -1448,6 +1546,10 @@ auto approval_scenario(const ApprovalScenarioAction action)
                                      termforge::Key::Down, 0, false, false,
                                      false, termforge::KeyAction::Press}}});
       value.steps.push_back({11, enter});
+      value.steps.push_back({12, testing::TuiScenarioRelease{
+                                     testing::TuiScenarioProducer::tool}});
+      value.steps.push_back({13, testing::TuiScenarioRelease{
+                                     testing::TuiScenarioProducer::tool}});
       break;
     case ApprovalScenarioAction::deny:
       value.steps.push_back({11, enter});
@@ -1468,14 +1570,18 @@ auto approval_scenario(const ApprovalScenarioAction action)
         {14, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}});
     value.steps.push_back({14, enter});
   } else {
-    for (std::uint64_t frame = 13; frame < 17; ++frame) {
+    const auto continuation_frame =
+        action == ApprovalScenarioAction::allow_once ? 15U : 13U;
+    for (std::uint64_t frame = continuation_frame;
+         frame < continuation_frame + 4U; ++frame) {
       value.steps.push_back(
           {frame,
            testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}});
     }
     value.steps.push_back(
-        {20, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}});
-    value.steps.push_back({20, enter});
+        {continuation_frame + 7U,
+         testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}});
+    value.steps.push_back({continuation_frame + 7U, enter});
   }
   value.limits.maximum_frames = 48;
   return value;
@@ -2397,7 +2503,10 @@ auto approval_factory() -> testing::TuiScenarioTargetFactory {
     adapters::InteractiveChatAppOptions options;
     options.live_wake_enabled = pass == testing::TuiScenarioPass::record;
     options.poll_worker_updates = false;
-    options.wake_observer = [state] { state->observe_wake(); };
+    options.wake_observer = [state, executor] {
+      state->observe_wake();
+      executor->observe_wake();
+    };
     options.rendered_output = output;
     options.rendered_frame = [frame](const termforge::Screen& screen) {
       *frame = normalized_screen(screen);
@@ -2436,8 +2545,8 @@ auto approval_factory() -> testing::TuiScenarioTargetFactory {
         [state, pass](const std::string_view step) {
           return state->release(step, pass == testing::TuiScenarioPass::record);
         },
-        [](std::string_view) -> std::expected<void, std::string> {
-          return std::unexpected("approval scenario has no tool script");
+        [executor](const std::string_view step) {
+          return executor->release(step);
         },
         [frame] { return *frame; },
         [raw, state, backend, editor, executor] {
