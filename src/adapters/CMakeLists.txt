@@ -7,6 +7,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   json_model_catalog_cache.cpp
   model_picker_dialog.cpp
   persona_editor_dialog.cpp
+  provider_character_picker_dialog.cpp
   process_model_catalog.cpp
   process_audio.cpp
   process_credentials.cpp

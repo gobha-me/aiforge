@@ -2,7 +2,7 @@
 # Prefer an installed package, then the sibling checkout for coordinated
 # development, then the compatible stable release.
 if (NOT TARGET venice-cpp::lib)
-  find_package(venice-cpp 0.29.6 CONFIG QUIET)
+  find_package(venice-cpp 0.29.16 CONFIG QUIET)
 endif ()
 
 if (NOT TARGET venice-cpp::lib)
@@ -17,9 +17,9 @@ if (NOT TARGET venice-cpp::lib)
     include(FetchContent)
     FetchContent_Declare(venice-cpp
       GIT_REPOSITORY https://github.com/gobha-me/venice-cpp.git
-      # v0.29.6 retains the chat, catalogue, and owned-media seams while adding
-      # fail-closed multipart metadata validation required by audio uploads.
-      GIT_TAG v0.29.6
+      # v0.29.16 adds receive-time response byte ceilings so authenticated
+      # character discovery cannot buffer an unbounded provider response.
+      GIT_TAG v0.29.16
       GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(venice-cpp)
   endif ()

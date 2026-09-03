@@ -5,7 +5,7 @@ outward. It currently provides a streaming Venice-backed one-shot/pipe surface,
 durable and resumable sessions, provider-neutral run events, deterministic
 backends, replayable run and transcript projections, Markdown-lite
 presentation, typed configuration, file-backed personas, model discovery and
-selection, and a resumable
+selection, transient provider-character selection, and a resumable
 structured `ask_user` tool
 boundary plus a policy-gated bounded argv process executor. Exact-candidate
 review receipts now materialize merge authorization only from current required
@@ -41,9 +41,10 @@ TermForge and venice-cpp; consumed core-only builds may set
 `aiforge_BUILD_ADAPTERS=OFF`. Their fallbacks are pinned to compatible stable
 baselines: TermForge v0.57.22 for the existing interactive seams plus visible
 fallback cursors, bounded input, output-refusal, resize, and image-route
-hardening; and venice-cpp v0.29.6
-for the existing chat, model-catalogue, and owned-media seams plus redirect,
-header-injection, and multipart-metadata guards. RasterForge v0.5.0 supplies
+hardening; and venice-cpp v0.29.16
+for the existing chat, model-catalogue, character, and owned-media seams plus
+redirect, header-injection, multipart-metadata, and receive-time response-size
+guards. RasterForge v0.5.0 supplies
 bounded static PNG, JPEG, and WebP validation for generated-image artifacts. It
 is active with the process adapters through `${PROJECT_NAME}_DEPS`.
 
@@ -330,6 +331,21 @@ update; command-line and environment values retain precedence. Session
 overrides are not restored as configuration when switching or resuming
 sessions. Media safe mode is intentionally absent from Chat and belongs only to
 image or video operations that expose the matching neutral capability.
+
+Interactive Chat `/character` opens a searchable live provider-character
+catalog. `/character set <slug>` performs an exact revalidated selection and
+`/character off` returns to the provider default without a network request.
+Character selection is transient session state: it takes effect with the next
+inference, remains until disabled, clears when switching, resuming, or creating
+a session, and is not stored as configuration. Characters that require a
+different, missing, or offline model remain visible but cannot be selected.
+AIForge never switches the
+model as a character side effect, and an incompatible `/model` change is
+rejected until the character is disabled. Provider characters affect only the
+namespaced provider request option; they do not change file-backed personas,
+workspace instructions, tools, permissions, or authority. Catalog pages and
+detail responses are bounded during receive, validated into neutral records,
+and never cached or retained as raw provider payloads.
 
 The bounded catalog cache is
 `$XDG_CACHE_HOME/aiforge/model-catalog.json`, or

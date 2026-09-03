@@ -12,10 +12,19 @@
 
 namespace aiforge::adapters {
 
+namespace detail {
+
+[[nodiscard]] auto is_valid_venice_character_slug(
+    std::string_view value) noexcept -> bool;
+
+} // namespace detail
+
 inline constexpr std::string_view venice_web_search_extension{
     "venice.chat.web-search"};
 inline constexpr std::string_view venice_system_prompt_extension{
     "venice.chat.include-system-prompt"};
+inline constexpr std::string_view venice_character_slug_extension{
+    "venice.chat.character-slug"};
 inline constexpr std::string_view web_search_model_capability{"web-search"};
 
 enum class VeniceWebSearchSetting {
@@ -43,6 +52,7 @@ struct VeniceConfiguredRequestSettings {
 struct VeniceRequestSettingOverrides {
   std::optional<VeniceWebSearchSetting> web_search;
   std::optional<VeniceSystemPromptSetting> system_prompt;
+  std::optional<domain::ProviderCharacterId> character_slug;
   auto operator==(const VeniceRequestSettingOverrides&) const -> bool = default;
 };
 

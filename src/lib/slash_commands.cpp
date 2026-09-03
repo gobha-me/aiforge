@@ -209,6 +209,31 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
                        "model accepts at most one model ID");
 }
 
+[[nodiscard]] auto character_handler(std::string_view arguments,
+                                     const SlashCommandContext&)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  arguments = trim_arguments(arguments);
+  if (arguments.empty()) {
+    return SlashCommandResult{SlashCommandAction::choose_provider_character,
+                              std::nullopt};
+  }
+  if (arguments == "off") {
+    return SlashCommandResult{SlashCommandAction::disable_provider_character,
+                              std::nullopt};
+  }
+  constexpr std::string_view set{"set"};
+  if (arguments.starts_with(set) && arguments.size() > set.size() &&
+      (arguments[set.size()] == ' ' || arguments[set.size()] == '\t')) {
+    const auto slug = trim_arguments(arguments.substr(set.size()));
+    if (!slug.empty() && slug.find_first_of(" \t") == std::string_view::npos) {
+      return SlashCommandResult{SlashCommandAction::choose_provider_character,
+                                std::string{slug}};
+    }
+  }
+  return command_error(SlashCommandErrorCode::invalid_arguments,
+                       "character accepts set <slug> or off");
+}
+
 [[nodiscard]] auto usage_handler(std::string_view arguments,
                                  const SlashCommandContext&)
     -> std::expected<SlashCommandResult, SlashCommandError> {
@@ -270,6 +295,9 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
       {"persona", "persona", "[list | set <name> | off | manage]",
        "List, select, disable, or manage file-backed personas.", idle_available,
        persona_handler},
+      {"character", "character", "[set <slug> | off]",
+       "Choose or disable a provider character for future runs.",
+       idle_available, character_handler},
       {"model", "model", "[model-id]", "Choose a text model for future runs.",
        idle_available, model_handler},
       {"settings", "settings", "",

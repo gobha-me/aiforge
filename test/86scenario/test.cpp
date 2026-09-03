@@ -1,6 +1,8 @@
 #include <unistd.h>
 
 #include <aiforge/adapters/interactive_chat_app.hpp>
+#include <aiforge/adapters/provider_character_picker_dialog.hpp>
+#include <aiforge/backend/provider_character_catalog.hpp>
 #include <aiforge/model/catalog.hpp>
 #include <aiforge/testing/scripted_persona_editor.hpp>
 #include <aiforge/testing/scripted_persona_source.hpp>
@@ -221,13 +223,78 @@ class ScenarioCatalogSource final : public model::CatalogSource {
       -> std::expected<model::CatalogSnapshot, model::CatalogError> override {
     model::CatalogEntry current{make_id<domain::ModelId>("model"), "text"};
     current.name = "Current model";
+    current.context_window_tokens = 8192;
     model::CatalogEntry alternate{make_id<domain::ModelId>("alternate"),
                                   "text"};
     alternate.name = "Alternate model";
+    alternate.context_window_tokens = 8192;
+    model::CatalogEntry offline{make_id<domain::ModelId>("offline"), "text"};
+    offline.name = "Offline model";
+    offline.context_window_tokens = 8192;
+    offline.offline = true;
     return model::CatalogSnapshot{
         std::chrono::sys_time<std::chrono::milliseconds>{123ms},
-        {std::move(current), std::move(alternate)}};
+        {std::move(current), std::move(alternate), std::move(offline)}};
   }
+};
+
+class ScenarioProviderCharacterSource final
+    : public backend::ProviderCharacterCatalogSource {
+ public:
+  explicit ScenarioProviderCharacterSource(const bool drift = false)
+      : m_drift(drift) {}
+
+  auto list(backend::ProviderCharacterLimits, std::stop_token)
+      -> std::expected<backend::ProviderCharacterCatalog,
+                       backend::ProviderCharacterError> override {
+    ++m_list_calls;
+    auto alan = summary("alan-watts", "model");
+    alan.name = "Alan Watts";
+    alan.description = "Philosophical conversation";
+    alan.tags = {"philosophy", "featured"};
+    auto incompatible = summary("other-model", "alternate");
+    auto offline = summary("offline-guide", "offline");
+    backend::ProviderCharacterSummary missing{
+        make_id<domain::ProviderCharacterId>("missing-model")};
+    return backend::ProviderCharacterCatalog{
+        {std::move(alan), std::move(incompatible), std::move(offline),
+         std::move(missing)},
+        "scenario.characters"};
+  }
+
+  auto lookup(const domain::ProviderCharacterId& id,
+              backend::ProviderCharacterLimits, std::stop_token)
+      -> std::expected<backend::ProviderCharacterSummary,
+                       backend::ProviderCharacterError> override {
+    ++m_lookup_calls;
+    if (id.value() != "alan-watts") {
+      return std::unexpected(backend::ProviderCharacterError{
+          backend::ProviderCharacterErrorCode::not_found,
+          "character disappeared", false, 404});
+    }
+    return summary("alan-watts", m_drift ? "alternate" : "model");
+  }
+
+  [[nodiscard]] auto list_calls() const noexcept -> std::size_t {
+    return m_list_calls;
+  }
+  [[nodiscard]] auto lookup_calls() const noexcept -> std::size_t {
+    return m_lookup_calls;
+  }
+
+ private:
+  [[nodiscard]] static auto summary(const std::string& id,
+                                    const std::string& model_id)
+      -> backend::ProviderCharacterSummary {
+    backend::ProviderCharacterSummary result{
+        make_id<domain::ProviderCharacterId>(id)};
+    result.model_id = make_id<domain::ModelId>(model_id);
+    return result;
+  }
+
+  bool m_drift{};
+  std::size_t m_list_calls{};
+  std::size_t m_lookup_calls{};
 };
 
 class SessionScenarioStore final : public storage::SessionStore {
@@ -486,6 +553,7 @@ class GatedBackendState final {
     std::lock_guard lock{m_mutex};
     ++m_initialize_calls;
     if (m_initialized) return false;
+    m_request = request;
     m_steps = {
         backend::BackendEvent{backend::ResponseStarted{"response"}},
         backend::BackendEvent{backend::ContentDelta{
@@ -504,6 +572,11 @@ class GatedBackendState final {
   auto initialize_calls() -> std::size_t {
     std::lock_guard lock{m_mutex};
     return m_initialize_calls;
+  }
+
+  auto captured_request() -> std::optional<backend::BackendRequest> {
+    std::lock_guard lock{m_mutex};
+    return m_request;
   }
 
   auto next(std::stop_token stop_token)
@@ -598,6 +671,7 @@ class GatedBackendState final {
   std::size_t m_consumed{};
   std::size_t m_observed_wakes{};
   std::size_t m_initialize_calls{};
+  std::optional<backend::BackendRequest> m_request;
   bool m_initialized{};
   bool m_ended{};
   bool m_cancelled{};
@@ -1314,10 +1388,13 @@ auto chat_factory(
     const bool with_catalog = false, const bool with_persistence = false,
     const bool stale_preview = false, const bool persistence_failure = false,
     std::optional<config::ConfigSource> shadow_source = std::nullopt,
-    const bool report_persist_calls = false, const bool with_personas = false)
+    const bool report_persist_calls = false, const bool with_personas = false,
+    const bool with_characters = false, const bool character_drift = false,
+    const bool report_character_run = false)
     -> testing::TuiScenarioTargetFactory {
   return [with_catalog, with_persistence, stale_preview, persistence_failure,
-          shadow_source, report_persist_calls, with_personas](
+          shadow_source, report_persist_calls, with_personas, with_characters,
+          character_drift, report_character_run](
              const testing::TuiScenarioPass pass, termforge::ByteSink* output)
              -> std::expected<testing::TuiScenarioTarget,
                               testing::TuiScenarioError> {
@@ -1333,6 +1410,8 @@ auto chat_factory(
     auto editor = std::make_shared<NoEditor>();
     auto catalog_source = std::make_shared<ScenarioCatalogSource>();
     auto catalog = std::make_shared<model::CatalogService>(*catalog_source);
+    auto characters =
+        std::make_shared<ScenarioProviderCharacterSource>(character_drift);
     auto frame = std::make_shared<std::string>();
     auto suffix = std::make_shared<std::uint64_t>();
     auto persist_calls = std::make_shared<std::size_t>();
@@ -1344,7 +1423,8 @@ auto chat_factory(
     adapters::InteractiveChatAppOptions options;
     options.live_wake_enabled = pass == testing::TuiScenarioPass::record;
     options.poll_worker_updates = false;
-    if (with_catalog) options.model_catalog = catalog.get();
+    if (with_catalog || with_characters) options.model_catalog = catalog.get();
+    if (with_characters) options.provider_character_catalog = characters.get();
     if (with_persistence) {
       options.preview_request_setting =
           [backend_state, stale_preview,
@@ -1409,11 +1489,23 @@ auto chat_factory(
       options.session_dependencies.persona_source = personas.get();
       options.session_dependencies.persona_editor = persona_editor.get();
     }
-    auto app = adapters::make_interactive_chat_app(
-        *backend, *backend, nullptr,
-        {make_id<domain::ModelId>("model"),
-         surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
-        *editor, {}, std::move(options));
+    const auto model_id = make_id<domain::ModelId>("model");
+    surfaces::ChatSessionOpen open{
+        model_id, surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt};
+    if (report_character_run) {
+      open.provenance = domain::RunProvenance{"test-revision",
+                                              "scenario",
+                                              std::nullopt,
+                                              model_id,
+                                              std::nullopt,
+                                              {},
+                                              {{"aiforge", "test-revision"}},
+                                              {},
+                                              {}};
+    }
+    auto app = adapters::make_interactive_chat_app(*backend, *backend, nullptr,
+                                                   std::move(open), *editor, {},
+                                                   std::move(options));
     if (!app->ready()) {
       return std::unexpected(testing::TuiScenarioError{
           testing::TuiScenarioErrorCode::target_failure,
@@ -1426,12 +1518,13 @@ auto chat_factory(
           return raw->configure_terminal_for_scenario(
               termforge::TerminalIo{pipe->read_fd(), -1}, capabilities);
         },
-        [raw, backend, editor, catalog_source, catalog, personas,
+        [raw, backend, editor, catalog_source, catalog, characters, personas,
          persona_editor] {
           static_cast<void>(backend);
           static_cast<void>(editor);
           static_cast<void>(catalog_source);
           static_cast<void>(catalog);
+          static_cast<void>(characters);
           static_cast<void>(personas);
           static_cast<void>(persona_editor);
           return raw->run();
@@ -1461,8 +1554,9 @@ auto chat_factory(
           return std::unexpected("chat scenario has no tool script");
         },
         [frame] { return *frame; },
-        [raw, backend, editor, catalog_source, catalog, persist_calls,
-         report_persist_calls, personas, persona_editor, with_personas] {
+        [raw, backend, editor, catalog_source, catalog, characters,
+         persist_calls, report_persist_calls, personas, persona_editor,
+         with_personas, with_characters, backend_state, report_character_run] {
           static_cast<void>(backend);
           static_cast<void>(editor);
           static_cast<void>(catalog_source);
@@ -1485,6 +1579,56 @@ auto chat_factory(
                   << persona_editor->recorded_creates().size()
                   << "|persona-replaces="
                   << persona_editor->recorded_replaces().size();
+          }
+          if (with_characters) {
+            state << "|character-lists=" << characters->list_calls()
+                  << "|character-lookups=" << characters->lookup_calls();
+          }
+          if (report_character_run) {
+            const auto request = backend_state->captured_request();
+            state << "|request-extensions="
+                  << (request ? request->options.extensions.size() : 0U)
+                  << "|request-tools="
+                  << (request ? request->tools.size() : 0U);
+            if (request) {
+              const auto character = request->options.extensions.find(
+                  std::string{adapters::venice_character_slug_extension});
+              if (character != request->options.extensions.end()) {
+                state << "|request-character=" << character->second.media_type
+                      << ':' << character->second.data;
+              }
+            }
+            for (const auto& event : raw->events()) {
+              if (const auto* started =
+                      std::get_if<domain::RunStarted>(&event.payload)) {
+                state << "|run-axes=" << started->surface_id.value() << ','
+                      << started->workspace_id.value() << ','
+                      << started->permission_profile_id.value() << ",persona="
+                      << (started->persona_id
+                              ? std::string{started->persona_id->value()}
+                              : std::string{"none"});
+              }
+              if (const auto* recorded =
+                      std::get_if<domain::RunProvenanceRecorded>(
+                          &event.payload)) {
+                state << "|provenance-tools="
+                      << recorded->provenance.tools.size();
+                const auto character = std::ranges::find(
+                    recorded->provenance.effective_request_options,
+                    adapters::venice_character_slug_extension,
+                    &domain::EffectiveRequestOption::key);
+                if (character !=
+                    recorded->provenance.effective_request_options.end()) {
+                  state
+                      << "|provenance-character="
+                      << character->value.value_or("missing") << ':'
+                      << (character->source ==
+                                  domain::RequestOptionSource::session_override
+                              ? "session_override"
+                              : "unexpected_source");
+                }
+              }
+            }
           }
           return std::move(state).str();
         }};
@@ -1517,6 +1661,178 @@ auto session_success_scenario() -> testing::TuiScenario {
       {4, enter},
       {5, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
       {5, enter},
+  };
+  value.limits.maximum_frames = 24;
+  return value;
+}
+
+auto provider_character_picker_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-provider-character-picker";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 28, 1000, 560};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  const auto clear = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Char, U'c', true, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/character"}}},
+      {0, enter},
+      {1, testing::TuiScenarioResize{{8, 3, 80, 60}}},
+      {2, testing::TuiScenarioResize{{100, 28, 1000, 560}}},
+      {3, testing::TuiScenarioPost{termforge::PasteEvent{"alan"}}},
+      {4, enter},
+      {5, testing::TuiScenarioPost{termforge::PasteEvent{"/model model"}}},
+      {5, enter},
+      {6, testing::TuiScenarioPost{termforge::PasteEvent{"/model alternate"}}},
+      {6, enter},
+      {7, clear},
+      {8, testing::TuiScenarioPost{termforge::PasteEvent{"/character off"}}},
+      {8, enter},
+      {9, testing::TuiScenarioPost{termforge::PasteEvent{"/model alternate"}}},
+      {9, enter},
+      {10, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
+      {10, enter},
+  };
+  value.limits.maximum_frames = 40;
+  return value;
+}
+
+auto provider_character_disabled_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-provider-character-disabled-choice";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 28, 1000, 560};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/character"}}},
+      {0, enter},
+      {1, testing::TuiScenarioPost{termforge::PasteEvent{"missing-model"}}},
+      {2, enter},
+      {3, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Escape, 0, false, false, false,
+              termforge::KeyAction::Press}}},
+      {4, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Char, U'd', true, false, false,
+              termforge::KeyAction::Press}}},
+  };
+  value.limits.maximum_frames = 24;
+  return value;
+}
+
+auto provider_character_unsafe_paste_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-provider-character-unsafe-paste";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 28, 1000, 560};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/character"}}},
+      {0, enter},
+      {1, testing::TuiScenarioPost{termforge::PasteEvent{"bad\x1b"}}},
+      {2, enter},
+      {3, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Char, U'd', true, false, false,
+              termforge::KeyAction::Press}}},
+  };
+  value.limits.maximum_frames = 20;
+  return value;
+}
+
+auto provider_character_drift_scenario() -> testing::TuiScenario {
+  auto value = provider_character_picker_scenario();
+  value.scenario_id = "interactive-provider-character-model-drift";
+  value.steps.resize(6);
+  value.steps.push_back({5, testing::TuiScenarioPost{termforge::KeyEvent{
+                                termforge::Key::Char, U'd', true, false, false,
+                                termforge::KeyAction::Press}}});
+  value.limits.maximum_frames = 24;
+  return value;
+}
+
+auto provider_character_session_switch_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-provider-character-session-switch";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 12, 1000, 240};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{
+              "/character set alan-watts"}}},
+      {0, enter},
+      {1, testing::TuiScenarioPost{termforge::PasteEvent{"/session new"}}},
+      {1, enter},
+      {2, testing::TuiScenarioPost{termforge::PasteEvent{"/model alternate"}}},
+      {2, enter},
+      {3, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
+      {3, enter},
+  };
+  value.limits.maximum_frames = 24;
+  return value;
+}
+
+auto provider_character_next_inference_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-provider-character-next-inference";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 12, 1000, 240};
+  value.backend_script = {"response-started",  "delta:hello", "usage", "cost",
+                          "response-finished", "end"};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{
+              "/character set alan-watts"}}},
+      {0, enter},
+      {1, testing::TuiScenarioPost{termforge::PasteEvent{"question"}}},
+      {1, enter},
+      {2, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {3, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {4, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {5, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {6, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {7, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {8, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
+      {8, enter},
+  };
+  value.limits.maximum_frames = 28;
+  return value;
+}
+
+auto provider_character_disappearance_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-provider-character-disappearance";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 12, 1000, 240};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{
+              "/character set disappeared"}}},
+      {0, enter},
+      {1, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Char, U'c', true, false, false,
+              termforge::KeyAction::Press}}},
+      {2, testing::TuiScenarioPost{termforge::PasteEvent{"/model alternate"}}},
+      {2, enter},
+      {3, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
+      {3, enter},
   };
   value.limits.maximum_frames = 24;
   return value;
@@ -2167,6 +2483,185 @@ TEST_CASE("saved request setting reports a higher-precedence active winner",
   REQUIRE(result->recorded.semantic_state ==
           "Saved request default; active environment value still wins next "
           "inference");
+}
+
+TEST_CASE("provider character picker is searchable bounded and model-safe",
+          "[scenario][chat][character]") {
+  const auto result =
+      testing::run_tui_scenario(provider_character_picker_scenario(),
+                                chat_factory(false, false, false, false,
+                                             std::nullopt, false, false, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "Selected model alternate|character-lists=1|character-lookups=3");
+  REQUIRE(result->recorded.wire_output.find("Select provider character") !=
+          std::string::npos);
+  REQUIRE(result->recorded.wire_output.find("Alan Watts") != std::string::npos);
+  REQUIRE(result->recorded.wire_output.find("requires model alternate") !=
+          std::string::npos);
+  REQUIRE(result->recorded.wire_output.find("required text model is offline") !=
+          std::string::npos);
+  REQUIRE(result->recorded.wire_output.find(
+              "character has no model metadata") != std::string::npos);
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames,
+      [](const std::string& frame) { return frame.starts_with("8x3:"); }));
+}
+
+TEST_CASE("provider character typed filter enforces its exact byte boundary",
+          "[scenario][chat][character][filter][failure]") {
+  const auto current_model = make_id<domain::ModelId>("model");
+  backend::ProviderCharacterSummary provider_first{
+      make_id<domain::ProviderCharacterId>("provider-first")};
+  provider_first.name = std::string(4095, 'a') + 'y';
+  provider_first.model_id = current_model;
+  backend::ProviderCharacterSummary boundary{
+      make_id<domain::ProviderCharacterId>("boundary")};
+  boundary.name = std::string(4095, 'a') + 'x';
+  boundary.model_id = current_model;
+  const backend::ProviderCharacterCatalog characters{{provider_first, boundary},
+                                                     "scenario.characters"};
+  model::CatalogEntry model_entry{current_model, "text"};
+  model_entry.context_window_tokens = 8192;
+  const model::CatalogSnapshot models{
+      std::chrono::sys_time<std::chrono::milliseconds>{123ms},
+      {std::move(model_entry)}};
+
+  adapters::ProviderCharacterPickerDialog order_dialog;
+  std::optional<adapters::ProviderCharacterPickerResult> ordered_selection;
+  order_dialog.set_characters(characters, models, current_model);
+  order_dialog.on_result(
+      [&ordered_selection](
+          std::optional<adapters::ProviderCharacterPickerResult> result) {
+        ordered_selection = std::move(result);
+      });
+  REQUIRE(order_dialog.on_event(
+      termforge::KeyEvent{termforge::Key::Down, 0, false, false, false,
+                          termforge::KeyAction::Press}));
+  REQUIRE(order_dialog.on_event(
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}));
+  REQUIRE(ordered_selection);
+  REQUIRE(ordered_selection->selection);
+  REQUIRE(ordered_selection->selection->id == provider_first.id);
+
+  adapters::ProviderCharacterPickerDialog dialog;
+  std::optional<adapters::ProviderCharacterPickerResult> selected;
+  dialog.set_characters(characters, models, current_model);
+  dialog.on_result(
+      [&selected](
+          std::optional<adapters::ProviderCharacterPickerResult> result) {
+        selected = std::move(result);
+      });
+  const auto typed = [&dialog](const char32_t character) {
+    return dialog.on_event(termforge::KeyEvent{termforge::Key::Char, character,
+                                               false, false, false,
+                                               termforge::KeyAction::Press});
+  };
+  bool accepted = true;
+  for (std::size_t index{}; index < 4095; ++index)
+    accepted = typed(U'a') && accepted;
+  REQUIRE(accepted);
+  REQUIRE(typed(U'x')); // Exactly 4096 bytes selects only `boundary`.
+  REQUIRE(typed(U'z')); // The over-bound character must not change the filter.
+  REQUIRE(dialog.on_event(termforge::KeyEvent{termforge::Key::Enter, 0, false,
+                                              false, false,
+                                              termforge::KeyAction::Press}));
+  REQUIRE(selected);
+  REQUIRE(selected->selection);
+  REQUIRE(selected->selection->id == boundary.id);
+}
+
+TEST_CASE("disabled provider character choices cannot mutate the session",
+          "[scenario][chat][character][failure]") {
+  const auto result =
+      testing::run_tui_scenario(provider_character_disabled_scenario(),
+                                chat_factory(false, false, false, false,
+                                             std::nullopt, false, false, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "Provider character selection cancelled|character-lists=1|"
+          "character-lookups=0");
+}
+
+TEST_CASE("provider character filter rejects unsafe paste without mutation",
+          "[scenario][chat][character][failure]") {
+  const auto result =
+      testing::run_tui_scenario(provider_character_unsafe_paste_scenario(),
+                                chat_factory(false, false, false, false,
+                                             std::nullopt, false, false, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "Provider character disabled; applies next inference|"
+          "character-lists=1|character-lookups=0");
+}
+
+TEST_CASE("provider character picker revalidates model drift before mutation",
+          "[scenario][chat][character][failure]") {
+  const auto result = testing::run_tui_scenario(
+      provider_character_drift_scenario(),
+      chat_factory(false, false, false, false, std::nullopt, false, false, true,
+                   true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "Provider character model changed; reopen /character|"
+          "character-lists=1|character-lookups=1");
+}
+
+TEST_CASE("provider character selection clears on a new session",
+          "[scenario][chat][character][session]") {
+  const auto result =
+      testing::run_tui_scenario(provider_character_session_switch_scenario(),
+                                chat_factory(false, false, false, false,
+                                             std::nullopt, false, false, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "Selected model alternate|character-lists=0|character-lookups=1");
+}
+
+TEST_CASE("provider character reaches the next request and provenance",
+          "[scenario][chat][character][provenance]") {
+  const auto result = testing::run_tui_scenario(
+      provider_character_next_inference_scenario(),
+      chat_factory(false, false, false, false, std::nullopt, false, false, true,
+                   false, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state.find(
+              "|request-extensions=1|request-tools=0|request-character="
+              "application/json:\"alan-watts\"") != std::string::npos);
+  REQUIRE(result->recorded.semantic_state.find(
+              "|run-axes=interactive-2,chat-2,observe-2,persona=none") !=
+          std::string::npos);
+  REQUIRE(result->recorded.semantic_state.find("|provenance-tools=0|") !=
+          std::string::npos);
+  REQUIRE(result->recorded.semantic_state.find(
+              "|provenance-character=alan-watts:session_override") !=
+          std::string::npos);
+}
+
+TEST_CASE("direct provider character set is atomic when lookup disappears",
+          "[scenario][chat][character][failure]") {
+  const auto result =
+      testing::run_tui_scenario(provider_character_disappearance_scenario(),
+                                chat_factory(false, false, false, false,
+                                             std::nullopt, false, false, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "Selected model alternate|character-lists=0|character-lookups=1");
 }
 
 TEST_CASE("startup model selection is keyboard-only and resize deterministic",

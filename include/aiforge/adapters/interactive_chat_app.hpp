@@ -2,6 +2,7 @@
 
 #include <aiforge/adapters/venice_generation_options.hpp>
 #include <aiforge/backend/backend.hpp>
+#include <aiforge/backend/provider_character_catalog.hpp>
 #include <aiforge/cli/command_registry.hpp>
 #include <aiforge/domain/events.hpp>
 #include <aiforge/model/catalog.hpp>
@@ -47,6 +48,7 @@ struct InteractiveChatAppOptions {
   bool live_wake_enabled{true};
   bool poll_worker_updates{true};
   model::CatalogService* model_catalog{};
+  backend::ProviderCharacterCatalogSource* provider_character_catalog{};
   VeniceConfiguredRequestSettings configured_request_settings;
   PreviewVeniceRequestSetting preview_request_setting;
   PersistVeniceRequestSetting persist_request_setting;

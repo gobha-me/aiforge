@@ -6,7 +6,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -238,6 +240,116 @@ class LocalServer final {
   std::string m_cost_value;
 };
 
+struct CharacterReply {
+  int status{200};
+  std::string body;
+};
+
+class CharacterServer final {
+ public:
+  explicit CharacterServer(std::vector<CharacterReply> pages,
+                           std::map<std::string, CharacterReply> lookups = {},
+                           const bool repeat_last_page = false,
+                           std::function<void(std::size_t)> on_list = {})
+      : m_pages(std::move(pages)), m_lookups(std::move(lookups)),
+        m_repeat_last_page(repeat_last_page), m_on_list(std::move(on_list)) {
+    m_server.Get("/api/v1/characters", [this](const httplib::Request& request,
+                                              httplib::Response& response) {
+      std::size_t index{};
+      {
+        std::lock_guard lock(m_mutex);
+        index = m_targets.size();
+        m_targets.push_back(request.target);
+        m_authorizations.push_back(request.get_header_value("Authorization"));
+      }
+      CharacterReply reply{500, R"({"error":"unexpected page"})"};
+      if (index < m_pages.size()) {
+        reply = m_pages[index];
+      } else if (m_repeat_last_page && !m_pages.empty()) {
+        reply = m_pages.back();
+      }
+      response.status = reply.status;
+      response.set_content(std::move(reply.body), "application/json");
+      if (m_on_list) m_on_list(index);
+    });
+    m_server.Get(
+        R"(/api/v1/characters/(.+))",
+        [this](const httplib::Request& request, httplib::Response& response) {
+          const auto slug = request.matches[1].str();
+          {
+            std::lock_guard lock(m_mutex);
+            m_targets.push_back(request.target);
+            m_authorizations.push_back(
+                request.get_header_value("Authorization"));
+          }
+          const auto found = m_lookups.find(slug);
+          const auto reply = found == m_lookups.end()
+                                 ? CharacterReply{404, R"({"error":"missing"})"}
+                                 : found->second;
+          response.status = reply.status;
+          response.set_content(reply.body, "application/json");
+        });
+    m_port = m_server.bind_to_any_port("127.0.0.1");
+    REQUIRE(m_port > 0);
+    m_thread = std::jthread([this] { m_server.listen_after_bind(); });
+    m_server.wait_until_ready();
+    REQUIRE(m_server.is_running());
+  }
+
+  ~CharacterServer() {
+    m_server.stop();
+    if (m_thread.joinable()) m_thread.join();
+  }
+
+  [[nodiscard]] auto base_url() const -> std::string {
+    return "http://127.0.0.1:" + std::to_string(m_port) + "/api/v1";
+  }
+
+  [[nodiscard]] auto targets() -> std::vector<std::string> {
+    std::lock_guard lock(m_mutex);
+    return m_targets;
+  }
+
+  [[nodiscard]] auto authorizations() -> std::vector<std::string> {
+    std::lock_guard lock(m_mutex);
+    return m_authorizations;
+  }
+
+ private:
+  httplib::Server m_server;
+  int m_port{};
+  std::jthread m_thread;
+  std::mutex m_mutex;
+  std::vector<CharacterReply> m_pages;
+  std::map<std::string, CharacterReply> m_lookups;
+  bool m_repeat_last_page{};
+  std::function<void(std::size_t)> m_on_list;
+  std::vector<std::string> m_targets;
+  std::vector<std::string> m_authorizations;
+};
+
+[[nodiscard]] auto character_json(
+    std::string slug, std::optional<std::string> model = "test-model")
+    -> nlohmann::json {
+  auto result = nlohmann::json{{"slug", std::move(slug)},
+                               {"name", "Character"},
+                               {"description", "Helpful character"},
+                               {"adult", false},
+                               {"featured", true},
+                               {"webEnabled", false},
+                               {"tags", {"helpful"}},
+                               {"author", "must-not-cross"},
+                               {"photoUrl", "https://example.invalid/photo"},
+                               {"stats", {{"imports", 42}}}};
+  if (model) result["modelId"] = *model;
+  return result;
+}
+
+[[nodiscard]] auto character_page(const std::vector<nlohmann::json>& entries)
+    -> CharacterReply {
+  return {200, nlohmann::json{{"data", entries}, {"object", "list"}}.dump()};
+}
+
 TEST_CASE("local adapter server stops without receiving a request",
           "[adapter][venice][lifetime]") {
   for (int iteration = 0; iteration < 64; ++iteration) {
@@ -329,6 +441,381 @@ TEST_CASE("Venice model discovery is public and maps neutral context metadata",
       "0.23");
   REQUIRE_FALSE(catalog->entries.front().pricing->base.cache_write);
   REQUIRE(server.model_authorization().empty());
+}
+
+TEST_CASE("Venice character discovery uses authenticated returned pagination",
+          "[adapter][venice][characters]") {
+  std::vector<nlohmann::json> first_page;
+  for (int index = 0; index < 100; ++index) {
+    first_page.push_back(character_json("character-" + std::to_string(index)));
+  }
+  CharacterServer server{
+      {character_page(first_page), character_page({character_json("last")})}};
+  adapters::VeniceBackend source{secret("catalog-secret"),
+                                 {server.base_url(), 1s, 1s, 1s, 8}};
+
+  auto limits = backend::ProviderCharacterLimits{};
+  limits.maximum_entries = 200;
+  const auto catalog = source.list(limits);
+  REQUIRE(catalog);
+  REQUIRE(catalog->source_id == "venice.characters");
+  REQUIRE(catalog->entries.size() == 101);
+  REQUIRE(catalog->entries.front().id ==
+          make_id<domain::ProviderCharacterId>("character-0"));
+  REQUIRE(catalog->entries.back().id ==
+          make_id<domain::ProviderCharacterId>("last"));
+  REQUIRE(catalog->entries.front().model_id ==
+          make_id<domain::ModelId>("test-model"));
+  REQUIRE(catalog->entries.front().name == "Character");
+  REQUIRE(catalog->entries.front().description == "Helpful character");
+  REQUIRE(catalog->entries.front().featured == true);
+  REQUIRE(catalog->entries.front().web_enabled == false);
+  REQUIRE(catalog->entries.front().tags == std::vector<std::string>{"helpful"});
+
+  const auto targets = server.targets();
+  REQUIRE(targets ==
+          std::vector<std::string>{
+              "/api/v1/characters?limit=100&offset=0&isAdult=false",
+              "/api/v1/characters?limit=100&offset=100&isAdult=false"});
+  REQUIRE(server.authorizations() ==
+          std::vector<std::string>{"Bearer catalog-secret",
+                                   "Bearer catalog-secret"});
+}
+
+TEST_CASE("Venice character pagination offset advancement is checked",
+          "[adapter][venice][characters][failure]") {
+  const auto maximum = std::numeric_limits<int>::max();
+  REQUIRE(adapters::detail::advance_venice_character_offset(maximum - 1, 1) ==
+          maximum);
+  REQUIRE_FALSE(adapters::detail::advance_venice_character_offset(maximum, 1));
+  REQUIRE_FALSE(adapters::detail::advance_venice_character_offset(
+      0, static_cast<std::size_t>(maximum) + 1U));
+  REQUIRE_FALSE(adapters::detail::advance_venice_character_offset(-1, 1));
+}
+
+TEST_CASE("Venice character discovery fails closed without partial results",
+          "[adapter][venice][characters][failure]") {
+  SECTION("invalid limits reject before transport") {
+    CharacterServer server{{character_page({})}};
+    adapters::VeniceBackend source{secret("secret"),
+                                   {server.base_url(), 1s, 1s, 1s, 8}};
+    auto limits = backend::ProviderCharacterLimits{};
+    limits.maximum_response_bytes = 0;
+    const auto catalog = source.list(limits);
+    REQUIRE_FALSE(catalog);
+    REQUIRE(catalog.error().code ==
+            backend::ProviderCharacterErrorCode::invalid_request);
+    REQUIRE(server.targets().empty());
+  }
+
+  SECTION("unsafe text and duplicate tags are invalid data") {
+    auto unsafe = character_json("unsafe");
+    unsafe["description"] = "hidden\xE2\x80\xAEtext";
+    auto duplicate_tags = character_json("duplicate-tags");
+    duplicate_tags["tags"] = {"same", "same"};
+    for (const auto& entry : {unsafe, duplicate_tags}) {
+      CharacterServer server{{character_page({entry})}};
+      adapters::VeniceBackend source{secret("secret"),
+                                     {server.base_url(), 1s, 1s, 1s, 8}};
+      const auto catalog = source.list();
+      REQUIRE_FALSE(catalog);
+      REQUIRE(catalog.error().code ==
+              backend::ProviderCharacterErrorCode::invalid_data);
+    }
+  }
+
+  SECTION("dropped unusable entries are partial data and fail closed") {
+    std::vector<nlohmann::json> entries;
+    for (int index = 0; index < 99; ++index) {
+      entries.push_back(character_json("entry-" + std::to_string(index)));
+    }
+    entries.emplace_back(nlohmann::json::object());
+    CharacterServer server{{character_page(entries)}};
+    adapters::VeniceBackend source{secret("secret"),
+                                   {server.base_url(), 1s, 1s, 1s, 8}};
+    const auto catalog = source.list();
+    REQUIRE_FALSE(catalog);
+    REQUIRE(catalog.error().code ==
+            backend::ProviderCharacterErrorCode::invalid_data);
+    REQUIRE(server.targets().size() == 1);
+  }
+
+  SECTION("provider slugs must use the shared conservative grammar") {
+    const std::array slugs{std::string{"has space"}, std::string{"has\"quote"},
+                           std::string{"has\\slash"},
+                           std::string{"has\xE2\x80\xAE"
+                                       "format"}};
+    for (const auto& slug : slugs) {
+      CharacterServer server{{character_page({character_json(slug)})}};
+      adapters::VeniceBackend source{secret("secret"),
+                                     {server.base_url(), 1s, 1s, 1s, 8}};
+      const auto catalog = source.list();
+      REQUIRE_FALSE(catalog);
+      REQUIRE(catalog.error().code ==
+              backend::ProviderCharacterErrorCode::invalid_data);
+    }
+  }
+
+  SECTION("wrong-typed mapped fields are invalid data") {
+    const std::array fields{"name",     "description", "modelId", "adult",
+                            "featured", "webEnabled",  "tags"};
+    for (const auto* field : fields) {
+      auto entry = character_json(std::string{"wrong-"} + field);
+      if (field == std::string_view{"tags"}) {
+        entry[field] = nlohmann::json::array({"valid", 42});
+      } else if (field == std::string_view{"adult"} ||
+                 field == std::string_view{"featured"} ||
+                 field == std::string_view{"webEnabled"}) {
+        entry[field] = "true";
+      } else {
+        entry[field] = nlohmann::json::array();
+      }
+      CharacterServer server{{character_page({entry})}};
+      adapters::VeniceBackend source{secret("secret"),
+                                     {server.base_url(), 1s, 1s, 1s, 8}};
+      const auto catalog = source.list();
+      REQUIRE_FALSE(catalog);
+      REQUIRE(catalog.error().code ==
+              backend::ProviderCharacterErrorCode::invalid_data);
+    }
+  }
+
+  SECTION("adult and invalid-model entries are rejected") {
+    auto adult = character_json("adult");
+    adult["adult"] = true;
+    auto invalid_model = character_json("invalid-model");
+    invalid_model["modelId"] = "bad\nmodel";
+    for (const auto& entry : {adult, invalid_model}) {
+      CharacterServer server{{character_page({entry})}};
+      adapters::VeniceBackend source{secret("secret"),
+                                     {server.base_url(), 1s, 1s, 1s, 8}};
+      const auto catalog = source.list();
+      REQUIRE_FALSE(catalog);
+      REQUIRE(catalog.error().code ==
+              backend::ProviderCharacterErrorCode::invalid_data);
+    }
+  }
+
+  SECTION("missing and null adult classification are rejected") {
+    auto missing = character_json("missing-adult");
+    missing.erase("adult");
+    auto null = character_json("null-adult");
+    null["adult"] = nullptr;
+    for (const auto& entry : {missing, null}) {
+      CharacterServer server{{character_page({entry})}};
+      adapters::VeniceBackend source{secret("secret"),
+                                     {server.base_url(), 1s, 1s, 1s, 8}};
+      const auto catalog = source.list();
+      REQUIRE_FALSE(catalog);
+      REQUIRE(catalog.error().code ==
+              backend::ProviderCharacterErrorCode::invalid_data);
+    }
+  }
+
+  SECTION("count and cumulative byte limits reject the whole catalog") {
+    for (const bool count_limit : {true, false}) {
+      std::vector<nlohmann::json> entries;
+      const auto count = count_limit ? 100 : 1;
+      for (int index = 0; index < count; ++index) {
+        entries.push_back(character_json("entry-" + std::to_string(index)));
+      }
+      CharacterServer server{{character_page(entries)}};
+      adapters::VeniceBackend source{secret("secret"),
+                                     {server.base_url(), 1s, 1s, 1s, 8}};
+      auto limits = backend::ProviderCharacterLimits{};
+      if (count_limit) {
+        limits.maximum_entries = 99;
+      } else {
+        limits.maximum_total_text_bytes = 40;
+      }
+      const auto catalog = source.list(limits);
+      REQUIRE_FALSE(catalog);
+      REQUIRE(catalog.error().code ==
+              backend::ProviderCharacterErrorCode::too_large);
+    }
+  }
+
+  SECTION("an endless full page is bounded by returned count") {
+    std::vector<nlohmann::json> entries;
+    for (int index = 0; index < 100; ++index) {
+      entries.push_back(character_json("entry-" + std::to_string(index)));
+    }
+    CharacterServer server{{character_page(entries)}, {}, true};
+    adapters::VeniceBackend source{secret("secret"),
+                                   {server.base_url(), 1s, 1s, 1s, 8}};
+    auto limits = backend::ProviderCharacterLimits{};
+    limits.maximum_entries = 100;
+    const auto catalog = source.list(limits);
+    REQUIRE_FALSE(catalog);
+    REQUIRE(catalog.error().code ==
+            backend::ProviderCharacterErrorCode::too_large);
+    REQUIRE(server.targets().size() == 2);
+  }
+
+  SECTION("cross-page duplicate identifiers reject the whole catalog") {
+    std::vector<nlohmann::json> first_page;
+    for (int index = 0; index < 100; ++index) {
+      first_page.push_back(character_json("entry-" + std::to_string(index)));
+    }
+    CharacterServer server{{character_page(first_page),
+                            character_page({character_json("entry-0")})}};
+    adapters::VeniceBackend source{secret("secret"),
+                                   {server.base_url(), 1s, 1s, 1s, 8}};
+    auto limits = backend::ProviderCharacterLimits{};
+    limits.maximum_entries = 101;
+    const auto catalog = source.list(limits);
+    REQUIRE_FALSE(catalog);
+    REQUIRE(catalog.error().code ==
+            backend::ProviderCharacterErrorCode::invalid_data);
+  }
+
+  SECTION("second-page transport failure never returns the first page") {
+    std::vector<nlohmann::json> first_page;
+    for (int index = 0; index < 100; ++index) {
+      first_page.push_back(character_json("entry-" + std::to_string(index)));
+    }
+    CharacterServer server{
+        {character_page(first_page), {503, R"({"error":"down"})"}}};
+    adapters::VeniceBackend source{secret("secret"),
+                                   {server.base_url(), 1s, 1s, 1s, 8}};
+    auto limits = backend::ProviderCharacterLimits{};
+    limits.maximum_entries = 200;
+    const auto catalog = source.list(limits);
+    REQUIRE_FALSE(catalog);
+    REQUIRE(catalog.error().code ==
+            backend::ProviderCharacterErrorCode::unavailable);
+    REQUIRE(server.targets().size() == 2);
+  }
+
+  SECTION("cancellation between full pages returns no catalog") {
+    std::stop_source stop;
+    std::vector<nlohmann::json> entries;
+    for (int index = 0; index < 100; ++index) {
+      entries.push_back(character_json("entry-" + std::to_string(index)));
+    }
+    CharacterServer server{{character_page(entries)}, {}, true, [&](auto) {
+                             stop.request_stop();
+                           }};
+    adapters::VeniceBackend source{secret("secret"),
+                                   {server.base_url(), 1s, 1s, 1s, 8}};
+    auto limits = backend::ProviderCharacterLimits{};
+    limits.maximum_entries = 200;
+    const auto catalog = source.list(limits, stop.get_token());
+    REQUIRE_FALSE(catalog);
+    REQUIRE(catalog.error().code ==
+            backend::ProviderCharacterErrorCode::cancelled);
+    REQUIRE(server.targets().size() == 1);
+  }
+
+  SECTION("oversized response body is a redacted typed size error") {
+    CharacterServer server{{character_page({character_json("too-large")})}};
+    adapters::VeniceBackend source{secret("body-secret"),
+                                   {server.base_url(), 1s, 1s, 1s, 8}};
+    auto limits = backend::ProviderCharacterLimits{};
+    limits.maximum_response_bytes = 32;
+    const auto catalog = source.list(limits);
+    REQUIRE_FALSE(catalog);
+    REQUIRE(catalog.error().code ==
+            backend::ProviderCharacterErrorCode::too_large);
+    REQUIRE(catalog.error().message.find("body-secret") == std::string::npos);
+  }
+
+  SECTION("authentication unavailable and malformed data remain distinct") {
+    const std::array cases{
+        std::pair{CharacterReply{401, R"({"error":"secret"})"},
+                  backend::ProviderCharacterErrorCode::authentication},
+        std::pair{CharacterReply{503, R"({"error":"down"})"},
+                  backend::ProviderCharacterErrorCode::unavailable},
+        std::pair{CharacterReply{200, R"({"data":{}})"},
+                  backend::ProviderCharacterErrorCode::invalid_data}};
+    for (const auto& [reply, expected] : cases) {
+      CharacterServer server{{reply}};
+      adapters::VeniceBackend source{secret("secret"),
+                                     {server.base_url(), 1s, 1s, 1s, 8}};
+      const auto catalog = source.list();
+      REQUIRE_FALSE(catalog);
+      REQUIRE(catalog.error().code == expected);
+      REQUIRE(catalog.error().message.find("secret") == std::string::npos);
+    }
+  }
+}
+
+TEST_CASE("Venice character lookup revalidates exact neutral identity",
+          "[adapter][venice][characters][lookup]") {
+  const auto envelope = [](nlohmann::json character) {
+    return CharacterReply{200, nlohmann::json{{"data", std::move(character)},
+                                              {"object", "character"}}
+                                   .dump()};
+  };
+  CharacterServer server{
+      {},
+      {{"chosen", envelope(character_json("chosen"))},
+       {"mismatch", envelope(character_json("different"))},
+       {"wrong-slug",
+        envelope(nlohmann::json{{"slug", 42}, {"adult", false}})}}};
+  adapters::VeniceBackend source{secret("lookup-secret"),
+                                 {server.base_url(), 1s, 1s, 1s, 8}};
+
+  const auto chosen =
+      source.lookup(make_id<domain::ProviderCharacterId>("chosen"));
+  REQUIRE(chosen);
+  REQUIRE(chosen->id == make_id<domain::ProviderCharacterId>("chosen"));
+  REQUIRE(chosen->model_id == make_id<domain::ModelId>("test-model"));
+
+  const auto mismatch =
+      source.lookup(make_id<domain::ProviderCharacterId>("mismatch"));
+  REQUIRE_FALSE(mismatch);
+  REQUIRE(mismatch.error().code ==
+          backend::ProviderCharacterErrorCode::invalid_data);
+
+  const auto wrong_slug =
+      source.lookup(make_id<domain::ProviderCharacterId>("wrong-slug"));
+  REQUIRE_FALSE(wrong_slug);
+  REQUIRE(wrong_slug.error().code ==
+          backend::ProviderCharacterErrorCode::invalid_data);
+
+  const auto missing =
+      source.lookup(make_id<domain::ProviderCharacterId>("missing"));
+  REQUIRE_FALSE(missing);
+  REQUIRE(missing.error().code ==
+          backend::ProviderCharacterErrorCode::not_found);
+  REQUIRE(
+      server.authorizations() ==
+      std::vector<std::string>{"Bearer lookup-secret", "Bearer lookup-secret",
+                               "Bearer lookup-secret", "Bearer lookup-secret"});
+
+  CharacterServer oversized_server{
+      {}, {{"large", envelope(character_json("large"))}}};
+  adapters::VeniceBackend oversized_source{
+      secret("lookup-secret"), {oversized_server.base_url(), 1s, 1s, 1s, 8}};
+  auto limits = backend::ProviderCharacterLimits{};
+  limits.maximum_response_bytes = 32;
+  const auto oversized = oversized_source.lookup(
+      make_id<domain::ProviderCharacterId>("large"), limits);
+  REQUIRE_FALSE(oversized);
+  REQUIRE(oversized.error().code ==
+          backend::ProviderCharacterErrorCode::too_large);
+
+  for (const bool null_adult : {false, true}) {
+    auto unclassified =
+        character_json(null_adult ? "null-adult" : "missing-adult");
+    if (null_adult) {
+      unclassified["adult"] = nullptr;
+    } else {
+      unclassified.erase("adult");
+    }
+    const auto slug = unclassified.at("slug").get<std::string>();
+    CharacterServer unclassified_server{
+        {}, {{slug, envelope(std::move(unclassified))}}};
+    adapters::VeniceBackend unclassified_source{
+        secret("lookup-secret"),
+        {unclassified_server.base_url(), 1s, 1s, 1s, 8}};
+    const auto result =
+        unclassified_source.lookup(make_id<domain::ProviderCharacterId>(slug));
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().code ==
+            backend::ProviderCharacterErrorCode::invalid_data);
+  }
 }
 
 TEST_CASE(
@@ -1290,6 +1777,26 @@ TEST_CASE("Venice adapter maps the explicit system-prompt boolean exactly",
   }
 }
 
+TEST_CASE("Venice adapter maps a validated character slug exactly",
+          "[adapter][venice][extensions][characters]") {
+  LocalServer server;
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
+  auto value = request();
+  value.options.extensions.emplace(
+      std::string{adapters::venice_character_slug_extension},
+      domain::StructuredDataBlock{"application/json", R"("chosen-slug")"});
+  auto started = backend.start(std::move(value), {});
+  REQUIRE(started);
+  while (true) {
+    auto next = (*started)->next({});
+    REQUIRE(next);
+    if (!*next) break;
+  }
+  const auto sent = nlohmann::json::parse(server.body());
+  REQUIRE(sent.at("venice_parameters").at("character_slug") == "chosen-slug");
+}
+
 TEST_CASE("Venice adapter combines both bounded Chat request settings",
           "[adapter][venice][extensions]") {
   LocalServer server;
@@ -1316,9 +1823,8 @@ TEST_CASE("Venice adapter combines both bounded Chat request settings",
                     .get<bool>());
 }
 
-TEST_CASE(
-    "Venice adapter rejects malformed web-search extensions before transport",
-    "[adapter][venice][extensions][failure]") {
+TEST_CASE("Venice adapter rejects malformed extensions before transport",
+          "[adapter][venice][extensions][failure]") {
   std::vector<backend::GenerationOptions> invalid;
   const auto extension = [](std::string name, std::string media_type,
                             std::string data) {
@@ -1353,6 +1859,39 @@ TEST_CASE(
   invalid.push_back(
       extension(std::string{adapters::venice_system_prompt_extension},
                 "text/plain", "true"));
+  invalid.push_back(
+      extension(std::string{adapters::venice_character_slug_extension},
+                "text/plain", R"("chosen")"));
+  invalid.push_back(
+      extension(std::string{adapters::venice_character_slug_extension},
+                "application/json", "{"));
+  invalid.push_back(
+      extension(std::string{adapters::venice_character_slug_extension},
+                "application/json", "true"));
+  invalid.push_back(
+      extension(std::string{adapters::venice_character_slug_extension},
+                "application/json", R"("")"));
+  invalid.push_back(
+      extension(std::string{adapters::venice_character_slug_extension},
+                "application/json", R"("unsafe\u202evalue")"));
+  invalid.push_back(
+      extension(std::string{adapters::venice_character_slug_extension},
+                "application/json", R"("has space")"));
+  invalid.push_back(
+      extension(std::string{adapters::venice_character_slug_extension},
+                "application/json", R"("has\"quote")"));
+  invalid.push_back(
+      extension(std::string{adapters::venice_character_slug_extension},
+                "application/json", R"("has\\slash")"));
+  auto malformed_utf8 = std::string{"\"bad"};
+  malformed_utf8.push_back(static_cast<char>(0xFF));
+  malformed_utf8.push_back('"');
+  invalid.push_back(
+      extension(std::string{adapters::venice_character_slug_extension},
+                "application/json", std::move(malformed_utf8)));
+  invalid.push_back(
+      extension(std::string{adapters::venice_character_slug_extension},
+                "application/json", '"' + std::string(257, 'x') + '"'));
   invalid.push_back(
       extension(std::string{adapters::venice_web_search_extension},
                 "application/json", R"("on")"));
@@ -2048,18 +2587,30 @@ TEST_CASE("resolved Venice chat settings preserve inherit and explicit false",
               {"venice.chat.web-search", std::nullopt,
                domain::RequestOptionSource::provider_default},
               {"venice.chat.include-system-prompt", std::string{"false"},
-               domain::RequestOptionSource::configuration}});
+               domain::RequestOptionSource::configuration},
+              {"venice.chat.character-slug", std::nullopt,
+               domain::RequestOptionSource::provider_default}});
 
   const adapters::VeniceRequestSettingOverrides overrides{
-      adapters::VeniceWebSearchSetting::off,
-      adapters::VeniceSystemPromptSetting::include};
+      .web_search = adapters::VeniceWebSearchSetting::off,
+      .system_prompt = adapters::VeniceSystemPromptSetting::include,
+      .character_slug = make_id<domain::ProviderCharacterId>("Az09._~-")};
+  const auto generated =
+      adapters::venice_generation_options(*configured, overrides);
+  REQUIRE(generated);
+  REQUIRE(generated->extensions.at(
+              std::string{adapters::venice_character_slug_extension}) ==
+          domain::StructuredDataBlock{"application/json", R"("Az09._~-")"});
   const auto overridden =
       adapters::venice_effective_request_options(*configured, overrides);
   REQUIRE(overridden);
   REQUIRE(overridden->front().value == "off");
   REQUIRE(overridden->front().source ==
           domain::RequestOptionSource::session_override);
-  REQUIRE(overridden->back().value == "true");
+  REQUIRE(overridden->at(1).value == "true");
+  REQUIRE(overridden->at(1).source ==
+          domain::RequestOptionSource::session_override);
+  REQUIRE(overridden->back().value == "Az09._~-");
   REQUIRE(overridden->back().source ==
           domain::RequestOptionSource::session_override);
 }
@@ -2076,6 +2627,24 @@ TEST_CASE("invalid closed Venice request setting values fail closed",
       static_cast<adapters::VeniceSystemPromptSetting>(999);
   REQUIRE_FALSE(adapters::venice_generation_options(configured));
   REQUIRE_FALSE(adapters::venice_effective_request_options(configured));
+
+  configured.system_prompt = adapters::VeniceSystemPromptSetting::inherit;
+  const std::array invalid_slugs{std::string{"has space"},
+                                 std::string{"has\"quote"},
+                                 std::string{"has\\slash"},
+                                 std::string{"has\xE2\x80\xAE"
+                                             "format"}};
+  for (const auto& slug : invalid_slugs) {
+    const auto id = domain::ProviderCharacterId::from(slug);
+    REQUIRE(id);
+    const adapters::VeniceRequestSettingOverrides overrides{
+        .web_search = std::nullopt,
+        .system_prompt = std::nullopt,
+        .character_slug = *id};
+    REQUIRE_FALSE(adapters::venice_generation_options(configured, overrides));
+    REQUIRE_FALSE(
+        adapters::venice_effective_request_options(configured, overrides));
+  }
 }
 
 TEST_CASE("process provenance names a credential source without its secret",

@@ -25,6 +25,9 @@ with the north star or an accepted ADR, the governing document wins.
 - Provider requests contain neutral messages, content blocks, tools, and
   generation options. Credentials and raw secrets never enter events,
   renderable errors, artifacts, or captured fake requests.
+- Provider characters are transient request options, not personas or an
+  instruction/authority layer. They never switch models, grant tools, broaden
+  permissions, or enter prompt construction as AIForge-authored text.
 - Build deterministic fakes and failure cases before a production UI or network
   path depends on a new boundary.
 - Fallible public operations return `std::expected`; exceptions do not cross

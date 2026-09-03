@@ -11,6 +11,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <set>
 #include <stop_token>
 #include <string_view>
 #include <thread>
@@ -76,6 +77,12 @@ constexpr std::string_view tool_thought_signature_media_type{
       return request_error("Venice request was invalid");
     case venice::ErrorKind::Parse:
       return protocol_error("Venice response stream could not be parsed");
+    case venice::ErrorKind::ResponseTooLarge:
+      return protocol_error("Venice response exceeded its byte limit");
+    case venice::ErrorKind::PaymentRequired:
+      return adapter_error(backend::BackendErrorKind::unavailable,
+                           "Venice request requires payment", false,
+                           error.status);
     case venice::ErrorKind::Http:
       return adapter_error(backend::BackendErrorKind::unavailable,
                            "Venice request failed", error.status >= 500,
@@ -84,6 +91,140 @@ constexpr std::string_view tool_thought_signature_media_type{
       return adapter_error(backend::BackendErrorKind::unavailable,
                            "Venice request failed", false, error.status);
   }
+}
+
+[[nodiscard]] auto character_error(
+    const backend::ProviderCharacterErrorCode code, std::string message,
+    const bool retryable = false, std::optional<int> status = std::nullopt)
+    -> backend::ProviderCharacterError {
+  return {code, std::move(message), retryable, status};
+}
+
+[[nodiscard]] auto map_character_error(const venice::Error& error,
+                                       const bool lookup)
+    -> backend::ProviderCharacterError {
+  using Code = backend::ProviderCharacterErrorCode;
+  switch (error.kind) {
+    case venice::ErrorKind::Cancelled:
+      return character_error(Code::cancelled,
+                             "Venice character request cancelled", false,
+                             error.status);
+    case venice::ErrorKind::Auth:
+      return character_error(Code::authentication,
+                             "Venice character authentication failed", false,
+                             error.status);
+    case venice::ErrorKind::InvalidArg:
+      return character_error(Code::invalid_request,
+                             "Venice character request was invalid", false,
+                             error.status);
+    case venice::ErrorKind::Parse:
+      return character_error(Code::invalid_data,
+                             "Venice returned invalid character data", false,
+                             error.status);
+    case venice::ErrorKind::ResponseTooLarge:
+      return character_error(
+          Code::too_large, "Venice character response exceeded its byte limit",
+          false, error.status);
+    case venice::ErrorKind::Network:
+    case venice::ErrorKind::RateLimited:
+      return character_error(Code::unavailable,
+                             "Venice character catalog is unavailable", true,
+                             error.status);
+    case venice::ErrorKind::Http:
+      if (lookup && error.status == 404) {
+        return character_error(Code::not_found,
+                               "Venice character was not found", false,
+                               error.status);
+      }
+      return character_error(Code::unavailable,
+                             "Venice character request failed",
+                             error.status >= 500, error.status);
+    case venice::ErrorKind::PaymentRequired:
+      return character_error(Code::unavailable,
+                             "Venice character request requires payment", false,
+                             error.status);
+  }
+  return character_error(Code::internal_failure,
+                         "Venice character request failed internally");
+}
+
+[[nodiscard]] auto mapped_character(
+    const venice::Character& character,
+    const backend::ProviderCharacterLimits& limits)
+    -> std::expected<backend::ProviderCharacterSummary,
+                     backend::ProviderCharacterError> {
+  using Code = backend::ProviderCharacterErrorCode;
+  const auto& raw = character.raw;
+  const auto valid_optional_string = [&](const char* field) {
+    return !raw.contains(field) || raw.at(field).is_null() ||
+           raw.at(field).is_string();
+  };
+  const auto valid_optional_boolean = [&](const char* field) {
+    return !raw.contains(field) || raw.at(field).is_null() ||
+           raw.at(field).is_boolean();
+  };
+  const auto tags_valid = [&] {
+    if (!raw.contains("tags")) return true;
+    const auto& tags = raw.at("tags");
+    return tags.is_array() && std::ranges::all_of(tags, [](const auto& tag) {
+             return tag.is_string();
+           });
+  };
+  if (!raw.is_object() || !raw.contains("slug") ||
+      !raw.at("slug").is_string() || !valid_optional_string("name") ||
+      !valid_optional_string("description") ||
+      !valid_optional_string("modelId") || !raw.contains("adult") ||
+      !raw.at("adult").is_boolean() || !valid_optional_boolean("featured") ||
+      !valid_optional_boolean("webEnabled") || !tags_valid()) {
+    return std::unexpected(character_error(
+        Code::invalid_data, "Venice returned malformed character fields"));
+  }
+  if (!character.adult || *character.adult ||
+      raw.at("adult").get<bool>() != *character.adult) {
+    return std::unexpected(
+        character_error(Code::invalid_data,
+                        "Venice returned an adult or unclassified character"));
+  }
+  if (!detail::is_valid_venice_character_slug(character.slug)) {
+    return std::unexpected(character_error(
+        Code::invalid_data, "Venice returned an invalid character slug"));
+  }
+  auto id = domain::ProviderCharacterId::from(character.slug);
+  if (!id) {
+    return std::unexpected(character_error(
+        Code::invalid_data, "Venice returned an invalid character identifier"));
+  }
+  backend::ProviderCharacterSummary result{std::move(*id)};
+  result.name = character.name;
+  result.description = character.description;
+  if (character.model_id) {
+    auto model_id = domain::ModelId::from(*character.model_id);
+    if (!model_id) {
+      return std::unexpected(character_error(
+          Code::invalid_data, "Venice returned an invalid character model"));
+    }
+    result.model_id = std::move(*model_id);
+  }
+  result.featured = character.featured.value_or(false);
+  result.web_enabled = character.web_enabled.value_or(false);
+  result.tags = character.tags;
+  if (auto checked =
+          backend::validate_provider_character_summary(result, limits);
+      !checked) {
+    return std::unexpected(std::move(checked.error()));
+  }
+  return result;
+}
+
+[[nodiscard]] auto character_text_bytes(
+    const backend::ProviderCharacterSummary& summary) -> std::size_t {
+  auto result = summary.id.value().size();
+  if (summary.name) result += summary.name->size();
+  if (summary.description) result += summary.description->size();
+  if (summary.model_id) result += summary.model_id->value().size();
+  for (const auto& tag : summary.tags)
+    result += tag.size();
+  return result;
 }
 
 [[nodiscard]] auto role_name(const domain::Role role) -> std::string_view {
@@ -245,6 +386,7 @@ constexpr std::string_view tool_thought_signature_media_type{
 struct VeniceRequestOptions {
   std::optional<std::string> web_search;
   std::optional<bool> include_system_prompt;
+  std::optional<std::string> character_slug;
 };
 
 // clang-format off
@@ -252,9 +394,11 @@ struct VeniceRequestOptions {
 [[nodiscard]] auto request_options(const backend::GenerationOptions& options)
     -> std::expected<VeniceRequestOptions, backend::BackendError> {
   // clang-format on
-  constexpr std::size_t maximum_extension_data_bytes{16};
+  constexpr std::size_t maximum_boolean_or_mode_bytes{16};
+  constexpr std::size_t maximum_character_slug_json_bytes{
+      (domain::ProviderCharacterId::max_size * 2U) + 2U};
   constexpr std::size_t maximum_required_capabilities{64};
-  if (options.extensions.size() > 2 ||
+  if (options.extensions.size() > 3 ||
       options.required_model_capabilities.size() >
           maximum_required_capabilities) {
     return std::unexpected(
@@ -264,7 +408,8 @@ struct VeniceRequestOptions {
   VeniceRequestOptions result;
   for (const auto& [name, value] : options.extensions) {
     if (name != venice_web_search_extension &&
-        name != venice_system_prompt_extension) {
+        name != venice_system_prompt_extension &&
+        name != venice_character_slug_extension) {
       return std::unexpected(
           request_error("Venice extension namespace is unsupported"));
     }
@@ -272,12 +417,32 @@ struct VeniceRequestOptions {
       return std::unexpected(
           request_error("Venice extension media type is invalid"));
     }
-    if (value.data.size() > maximum_extension_data_bytes) {
+    const auto maximum_data_bytes = name == venice_character_slug_extension
+                                        ? maximum_character_slug_json_bytes
+                                        : maximum_boolean_or_mode_bytes;
+    if (value.data.size() > maximum_data_bytes) {
       return std::unexpected(
           request_error("Venice extension value is too large"));
     }
     const auto parsed = nlohmann::json::parse(value.data, nullptr, false);
-    if (name == venice_system_prompt_extension) {
+    if (name == venice_character_slug_extension) {
+      if (!parsed.is_string()) {
+        return std::unexpected(
+            request_error("Venice character extension value is invalid"));
+      }
+      auto slug_text = parsed.get<std::string>();
+      if (!detail::is_valid_venice_character_slug(slug_text)) {
+        return std::unexpected(
+            request_error("Venice character extension value is invalid"));
+      }
+      auto slug = domain::ProviderCharacterId::from(std::move(slug_text));
+      if (!slug || !backend::validate_provider_character_summary(
+                       backend::ProviderCharacterSummary{*slug})) {
+        return std::unexpected(
+            request_error("Venice character extension value is invalid"));
+      }
+      result.character_slug = std::string{slug->value()};
+    } else if (name == venice_system_prompt_extension) {
       if (!parsed.is_boolean()) {
         return std::unexpected(
             request_error("Venice system-prompt extension value is invalid"));
@@ -336,12 +501,15 @@ struct VeniceRequestOptions {
   if (request.options.seed) {
     result.seed = static_cast<std::int64_t>(*request.options.seed);
   }
-  if (extensions->web_search || extensions->include_system_prompt) {
+  if (extensions->web_search || extensions->include_system_prompt ||
+      extensions->character_slug) {
     result.venice_parameters.emplace();
     result.venice_parameters->enable_web_search =
         std::move(extensions->web_search);
     result.venice_parameters->include_venice_system_prompt =
         extensions->include_system_prompt;
+    result.venice_parameters->character_slug =
+        std::move(extensions->character_slug);
   }
 
   result.messages.reserve(request.context.entries.size());
@@ -770,6 +938,21 @@ class VeniceStream final : public backend::BackendStream {
 
 } // namespace
 
+auto detail::advance_venice_character_offset(const int current,
+                                             const std::size_t returned)
+    -> std::expected<int, backend::ProviderCharacterError> {
+  using Code = backend::ProviderCharacterErrorCode;
+  if (current < 0 ||
+      returned > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+      static_cast<std::size_t>(current) >
+          static_cast<std::size_t>(std::numeric_limits<int>::max()) -
+              returned) {
+    return std::unexpected(character_error(
+        Code::too_large, "Venice character catalog offset overflowed"));
+  }
+  return current + static_cast<int>(returned);
+}
+
 struct VeniceBackend::Impl {
   explicit Impl(credentials::Secret credential,
                 VeniceBackendOptions backend_options)
@@ -903,6 +1086,168 @@ auto VeniceBackend::lookup(const domain::ModelId& model_id,
   } catch (...) {
     return std::unexpected(adapter_error(backend::BackendErrorKind::unavailable,
                                          "Venice model lookup failed"));
+  }
+}
+
+// Page, cancellation, count, identity, and byte gates remain adjacent here.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Catalog gates.
+auto VeniceBackend::list(const backend::ProviderCharacterLimits limits,
+                         const std::stop_token stop_token)
+    -> std::expected<backend::ProviderCharacterCatalog,
+                     backend::ProviderCharacterError> {
+  using Code = backend::ProviderCharacterErrorCode;
+  try {
+    backend::ProviderCharacterCatalog result{{}, "venice.characters"};
+    if (auto checked =
+            backend::validate_provider_character_catalog(result, limits);
+        !checked) {
+      return std::unexpected(std::move(checked.error()));
+    }
+    if (stop_token.stop_requested()) {
+      return std::unexpected(character_error(
+          Code::cancelled, "Venice character request cancelled"));
+    }
+    if (m_impl == nullptr) {
+      return std::unexpected(
+          character_error(Code::invalid_request,
+                          "Venice character adapter is not initialized"));
+    }
+
+    constexpr int page_limit{100};
+    std::size_t returned_total{};
+    std::size_t text_bytes = result.source_id.size();
+    int offset{};
+    std::set<domain::ProviderCharacterId> ids;
+    venice::CancelToken cancellation;
+    std::stop_callback cancel_callback{
+        stop_token, [&cancellation] { cancellation.cancel(); }};
+
+    for (;;) {
+      if (stop_token.stop_requested()) {
+        return std::unexpected(character_error(
+            Code::cancelled, "Venice character request cancelled"));
+      }
+      venice::CharacterQuery query;
+      query.limit = page_limit;
+      query.offset = offset;
+      query.is_adult = false;
+      const venice::RequestOptions request_options{
+          .connect_timeout = m_impl->options.connect_timeout,
+          .read_timeout = m_impl->options.read_timeout,
+          .write_timeout = m_impl->options.write_timeout,
+          .cancel = &cancellation,
+          .maximum_response_bytes = limits.maximum_response_bytes};
+      auto page = m_impl->client.characters(query, request_options);
+      if (!page) {
+        return std::unexpected(map_character_error(page.error(), false));
+      }
+      if (page->returned > static_cast<std::size_t>(page_limit) ||
+          page->entries.size() != page->returned) {
+        return std::unexpected(character_error(
+            Code::invalid_data,
+            "Venice returned an invalid character catalog page"));
+      }
+      if (page->returned > limits.maximum_entries - returned_total) {
+        return std::unexpected(character_error(
+            Code::too_large, "Venice character catalog has too many entries"));
+      }
+      returned_total += page->returned;
+
+      for (const auto& character : page->entries) {
+        auto summary = mapped_character(character, limits);
+        if (!summary) return std::unexpected(std::move(summary.error()));
+        if (!ids.insert(summary->id).second) {
+          return std::unexpected(character_error(
+              Code::invalid_data,
+              "Venice character catalog repeats an identifier"));
+        }
+        const auto bytes = character_text_bytes(*summary);
+        if (bytes > limits.maximum_total_text_bytes - text_bytes) {
+          return std::unexpected(character_error(
+              Code::too_large, "Venice character catalog exceeds its "
+                               "cumulative text byte limit"));
+        }
+        text_bytes += bytes;
+        result.entries.push_back(std::move(*summary));
+      }
+
+      if (stop_token.stop_requested()) {
+        return std::unexpected(character_error(
+            Code::cancelled, "Venice character request cancelled"));
+      }
+      if (page->returned < static_cast<std::size_t>(page_limit)) break;
+      auto next_offset =
+          detail::advance_venice_character_offset(offset, page->returned);
+      if (!next_offset) return std::unexpected(std::move(next_offset.error()));
+      offset = *next_offset;
+    }
+
+    if (auto checked =
+            backend::validate_provider_character_catalog(result, limits);
+        !checked) {
+      return std::unexpected(std::move(checked.error()));
+    }
+    return result;
+  } catch (...) {
+    return std::unexpected(character_error(
+        Code::internal_failure, "Venice character catalog failed internally"));
+  }
+}
+
+auto VeniceBackend::lookup(const domain::ProviderCharacterId& id,
+                           const backend::ProviderCharacterLimits limits,
+                           const std::stop_token stop_token)
+    -> std::expected<backend::ProviderCharacterSummary,
+                     backend::ProviderCharacterError> {
+  using Code = backend::ProviderCharacterErrorCode;
+  try {
+    if (!detail::is_valid_venice_character_slug(id.value())) {
+      return std::unexpected(character_error(
+          Code::invalid_request, "Venice character identifier is invalid"));
+    }
+    if (auto checked = backend::validate_provider_character_summary(
+            backend::ProviderCharacterSummary{id}, limits);
+        !checked) {
+      return std::unexpected(std::move(checked.error()));
+    }
+    if (stop_token.stop_requested()) {
+      return std::unexpected(character_error(
+          Code::cancelled, "Venice character request cancelled"));
+    }
+    if (m_impl == nullptr) {
+      return std::unexpected(
+          character_error(Code::invalid_request,
+                          "Venice character adapter is not initialized"));
+    }
+
+    venice::CancelToken cancellation;
+    std::stop_callback cancel_callback{
+        stop_token, [&cancellation] { cancellation.cancel(); }};
+    const venice::RequestOptions request_options{
+        .connect_timeout = m_impl->options.connect_timeout,
+        .read_timeout = m_impl->options.read_timeout,
+        .write_timeout = m_impl->options.write_timeout,
+        .cancel = &cancellation,
+        .maximum_response_bytes = limits.maximum_response_bytes};
+    auto character = m_impl->client.character(id.value(), request_options);
+    if (!character) {
+      return std::unexpected(map_character_error(character.error(), true));
+    }
+    auto result = mapped_character(*character, limits);
+    if (!result) return std::unexpected(std::move(result.error()));
+    if (result->id != id) {
+      return std::unexpected(character_error(
+          Code::invalid_data,
+          "Venice character lookup returned a different identifier"));
+    }
+    if (stop_token.stop_requested()) {
+      return std::unexpected(character_error(
+          Code::cancelled, "Venice character request cancelled"));
+    }
+    return result;
+  } catch (...) {
+    return std::unexpected(character_error(
+        Code::internal_failure, "Venice character lookup failed internally"));
   }
 }
 

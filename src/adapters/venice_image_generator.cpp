@@ -35,6 +35,9 @@ namespace {
     case venice::ErrorKind::Parse:
       return {Code::protocol, "Venice image response was invalid", false,
               error.status};
+    case venice::ErrorKind::ResponseTooLarge:
+      return {Code::protocol, "Venice image response exceeded its byte limit",
+              false, error.status};
     case venice::ErrorKind::Cancelled:
       return {Code::cancelled, "Venice image generation was cancelled", false,
               error.status};
