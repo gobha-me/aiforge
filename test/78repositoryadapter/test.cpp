@@ -180,7 +180,8 @@ TEST_CASE("isolated Git observation disables hooks writes and submodule "
   INFO((observed ? std::string{} : observed.error().message));
   REQUIRE(observed);
   CHECK_FALSE(std::filesystem::exists(marker));
-  CHECK(std::filesystem::last_write_time(index) == index_time);
+  CHECK(
+      static_cast<bool>(std::filesystem::last_write_time(index) == index_time));
 
   TemporaryDirectory scripted;
   const auto fake_git = scripted.path() / "git";
