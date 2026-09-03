@@ -1,3 +1,4 @@
+#include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
 #include <aiforge/testing/scripted_persona_editor.hpp>
 #include <aiforge/testing/scripted_persona_source.hpp>
@@ -95,6 +96,72 @@ class Backend final : public backend::Backend,
   std::map<std::string, backend::ModelCapabilityMap> capabilities_by_model;
 };
 
+class QuestionStream final : public backend::BackendStream {
+ public:
+  QuestionStream(domain::MessageId message_id, const bool asks)
+      : m_message_id(std::move(message_id)), m_asks(asks) {}
+
+  auto next(std::stop_token)
+      -> std::expected<std::optional<backend::BackendEvent>,
+                       backend::BackendError> override {
+    if (m_asks) {
+      switch (m_step++) {
+        case 0:
+          return backend::BackendEvent{
+              backend::ResponseStarted{"question-response"}};
+        case 1:
+          return backend::BackendEvent{backend::ToolCallDelta{
+              make_id<domain::InvocationId>("ask-call"), "ask_user",
+              R"({"questions":[{"id":"format","prompt":"Choose output","kind":"one","required":true,"minimum_selections":1,"maximum_selections":1,"options":[{"id":"short","label":"Short","recommended":true},{"id":"long","label":"Long"}]}]})"}};
+        case 2:
+          return backend::BackendEvent{
+              backend::ResponseFinished{domain::FinishReason::tool_call}};
+        default: return std::optional<backend::BackendEvent>{};
+      }
+    }
+    switch (m_step++) {
+      case 0:
+        return backend::BackendEvent{
+            backend::ResponseStarted{"answer-response"}};
+      case 1:
+        return backend::BackendEvent{backend::ContentDelta{
+            m_message_id, domain::TextBlock{"continued answer"}}};
+      case 2:
+        return backend::BackendEvent{
+            backend::ResponseFinished{domain::FinishReason::stop}};
+      default: return std::optional<backend::BackendEvent>{};
+    }
+  }
+
+ private:
+  domain::MessageId m_message_id;
+  bool m_asks{};
+  int m_step{};
+};
+
+class QuestionBackend final : public backend::Backend,
+                              public backend::ModelContextProvider {
+ public:
+  auto lookup(const domain::ModelId& model_id, std::stop_token)
+      -> std::expected<backend::ModelContextInfo,
+                       backend::BackendError> override {
+    return backend::ModelContextInfo{
+        model_id, 100000, 4096, std::nullopt,
+        backend::ModelCapabilityMap{{"tools", tool_support}}};
+  }
+
+  auto start(backend::BackendRequest request, std::stop_token)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    requests.push_back(request);
+    return std::make_unique<QuestionStream>(request.assistant_message_id,
+                                            requests.size() == 1);
+  }
+
+  std::vector<backend::BackendRequest> requests;
+  bool tool_support{true};
+};
+
 auto usd_cost(const std::string& value) -> domain::ReportedCost {
   auto amount = domain::MonetaryAmount::create(
                     "USD", domain::DecimalAmount::from(value).value())
@@ -186,6 +253,19 @@ auto drain_to_end(surfaces::ChatSession& session)
   }
   REQUIRE_FALSE(session.active());
   return result;
+}
+
+auto drain_to_question(surfaces::ChatSession& session)
+    -> runtime::PendingQuestionInput {
+  for (int attempt = 0; attempt < 200 && !session.pending_question_input();
+       ++attempt) {
+    const auto events = session.drain();
+    REQUIRE(events);
+    if (events->empty()) std::this_thread::sleep_for(2ms);
+  }
+  const auto pending = session.pending_question_input();
+  REQUIRE(pending);
+  return *pending;
 }
 
 auto text_messages(const backend::BackendRequest& request,
@@ -290,12 +370,13 @@ TEST_CASE("interactive turns stream and reuse completed conversation context",
 TEST_CASE("interactive turns preserve registered tool declarations",
           "[chat][tools]") {
   Backend backend;
+  backend.capabilities.emplace("tools", true);
   const backend::ToolDeclaration tool{
-      "lookup",
-      "Look up a value",
+      "ask_user",
+      "Ask the user a question",
       {"application/schema+json", R"({"type":"object"})"},
-      {domain::Effect::read},
-      {{domain::Effect::read, "filesystem.root", "/repo"}}};
+      {},
+      {}};
   runtime::ToolRegistry registry;
   REQUIRE(registry.register_tool(
       tool, std::make_shared<testing::ScriptedToolExecutor>(
@@ -319,6 +400,192 @@ TEST_CASE("interactive turns preserve registered tool declarations",
   for (const auto& request : backend.requests) {
     REQUIRE(request.tools == std::vector<backend::ToolDeclaration>{tool});
   }
+}
+
+TEST_CASE("interactive ask_user answers continue and complete the same run",
+          "[chat][tools][questions]") {
+  QuestionBackend backend;
+  runtime::ToolRegistry registry;
+  REQUIRE(runtime::register_ask_user_tool(registry, true));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  const auto declarations = tools->declarations();
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.tools = std::move(*tools);
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
+      backend, backend, nullptr, nullptr, {}, {}, std::move(dependencies));
+  REQUIRE(session);
+
+  const auto submitted = (*session)->submit("ask first");
+  REQUIRE(submitted);
+  const auto pending = drain_to_question(**session);
+  REQUIRE(pending.run_id == submitted->run_id);
+  REQUIRE((*session)->answer_questions(
+      pending.run_id, pending.invocation_id,
+      {{make_id<domain::QuestionId>("format"), {"short"}, std::nullopt}}));
+  const auto completed = drain_to_end(**session);
+
+  REQUIRE(backend.requests.size() == 2);
+  REQUIRE(backend.requests[0].tools == declarations);
+  REQUIRE(backend.requests[1].tools == declarations);
+  REQUIRE(std::ranges::any_of(
+      backend.requests[1].context.entries, [](const auto& entry) {
+        return entry.kind == domain::ContextEntryKind::tool_result &&
+               entry.message.invocation_id ==
+                   make_id<domain::InvocationId>("ask-call");
+      }));
+  REQUIRE(std::ranges::any_of(completed, [](const auto& event) {
+    return std::holds_alternative<domain::RunCompleted>(event.payload);
+  }));
+  REQUIRE(std::ranges::all_of(
+      (*session)->event_log().events(), [&](const auto& event) {
+        return event.metadata.run_id == submitted->run_id;
+      }));
+}
+
+TEST_CASE("durable ask_user continuation retains its originating tool subset",
+          "[chat][tools][questions][storage][failure]") {
+  const auto run_case = [](const bool add_profile_member,
+                           const bool resumed_tool_support) {
+    QuestionBackend backend;
+    MemoryStore store;
+    runtime::ToolRegistry initial_registry;
+    REQUIRE(runtime::register_ask_user_tool(initial_registry, true));
+    auto initial_tools = initial_registry.snapshot();
+    REQUIRE(initial_tools);
+    const auto original_declarations = initial_tools->declarations();
+    surfaces::ChatSessionDependencies create_dependencies;
+    create_dependencies.tools = *initial_tools;
+    domain::RunProvenance provenance{"test-version",
+                                     "test-backend",
+                                     std::nullopt,
+                                     make_id<domain::ModelId>("model"),
+                                     std::nullopt,
+                                     {},
+                                     {},
+                                     {}};
+    auto created = surfaces::ChatSession::open(
+        {make_id<domain::ModelId>("model"),
+         surfaces::ChatSessionOpen::Mode::create, std::nullopt, provenance},
+        backend, backend, &store, nullptr, {}, {},
+        std::move(create_dependencies));
+    INFO((created ? std::string{} : created.error().message));
+    REQUIRE(created);
+    const auto session_id = (*created)->session_id();
+    const auto submitted = (*created)->submit("ask before restart");
+    REQUIRE(submitted);
+    const auto pending = drain_to_question(**created);
+    created->reset();
+
+    runtime::ToolRegistry resumed_registry;
+    REQUIRE(runtime::register_ask_user_tool(resumed_registry, true));
+    if (add_profile_member) {
+      REQUIRE(resumed_registry.register_tool(
+          {"propose_memory",
+           "Newly available no-authority profile member",
+           {"application/schema+json", R"({"type":"object"})"},
+           {},
+           {}},
+          std::make_shared<testing::ScriptedToolExecutor>(
+              std::vector<testing::ScriptedToolExchange>{}),
+          {}, runtime::ToolExecutorContract{"test.propose_memory", "1"}));
+    }
+    auto resumed_tools = resumed_registry.snapshot();
+    REQUIRE(resumed_tools);
+    backend.tool_support = resumed_tool_support;
+    surfaces::ChatSessionDependencies resume_dependencies;
+    resume_dependencies.tools = std::move(*resumed_tools);
+    auto resumed = surfaces::ChatSession::open(
+        {make_id<domain::ModelId>("model"),
+         surfaces::ChatSessionOpen::Mode::resume, session_id},
+        backend, backend, &store, nullptr, {}, {},
+        std::move(resume_dependencies));
+    INFO((resumed ? std::string{} : resumed.error().message));
+    REQUIRE(resumed);
+    REQUIRE((*resumed)->answer_questions(
+        pending.run_id, pending.invocation_id,
+        {{make_id<domain::QuestionId>("format"), {"short"}, std::nullopt}}));
+    const auto completed = drain_to_end(**resumed);
+
+    REQUIRE(backend.requests.size() == 2);
+    REQUIRE(backend.requests[1].tools == original_declarations);
+    REQUIRE(std::ranges::any_of(completed, [](const auto& event) {
+      return std::holds_alternative<domain::RunCompleted>(event.payload);
+    }));
+  };
+
+  SECTION("a newly registered profile member cannot widen the run") {
+    run_case(true, true);
+  }
+  SECTION("current model capability metadata cannot narrow the run") {
+    run_case(false, false);
+  }
+}
+
+TEST_CASE("interactive tool profiles fail closed and change only while idle",
+          "[chat][tools][profiles][failure]") {
+  const backend::ToolDeclaration ask_user{
+      "ask_user",
+      "Ask the user a question",
+      {"application/schema+json", R"({"type":"object"})"},
+      {},
+      {}};
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      ask_user, std::make_shared<testing::ScriptedToolExecutor>(
+                    std::vector<testing::ScriptedToolExchange>{})));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+
+  Backend backend;
+  backend.capabilities.emplace("tools", std::nullopt);
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.tools = *tools;
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
+      backend, backend, nullptr, nullptr, {}, {}, std::move(dependencies));
+  REQUIRE(session);
+  auto unknown =
+      domain::ToolProfileId::from(std::string{"missing-profile"}).value();
+  REQUIRE_FALSE((*session)->select_tool_profile(std::move(unknown)));
+
+  const auto unknown_state = (*session)->tool_profile_state();
+  REQUIRE(unknown_state);
+  REQUIRE(unknown_state->selected_profile.profile_id.value() == "essentials");
+  REQUIRE(unknown_state->effective_tools.empty());
+  REQUIRE(unknown_state->tool_availability.size() == 2);
+  REQUIRE(unknown_state->tool_availability.front().reason ==
+          runtime::ToolProfileAvailabilityReason::model_tool_calling_unknown);
+
+  REQUIRE((*session)->submit("first"));
+  auto off = domain::ToolProfileId::from(std::string{"off"}).value();
+  REQUIRE_FALSE((*session)->select_tool_profile(off));
+  drain_to_end(**session);
+  REQUIRE(backend.requests.size() == 1);
+  REQUIRE(backend.requests.front().tools.empty());
+
+  backend.capabilities_by_model["supported"]["tools"] = true;
+  REQUIRE((*session)->select_model(make_id<domain::ModelId>("supported")));
+  auto essentials =
+      domain::ToolProfileId::from(std::string{"essentials"}).value();
+  REQUIRE((*session)->select_tool_profile(std::move(essentials)));
+  const auto supported = (*session)->tool_profile_state();
+  REQUIRE(supported);
+  REQUIRE(supported->effective_tools.declarations() ==
+          std::vector<backend::ToolDeclaration>{ask_user});
+
+  backend.capabilities_by_model["unsupported"]["tools"] = false;
+  REQUIRE((*session)->select_model(make_id<domain::ModelId>("unsupported")));
+  const auto narrowed = (*session)->tool_profile_state();
+  REQUIRE(narrowed);
+  REQUIRE(narrowed->selected_profile.profile_id.value() == "essentials");
+  REQUIRE(narrowed->effective_tools.empty());
+  REQUIRE(
+      narrowed->tool_availability.front().reason ==
+      runtime::ToolProfileAvailabilityReason::model_tool_calling_unsupported);
 }
 
 TEST_CASE("interactive generation requirements fail closed before transport",
@@ -867,12 +1134,37 @@ TEST_CASE("every interactive run records its own provenance once",
   auto first = (*session)->submit("first");
   REQUIRE(first);
   REQUIRE(recorded_in(first->committed_events) == 1);
+  const auto first_provenance =
+      std::ranges::find_if(first->committed_events, [](const auto& event) {
+        return std::holds_alternative<domain::RunProvenanceRecorded>(
+            event.payload);
+      });
+  REQUIRE(first_provenance != first->committed_events.end());
+  const auto& first_recorded =
+      std::get<domain::RunProvenanceRecorded>(first_provenance->payload)
+          .provenance;
+  REQUIRE(first_recorded.tool_profile);
+  REQUIRE(first_recorded.tool_profile->selected_profile_id.value() ==
+          "essentials");
+  REQUIRE(first_recorded.tools.empty());
   drain_to_end(**session);
 
   auto second = (*session)->submit("second");
   REQUIRE(second);
   REQUIRE(recorded_in(second->committed_events) == 1);
   REQUIRE(second->run_id != first->run_id);
+  const auto second_provenance =
+      std::ranges::find_if(second->committed_events, [](const auto& event) {
+        return std::holds_alternative<domain::RunProvenanceRecorded>(
+            event.payload);
+      });
+  REQUIRE(second_provenance != second->committed_events.end());
+  const auto& second_recorded =
+      std::get<domain::RunProvenanceRecorded>(second_provenance->payload)
+          .provenance;
+  REQUIRE(second_recorded.tool_profile);
+  REQUIRE(second_recorded.tool_profile->selected_profile_id.value() ==
+          "essentials");
   drain_to_end(**session);
 
   REQUIRE(recorded_in((*session)->event_log().events()) == 2);

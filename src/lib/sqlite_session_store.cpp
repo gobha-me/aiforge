@@ -2410,6 +2410,30 @@ template <typename IdType>
           parse_request_option_source(value.at("source"))};
 }
 
+[[nodiscard]] auto tool_profile_provenance_json(
+    const domain::ToolProfileProvenance& profile) -> Json {
+  return {{"selected_profile_id", id_text(profile.selected_profile_id)},
+          {"model_maximum_profile_id",
+           optional_id_json(profile.model_maximum_profile_id)},
+          {"persona_maximum_profile_id",
+           optional_id_json(profile.persona_maximum_profile_id)}};
+}
+
+[[nodiscard]] auto parse_tool_profile_provenance(const Json& value)
+    -> domain::ToolProfileProvenance {
+  if (!value.is_object() || value.size() != 3 ||
+      !value.contains("selected_profile_id") ||
+      !value.contains("model_maximum_profile_id") ||
+      !value.contains("persona_maximum_profile_id")) {
+    throw CodecFailure{"tool profile provenance is invalid"};
+  }
+  return {parse_id<domain::ToolProfileId>(value.at("selected_profile_id")),
+          parse_optional_id<domain::ToolProfileId>(
+              value.at("model_maximum_profile_id")),
+          parse_optional_id<domain::ToolProfileId>(
+              value.at("persona_maximum_profile_id"))};
+}
+
 [[nodiscard]] auto configuration_entry_json(
     const domain::ConfigurationProvenanceEntry& entry) -> Json {
   auto decisions = Json::array();
@@ -2476,10 +2500,13 @@ template <typename IdType>
   }
   auto tools = Json::array();
   for (const auto& tool : provenance.tools) {
-    tools.push_back(
-        {{"tool_name", tool.tool_name},
-         {"declared_effects", effects_json(tool.declared_effects)},
-         {"capability_scopes", scopes_json(tool.capability_scopes)}});
+    Json encoded{{"tool_name", tool.tool_name},
+                 {"declared_effects", effects_json(tool.declared_effects)},
+                 {"capability_scopes", scopes_json(tool.capability_scopes)}};
+    if (tool.registration_digest) {
+      encoded["registration_digest"] = *tool.registration_digest;
+    }
+    tools.push_back(std::move(encoded));
   }
   auto effective_request_options = Json::array();
   for (const auto& option : provenance.effective_request_options) {
@@ -2502,6 +2529,10 @@ template <typename IdType>
               {"tools", std::move(tools)}};
   if (!effective_request_options.empty()) {
     result["effective_request_options"] = std::move(effective_request_options);
+  }
+  if (provenance.tool_profile) {
+    result["tool_profile"] =
+        tool_profile_provenance_json(*provenance.tool_profile);
   }
   return result;
 }
@@ -2545,9 +2576,15 @@ template <typename IdType>
   }
   provenance.tools.reserve(tools.size());
   for (const auto& tool : tools) {
+    std::optional<std::string> registration_digest;
+    if (const auto digest = tool.find("registration_digest");
+        digest != tool.end()) {
+      registration_digest = digest->get<std::string>();
+    }
     provenance.tools.push_back({tool.at("tool_name").get<std::string>(),
                                 parse_effects(tool.at("declared_effects")),
-                                parse_scopes(tool.at("capability_scopes"))});
+                                parse_scopes(tool.at("capability_scopes")),
+                                std::move(registration_digest)});
   }
   if (const auto options = value.find("effective_request_options");
       options != value.end()) {
@@ -2559,6 +2596,9 @@ template <typename IdType>
       provenance.effective_request_options.push_back(
           parse_effective_request_option(option));
     }
+  }
+  if (const auto profile = value.find("tool_profile"); profile != value.end()) {
+    provenance.tool_profile = parse_tool_profile_provenance(*profile);
   }
   if (!domain::validate_run_provenance(provenance)) {
     throw CodecFailure{"run provenance is invalid"};

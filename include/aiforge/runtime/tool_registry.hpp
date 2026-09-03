@@ -63,6 +63,14 @@ struct ToolExecutionLimits {
   auto operator==(const ToolExecutionLimits&) const -> bool = default;
 };
 
+// Stable implementation identity used to prove that a durable pending run is
+// resumed against the same executor contract that validated its arguments.
+struct ToolExecutorContract {
+  std::string identity;
+  std::string version;
+  auto operator==(const ToolExecutorContract&) const -> bool = default;
+};
+
 struct ToolInvocation {
   domain::InvocationId invocation_id;
   std::optional<domain::InvocationId> parent_invocation_id;
@@ -119,6 +127,7 @@ struct RegisteredTool {
   backend::ToolDeclaration declaration;
   ToolExecutionLimits limits;
   std::shared_ptr<ToolExecutor> executor;
+  std::optional<ToolExecutorContract> executor_contract;
 };
 
 class ToolRegistrySnapshot final {
@@ -129,6 +138,8 @@ class ToolRegistrySnapshot final {
       -> const std::vector<backend::ToolDeclaration>&;
   [[nodiscard]] auto find(std::string_view name) const noexcept
       -> const RegisteredTool*;
+  [[nodiscard]] auto subset(std::span<const std::string> names) const
+      -> std::expected<ToolRegistrySnapshot, ToolRegistryError>;
   [[nodiscard]] auto empty() const noexcept -> bool { return m_tools.empty(); }
   [[nodiscard]] auto size() const noexcept -> std::size_t {
     return m_tools.size();
@@ -146,9 +157,10 @@ class ToolRegistrySnapshot final {
 
 class ToolRegistry final {
  public:
-  [[nodiscard]] auto register_tool(backend::ToolDeclaration declaration,
-                                   std::shared_ptr<ToolExecutor> executor,
-                                   ToolExecutionLimits limits = {})
+  [[nodiscard]] auto register_tool(
+      backend::ToolDeclaration declaration,
+      std::shared_ptr<ToolExecutor> executor, ToolExecutionLimits limits = {},
+      std::optional<ToolExecutorContract> executor_contract = std::nullopt)
       -> std::expected<void, ToolRegistryError>;
 
   [[nodiscard]] auto snapshot() const

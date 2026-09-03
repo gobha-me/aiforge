@@ -160,9 +160,12 @@ namespace {
   return {};
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicitly validates every durable tool-provenance invariant.
 [[nodiscard]] auto validate_tools(const std::vector<ToolProvenanceEntry>& tools,
                                   const RunProvenanceLimits& limits)
     -> std::expected<void, RunProvenanceError> {
+  // clang-format on
   if (tools.size() > limits.maximum_tools) {
     return failure(RunProvenanceErrorCode::too_many_entries,
                    "the tool entry count exceeds its limit");
@@ -176,6 +179,18 @@ namespace {
     if (!names.insert(tool.tool_name).second) {
       return failure(RunProvenanceErrorCode::duplicate_tool,
                      "tool '" + tool.tool_name + "' is duplicated");
+    }
+    if (tool.registration_digest &&
+        (tool.registration_digest->size() != 71 ||
+         !tool.registration_digest->starts_with("sha256:") ||
+         !std::ranges::all_of(tool.registration_digest->substr(7),
+                              [](const unsigned char value) {
+                                return (value >= '0' && value <= '9') ||
+                                       (value >= 'a' && value <= 'f');
+                              }))) {
+      return failure(RunProvenanceErrorCode::invalid_tool,
+                     "tool '" + tool.tool_name +
+                         "' has an invalid registration digest");
     }
     if (tool.declared_effects.size() > limits.maximum_effects_per_tool) {
       return failure(RunProvenanceErrorCode::invalid_tool,
@@ -195,6 +210,38 @@ namespace {
                            "' declares a malformed scope");
       }
     }
+  }
+  return {};
+}
+
+[[nodiscard]] auto validate_tool_profile(
+    const std::optional<ToolProfileProvenance>& profile,
+    const RunProvenanceLimits& limits)
+    -> std::expected<void, RunProvenanceError> {
+  if (!profile) return {};
+  const auto valid_profile_id = [&](const ToolProfileId& id) {
+    const auto value = id.value();
+    if (value.empty() ||
+        value.size() >
+            std::min(limits.maximum_identity_bytes, ToolProfileId::max_size) ||
+        value.front() < 'a' || value.front() > 'z') {
+      return false;
+    }
+    return std::ranges::all_of(value.substr(1), [](const char raw) {
+      const auto character = static_cast<unsigned char>(raw);
+      return (character >= 'a' && character <= 'z') ||
+             (character >= '0' && character <= '9') || character == '-' ||
+             character == '_';
+    });
+  };
+  if (!valid_profile_id(profile->selected_profile_id) ||
+      (profile->model_maximum_profile_id &&
+       !valid_profile_id(*profile->model_maximum_profile_id)) ||
+      (profile->persona_maximum_profile_id &&
+       !valid_profile_id(*profile->persona_maximum_profile_id))) {
+    return failure(
+        RunProvenanceErrorCode::invalid_tool_profile,
+        "a tool profile reference is empty, oversized, or malformed");
   }
   return {};
 }
@@ -274,6 +321,7 @@ namespace {
   }
   for (const auto& tool : provenance.tools) {
     total += tool.tool_name.size();
+    if (tool.registration_digest) total += tool.registration_digest->size();
     for (const auto& scope : tool.capability_scopes) {
       total += scope.kind.size() + scope.value.size();
     }
@@ -281,6 +329,17 @@ namespace {
   for (const auto& option : provenance.effective_request_options) {
     total += option.key.size();
     if (option.value) total += option.value->size();
+  }
+  if (provenance.tool_profile) {
+    total += provenance.tool_profile->selected_profile_id.value().size();
+    if (provenance.tool_profile->model_maximum_profile_id) {
+      total +=
+          provenance.tool_profile->model_maximum_profile_id->value().size();
+    }
+    if (provenance.tool_profile->persona_maximum_profile_id) {
+      total +=
+          provenance.tool_profile->persona_maximum_profile_id->value().size();
+    }
   }
   return total;
 }
@@ -342,6 +401,10 @@ auto validate_run_provenance(const RunProvenance& provenance,
   }
   if (auto tools = validate_tools(provenance.tools, limits); !tools) {
     return tools;
+  }
+  if (auto profile = validate_tool_profile(provenance.tool_profile, limits);
+      !profile) {
+    return profile;
   }
   if (auto options = validate_request_options(
           provenance.effective_request_options, limits);

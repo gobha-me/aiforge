@@ -1,12 +1,17 @@
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/runtime/context_builder.hpp>
 #include <aiforge/runtime/persona.hpp>
+#include <aiforge/runtime/tool_profiles.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <cstdint>
+#include <iterator>
+#include <limits>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 
@@ -188,6 +193,163 @@ struct PersonaSetup {
           value.message, value.retryable, value.may_have_applied};
 }
 
+[[nodiscard]] auto model_tool_calling_support(
+    const backend::ModelContextInfo& model) -> std::optional<bool> {
+  const auto found = model.capabilities.find("tools");
+  return found == model.capabilities.end() ? std::nullopt : found->second;
+}
+
+[[nodiscard]] auto profile_error(const runtime::ToolProfileError& value)
+    -> ChatSessionError {
+  return {
+      value.code == runtime::ToolProfileErrorCode::unknown_profile ||
+              value.code == runtime::ToolProfileErrorCode::invalid_profile ||
+              value.code == runtime::ToolProfileErrorCode::duplicate_profile ||
+              value.code == runtime::ToolProfileErrorCode::duplicate_tool
+          ? ChatSessionErrorCode::invalid_input
+          : ChatSessionErrorCode::internal_failure,
+      value.message};
+}
+
+[[nodiscard]] auto resolve_profile(const runtime::ToolRegistrySnapshot& tools,
+                                   const domain::ToolProfileId& profile_id,
+                                   const backend::ModelContextInfo& model)
+    -> std::expected<runtime::ToolProfileResolution, ChatSessionError> {
+  auto resolved = runtime::resolve_tool_profile(
+      tools, profile_id, model_tool_calling_support(model));
+  if (!resolved) return std::unexpected(profile_error(resolved.error()));
+  return std::move(*resolved);
+}
+
+[[nodiscard]] auto tool_declaration_tokens(
+    const std::vector<backend::ToolDeclaration>& declarations)
+    -> std::expected<std::uint64_t, ChatSessionError> {
+  std::uint64_t bytes{};
+  const auto add = [&bytes](const std::size_t amount) {
+    if (amount > std::numeric_limits<std::uint64_t>::max() - bytes)
+      return false;
+    bytes += amount;
+    return true;
+  };
+  for (const auto& declaration : declarations) {
+    if (!add(declaration.name.size()) || !add(declaration.description.size()) ||
+        !add(declaration.input_schema.data.size()) ||
+        !add(declaration.effects.size())) {
+      return error(ChatSessionErrorCode::context_failed,
+                   "tool declarations exceed the context accounting limit");
+    }
+    for (const auto& scope : declaration.capability_scopes) {
+      if (!add(scope.kind.size()) || !add(scope.value.size())) {
+        return error(ChatSessionErrorCode::context_failed,
+                     "tool declarations exceed the context accounting limit");
+      }
+    }
+  }
+  if (bytes == 0) return std::uint64_t{};
+  if (bytes > std::numeric_limits<std::uint64_t>::max() - 3U) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "tool declarations exceed the context accounting limit");
+  }
+  return (bytes + 3U) / 4U;
+}
+
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Exhaustively accounts for every message content variant.
+[[nodiscard]] auto estimated_message_tokens(const domain::Message& message)
+    -> std::expected<std::uint64_t, ChatSessionError> {
+  // clang-format on
+  std::uint64_t total{};
+  const auto add = [&](const std::size_t size) -> bool {
+    if (size > std::numeric_limits<std::uint64_t>::max() - total) return false;
+    total += static_cast<std::uint64_t>(size);
+    return true;
+  };
+  for (const auto& block : message.content) {
+    const auto admitted = std::visit(
+        [&](const auto& value) -> bool {
+          using Value = std::remove_cvref_t<decltype(value)>;
+          if constexpr (std::same_as<Value, domain::TextBlock>) {
+            return add(value.text.size());
+          } else if constexpr (std::same_as<Value,
+                                            domain::StructuredDataBlock>) {
+            return add(value.media_type.size()) && add(value.data.size());
+          } else if constexpr (std::same_as<Value, domain::CitationBlock>) {
+            return add(value.uri.size()) &&
+                   (!value.title || add(value.title->size()));
+          } else if constexpr (std::same_as<Value,
+                                            domain::ArtifactReferenceBlock>) {
+            return add(value.artifact_id.value().size()) &&
+                   (!value.label || add(value.label->size()));
+          } else {
+            return false;
+          }
+        },
+        block);
+    if (!admitted) {
+      return error(ChatSessionErrorCode::context_failed,
+                   "tool result cannot enter interactive context");
+    }
+  }
+  for (const auto& call : message.tool_calls) {
+    if (!add(call.invocation_id.value().size()) ||
+        !add(call.tool_name.size()) || !add(call.arguments.media_type.size()) ||
+        !add(call.arguments.data.size())) {
+      return error(ChatSessionErrorCode::context_failed,
+                   "tool call cannot enter interactive context");
+    }
+  }
+  return std::max<std::uint64_t>(total, 1);
+}
+
+[[nodiscard]] auto assistant_continuation_state(
+    const std::span<const domain::RunEvent> events,
+    const domain::ConstructedContext& context)
+    -> std::expected<std::vector<backend::AssistantContinuationState>,
+                     ChatSessionError> {
+  struct AssistantInference {
+    domain::InferenceId inference_id;
+    domain::MessageId message_id;
+  };
+  std::vector<AssistantInference> assistants;
+  std::vector<backend::AssistantContinuationState> result;
+  for (const auto& event : events) {
+    if (const auto* started =
+            std::get_if<domain::AssistantContentStarted>(&event.payload)) {
+      assistants.push_back({started->inference_id, started->message_id});
+      continue;
+    }
+    const auto* reasoning =
+        std::get_if<domain::ReasoningMetadataAdded>(&event.payload);
+    if (reasoning == nullptr) continue;
+    const auto assistant = std::ranges::find(
+        assistants, reasoning->inference_id, &AssistantInference::inference_id);
+    if (assistant == assistants.end()) {
+      return error(ChatSessionErrorCode::run_failed,
+                   "reasoning continuation has no assistant message");
+    }
+    const auto admitted = std::ranges::find_if(
+        context.entries, [&](const domain::ContextEntry& entry) {
+          return entry.message.message_id == assistant->message_id;
+        });
+    if (admitted == context.entries.end()) continue;
+    auto state =
+        std::ranges::find(result, assistant->message_id,
+                          &backend::AssistantContinuationState::message_id);
+    if (state == result.end()) {
+      result.push_back(
+          {assistant->message_id, std::nullopt, domain::Metadata{}});
+      state = std::prev(result.end());
+    }
+    if (reasoning->text) {
+      if (!state->reasoning_text) state->reasoning_text.emplace();
+      state->reasoning_text->append(*reasoning->text);
+    }
+    state->metadata.insert(state->metadata.end(), reasoning->metadata.begin(),
+                           reasoning->metadata.end());
+  }
+  return result;
+}
+
 [[nodiscard]] auto resolve_persona(persona::PersonaSource* source,
                                    const persona::PersonaLimits limits,
                                    const persona::PersonaDirective& directive,
@@ -285,7 +447,8 @@ struct ChatSession::Impl {
   backend::ModelContextProvider* model_context{};
   std::uint64_t output_tokens{};
   backend::GenerationOptions generation_options;
-  std::vector<backend::ToolDeclaration> tool_declarations;
+  runtime::ToolRegistrySnapshot available_tools;
+  domain::ToolProfileId tool_profile_id;
   ChatSessionLimits limits;
   bool is_durable{};
   ChatIdentitySuffixSource identity_suffix_source;
@@ -302,6 +465,8 @@ struct ChatSession::Impl {
   runtime::MemorySettings memory_settings{};
   std::optional<domain::RepositoryId> repository_id;
   std::string runtime_version;
+  std::optional<domain::ContextBuildInput> active_context;
+  std::vector<domain::RunEvent> pending_surface_events;
   std::unique_ptr<runtime::RunKernel> kernel;
 };
 
@@ -404,7 +569,18 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
       selected = sessions->front().session_id;
     }
 
-    auto tool_declarations = dependencies.tools.declarations();
+    auto available_tools = dependencies.tools;
+    auto initial_tool_profile =
+        domain::ToolProfileId::from(std::string{"essentials"});
+    if (!initial_tool_profile) {
+      return error(ChatSessionErrorCode::internal_failure,
+                   "default tool profile identity is invalid");
+    }
+    if (auto resolved =
+            resolve_profile(available_tools, *initial_tool_profile, *model);
+        !resolved) {
+      return std::unexpected(std::move(resolved.error()));
+    }
     const bool durable = request.mode != ChatSessionOpen::Mode::ephemeral &&
                          session_store != nullptr;
     std::unique_ptr<runtime::RunKernel> kernel;
@@ -469,7 +645,8 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              &model_context,
              output_tokens,
              std::move(request.generation_options),
-             std::move(tool_declarations),
+             std::move(available_tools),
+             std::move(*initial_tool_profile),
              limits,
              durable,
              std::move(dependencies.identity_suffix_source),
@@ -486,6 +663,8 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              dependencies.memory_settings,
              std::move(dependencies.repository_id),
              std::move(dependencies.runtime_version),
+             std::nullopt,
+             {},
              std::move(kernel)});
     return std::unique_ptr<ChatSession>{new ChatSession{std::move(impl)}};
   } catch (...) {
@@ -494,8 +673,11 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
   }
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicitly stages interactive run admission and durable startup.
 auto ChatSession::submit(std::string prompt)
     -> std::expected<ChatSubmission, ChatSessionError> {
+  // clang-format on
   try {
     if (prompt.empty() || !valid_text(prompt)) {
       return error(ChatSessionErrorCode::invalid_input,
@@ -508,6 +690,16 @@ auto ChatSession::submit(std::string prompt)
     if (m_impl->kernel->active_run_id()) {
       return error(ChatSessionErrorCode::run_failed,
                    "another interactive run is active");
+    }
+    auto tool_profile = resolve_profile(m_impl->available_tools,
+                                        m_impl->tool_profile_id, m_impl->model);
+    if (!tool_profile) {
+      return std::unexpected(std::move(tool_profile.error()));
+    }
+    auto declaration_tokens =
+        tool_declaration_tokens(tool_profile->effective_tools.declarations());
+    if (!declaration_tokens) {
+      return std::unexpected(std::move(declaration_tokens.error()));
     }
     if (!m_impl->persona_attention.empty()) {
       return error(ChatSessionErrorCode::context_failed,
@@ -595,11 +787,27 @@ auto ChatSession::submit(std::string prompt)
     }
     auto content = std::move(*history);
     if (m_impl->memory_controller != nullptr) {
-      std::uint64_t mandatory = detail::runtime_contract.size() + prompt.size();
-      for (const auto& item : content)
-        mandatory += item.estimated_tokens;
+      std::uint64_t mandatory{};
+      const auto add_mandatory = [&](const std::uint64_t amount) {
+        if (amount > std::numeric_limits<std::uint64_t>::max() - mandatory) {
+          return false;
+        }
+        mandatory += amount;
+        return true;
+      };
+      bool bounded = add_mandatory(detail::runtime_contract.size()) &&
+                     add_mandatory(prompt.size()) &&
+                     add_mandatory(*declaration_tokens);
+      for (const auto& item : content) {
+        bounded = bounded && add_mandatory(item.estimated_tokens);
+      }
       if (m_impl->persona_document) {
-        mandatory += m_impl->persona_document->text.size();
+        bounded =
+            bounded && add_mandatory(m_impl->persona_document->text.size());
+      }
+      if (!bounded) {
+        return error(ChatSessionErrorCode::context_failed,
+                     "required context accounting overflowed");
       }
       const auto maximum_input =
           m_impl->model.context_window_tokens - m_impl->output_tokens;
@@ -628,7 +836,8 @@ auto ChatSession::submit(std::string prompt)
          prompt.size()});
 
     domain::ContextBuildInput input{
-        {m_impl->model.context_window_tokens, m_impl->output_tokens, 0},
+        {m_impl->model.context_window_tokens, m_impl->output_tokens,
+         *declaration_tokens},
         {{*runtime_entry_id,
           domain::InstructionLayer::application_runtime,
           domain::InstructionOperation::add,
@@ -652,6 +861,7 @@ auto ChatSession::submit(std::string prompt)
       }
       input.instructions.push_back(std::move(*persona_instruction));
     }
+    auto continuation_context = input;
     auto context = runtime::ContextBuilder{}.build(std::move(input));
     if (!context) {
       return error(ChatSessionErrorCode::context_failed,
@@ -659,12 +869,18 @@ auto ChatSession::submit(std::string prompt)
     }
 
     const auto before = m_impl->kernel->event_log().events().size();
-    backend::BackendRequest backend_request{*inference_id,
-                                            *assistant_message_id,
-                                            m_impl->model_id,
-                                            std::move(*context),
-                                            m_impl->tool_declarations,
-                                            m_impl->generation_options};
+    auto provenance = m_impl->provenance;
+    if (provenance) {
+      provenance->tool_profile = domain::ToolProfileProvenance{
+          m_impl->tool_profile_id, std::nullopt, std::nullopt};
+    }
+    backend::BackendRequest backend_request{
+        *inference_id,
+        *assistant_message_id,
+        m_impl->model_id,
+        std::move(*context),
+        tool_profile->effective_tools.declarations(),
+        m_impl->generation_options};
     auto started = m_impl->kernel->start(
         {*run_id,
          {*surface_id, *workspace_id, *permission_id,
@@ -674,10 +890,11 @@ auto ChatSession::submit(std::string prompt)
               : std::nullopt},
          std::move(user_message),
          std::move(backend_request),
-         m_impl->provenance,
+         std::move(provenance),
          m_impl->next_persona_selection,
          m_impl->model.pricing_observation});
     if (!started) return std::unexpected(kernel_error(started.error()));
+    m_impl->active_context = std::move(continuation_context);
 
     if (m_impl->persona_document) {
       m_impl->next_persona_selection = domain::PersonaSelection{
@@ -701,12 +918,162 @@ auto ChatSession::submit(std::string prompt)
   }
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicitly rebuilds the exact same-run continuation contract.
+auto ChatSession::continue_if_ready()
+    -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
+  // clang-format on
+  const auto run_id = m_impl->kernel->active_run_id();
+  if (!run_id || m_impl->kernel->active_inference_id() ||
+      m_impl->kernel->pending_question_input()) {
+    return std::vector<domain::RunEvent>{};
+  }
+
+  const auto* active_tools = m_impl->kernel->active_tool_declarations();
+  if (active_tools == nullptr) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "active run tool declarations are unavailable");
+  }
+  auto declaration_tokens = tool_declaration_tokens(*active_tools);
+  if (!declaration_tokens) {
+    return std::unexpected(std::move(declaration_tokens.error()));
+  }
+
+  const auto suffix = m_impl->identity_suffix_source();
+  domain::ContextBuildInput base;
+  if (m_impl->active_context) {
+    base = *m_impl->active_context;
+  } else {
+    auto history =
+        detail::replayed_conversation(m_impl->kernel->event_log(), suffix);
+    if (!history) {
+      return error(ChatSessionErrorCode::session_failed,
+                   std::move(history.error()));
+    }
+    auto runtime_message_id = make_id<domain::MessageId>("runtime", suffix);
+    auto runtime_entry_id =
+        make_id<domain::ContextEntryId>("runtime-entry", suffix);
+    auto runtime_source_id =
+        make_id<domain::ContextSourceId>("runtime-source", suffix);
+    if (!runtime_message_id || !runtime_entry_id || !runtime_source_id) {
+      return error(ChatSessionErrorCode::internal_failure,
+                   "interactive continuation identity generation failed");
+    }
+    base = domain::ContextBuildInput{
+        {m_impl->model.context_window_tokens, m_impl->output_tokens,
+         *declaration_tokens},
+        {{*runtime_entry_id,
+          domain::InstructionLayer::application_runtime,
+          domain::InstructionOperation::add,
+          std::nullopt,
+          domain::Message{
+              *runtime_message_id,
+              domain::Role::system,
+              {domain::TextBlock{std::string{detail::runtime_contract}}},
+              std::nullopt},
+          {*runtime_source_id, std::string{"aiforge:runtime"}, std::nullopt},
+          0,
+          1,
+          detail::runtime_contract.size()}},
+        std::move(*history)};
+    if (m_impl->persona_document) {
+      auto persona_instruction = runtime::persona_instruction_input(
+          *m_impl->persona_document, m_impl->persona_document->text.size());
+      if (!persona_instruction) {
+        return error(ChatSessionErrorCode::context_failed,
+                     persona_instruction.error().message);
+      }
+      base.instructions.push_back(std::move(*persona_instruction));
+    }
+    m_impl->active_context = base;
+  }
+
+  std::vector<domain::RunEvent> run_events;
+  for (const auto& event : m_impl->kernel->event_log().events()) {
+    if (event.metadata.run_id == *run_id) run_events.push_back(event);
+  }
+  auto tool_messages = runtime::tool_continuation_messages(run_events);
+  if (!tool_messages) {
+    return error(ChatSessionErrorCode::run_failed,
+                 tool_messages.error().message,
+                 tool_messages.error().retryable);
+  }
+  if (tool_messages->empty()) return std::vector<domain::RunEvent>{};
+
+  for (auto& message : *tool_messages) {
+    const auto message_suffix = m_impl->identity_suffix_source();
+    auto entry_id =
+        make_id<domain::ContextEntryId>("tool-result-entry", message_suffix);
+    auto source_id =
+        make_id<domain::ContextSourceId>("tool-result-source", message_suffix);
+    auto estimated = estimated_message_tokens(message);
+    if (!entry_id || !source_id || !estimated) {
+      return error(ChatSessionErrorCode::context_failed,
+                   "tool result context could not be built");
+    }
+    base.content.push_back(
+        {*entry_id,
+         message.role == domain::Role::assistant
+             ? domain::ContextContentKind::conversation
+             : domain::ContextContentKind::tool_result,
+         std::move(message),
+         {*source_id, std::string{"interactive:tool-continuation"},
+          std::nullopt},
+         static_cast<std::uint64_t>(base.content.size()) + 1,
+         *estimated});
+  }
+  auto context = runtime::ContextBuilder{}.build(std::move(base));
+  if (!context) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "tool results exceed model context capacity");
+  }
+  auto continuation_state = assistant_continuation_state(run_events, *context);
+  if (!continuation_state) {
+    return std::unexpected(std::move(continuation_state.error()));
+  }
+  const auto identity_suffix = m_impl->identity_suffix_source();
+  auto inference_id =
+      make_id<domain::InferenceId>("inference", identity_suffix);
+  auto assistant_message_id =
+      make_id<domain::MessageId>("assistant", identity_suffix);
+  if (!inference_id || !assistant_message_id) {
+    return error(ChatSessionErrorCode::internal_failure,
+                 "interactive continuation identity generation failed");
+  }
+
+  const auto before = m_impl->kernel->event_log().events().size();
+  auto continued = m_impl->kernel->continue_run(
+      *run_id,
+      {*inference_id, *assistant_message_id, m_impl->model_id,
+       std::move(*context), *active_tools, m_impl->generation_options,
+       std::move(*continuation_state)},
+      m_impl->model.pricing_observation);
+  if (!continued) {
+    if (continued.error().code ==
+        runtime::RunKernelErrorCode::continuation_not_ready) {
+      return std::vector<domain::RunEvent>{};
+    }
+    return std::unexpected(kernel_error(continued.error()));
+  }
+  const auto events = m_impl->kernel->event_log().events();
+  std::vector<domain::RunEvent> committed;
+  committed.reserve(events.size() - before);
+  for (std::size_t index = before; index < events.size(); ++index) {
+    committed.push_back(events[index]);
+  }
+  return committed;
+}
+
 auto ChatSession::drain()
     -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
   auto drained = m_impl->kernel->drain();
   if (!drained) return std::unexpected(kernel_error(drained.error()));
+  auto result = std::move(m_impl->pending_surface_events);
+  m_impl->pending_surface_events.clear();
+  result.insert(result.end(), std::make_move_iterator(drained->begin()),
+                std::make_move_iterator(drained->end()));
   if (m_impl->memory_controller != nullptr &&
-      std::ranges::any_of(*drained, [](const auto& event) {
+      std::ranges::any_of(result, [](const auto& event) {
         return std::holds_alternative<domain::ToolResultRecorded>(
             event.payload);
       })) {
@@ -719,15 +1086,63 @@ auto ChatSession::drain()
                    captured.error().message, captured.error().retryable);
     }
   }
-  return std::move(*drained);
+  auto continued = continue_if_ready();
+  if (!continued) {
+    m_impl->pending_surface_events = std::move(result);
+    return std::unexpected(std::move(continued.error()));
+  }
+  result.insert(result.end(), std::make_move_iterator(continued->begin()),
+                std::make_move_iterator(continued->end()));
+  if (!m_impl->kernel->active_run_id()) m_impl->active_context.reset();
+  return result;
 }
 
 auto ChatSession::cancel_active(std::optional<std::string> reason)
     -> std::expected<void, ChatSessionError> {
   const auto run = m_impl->kernel->active_run_id();
   if (!run) return {};
+  const auto before = m_impl->kernel->event_log().events().size();
   auto cancelled = m_impl->kernel->cancel_run(*run, std::move(reason));
   if (!cancelled) return std::unexpected(kernel_error(cancelled.error()));
+  const auto events = m_impl->kernel->event_log().events();
+  for (std::size_t index = before; index < events.size(); ++index) {
+    m_impl->pending_surface_events.push_back(events[index]);
+  }
+  return {};
+}
+
+auto ChatSession::pending_question_input() const
+    -> std::optional<runtime::PendingQuestionInput> {
+  return m_impl->kernel->pending_question_input();
+}
+
+auto ChatSession::answer_questions(const domain::RunId& run_id,
+                                   const domain::InvocationId& invocation_id,
+                                   std::vector<domain::QuestionAnswer> answers)
+    -> std::expected<void, ChatSessionError> {
+  const auto before = m_impl->kernel->event_log().events().size();
+  auto answered = m_impl->kernel->answer_questions(run_id, invocation_id,
+                                                   std::move(answers));
+  if (!answered) return std::unexpected(kernel_error(answered.error()));
+  const auto events = m_impl->kernel->event_log().events();
+  for (std::size_t index = before; index < events.size(); ++index) {
+    m_impl->pending_surface_events.push_back(events[index]);
+  }
+  return {};
+}
+
+auto ChatSession::cancel_questions(const domain::RunId& run_id,
+                                   const domain::InvocationId& invocation_id,
+                                   std::optional<std::string> reason)
+    -> std::expected<void, ChatSessionError> {
+  const auto before = m_impl->kernel->event_log().events().size();
+  auto cancelled = m_impl->kernel->cancel_questions(run_id, invocation_id,
+                                                    std::move(reason));
+  if (!cancelled) return std::unexpected(kernel_error(cancelled.error()));
+  const auto events = m_impl->kernel->event_log().events();
+  for (std::size_t index = before; index < events.size(); ++index) {
+    m_impl->pending_surface_events.push_back(events[index]);
+  }
   return {};
 }
 
@@ -909,12 +1324,36 @@ auto ChatSession::select_model(domain::ModelId model_id)
     return error(ChatSessionErrorCode::model_lookup_failed,
                  supported.error().redacted_message);
   }
+  if (auto profile = resolve_profile(m_impl->available_tools,
+                                     m_impl->tool_profile_id, *selected);
+      !profile) {
+    return std::unexpected(std::move(profile.error()));
+  }
   m_impl->model_id = std::move(model_id);
   m_impl->model = std::move(*selected);
   m_impl->output_tokens = output_tokens;
   m_impl->generation_options.max_output_tokens = output_tokens;
   if (m_impl->provenance) m_impl->provenance->model_id = m_impl->model_id;
   return {};
+}
+
+auto ChatSession::select_tool_profile(domain::ToolProfileId profile_id)
+    -> std::expected<void, ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before selecting tools");
+  }
+  auto resolved =
+      resolve_profile(m_impl->available_tools, profile_id, m_impl->model);
+  if (!resolved) return std::unexpected(std::move(resolved.error()));
+  m_impl->tool_profile_id = std::move(profile_id);
+  return {};
+}
+
+auto ChatSession::tool_profile_state() const
+    -> std::expected<runtime::ToolProfileResolution, ChatSessionError> {
+  return resolve_profile(m_impl->available_tools, m_impl->tool_profile_id,
+                         m_impl->model);
 }
 
 auto ChatSession::set_generation_options(

@@ -177,7 +177,7 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   const auto& registry = builtin_slash_command_registry();
   const auto listed = registry.describe();
   REQUIRE(listed);
-  REQUIRE(listed->size() == 14);
+  REQUIRE(listed->size() == 15);
   REQUIRE((*listed)[0].name == "help");
   REQUIRE((*listed)[1].name == "quit");
   REQUIRE((*listed)[2].name == "clear");
@@ -187,11 +187,12 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   REQUIRE((*listed)[6].name == "character");
   REQUIRE((*listed)[7].name == "model");
   REQUIRE((*listed)[8].name == "settings");
-  REQUIRE((*listed)[9].name == "reasoning");
-  REQUIRE((*listed)[10].name == "usage");
-  REQUIRE((*listed)[11].name == "plan");
-  REQUIRE((*listed)[12].name == "tasks");
-  REQUIRE((*listed)[13].name == "memory");
+  REQUIRE((*listed)[9].name == "tools");
+  REQUIRE((*listed)[10].name == "reasoning");
+  REQUIRE((*listed)[11].name == "usage");
+  REQUIRE((*listed)[12].name == "plan");
+  REQUIRE((*listed)[13].name == "tasks");
+  REQUIRE((*listed)[14].name == "memory");
 
   const auto memory = registry.dispatch("/memory search convention");
   REQUIRE(memory);
@@ -312,6 +313,24 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   REQUIRE(active_settings.error().code ==
           SlashCommandErrorCode::unavailable_command);
 
+  const auto tools = registry.dispatch("/tools");
+  REQUIRE(tools);
+  REQUIRE((*tools)->action == SlashCommandAction::manage_tool_profile);
+  REQUIRE_FALSE((*tools)->subject);
+  const auto essentials = registry.dispatch("/tools profile essentials");
+  REQUIRE(essentials);
+  REQUIRE((*essentials)->action == SlashCommandAction::select_tool_profile);
+  REQUIRE((*essentials)->subject == "essentials");
+  const auto tools_off = registry.dispatch("/tools off");
+  REQUIRE(tools_off);
+  REQUIRE((*tools_off)->action == SlashCommandAction::disable_tools);
+  REQUIRE_FALSE((*tools_off)->subject);
+  const auto active_tools =
+      registry.dispatch("/tools", {.run_active = true, .stop_token = {}});
+  REQUIRE_FALSE(active_tools);
+  REQUIRE(active_tools.error().code ==
+          SlashCommandErrorCode::unavailable_command);
+
   for (const auto argument : {"show", "hide"}) {
     const auto reasoning =
         registry.dispatch("/reasoning " + std::string{argument});
@@ -362,6 +381,14 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   for (const auto invalid :
        {"/character set", "/character off now", "/character set two slugs",
         "/character unknown"}) {
+    const auto rejected = registry.dispatch(invalid);
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error().code == SlashCommandErrorCode::invalid_arguments);
+  }
+
+  for (const auto invalid :
+       {"/tools profile", "/tools profile two names", "/tools essentials",
+        "/tools off now", "/tools profile Bad"}) {
     const auto rejected = registry.dispatch(invalid);
     REQUIRE_FALSE(rejected);
     REQUIRE(rejected.error().code == SlashCommandErrorCode::invalid_arguments);

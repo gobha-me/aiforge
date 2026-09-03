@@ -322,9 +322,9 @@ auto register_ask_user_tool(ToolRegistry& registry,
                           "ask_user limits must be positive"});
   }
   return registry.register_tool(
-      ask_user_declaration(limits),
-      std::make_shared<AskUserExecutor>(std::move(limits)),
-      ToolExecutionLimits{64U * 1024U, 1, std::chrono::seconds{5}});
+      ask_user_declaration(limits), std::make_shared<AskUserExecutor>(limits),
+      ToolExecutionLimits{std::size_t{64} * 1024U, 1, std::chrono::seconds{5}},
+      ToolExecutorContract{"aiforge.runtime.ask_user", "1"});
 }
 
 } // namespace aiforge::runtime

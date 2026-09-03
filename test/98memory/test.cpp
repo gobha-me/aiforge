@@ -176,6 +176,20 @@ TEST_CASE("memory proposal parsing fails closed", "[memory][tool][failure]") {
       configuration));
 }
 
+TEST_CASE("memory tool registration carries a durable executor contract",
+          "[memory][tool][registry]") {
+  runtime::ToolRegistry registry;
+  REQUIRE(runtime::register_memory_tool(
+      registry, runtime::MemoryToolConfiguration{true, false, {}}));
+  const auto snapshot = registry.snapshot();
+  REQUIRE(snapshot);
+  const auto* registration = snapshot->find("propose_memory");
+  REQUIRE(registration != nullptr);
+  const runtime::ToolExecutorContract expected{"aiforge.runtime.propose_memory",
+                                               "1"};
+  REQUIRE(registration->executor_contract == expected);
+}
+
 TEST_CASE("memory settings have conservative bounded defaults",
           "[memory][config][failure]") {
   const std::vector<config::ConfigLayer> layers;

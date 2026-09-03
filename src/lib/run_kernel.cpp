@@ -1,5 +1,6 @@
 
 
+#include <aiforge/detail/sha256.hpp>
 #include <aiforge/detail/utf8_text.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/repository/context_parcel.hpp>
@@ -7,6 +8,7 @@
 #include <aiforge/runtime/run_kernel.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <concepts>
@@ -21,6 +23,7 @@
 #include <optional>
 #include <ranges>
 #include <set>
+#include <span>
 #include <stop_token>
 #include <string_view>
 #include <thread>
@@ -31,6 +34,67 @@ namespace aiforge::runtime {
 namespace {
 
 constexpr std::size_t maximum_reasoning_bytes = std::size_t{1024} * 1024U;
+
+[[nodiscard]] auto effect_name(const domain::Effect effect) noexcept
+    -> std::string_view {
+  switch (effect) {
+    case domain::Effect::read: return "read";
+    case domain::Effect::write: return "write";
+    case domain::Effect::remove: return "remove";
+    case domain::Effect::execute: return "execute";
+    case domain::Effect::network: return "network";
+    case domain::Effect::communicate: return "communicate";
+    case domain::Effect::spend: return "spend";
+    case domain::Effect::change_infrastructure: return "change_infrastructure";
+    case domain::Effect::change_privileges: return "change_privileges";
+  }
+  return {};
+}
+
+auto append_registration_field(detail::Sha256& digest,
+                               const std::string_view value) -> void {
+  std::array<std::byte, 8> length{};
+  const auto size = static_cast<std::uint64_t>(value.size());
+  for (std::size_t index{}; index < length.size(); ++index) {
+    const auto shift = static_cast<unsigned>((length.size() - index - 1U) * 8U);
+    length[index] = static_cast<std::byte>((size >> shift) & 0xffU);
+  }
+  digest.update(length);
+  digest.update(std::as_bytes(std::span{value.data(), value.size()}));
+}
+
+template <typename Value>
+auto append_registration_number(detail::Sha256& digest, const Value value)
+    -> void {
+  append_registration_field(digest, std::to_string(value));
+}
+
+[[nodiscard]] auto registration_digest(const RegisteredTool& tool)
+    -> std::optional<std::string> {
+  if (!tool.executor_contract) return std::nullopt;
+  detail::Sha256 digest;
+  append_registration_field(digest, "aiforge.tool-registration.v1");
+  append_registration_field(digest, tool.declaration.name);
+  append_registration_field(digest, tool.declaration.description);
+  append_registration_field(digest, tool.declaration.input_schema.media_type);
+  append_registration_field(digest, tool.declaration.input_schema.data);
+  append_registration_number(digest, tool.declaration.effects.size());
+  for (const auto effect : tool.declaration.effects) {
+    append_registration_field(digest, effect_name(effect));
+  }
+  append_registration_number(digest, tool.declaration.capability_scopes.size());
+  for (const auto& scope : tool.declaration.capability_scopes) {
+    append_registration_field(digest, effect_name(scope.effect));
+    append_registration_field(digest, scope.kind);
+    append_registration_field(digest, scope.value);
+  }
+  append_registration_number(digest, tool.limits.output_bytes);
+  append_registration_number(digest, tool.limits.progress_events);
+  append_registration_number(digest, tool.limits.timeout.count());
+  append_registration_field(digest, tool.executor_contract->identity);
+  append_registration_field(digest, tool.executor_contract->version);
+  return "sha256:" + digest.finish();
+}
 
 struct BackendFailure {
   backend::BackendError error;
@@ -714,6 +778,7 @@ struct RunKernel::Impl {
     std::optional<domain::PlanId> planning_plan_id;
     std::optional<domain::ChildRunDescriptor> child_run;
     std::size_t reasoning_text_bytes{};
+    ToolRegistrySnapshot tools;
   };
 
   struct Transaction {
@@ -1272,7 +1337,7 @@ struct RunKernel::Impl {
             auto found = active->tool_calls.find(value.invocation_id);
             if (found == active->tool_calls.end()) {
               if (value.tool_name.empty() ||
-                  tools.find(value.tool_name) == nullptr ||
+                  active->tools.find(value.tool_name) == nullptr ||
                   transaction.used_invocation_ids.contains(
                       value.invocation_id)) {
                 return fail_live_run(transaction, protocol_domain_error());
@@ -1304,7 +1369,7 @@ struct RunKernel::Impl {
             if (has_tools) {
               for (const auto& invocation_id : active->tool_call_order) {
                 auto& assembly = active->tool_calls.at(invocation_id);
-                const auto* registration = tools.find(assembly.name);
+                const auto* registration = active->tools.find(assembly.name);
                 if (registration == nullptr ||
                     !transaction.used_invocation_ids.insert(invocation_id)
                          .second) {
@@ -2243,6 +2308,8 @@ RunKernel::RunKernel(domain::SessionId session_id, backend::Backend& backend,
                                     std::move(child_runner))) {
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit fail-closed replay validates every durable transition.
 auto RunKernel::open_durable(DurableSessionOpen session,
                              storage::SessionStore& store,
                              backend::Backend& backend, RunWakeSink* wake_sink,
@@ -2251,6 +2318,7 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                              std::shared_ptr<ToolPolicy> policy,
                              std::shared_ptr<ChildRunner> child_runner)
     -> std::expected<std::unique_ptr<RunKernel>, RunKernelError> {
+  // clang-format on
   try {
     auto kernel = std::unique_ptr<RunKernel>{new RunKernel(
         session.session_id, backend, wake_sink, std::move(timestamp_source),
@@ -2364,6 +2432,8 @@ auto RunKernel::open_durable(DurableSessionOpen session,
       if (awaiting_run) {
         std::optional<domain::InvocationId> invocation_id;
         std::optional<domain::RunStarted> started;
+        std::optional<std::vector<domain::ToolProvenanceEntry>>
+            provenance_tools;
         std::vector<domain::InvocationId> current_batch;
         std::map<domain::InvocationId, domain::ToolProposed> proposals;
         std::map<domain::InvocationId, domain::PolicyDecision> policy_decisions;
@@ -2373,6 +2443,9 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             approval_decisions;
         std::map<domain::InvocationId, std::vector<domain::CapabilityScope>>
             approval_scopes;
+        std::map<domain::InvocationId, domain::ApprovalGrantLifetime>
+            approval_lifetimes;
+        std::set<domain::InvocationId> approval_requested;
         std::map<domain::InvocationId, std::vector<domain::QuestionDefinition>>
             questions;
         std::map<domain::InvocationId, domain::MessageId> terminal_message_ids;
@@ -2383,6 +2456,10 @@ auto RunKernel::open_durable(DurableSessionOpen session,
           if (const auto* value =
                   std::get_if<domain::RunStarted>(&event.payload)) {
             started = *value;
+          } else if (const auto* value =
+                         std::get_if<domain::RunProvenanceRecorded>(
+                             &event.payload)) {
+            provenance_tools = value->provenance.tools;
           } else if (std::holds_alternative<domain::InferenceStarted>(
                          event.payload)) {
             current_batch.clear();
@@ -2391,6 +2468,8 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             policy_scopes.clear();
             approval_decisions.clear();
             approval_scopes.clear();
+            approval_lifetimes.clear();
+            approval_requested.clear();
             questions.clear();
             terminal_message_ids.clear();
             tool_started.clear();
@@ -2398,19 +2477,51 @@ auto RunKernel::open_durable(DurableSessionOpen session,
           } else if (const auto* value =
                          std::get_if<domain::ToolProposed>(&event.payload)) {
             current_batch.push_back(value->invocation_id);
-            proposals.insert_or_assign(value->invocation_id, *value);
+            if (!proposals.emplace(value->invocation_id, *value).second) {
+              return std::unexpected(
+                  kernel_error(RunKernelErrorCode::replay_rejected,
+                               "queued tool history repeats a proposal"));
+            }
           } else if (const auto* value = std::get_if<domain::ToolPolicyDecided>(
                          &event.payload)) {
-            policy_decisions.insert_or_assign(value->invocation_id,
-                                              value->decision);
-            policy_scopes.insert_or_assign(value->invocation_id, value->scopes);
+            if (!proposals.contains(value->invocation_id) ||
+                !policy_decisions.emplace(value->invocation_id, value->decision)
+                     .second ||
+                !policy_scopes.emplace(value->invocation_id, value->scopes)
+                     .second) {
+              return std::unexpected(kernel_error(
+                  RunKernelErrorCode::replay_rejected,
+                  "queued tool history repeats or misorders policy"));
+            }
+          } else if (const auto* value =
+                         std::get_if<domain::ToolApprovalRequested>(
+                             &event.payload)) {
+            const auto policy = policy_decisions.find(value->invocation_id);
+            if (!proposals.contains(value->invocation_id) ||
+                policy == policy_decisions.end() ||
+                policy->second != domain::PolicyDecision::require_approval ||
+                !approval_requested.insert(value->invocation_id).second) {
+              return std::unexpected(kernel_error(
+                  RunKernelErrorCode::replay_rejected,
+                  "queued tool history repeats or misorders approval"));
+            }
           } else if (const auto* value =
                          std::get_if<domain::ToolApprovalDecided>(
                              &event.payload)) {
-            approval_decisions.insert_or_assign(value->invocation_id,
-                                                value->decision);
-            approval_scopes.insert_or_assign(value->invocation_id,
-                                             value->granted_scopes);
+            if (!approval_requested.contains(value->invocation_id) ||
+                !approval_decisions
+                     .emplace(value->invocation_id, value->decision)
+                     .second ||
+                !approval_scopes
+                     .emplace(value->invocation_id, value->granted_scopes)
+                     .second ||
+                !approval_lifetimes
+                     .emplace(value->invocation_id, value->lifetime)
+                     .second) {
+              return std::unexpected(kernel_error(
+                  RunKernelErrorCode::replay_rejected,
+                  "queued tool history repeats or misorders a decision"));
+            }
           } else if (const auto* value =
                          std::get_if<domain::ToolStarted>(&event.payload)) {
             tool_started.insert(value->invocation_id);
@@ -2453,6 +2564,41 @@ auto RunKernel::open_durable(DurableSessionOpen session,
               kernel_error(RunKernelErrorCode::replay_rejected,
                            "awaiting question history is incomplete"));
         }
+        if (!provenance_tools) {
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::replay_rejected,
+              "pending tool recovery requires registration provenance"));
+        }
+        std::vector<std::string> names;
+        names.reserve(provenance_tools->size());
+        for (const auto& tool : *provenance_tools) {
+          names.push_back(tool.tool_name);
+        }
+        auto selected_tools = kernel->m_impl->tools.subset(names);
+        if (!selected_tools ||
+            selected_tools->declarations().size() != provenance_tools->size()) {
+          return std::unexpected(
+              kernel_error(RunKernelErrorCode::replay_rejected,
+                           "run tool provenance is unavailable during replay"));
+        }
+        for (std::size_t index{}; index < provenance_tools->size(); ++index) {
+          const auto& declaration = selected_tools->declarations()[index];
+          const auto* registration = selected_tools->find(declaration.name);
+          const auto& recorded = (*provenance_tools)[index];
+          const auto current_digest = registration == nullptr
+                                          ? std::nullopt
+                                          : registration_digest(*registration);
+          if (recorded.tool_name != declaration.name ||
+              recorded.declared_effects != declaration.effects ||
+              recorded.capability_scopes != declaration.capability_scopes ||
+              !recorded.registration_digest || !current_digest ||
+              *recorded.registration_digest != *current_digest) {
+            return std::unexpected(
+                kernel_error(RunKernelErrorCode::replay_rejected,
+                             "run tool registration changed during replay"));
+          }
+        }
+        auto active_tools = std::move(*selected_tools);
         std::map<domain::InvocationId, Impl::PendingInvocation> invocations;
         for (const auto& current_id : current_batch) {
           const auto proposed = proposals.find(current_id);
@@ -2462,8 +2608,14 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                              "queued tool history lacks its proposal"));
           }
           const auto* registration =
-              kernel->m_impl->tools.find(proposed->second.tool_name);
+              active_tools.find(proposed->second.tool_name);
           if (registration == nullptr) {
+            if (kernel->m_impl->tools.find(proposed->second.tool_name) !=
+                nullptr) {
+              return std::unexpected(kernel_error(
+                  RunKernelErrorCode::replay_rejected,
+                  "queued tool was not declared for the originating run"));
+            }
             return std::unexpected(kernel_error(
                 current_id == *invocation_id
                     ? RunKernelErrorCode::interactive_input_unavailable
@@ -2497,6 +2649,47 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             return std::unexpected(
                 kernel_error(RunKernelErrorCode::replay_rejected,
                              "queued tool declaration changed during replay"));
+          }
+
+          const auto scopes_match_request = [&](const auto& scopes) {
+            if (!scopes_are_unique(scopes)) return false;
+            const auto forward = intersect_capability_scopes(
+                scopes, proposed->second.requested_scopes);
+            const auto reverse = intersect_capability_scopes(
+                proposed->second.requested_scopes, scopes);
+            return forward.has_value() && reverse.has_value();
+          };
+          const auto policy = policy_decisions.find(current_id);
+          if (policy != policy_decisions.end()) {
+            const auto& scopes = policy_scopes.at(current_id);
+            if (!valid_policy_decision(policy->second) ||
+                (policy->second == domain::PolicyDecision::deny
+                     ? !scopes.empty()
+                     : !scopes_match_request(scopes))) {
+              return std::unexpected(kernel_error(
+                  RunKernelErrorCode::replay_rejected,
+                  "queued tool policy scopes are invalid during replay"));
+            }
+          }
+          const auto approval = approval_decisions.find(current_id);
+          if (approval != approval_decisions.end()) {
+            const auto& scopes = approval_scopes.at(current_id);
+            const auto lifetime = approval_lifetimes.at(current_id);
+            if (!valid_approval_decision(approval->second) ||
+                !valid_approval_lifetime(lifetime) ||
+                !scopes_are_unique(scopes) ||
+                (approval->second == domain::ApprovalDecision::approved
+                     ? policy == policy_decisions.end() ||
+                           policy->second !=
+                               domain::PolicyDecision::require_approval ||
+                           !scopes_match_request(scopes)
+                     : !scopes.empty() ||
+                           lifetime !=
+                               domain::ApprovalGrantLifetime::invocation)) {
+              return std::unexpected(kernel_error(
+                  RunKernelErrorCode::replay_rejected,
+                  "queued tool approval scopes are invalid during replay"));
+            }
           }
 
           auto state = Impl::InvocationState::proposed;
@@ -2535,6 +2728,11 @@ auto RunKernel::open_durable(DurableSessionOpen session,
           } else if (policy_decisions.contains(current_id) &&
                      policy_decisions.at(current_id) ==
                          domain::PolicyDecision::require_approval) {
+            if (!approval_requested.contains(current_id)) {
+              return std::unexpected(kernel_error(
+                  RunKernelErrorCode::replay_rejected,
+                  "queued tool approval request is missing during replay"));
+            }
             state = Impl::InvocationState::awaiting_approval;
             policy_request =
                 ToolPolicyRequest{event_log.session_id(),
@@ -2603,7 +2801,8 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                                                  std::nullopt,
                                                  std::nullopt,
                                                  std::nullopt,
-                                                 0};
+                                                 0,
+                                                 std::move(active_tools)};
       }
       if (awaiting_plan_run) {
         std::optional<domain::RunStarted> started;
@@ -2648,7 +2847,8 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                                std::nullopt,
                                std::nullopt,
                                std::nullopt,
-                               0};
+                               0,
+                               {}};
         active.planning_plan_id = *plan_id;
         kernel->m_impl->active = std::move(active);
       }
@@ -2668,7 +2868,10 @@ auto RunKernel::open_durable(DurableSessionOpen session,
 
 RunKernel::~RunKernel() = default;
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicitly stages run admission, provenance, and persistence.
 auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
+  // clang-format on
   try {
     if (m_impl->unusable) {
       return std::unexpected(kernel_error(
@@ -2684,16 +2887,44 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
       return std::unexpected(kernel_error(
           RunKernelErrorCode::run_already_active, "another run is active"));
     }
+    std::vector<std::string> requested_tool_names;
+    requested_tool_names.reserve(start.request.tools.size());
+    for (const auto& declaration : start.request.tools) {
+      requested_tool_names.push_back(declaration.name);
+    }
+    auto effective_tools = m_impl->tools.subset(requested_tool_names);
     if (start.user_message.role != domain::Role::user ||
         !start.user_message.tool_calls.empty() ||
         start.request.assistant_message_id == start.user_message.message_id ||
-        start.request.tools != m_impl->tools.declarations() ||
+        !effective_tools ||
+        start.request.tools != effective_tools->declarations() ||
+        (m_impl->session_store != nullptr && !start.provenance &&
+         !start.request.tools.empty()) ||
         (start.pricing_observation &&
          (start.pricing_observation->model_id != start.request.model_id ||
           !domain::validate_pricing_observation(*start.pricing_observation)))) {
       return std::unexpected(kernel_error(
           RunKernelErrorCode::invalid_start,
           "run start contains invalid identity or tool declarations"));
+    }
+    std::vector<domain::ToolProvenanceEntry> effective_tool_provenance;
+    effective_tool_provenance.reserve(effective_tools->size());
+    for (const auto& declaration : effective_tools->declarations()) {
+      const auto* registration = effective_tools->find(declaration.name);
+      if (registration == nullptr) {
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::invalid_start,
+                         "run tool registration is internally inconsistent"));
+      }
+      auto digest = registration_digest(*registration);
+      if (m_impl->session_store != nullptr && !digest) {
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::invalid_start,
+                         "durable runs require versioned tool registrations"));
+      }
+      effective_tool_provenance.push_back(
+          {declaration.name, declaration.effects, declaration.capability_scopes,
+           std::move(digest)});
     }
     if (!valid_imported_artifacts(start.imported_artifacts, start.user_message,
                                   m_impl->event_log)) {
@@ -2758,11 +2989,7 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
             kernel_error(RunKernelErrorCode::invalid_start,
                          "run provenance tool identity is kernel-owned"));
       }
-      for (const auto& declaration : m_impl->tools.declarations()) {
-        start.provenance->tools.push_back({declaration.name,
-                                           declaration.effects,
-                                           declaration.capability_scopes});
-      }
+      start.provenance->tools = std::move(effective_tool_provenance);
       // Validated before anything is recorded so an ephemeral run cannot carry
       // a sensitive value into the in-memory log either.
       if (auto valid = domain::validate_run_provenance(*start.provenance);
@@ -2791,7 +3018,8 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
                            std::nullopt,
                            std::nullopt,
                            std::nullopt,
-                           0};
+                           0,
+                           std::move(*effective_tools)};
     auto transaction = m_impl->transaction();
     if (auto result = m_impl->record(start.run_id, std::move(start.attributes),
                                      transaction);
@@ -2993,7 +3221,8 @@ auto RunKernel::start_plan(PlanStart start)
                            std::nullopt,
                            std::nullopt,
                            std::nullopt,
-                           0};
+                           0,
+                           {}};
     active.planning_plan_id = plan_id;
 
     auto transaction = m_impl->transaction();
@@ -3518,7 +3747,8 @@ auto RunKernel::dispatch_child(ChildRunStart start)
                            std::nullopt,
                            std::nullopt,
                            descriptor,
-                           0};
+                           0,
+                           {}};
     auto transaction = m_impl->transaction();
     transaction.active_children.emplace(start.child_run_id, active);
     if (auto recorded = m_impl->record(
@@ -4111,7 +4341,7 @@ auto RunKernel::continue_run(
               return active.invocations.at(invocation_id).state !=
                      Impl::InvocationState::terminal;
             }) ||
-        request.tools != m_impl->tools.declarations() ||
+        request.tools != active.tools.declarations() ||
         (pricing_observation &&
          (pricing_observation->model_id != request.model_id ||
           !domain::validate_pricing_observation(*pricing_observation)))) {
@@ -4184,8 +4414,11 @@ auto RunKernel::continue_run(
   }
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicitly drains ordered worker updates and launches ready tools.
 auto RunKernel::drain()
     -> std::expected<std::vector<domain::RunEvent>, RunKernelError> {
+  // clang-format on
   try {
     if (m_impl->unusable) {
       return std::unexpected(kernel_error(
@@ -4253,8 +4486,14 @@ auto RunKernel::drain()
         m_impl->finish_child_operation(*child_update_id);
       }
       if (launch_ready) {
-        if (auto launched = m_impl->launch_next_tool();
-            !launched && !first_error) {
+        const auto before_launch = m_impl->event_log.events().size();
+        auto launched = m_impl->launch_next_tool();
+        const auto& after_launch = m_impl->event_log.events();
+        for (std::size_t index = before_launch; index < after_launch.size();
+             ++index) {
+          committed.push_back(after_launch[index]);
+        }
+        if (!launched && !first_error) {
           first_error = std::move(launched.error());
         }
       }
@@ -4298,6 +4537,11 @@ auto RunKernel::active_child_run_ids() const -> std::vector<domain::RunId> {
 auto RunKernel::active_inference_id() const noexcept
     -> std::optional<domain::InferenceId> {
   return m_impl->active ? m_impl->active->inference_id : std::nullopt;
+}
+
+auto RunKernel::active_tool_declarations() const noexcept
+    -> const std::vector<backend::ToolDeclaration>* {
+  return m_impl->active ? &m_impl->active->tools.declarations() : nullptr;
 }
 
 auto RunKernel::pending_question_input() const

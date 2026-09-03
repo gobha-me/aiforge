@@ -4,10 +4,12 @@
 #include <aiforge/adapters/provider_character_picker_dialog.hpp>
 #include <aiforge/backend/provider_character_catalog.hpp>
 #include <aiforge/model/catalog.hpp>
+#include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/testing/scripted_persona_editor.hpp>
 #include <aiforge/testing/scripted_persona_source.hpp>
 #include <aiforge/testing/tui_scenario.hpp>
 #include <algorithm>
+#include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <condition_variable>
@@ -724,6 +726,181 @@ class GatedBackend final : public backend::Backend,
   std::shared_ptr<GatedBackendState> m_state;
 };
 
+class QuestionBackendState final {
+ public:
+  QuestionBackendState() {
+    const auto invocation = make_id<domain::InvocationId>("ask-call");
+    m_events = {
+        backend::BackendEvent{backend::ResponseStarted{"question-response"}},
+        backend::BackendEvent{backend::ToolCallDelta{
+            invocation, "ask_user",
+            R"({"questions":[{"id":"format","prompt":"Choose output","kind":"one","required":true,"minimum_selections":1,"maximum_selections":1,"options":[{"id":"short","label":"Short","recommended":true},{"id":"long","label":"Long"}]}]})"}},
+        backend::BackendEvent{
+            backend::ResponseFinished{domain::FinishReason::tool_call}},
+        std::nullopt,
+        backend::BackendEvent{backend::ResponseStarted{"answer-response"}},
+        backend::BackendEvent{backend::ContentDelta{
+            make_id<domain::MessageId>("continuation-assistant"),
+            domain::TextBlock{"continued answer"}}},
+        backend::BackendEvent{
+            backend::ResponseFinished{domain::FinishReason::stop}},
+        std::nullopt,
+    };
+  }
+
+  auto start(backend::BackendRequest request)
+      -> std::expected<std::size_t, backend::BackendError> {
+    std::lock_guard lock{m_mutex};
+    if (m_requests.size() >= 2) {
+      return std::unexpected(backend::BackendError{
+          backend::BackendErrorKind::script_exhausted,
+          "question backend was started too many times", false, std::nullopt});
+    }
+    if (m_requests.empty()) {
+      if (request.tools.size() != 1 ||
+          request.tools.front().name != "ask_user") {
+        m_valid = false;
+      }
+    } else {
+      m_events[5] = backend::BackendEvent{backend::ContentDelta{
+          request.assistant_message_id, domain::TextBlock{"continued answer"}}};
+      if (request.tools != m_requests.front().tools ||
+          !std::ranges::any_of(request.context.entries, [](const auto& entry) {
+            return entry.kind == domain::ContextEntryKind::tool_result;
+          })) {
+        m_valid = false;
+      }
+    }
+    const auto offset = m_requests.size() * 4U;
+    m_requests.push_back(std::move(request));
+    m_condition.notify_all();
+    return offset;
+  }
+
+  auto next(const std::size_t offset, std::size_t& local_index,
+            std::stop_token token)
+      -> std::expected<std::optional<backend::BackendEvent>,
+                       backend::BackendError> {
+    std::unique_lock lock{m_mutex};
+    const auto index = offset + local_index;
+    ++m_waiting_calls;
+    m_condition.notify_all();
+    if (!m_condition.wait(lock, token, [&] { return m_released > index; })) {
+      return backend::BackendEvent{backend::ResponseCancelled{"cancelled"}};
+    }
+    auto result = m_events.at(index);
+    ++local_index;
+    if (!result) ++m_ended_streams;
+    m_condition.notify_all();
+    return result;
+  }
+
+  auto release(const std::string_view description, const bool wait_for_wake)
+      -> std::expected<void, std::string> {
+    static const std::array expected{
+        std::string_view{"question-started"},
+        std::string_view{"question-call"},
+        std::string_view{"question-finished"},
+        std::string_view{"question-end"},
+        std::string_view{"continuation-started"},
+        std::string_view{"continuation-delta"},
+        std::string_view{"continuation-finished"},
+        std::string_view{"continuation-end"},
+    };
+    std::unique_lock lock{m_mutex};
+    if (!m_condition.wait_for(lock, 1s,
+                              [&] { return m_waiting_calls > m_released; })) {
+      return std::unexpected("question backend did not reach its boundary");
+    }
+    if (m_released >= expected.size() || description != expected[m_released]) {
+      return std::unexpected("question backend descriptor mismatch");
+    }
+    ++m_released;
+    const auto released = m_released;
+    m_condition.notify_all();
+    const bool ended = released == 4 || released == 8;
+    const auto expected_ended = released == 4 ? 1U : 2U;
+    if (!m_condition.wait_for(lock, 1s, [&] {
+          return ended ? m_ended_streams >= expected_ended
+                       : m_waiting_calls >= released + 1U;
+        })) {
+      return std::unexpected("question backend did not acknowledge its step");
+    }
+    if (wait_for_wake &&
+        !m_condition.wait_for(lock, 1s, [&] { return m_wakes >= released; })) {
+      return std::unexpected("question backend update was not posted");
+    }
+    return {};
+  }
+
+  auto observe_wake() -> void {
+    std::lock_guard lock{m_mutex};
+    ++m_wakes;
+    m_condition.notify_all();
+  }
+
+  [[nodiscard]] auto semantic_state() -> std::string {
+    std::lock_guard lock{m_mutex};
+    return "requests=" + std::to_string(m_requests.size()) +
+           (m_valid ? "|valid" : "|invalid");
+  }
+
+ private:
+  std::mutex m_mutex;
+  std::condition_variable_any m_condition;
+  std::vector<std::optional<backend::BackendEvent>> m_events;
+  std::vector<backend::BackendRequest> m_requests;
+  std::size_t m_waiting_calls{};
+  std::size_t m_released{};
+  std::size_t m_wakes{};
+  std::size_t m_ended_streams{};
+  bool m_valid{true};
+};
+
+class QuestionStream final : public backend::BackendStream {
+ public:
+  QuestionStream(std::shared_ptr<QuestionBackendState> state,
+                 const std::size_t offset)
+      : m_state(std::move(state)), m_offset(offset) {}
+
+  auto next(std::stop_token token)
+      -> std::expected<std::optional<backend::BackendEvent>,
+                       backend::BackendError> override {
+    return m_state->next(m_offset, m_index, token);
+  }
+
+ private:
+  std::shared_ptr<QuestionBackendState> m_state;
+  std::size_t m_offset{};
+  std::size_t m_index{};
+};
+
+class QuestionBackend final : public backend::Backend,
+                              public backend::ModelContextProvider {
+ public:
+  explicit QuestionBackend(std::shared_ptr<QuestionBackendState> state)
+      : m_state(std::move(state)) {}
+
+  auto lookup(const domain::ModelId& model_id, std::stop_token)
+      -> std::expected<backend::ModelContextInfo,
+                       backend::BackendError> override {
+    return backend::ModelContextInfo{
+        model_id, 8192, 1024, pricing_observation(),
+        backend::ModelCapabilityMap{{"tools", true}}};
+  }
+
+  auto start(backend::BackendRequest request, std::stop_token)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    auto offset = m_state->start(std::move(request));
+    if (!offset) return std::unexpected(std::move(offset.error()));
+    return std::make_unique<QuestionStream>(m_state, *offset);
+  }
+
+ private:
+  std::shared_ptr<QuestionBackendState> m_state;
+};
+
 struct ModalState {
   std::string result{"pending"};
   int columns{};
@@ -926,6 +1103,106 @@ auto chat_scenario() -> testing::TuiScenario {
       {9, enter},
   };
   value.limits.maximum_frames = 32;
+  return value;
+}
+
+auto question_scenario(const bool interrupt = false) -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = interrupt ? "interactive-ask-user-interrupt"
+                                : "interactive-ask-user-answer";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 14, 1000, 280};
+  value.backend_script = {"question-started", "question-call",
+                          "question-finished", "question-end"};
+  if (!interrupt) {
+    value.backend_script.insert(value.backend_script.end(),
+                                {"continuation-started", "continuation-delta",
+                                 "continuation-finished", "continuation-end"});
+  }
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"question"}}},
+      {0, enter},
+      {1, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {2, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {3, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {4, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+  };
+  if (interrupt) {
+    value.steps.push_back({6, testing::TuiScenarioPost{termforge::KeyEvent{
+                                  termforge::Key::Char, U'c', true, false,
+                                  false, termforge::KeyAction::Press}}});
+    value.steps.push_back(
+        {8, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}});
+    value.steps.push_back({8, enter});
+  } else {
+    value.steps.push_back({6, enter});
+    for (std::uint64_t frame = 7; frame < 11; ++frame) {
+      value.steps.push_back(
+          {frame,
+           testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}});
+    }
+    value.steps.push_back(
+        {13, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}});
+    value.steps.push_back({13, enter});
+  }
+  value.limits.maximum_frames = 48;
+  return value;
+}
+
+auto question_cancel_scenario() -> testing::TuiScenario {
+  auto value = question_scenario();
+  value.scenario_id = "interactive-ask-user-cancel";
+  value.steps.at(6).action = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Escape, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  return value;
+}
+
+auto tool_profile_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-tool-profile-session-local";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 18, 1000, 360};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  const auto down = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Down, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/tools off"}}},
+      {0, enter},
+      {2, testing::TuiScenarioPost{termforge::PasteEvent{
+              "/tools profile essentials"}}},
+      {2, enter},
+      {4, testing::TuiScenarioPost{termforge::PasteEvent{"/tools"}}},
+      {4, enter},
+      {5, testing::TuiScenarioResize{{8, 3, 80, 60}}},
+      {6, testing::TuiScenarioResize{{100, 18, 1000, 360}}},
+      {7, down},
+      {8, enter},
+      {10, testing::TuiScenarioPost{termforge::PasteEvent{
+               "/session resume target-session"}}},
+      {10, enter},
+      {12, testing::TuiScenarioPost{termforge::PasteEvent{"/tools"}}},
+      {12, enter},
+      {14, enter},
+      {16, testing::TuiScenarioPost{termforge::PasteEvent{"/tools off"}}},
+      {16, enter},
+      {18, testing::TuiScenarioPost{termforge::PasteEvent{"/session new"}}},
+      {18, enter},
+      {20, testing::TuiScenarioPost{termforge::PasteEvent{"/tools"}}},
+      {20, enter},
+      {22, enter},
+      {24, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
+      {24, enter},
+  };
+  value.limits.maximum_frames = 48;
   return value;
 }
 
@@ -1635,6 +1912,96 @@ auto chat_factory(
   };
 }
 
+auto question_factory() -> testing::TuiScenarioTargetFactory {
+  return [](const testing::TuiScenarioPass pass, termforge::ByteSink* output)
+             -> std::expected<testing::TuiScenarioTarget,
+                              testing::TuiScenarioError> {
+    auto pipe = std::make_shared<Pipe>();
+    if (!pipe->ok()) {
+      return std::unexpected(testing::TuiScenarioError{
+          testing::TuiScenarioErrorCode::target_failure,
+          "question scenario pipe setup failed"});
+    }
+    auto state = std::make_shared<QuestionBackendState>();
+    auto backend = std::make_shared<QuestionBackend>(state);
+    auto editor = std::make_shared<NoEditor>();
+    auto frame = std::make_shared<std::string>();
+    auto suffix = std::make_shared<std::uint64_t>();
+    runtime::ToolRegistry registry;
+    if (auto registered = runtime::register_ask_user_tool(registry, true);
+        !registered) {
+      return std::unexpected(testing::TuiScenarioError{
+          testing::TuiScenarioErrorCode::target_failure,
+          registered.error().message});
+    }
+    auto tools = registry.snapshot();
+    if (!tools) {
+      return std::unexpected(testing::TuiScenarioError{
+          testing::TuiScenarioErrorCode::target_failure,
+          tools.error().message});
+    }
+    adapters::InteractiveChatAppOptions options;
+    options.live_wake_enabled = pass == testing::TuiScenarioPass::record;
+    options.poll_worker_updates = false;
+    options.wake_observer = [state] { state->observe_wake(); };
+    options.rendered_output = output;
+    options.rendered_frame = [frame](const termforge::Screen& screen) {
+      *frame = normalized_screen(screen);
+    };
+    options.session_dependencies.identity_suffix_source = [suffix] {
+      return ++*suffix;
+    };
+    options.session_dependencies.timestamp_source = [] {
+      return domain::EventTimestamp{123ms};
+    };
+    options.session_dependencies.tools = std::move(*tools);
+    auto app = adapters::make_interactive_chat_app(
+        *backend, *backend, nullptr,
+        {make_id<domain::ModelId>("model"),
+         surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
+        *editor, {}, std::move(options));
+    if (!app->ready()) {
+      return std::unexpected(testing::TuiScenarioError{
+          testing::TuiScenarioErrorCode::target_failure,
+          app->setup_error().message});
+    }
+    auto* raw = app.get();
+    return testing::TuiScenarioTarget{
+        std::move(app),
+        [raw, pipe](const termforge::Capabilities& capabilities) {
+          return raw->configure_terminal_for_scenario(
+              termforge::TerminalIo{pipe->read_fd(), -1}, capabilities);
+        },
+        [raw, backend, editor] {
+          static_cast<void>(backend);
+          static_cast<void>(editor);
+          return raw->run();
+        },
+        [state, pass](const std::string_view step) {
+          return state->release(step, pass == testing::TuiScenarioPass::record);
+        },
+        [](std::string_view) -> std::expected<void, std::string> {
+          return std::unexpected("question scenario has no tool script");
+        },
+        [frame] { return *frame; },
+        [raw, state, backend, editor] {
+          static_cast<void>(backend);
+          static_cast<void>(editor);
+          auto terminal = std::string{"active"};
+          for (const auto& event : raw->events()) {
+            if (std::holds_alternative<domain::RunCompleted>(event.payload)) {
+              terminal = "completed";
+            } else if (std::holds_alternative<domain::RunCancelled>(
+                           event.payload)) {
+              terminal = "cancelled";
+            }
+          }
+          return state->semantic_state() + "|" + terminal + "|" +
+                 std::string{raw->status_text()};
+        }};
+  };
+}
+
 auto session_success_scenario() -> testing::TuiScenario {
   testing::TuiScenario value;
   value.scenario_id = "interactive-session-list-resume-new";
@@ -2152,6 +2519,104 @@ TEST_CASE("interactive chat records and replays a gated backend stream",
       result->recorded.normalized_frames, [](const std::string& frame) {
         return frame.starts_with("32x6:") &&
                frame.find("usage 3 in/2 out") == std::string::npos;
+      }));
+}
+
+TEST_CASE("interactive ask_user answers continue the same run",
+          "[scenario][chat][questions]") {
+  const auto result =
+      testing::run_tui_scenario(question_scenario(), question_factory());
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state.find("requests=2|valid|completed") !=
+          std::string::npos);
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("Choose output") != std::string::npos;
+      }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("continued answer") != std::string::npos;
+      }));
+}
+
+TEST_CASE("interactive ask_user Ctrl+C cancels instead of quitting silently",
+          "[scenario][chat][questions][cancellation]") {
+  const auto result =
+      testing::run_tui_scenario(question_scenario(true), question_factory());
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state.find("requests=1|valid|cancelled") !=
+          std::string::npos);
+}
+
+TEST_CASE("interactive tool profile commands remain session local",
+          "[scenario][chat][tools][profiles]") {
+  const auto result =
+      testing::run_tui_scenario(tool_profile_scenario(), session_factory(true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  const auto picker_open = std::ranges::find_if(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("Choose a Chat tool profile") != std::string::npos;
+      });
+  REQUIRE(picker_open != result->recorded.normalized_frames.end());
+  const auto selected_off = std::ranges::find_if(
+      std::next(picker_open), result->recorded.normalized_frames.end(),
+      [](const std::string& frame) {
+        return frame.find("Selected Off") != std::string::npos;
+      });
+  REQUIRE(selected_off != result->recorded.normalized_frames.end());
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames,
+      [](const std::string& frame) { return frame.starts_with("8x3:"); }));
+  const auto resumed_session = std::ranges::find_if(
+      std::next(selected_off), result->recorded.normalized_frames.end(),
+      [](const std::string& frame) {
+        return frame.find("target-session") != std::string::npos;
+      });
+  REQUIRE(resumed_session != result->recorded.normalized_frames.end());
+  const auto resumed_profile = std::ranges::find_if(
+      std::next(resumed_session), result->recorded.normalized_frames.end(),
+      [](const std::string& frame) {
+        return frame.find("Selected Essentials") != std::string::npos;
+      });
+  REQUIRE(resumed_profile != result->recorded.normalized_frames.end());
+  const auto selected_off_again = std::ranges::find_if(
+      std::next(resumed_profile), result->recorded.normalized_frames.end(),
+      [](const std::string& frame) {
+        return frame.find("Selected Off") != std::string::npos;
+      });
+  REQUIRE(selected_off_again != result->recorded.normalized_frames.end());
+  const auto new_session = std::ranges::find_if(
+      std::next(selected_off_again), result->recorded.normalized_frames.end(),
+      [](const std::string& frame) {
+        return frame.find("session session-3") != std::string::npos;
+      });
+  REQUIRE(new_session != result->recorded.normalized_frames.end());
+  REQUIRE(std::ranges::any_of(
+      std::next(new_session), result->recorded.normalized_frames.end(),
+      [](const std::string& frame) {
+        return frame.find("Selected Essentials") != std::string::npos;
+      }));
+}
+
+TEST_CASE("interactive ask_user dismissal records a result and continues",
+          "[scenario][chat][questions][cancellation]") {
+  const auto result =
+      testing::run_tui_scenario(question_cancel_scenario(), question_factory());
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state.find("requests=2|valid|completed") !=
+          std::string::npos);
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("Question cancelled; continuing run") !=
+               std::string::npos;
       }));
 }
 

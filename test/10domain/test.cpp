@@ -44,7 +44,7 @@ auto started() -> RunStarted {
 }
 
 auto provenance() -> RunProvenance {
-  return RunProvenance{"0.10.0",
+  RunProvenance result{"0.10.0",
                        "venice",
                        std::nullopt,
                        make_id<ModelId>("model"),
@@ -63,6 +63,11 @@ auto provenance() -> RunProvenance {
                          RequestOptionSource::configuration},
                         {"venice.chat.include-system-prompt", std::nullopt,
                          RequestOptionSource::provider_default}}};
+  result.tool_profile =
+      ToolProfileProvenance{make_id<ToolProfileId>("essentials"),
+                            make_id<ToolProfileId>("model-safe"),
+                            make_id<ToolProfileId>("persona-safe")};
+  return result;
 }
 
 } // namespace
@@ -74,6 +79,9 @@ TEST_CASE("opaque IDs reject invalid input before it reaches an event",
   REQUIRE_FALSE(EventId::from(std::string(Id<EventIdTag>::max_size + 1, 'x')));
   REQUIRE(EventId::from("bad\nvalue").error() == IdError::control_character);
   REQUIRE(EventId::from("evt-01")->value() == "evt-01");
+  REQUIRE_FALSE(
+      ToolProfileId::from(std::string(ToolProfileId::max_size + 1, 'x')));
+  REQUIRE(ToolProfileId::from("essentials")->value() == "essentials");
 }
 
 TEST_CASE("session event log rejects invalid envelopes and rewritten order",
@@ -384,6 +392,75 @@ TEST_CASE("run provenance bounds effective request option snapshots",
   zero_limit.maximum_request_options = 0;
   REQUIRE(validate_run_provenance(provenance(), zero_limit).error().code ==
           RunProvenanceErrorCode::invalid_limits);
+}
+
+TEST_CASE("run provenance bounds named tool profile references",
+          "[domain][failure][provenance][tool-profile]") {
+  REQUIRE(validate_run_provenance(provenance()));
+
+  auto legacy = provenance();
+  legacy.tool_profile.reset();
+  REQUIRE(validate_run_provenance(legacy));
+
+  auto malformed_selected = provenance();
+  malformed_selected.tool_profile->selected_profile_id =
+      make_id<ToolProfileId>("bad profile");
+  REQUIRE(validate_run_provenance(malformed_selected).error().code ==
+          RunProvenanceErrorCode::invalid_tool_profile);
+  malformed_selected.tool_profile->selected_profile_id =
+      make_id<ToolProfileId>("Essentials");
+  REQUIRE(validate_run_provenance(malformed_selected).error().code ==
+          RunProvenanceErrorCode::invalid_tool_profile);
+
+  auto malformed_model = provenance();
+  malformed_model.tool_profile->model_maximum_profile_id =
+      make_id<ToolProfileId>("model/profile");
+  REQUIRE(validate_run_provenance(malformed_model).error().code ==
+          RunProvenanceErrorCode::invalid_tool_profile);
+
+  auto malformed_persona = provenance();
+  malformed_persona.tool_profile->persona_maximum_profile_id =
+      make_id<ToolProfileId>("persona\\profile");
+  REQUIRE(validate_run_provenance(malformed_persona).error().code ==
+          RunProvenanceErrorCode::invalid_tool_profile);
+
+  auto bounded = provenance();
+  bounded.backend_version.reset();
+  bounded.credential_source.reset();
+  bounded.configuration.clear();
+  bounded.components.clear();
+  bounded.tools.clear();
+  bounded.effective_request_options.clear();
+  bounded.tool_profile.reset();
+  RunProvenanceLimits exact;
+  exact.maximum_total_bytes = bounded.aiforge_version.size() +
+                              bounded.backend_id.size() +
+                              bounded.model_id.value().size();
+  REQUIRE(validate_run_provenance(bounded, exact));
+  bounded.tool_profile = ToolProfileProvenance{
+      make_id<ToolProfileId>("essentials"), std::nullopt, std::nullopt};
+  REQUIRE(validate_run_provenance(bounded, exact).error().code ==
+          RunProvenanceErrorCode::resource_exhausted);
+}
+
+TEST_CASE("run provenance validates optional tool registration digests",
+          "[domain][failure][provenance][tools]") {
+  auto value = provenance();
+  value.tools = {{"ask_user", {}, {}, "sha256:" + std::string(64, 'a')}};
+  REQUIRE(validate_run_provenance(value));
+
+  value.tools.front().registration_digest.reset();
+  REQUIRE(validate_run_provenance(value));
+
+  value.tools.front().registration_digest = "sha256:" + std::string(63, 'a');
+  REQUIRE(validate_run_provenance(value).error().code ==
+          RunProvenanceErrorCode::invalid_tool);
+  value.tools.front().registration_digest = "sha256:" + std::string(64, 'A');
+  REQUIRE(validate_run_provenance(value).error().code ==
+          RunProvenanceErrorCode::invalid_tool);
+  value.tools.front().registration_digest = std::string(71, 'a');
+  REQUIRE(validate_run_provenance(value).error().code ==
+          RunProvenanceErrorCode::invalid_tool);
 }
 
 TEST_CASE(

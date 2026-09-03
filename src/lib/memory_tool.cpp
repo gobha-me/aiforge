@@ -67,7 +67,7 @@ class DuplicateJsonKey final : public std::exception {};
                                const MemoryToolConfiguration& configuration)
     -> std::expected<MemoryProposalDraft, ToolExecutionError> {
   if (arguments.media_type != "application/json" || arguments.data.empty() ||
-      arguments.data.size() > 64U * 1024U) {
+      arguments.data.size() > std::size_t{64} * 1024U) {
     return error("propose_memory arguments must be bounded JSON");
   }
   try {
@@ -264,7 +264,8 @@ auto register_memory_tool(ToolRegistry& registry,
   return registry.register_tool(
       memory_tool_declaration(configuration),
       std::make_shared<MemoryToolExecutor>(configuration),
-      ToolExecutionLimits{64U * 1024U, 1, std::chrono::seconds{5}});
+      ToolExecutionLimits{std::size_t{64} * 1024U, 1, std::chrono::seconds{5}},
+      ToolExecutorContract{"aiforge.runtime.propose_memory", "1"});
 }
 
 } // namespace aiforge::runtime

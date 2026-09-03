@@ -413,6 +413,12 @@ TEST_CASE(
   result = registry.register_tool(invalid, executor);
   REQUIRE_FALSE(result);
 
+  result = registry.register_tool(declaration("invalid-contract"), executor, {},
+                                  runtime::ToolExecutorContract{"", "1"});
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code ==
+          runtime::ToolRegistryErrorCode::invalid_declaration);
+
   REQUIRE(registry.register_tool(declaration(), executor));
   const auto snapshot = snapshot_of(registry);
   REQUIRE(snapshot.size() == 1);
@@ -426,6 +432,163 @@ TEST_CASE(
   REQUIRE(registry.register_tool(declaration("second"), executor));
   REQUIRE(snapshot.size() == 1);
   REQUIRE(snapshot_of(registry).size() == 2);
+}
+
+TEST_CASE("tool registry subsets are bounded atomic registry-ordered snapshots",
+          "[tools][registry][failure]") {
+  runtime::ToolRegistry registry;
+  auto first_executor = std::make_shared<RejectingExecutor>();
+  auto second_executor = std::make_shared<CountingExecutor>();
+  const runtime::ToolExecutionLimits first_limits{1024, 2, 1s};
+  const runtime::ToolExecutionLimits second_limits{2048, 4, 2s};
+  const runtime::ToolExecutorContract first_contract{"test.first", "1"};
+  const runtime::ToolExecutorContract second_contract{"test.second", "2"};
+  REQUIRE(registry.register_tool(declaration("first"), first_executor,
+                                 first_limits, first_contract));
+  REQUIRE(registry.register_tool(declaration("second"), second_executor,
+                                 second_limits, second_contract));
+  const auto full = snapshot_of(registry);
+
+  const std::vector<std::string> reverse{"second", "first"};
+  const auto selected = full.subset(reverse);
+  REQUIRE(selected);
+  REQUIRE(selected->declarations() ==
+          std::vector<backend::ToolDeclaration>{declaration("first"),
+                                                declaration("second")});
+  const auto* first = selected->find("first");
+  const auto* second = selected->find("second");
+  REQUIRE(first != nullptr);
+  REQUIRE(second != nullptr);
+  REQUIRE(first->executor == first_executor);
+  REQUIRE(first->limits == first_limits);
+  REQUIRE(first->executor_contract == first_contract);
+  REQUIRE(second->executor == second_executor);
+  REQUIRE(second->limits == second_limits);
+  REQUIRE(second->executor_contract == second_contract);
+
+  const std::vector<std::string> duplicate{"first", "first"};
+  const auto duplicated = full.subset(duplicate);
+  REQUIRE_FALSE(duplicated);
+  REQUIRE(duplicated.error().code ==
+          runtime::ToolRegistryErrorCode::duplicate_name);
+  const std::vector<std::string> unknown{"missing"};
+  const auto missing = full.subset(unknown);
+  REQUIRE_FALSE(missing);
+  REQUIRE(missing.error().code ==
+          runtime::ToolRegistryErrorCode::invalid_declaration);
+  const std::vector<std::string> oversized(257, "first");
+  const auto too_many = full.subset(oversized);
+  REQUIRE_FALSE(too_many);
+  REQUIRE(too_many.error().code ==
+          runtime::ToolRegistryErrorCode::invalid_declaration);
+  const std::vector<std::string> none;
+  const auto empty = full.subset(none);
+  REQUIRE(empty);
+  REQUIRE(empty->empty());
+  REQUIRE(full.size() == 2);
+}
+
+TEST_CASE("run tool subsets reject forged unordered and repeated declarations",
+          "[tools][runtime][failure]") {
+  runtime::ToolRegistry registry;
+  auto executor = std::make_shared<CountingExecutor>();
+  REQUIRE(registry.register_tool(declaration("first"), executor));
+  REQUIRE(registry.register_tool(declaration("second"), executor));
+  const auto full = snapshot_of(registry);
+
+  auto accepted = request("inference-1", "assistant-1", {});
+  testing::ScriptedBackend backend{{
+      {accepted,
+       testing::StreamScript{{
+           step(backend::ResponseStarted{"response"}),
+           step(backend::ResponseFinished{domain::FinishReason::stop}),
+           testing::EndOfStream{},
+       }}},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            full,
+                            allow_policy()};
+
+  auto reordered = full.declarations();
+  std::ranges::reverse(reordered);
+  auto result =
+      kernel.start(run_start(request("inference-1", "assistant-1", reordered)));
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == runtime::RunKernelErrorCode::invalid_start);
+  REQUIRE(kernel.event_log().events().empty());
+
+  const std::vector<backend::ToolDeclaration> duplicated{
+      full.declarations().front(), full.declarations().front()};
+  result = kernel.start(
+      run_start(request("inference-1", "assistant-1", duplicated)));
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == runtime::RunKernelErrorCode::invalid_start);
+  REQUIRE(kernel.event_log().events().empty());
+
+  const std::vector<backend::ToolDeclaration> unknown{declaration("missing")};
+  result =
+      kernel.start(run_start(request("inference-1", "assistant-1", unknown)));
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == runtime::RunKernelErrorCode::invalid_start);
+  REQUIRE(kernel.event_log().events().empty());
+
+  auto forged = full.declarations();
+  forged.front().description = "Forged declaration";
+  result =
+      kernel.start(run_start(request("inference-1", "assistant-1", forged)));
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == runtime::RunKernelErrorCode::invalid_start);
+  REQUIRE(kernel.event_log().events().empty());
+
+  REQUIRE(kernel.start(run_start(accepted)));
+  drain_to_run_end(kernel, wake);
+  REQUIRE(backend.remaining_exchanges() == 0);
+}
+
+TEST_CASE("provider cannot call a registered tool outside the run subset",
+          "[tools][runtime][failure]") {
+  auto hidden_executor = std::make_shared<CountingExecutor>();
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(declaration(),
+                                 std::make_shared<CountingExecutor>()));
+  REQUIRE(registry.register_tool(declaration("hidden"), hidden_executor));
+  const auto full = snapshot_of(registry);
+  const std::vector<std::string> selected_names{"lookup"};
+  const auto selected = full.subset(selected_names);
+  REQUIRE(selected);
+  auto initial =
+      request("inference-1", "assistant-1", selected->declarations());
+  testing::ScriptedBackend backend{{
+      {initial,
+       testing::StreamScript{{
+           step(backend::ResponseStarted{"response"}),
+           step(backend::ToolCallDelta{
+               make_id<domain::InvocationId>("hidden-call"), "hidden", "{}"}),
+           testing::EndOfStream{},
+       }}},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            full,
+                            allow_policy()};
+
+  REQUIRE(kernel.start(run_start(initial)));
+  drain_to_run_end(kernel, wake);
+  REQUIRE(hidden_executor->validations == 0);
+  REQUIRE(hidden_executor->starts == 0);
+  REQUIRE(
+      std::ranges::any_of(kernel.event_log().events(), [](const auto& event) {
+        return std::holds_alternative<domain::RunFailed>(event.payload);
+      }));
 }
 
 TEST_CASE("allowed tool results continue the same run in registry order",
@@ -449,16 +612,22 @@ TEST_CASE("allowed tool results continue the same run in registry order",
            }}}});
   runtime::ToolRegistry registry;
   REQUIRE(registry.register_tool(tool, executor, limits));
+  REQUIRE(registry.register_tool(declaration("hidden"),
+                                 std::make_shared<CountingExecutor>()));
   const auto snapshot = snapshot_of(registry);
+  const std::vector<std::string> selected_names{"lookup"};
+  const auto selected = snapshot.subset(selected_names);
+  REQUIRE(selected);
 
-  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
+  auto initial =
+      request("inference-1", "assistant-1", selected->declarations());
   const auto tool_message =
       domain::Message{make_id<domain::MessageId>("tool-message-7"),
                       domain::Role::tool,
                       {domain::TextBlock{"done"}},
                       invocation};
   auto continuation = request("inference-2", "assistant-2",
-                              snapshot.declarations(), {tool_message});
+                              selected->declarations(), {tool_message});
   testing::ScriptedBackend backend{{
       {initial, tool_call_script(invocation)},
       {continuation,

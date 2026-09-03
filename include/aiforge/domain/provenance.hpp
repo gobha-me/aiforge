@@ -83,13 +83,27 @@ struct RuntimeComponentVersion {
   auto operator==(const RuntimeComponentVersion&) const -> bool = default;
 };
 
-// Tool declarations carry no version, so declaration identity is the tool name
-// with the effects and capability scopes it declared for the run.
+// The readable authority identity remains name, effects, and scopes. A
+// registration digest additionally binds the exact declaration, limits, and
+// versioned executor contract when durable recovery may be required.
 struct ToolProvenanceEntry {
   std::string tool_name;
   std::vector<Effect> declared_effects;
   std::vector<CapabilityScope> capability_scopes;
+  // Present for newly recorded versioned registrations. Legacy completed runs
+  // may omit it; a pending durable run may not resume without it.
+  std::optional<std::string> registration_digest{};
   auto operator==(const ToolProvenanceEntry&) const -> bool = default;
+};
+
+// Named profile references explain which independently selected and associated
+// upper bounds produced a run's exact kernel-owned tool snapshot. Associations
+// are maxima only; authority and declarations remain separate runtime facts.
+struct ToolProfileProvenance {
+  ToolProfileId selected_profile_id;
+  std::optional<ToolProfileId> model_maximum_profile_id;
+  std::optional<ToolProfileId> persona_maximum_profile_id;
+  auto operator==(const ToolProfileProvenance&) const -> bool = default;
 };
 
 // Effective request options distinguish provider defaults from values selected
@@ -123,6 +137,7 @@ struct RunProvenance {
   // snapshot. A caller submits this empty.
   std::vector<ToolProvenanceEntry> tools;
   std::vector<EffectiveRequestOption> effective_request_options{};
+  std::optional<ToolProfileProvenance> tool_profile{};
   auto operator==(const RunProvenance&) const -> bool = default;
 };
 
@@ -157,6 +172,7 @@ enum class RunProvenanceErrorCode {
   duplicate_tool,
   invalid_request_option,
   resource_exhausted,
+  invalid_tool_profile,
 };
 
 struct RunProvenanceError {

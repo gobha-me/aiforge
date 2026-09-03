@@ -1,6 +1,8 @@
 #include <aiforge/runtime/tool_policy.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
 
+#include <aiforge/detail/utf8_text.hpp>
+
 #include <algorithm>
 #include <iterator>
 #include <ranges>
@@ -14,9 +16,11 @@ namespace aiforge::runtime {
 namespace {
 
 constexpr std::size_t kMaximumToolNameBytes{128};
-constexpr std::size_t kMaximumDescriptionBytes{16U * 1024U};
-constexpr std::size_t kMaximumSchemaBytes{1024U * 1024U};
-constexpr std::size_t kMaximumScopeBytes{16U * 1024U};
+constexpr std::size_t kMaximumDescriptionBytes{std::size_t{16} * 1024U};
+constexpr std::size_t kMaximumSchemaBytes{std::size_t{1024} * 1024U};
+constexpr std::size_t kMaximumScopeBytes{std::size_t{16} * 1024U};
+constexpr std::size_t kMaximumSubsetTools{256};
+constexpr std::size_t kMaximumExecutorContractBytes{128};
 
 [[nodiscard]] auto has_control_character(const std::string_view value) -> bool {
   return std::ranges::any_of(value, [](const unsigned char character) {
@@ -33,6 +37,31 @@ constexpr std::size_t kMaximumScopeBytes{16U * 1024U};
 [[nodiscard]] auto valid_limits(const ToolExecutionLimits& limits) -> bool {
   return limits.output_bytes != 0 && limits.progress_events != 0 &&
          limits.timeout > std::chrono::milliseconds::zero();
+}
+
+[[nodiscard]] auto valid_effect(const domain::Effect effect) noexcept -> bool {
+  switch (effect) {
+    case domain::Effect::read:
+    case domain::Effect::write:
+    case domain::Effect::remove:
+    case domain::Effect::execute:
+    case domain::Effect::network:
+    case domain::Effect::communicate:
+    case domain::Effect::spend:
+    case domain::Effect::change_infrastructure:
+    case domain::Effect::change_privileges: return true;
+  }
+  return false;
+}
+
+[[nodiscard]] auto valid_executor_contract(const ToolExecutorContract& contract)
+    -> bool {
+  const auto valid_field = [](const std::string_view value) {
+    return !value.empty() && value.size() <= kMaximumExecutorContractBytes &&
+           detail::is_safe_utf8_text(value) &&
+           value.find_first_of("\r\n\t") == std::string_view::npos;
+  };
+  return valid_field(contract.identity) && valid_field(contract.version);
 }
 
 [[nodiscard]] auto valid_declaration(
@@ -67,7 +96,7 @@ constexpr std::size_t kMaximumScopeBytes{16U * 1024U};
 
   std::set<domain::Effect> effects;
   for (const auto effect : declaration.effects) {
-    if (!effects.insert(effect).second) {
+    if (!valid_effect(effect) || !effects.insert(effect).second) {
       return invalid("tool effects must be unique");
     }
   }
@@ -107,9 +136,45 @@ auto ToolRegistrySnapshot::find(const std::string_view name) const noexcept
   return found == m_tools.end() ? nullptr : &*found;
 }
 
-auto ToolRegistry::register_tool(backend::ToolDeclaration declaration,
-                                 std::shared_ptr<ToolExecutor> executor,
-                                 ToolExecutionLimits limits)
+auto ToolRegistrySnapshot::subset(const std::span<const std::string> names)
+    const -> std::expected<ToolRegistrySnapshot, ToolRegistryError> {
+  try {
+    if (names.size() > kMaximumSubsetTools) {
+      return invalid("tool subset contains too many names");
+    }
+    std::set<std::string_view> selected;
+    for (const auto& name : names) {
+      if (!selected.insert(name).second) {
+        return std::unexpected(
+            ToolRegistryError{ToolRegistryErrorCode::duplicate_name,
+                              "tool subset contains a duplicate name"});
+      }
+    }
+
+    std::vector<RegisteredTool> tools;
+    std::vector<backend::ToolDeclaration> declarations;
+    tools.reserve(selected.size());
+    declarations.reserve(selected.size());
+    for (const auto& tool : m_tools) {
+      if (!selected.contains(tool.declaration.name)) continue;
+      tools.push_back(tool);
+      declarations.push_back(tool.declaration);
+    }
+    if (tools.size() != selected.size()) {
+      return invalid("tool subset contains an unknown name");
+    }
+    return ToolRegistrySnapshot{std::move(tools), std::move(declarations)};
+  } catch (...) {
+    return std::unexpected(
+        ToolRegistryError{ToolRegistryErrorCode::internal_failure,
+                          "tool subset selection failed internally"});
+  }
+}
+
+auto ToolRegistry::register_tool(
+    backend::ToolDeclaration declaration,
+    std::shared_ptr<ToolExecutor> executor, ToolExecutionLimits limits,
+    std::optional<ToolExecutorContract> executor_contract)
     -> std::expected<void, ToolRegistryError> {
   try {
     if (!executor) {
@@ -120,6 +185,9 @@ auto ToolRegistry::register_tool(backend::ToolDeclaration declaration,
     if (auto checked = valid_declaration(declaration, limits); !checked) {
       return checked;
     }
+    if (executor_contract && !valid_executor_contract(*executor_contract)) {
+      return invalid("tool executor contract identity or version is invalid");
+    }
     if (std::ranges::any_of(m_tools, [&](const auto& tool) {
           return tool.declaration.name == declaration.name;
         })) {
@@ -127,8 +195,9 @@ auto ToolRegistry::register_tool(backend::ToolDeclaration declaration,
           ToolRegistryError{ToolRegistryErrorCode::duplicate_name,
                             "tool name is already registered"});
     }
-    m_tools.push_back(
-        RegisteredTool{std::move(declaration), limits, std::move(executor)});
+    m_tools.push_back(RegisteredTool{std::move(declaration), limits,
+                                     std::move(executor),
+                                     std::move(executor_contract)});
     return {};
   } catch (...) {
     return std::unexpected(

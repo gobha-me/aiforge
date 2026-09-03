@@ -246,6 +246,30 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
   return no_arguments(arguments, SlashCommandAction::manage_request_settings);
 }
 
+[[nodiscard]] auto tools_handler(std::string_view arguments,
+                                 const SlashCommandContext&)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  arguments = trim_arguments(arguments);
+  if (arguments.empty()) {
+    return SlashCommandResult{SlashCommandAction::manage_tool_profile,
+                              std::nullopt};
+  }
+  if (arguments == "off") {
+    return SlashCommandResult{SlashCommandAction::disable_tools, std::nullopt};
+  }
+  constexpr std::string_view profile{"profile"};
+  if (arguments.starts_with(profile) && arguments.size() > profile.size() &&
+      (arguments[profile.size()] == ' ' || arguments[profile.size()] == '\t')) {
+    const auto profile_id = trim_arguments(arguments.substr(profile.size()));
+    if (valid_identifier(profile_id, false)) {
+      return SlashCommandResult{SlashCommandAction::select_tool_profile,
+                                std::string{profile_id}};
+    }
+  }
+  return command_error(SlashCommandErrorCode::invalid_arguments,
+                       "tools accepts profile <name> or off");
+}
+
 [[nodiscard]] auto reasoning_handler(std::string_view arguments,
                                      const SlashCommandContext&)
     -> std::expected<SlashCommandResult, SlashCommandError> {
@@ -303,6 +327,9 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
       {"settings", "settings", "",
        "Inspect or change request settings for future runs.", idle_available,
        settings_handler},
+      {"tools", "tools", "[profile <name> | off]",
+       "Inspect or select the Chat tool profile for future runs.",
+       idle_available, tools_handler},
       {"reasoning", "reasoning", "<show | hide>",
        "Show or hide retained reasoning text.", idle_available,
        reasoning_handler},

@@ -178,6 +178,17 @@ auto snapshot() -> runtime::ToolRegistrySnapshot {
   return std::move(*result);
 }
 
+auto provenance() -> domain::RunProvenance {
+  return {"test-version",
+          "test-backend",
+          std::nullopt,
+          id<domain::ModelId>("model"),
+          std::nullopt,
+          {},
+          {},
+          {}};
+}
+
 } // namespace
 
 TEST_CASE("ask_user registration requires an interactive input protocol",
@@ -202,6 +213,9 @@ TEST_CASE("ask_user registration requires an interactive input protocol",
   const auto* registered = tools->find("ask_user");
   REQUIRE(registered != nullptr);
   REQUIRE(registered->declaration.effects.empty());
+  const runtime::ToolExecutorContract ask_user_contract{
+      "aiforge.runtime.ask_user", "1"};
+  REQUIRE(registered->executor_contract == ask_user_contract);
   REQUIRE(registered->executor->validate(
       {"application/json", std::string{arguments}}));
   REQUIRE_FALSE(registered->executor->validate(
@@ -299,13 +313,16 @@ TEST_CASE("ask_user resolves once and continues inference in the same run",
   REQUIRE_FALSE(kernel.answer_questions(
       id<domain::RunId>("run"), invocation,
       {{id<domain::QuestionId>("format"), {"short"}, std::nullopt}}));
-  REQUIRE(kernel.continue_run(id<domain::RunId>("run"), continuation));
+  const auto continued =
+      kernel.continue_run(id<domain::RunId>("run"), continuation);
+  INFO((continued ? std::string{} : continued.error().message));
+  REQUIRE(continued);
   drain_until_done(kernel, wake);
   REQUIRE(backend.remaining_exchanges() == 0);
 }
 
-TEST_CASE("pending ask_user input rehydrates without rerunning the tool",
-          "[questions][replay]") {
+TEST_CASE("legacy pending ask_user history without provenance is rejected",
+          "[questions][replay][failure]") {
   const auto tools = snapshot();
   const auto invocation = id<domain::InvocationId>("ask-call");
   auto initial = request("inference-1", "assistant-1", tools);
@@ -347,32 +364,234 @@ TEST_CASE("pending ask_user input rehydrates without rerunning the tool",
                     event.payload);
               }) == 1);
   testing::ScriptedBackend replay_backend{{}};
-  auto unavailable = runtime::RunKernel::open_durable(
-      {id<domain::SessionId>("session"), runtime::DurableSessionMode::resume,
-       store.created},
-      store, replay_backend);
-  REQUIRE_FALSE(unavailable);
-  REQUIRE(unavailable.error().code ==
-          runtime::RunKernelErrorCode::interactive_input_unavailable);
-
-  auto resumed = runtime::RunKernel::open_durable(
+  auto rejected = runtime::RunKernel::open_durable(
       {id<domain::SessionId>("session"), runtime::DurableSessionMode::resume,
        store.created},
       store, replay_backend, nullptr, {}, {}, tools);
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code ==
+          runtime::RunKernelErrorCode::replay_rejected);
+}
+
+TEST_CASE("pending ask_user replay retains the run tool subset",
+          "[questions][replay][tools][failure]") {
+  runtime::ToolRegistry registry;
+  REQUIRE(runtime::register_ask_user_tool(registry, true));
+  REQUIRE(registry.register_tool(
+      {"hidden",
+       "Not advertised for this run",
+       {"application/schema+json", R"({"type":"object"})"},
+       {},
+       {}},
+      std::make_shared<testing::ScriptedToolExecutor>(
+          std::vector<testing::ScriptedToolExchange>{})));
+  auto full = registry.snapshot();
+  REQUIRE(full);
+  const std::vector<std::string> selected_names{"ask_user"};
+  auto selected = full->subset(selected_names);
+  REQUIRE(selected);
+
+  const auto invocation = id<domain::InvocationId>("ask-call");
+  auto initial = request("inference-1", "assistant-1", *selected);
+  const auto result_message = domain::Message{
+      id<domain::MessageId>("tool-message-6"),
+      domain::Role::tool,
+      {domain::StructuredDataBlock{
+          "application/json",
+          R"({"answers":[{"other":null,"question_id":"format","selected_option_ids":["short"]}],"status":"answered"})"}},
+      invocation};
+  auto continuation =
+      request("inference-2", "assistant-2", *selected, {result_message});
+  testing::ScriptedBackend initial_backend{{
+      {initial, testing::StreamScript{{
+                    backend::ResponseStarted{"response-1"},
+                    backend::ToolCallDelta{invocation, "ask_user",
+                                           std::string{arguments}},
+                    backend::ResponseFinished{domain::FinishReason::tool_call},
+                    testing::EndOfStream{},
+                }}},
+  }};
+  Wake initial_wake;
+  MemoryStore store;
+  auto original = runtime::RunKernel::open_durable(
+      {id<domain::SessionId>("session"), runtime::DurableSessionMode::create,
+       store.created},
+      store, initial_backend, &initial_wake, {}, {}, *full);
+  REQUIRE(original);
+  auto start = runtime::RunStart{
+      id<domain::RunId>("run"),
+      {id<domain::SurfaceId>("tui"), id<domain::WorkspaceId>("chat"),
+       id<domain::PermissionProfileId>("observe"), std::nullopt},
+      {id<domain::MessageId>("user"),
+       domain::Role::user,
+       {domain::TextBlock{"hello"}},
+       std::nullopt},
+      initial};
+  const auto missing_provenance = (*original)->start(start);
+  REQUIRE_FALSE(missing_provenance);
+  REQUIRE(missing_provenance.error().code ==
+          runtime::RunKernelErrorCode::invalid_start);
+  REQUIRE(store.events.empty());
+  auto unversioned = start;
+  unversioned.request.tools = full->declarations();
+  unversioned.provenance = provenance();
+  const auto unversioned_start = (*original)->start(std::move(unversioned));
+  REQUIRE_FALSE(unversioned_start);
+  REQUIRE(unversioned_start.error().code ==
+          runtime::RunKernelErrorCode::invalid_start);
+  REQUIRE(store.events.empty());
+  start.provenance = provenance();
+  REQUIRE((*original)->start(std::move(start)));
+  drain_until_questions(**original, initial_wake);
+
+  original->reset();
+
+  MemoryStore tampered;
+  tampered.events = store.events;
+  const auto recorded =
+      std::ranges::find_if(tampered.events, [](const auto& event) {
+        return std::holds_alternative<domain::RunProvenanceRecorded>(
+            event.payload);
+      });
+  REQUIRE(recorded != tampered.events.end());
+  std::get<domain::RunProvenanceRecorded>(recorded->payload)
+      .provenance.tools.clear();
+  testing::ScriptedBackend rejected_backend{{}};
+  auto rejected_replay = runtime::RunKernel::open_durable(
+      {id<domain::SessionId>("session"), runtime::DurableSessionMode::resume,
+       tampered.created},
+      tampered, rejected_backend, nullptr, {}, {}, *full);
+  REQUIRE_FALSE(rejected_replay);
+  REQUIRE(rejected_replay.error().code ==
+          runtime::RunKernelErrorCode::replay_rejected);
+
+  MemoryStore missing_digest;
+  missing_digest.events = store.events;
+  const auto missing_recorded =
+      std::ranges::find_if(missing_digest.events, [](const auto& event) {
+        return std::holds_alternative<domain::RunProvenanceRecorded>(
+            event.payload);
+      });
+  REQUIRE(missing_recorded != missing_digest.events.end());
+  std::get<domain::RunProvenanceRecorded>(missing_recorded->payload)
+      .provenance.tools.front()
+      .registration_digest.reset();
+  auto missing_digest_replay = runtime::RunKernel::open_durable(
+      {id<domain::SessionId>("session"), runtime::DurableSessionMode::resume,
+       missing_digest.created},
+      missing_digest, rejected_backend, nullptr, {}, {}, *full);
+  REQUIRE_FALSE(missing_digest_replay);
+  REQUIRE(missing_digest_replay.error().code ==
+          runtime::RunKernelErrorCode::replay_rejected);
+
+  MemoryStore widened_scopes;
+  widened_scopes.events = store.events;
+  const auto policy =
+      std::ranges::find_if(widened_scopes.events, [](const auto& event) {
+        return std::holds_alternative<domain::ToolPolicyDecided>(event.payload);
+      });
+  REQUIRE(policy != widened_scopes.events.end());
+  std::get<domain::ToolPolicyDecided>(policy->payload)
+      .scopes.push_back({domain::Effect::read, "filesystem.root", "/outside"});
+  auto widened_scope_replay = runtime::RunKernel::open_durable(
+      {id<domain::SessionId>("session"), runtime::DurableSessionMode::resume,
+       widened_scopes.created},
+      widened_scopes, rejected_backend, nullptr, {}, {}, *full);
+  REQUIRE_FALSE(widened_scope_replay);
+  REQUIRE(widened_scope_replay.error().code ==
+          runtime::RunKernelErrorCode::replay_rejected);
+
+  MemoryStore duplicate_policy;
+  duplicate_policy.events = store.events;
+  const auto original_policy =
+      std::ranges::find_if(duplicate_policy.events, [](const auto& event) {
+        return std::holds_alternative<domain::ToolPolicyDecided>(event.payload);
+      });
+  REQUIRE(original_policy != duplicate_policy.events.end());
+  auto repeated_policy = *original_policy;
+  repeated_policy.metadata.event_id =
+      id<domain::EventId>("duplicate-policy-decision");
+  repeated_policy.metadata.sequence += 1;
+  for (auto current = std::next(original_policy);
+       current != duplicate_policy.events.end(); ++current) {
+    current->metadata.sequence += 1;
+  }
+  duplicate_policy.events.insert(std::next(original_policy),
+                                 std::move(repeated_policy));
+  auto duplicate_policy_replay = runtime::RunKernel::open_durable(
+      {id<domain::SessionId>("session"), runtime::DurableSessionMode::resume,
+       duplicate_policy.created},
+      duplicate_policy, rejected_backend, nullptr, {}, {}, *full);
+  REQUIRE_FALSE(duplicate_policy_replay);
+  REQUIRE(duplicate_policy_replay.error().code ==
+          runtime::RunKernelErrorCode::replay_rejected);
+
+  const auto* original_registration = full->find("ask_user");
+  REQUIRE(original_registration != nullptr);
+  REQUIRE(original_registration->executor_contract);
+  const auto rejects_drift = [&](backend::ToolDeclaration declaration,
+                                 runtime::ToolExecutionLimits limits,
+                                 runtime::ToolExecutorContract contract) {
+    runtime::ToolRegistry drifted_registry;
+    REQUIRE(drifted_registry.register_tool(std::move(declaration),
+                                           original_registration->executor,
+                                           limits, std::move(contract)));
+    auto drifted = drifted_registry.snapshot();
+    REQUIRE(drifted);
+    testing::ScriptedBackend drifted_backend{{}};
+    auto result = runtime::RunKernel::open_durable(
+        {id<domain::SessionId>("session"), runtime::DurableSessionMode::resume,
+         store.created},
+        store, drifted_backend, nullptr, {}, {}, std::move(*drifted));
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().code ==
+            runtime::RunKernelErrorCode::replay_rejected);
+  };
+
+  auto schema_drift = original_registration->declaration;
+  schema_drift.input_schema.data.push_back(' ');
+  rejects_drift(std::move(schema_drift), original_registration->limits,
+                *original_registration->executor_contract);
+  auto limit_drift = original_registration->limits;
+  ++limit_drift.output_bytes;
+  rejects_drift(original_registration->declaration, limit_drift,
+                *original_registration->executor_contract);
+  auto version_drift = *original_registration->executor_contract;
+  version_drift.version = "2";
+  rejects_drift(original_registration->declaration,
+                original_registration->limits, std::move(version_drift));
+
+  testing::ScriptedBackend replay_backend{{
+      {continuation,
+       testing::StreamScript{{
+           backend::ResponseStarted{"response-2"},
+           backend::ContentDelta{continuation.assistant_message_id,
+                                 domain::TextBlock{"done"}},
+           backend::ResponseFinished{domain::FinishReason::stop},
+           testing::EndOfStream{},
+       }}},
+  }};
+  Wake replay_wake;
+  auto resumed = runtime::RunKernel::open_durable(
+      {id<domain::SessionId>("session"), runtime::DurableSessionMode::resume,
+       store.created},
+      store, replay_backend, &replay_wake, {}, {}, *full);
   REQUIRE(resumed);
   REQUIRE((*resumed)->pending_question_input());
-  REQUIRE((*resumed)->cancel_questions(id<domain::RunId>("run"), invocation,
-                                       "user cancelled"));
-  REQUIRE_FALSE((*resumed)->pending_question_input());
-  REQUIRE_FALSE((*resumed)->cancel_questions(id<domain::RunId>("run"),
-                                             invocation, "duplicate"));
-  const auto results =
-      runtime::tool_result_messages((*resumed)->event_log().events());
-  REQUIRE(results);
-  REQUIRE(results->size() == 1);
-  REQUIRE(
-      std::get<domain::StructuredDataBlock>(results->front().content.front())
-          .data == R"({"status":"cancelled"})");
+  REQUIRE((*resumed)->answer_questions(
+      id<domain::RunId>("run"), invocation,
+      {{id<domain::QuestionId>("format"), {"short"}, std::nullopt}}));
+
+  auto widened = continuation;
+  widened.tools = full->declarations();
+  const auto rejected =
+      (*resumed)->continue_run(id<domain::RunId>("run"), std::move(widened));
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code ==
+          runtime::RunKernelErrorCode::continuation_not_ready);
+  REQUIRE((*resumed)->continue_run(id<domain::RunId>("run"), continuation));
+  drain_until_done(**resumed, replay_wake);
+  REQUIRE(replay_backend.remaining_exchanges() == 0);
 }
 
 TEST_CASE("ask_user blocks a queued tool until the question resolves",
@@ -402,7 +621,8 @@ TEST_CASE("ask_user blocks a queued tool until the question resolves",
        {"application/schema+json", R"({"type":"object"})"},
        {},
        {}},
-      queued_executor, limits));
+      queued_executor, limits,
+      runtime::ToolExecutorContract{"test.after_question", "1"}));
   auto tools = registry.snapshot();
   REQUIRE(tools);
   auto initial = request("inference-1", "assistant-1", *tools);
@@ -419,15 +639,17 @@ TEST_CASE("ask_user blocks a queued tool until the question resolves",
   Wake wake;
   runtime::RunKernel kernel{
       id<domain::SessionId>("session"), backend, &wake, {}, {}, *tools};
-  REQUIRE(kernel.start(
-      {id<domain::RunId>("run"),
-       {id<domain::SurfaceId>("tui"), id<domain::WorkspaceId>("chat"),
-        id<domain::PermissionProfileId>("observe"), std::nullopt},
-       {id<domain::MessageId>("user"),
-        domain::Role::user,
-        {domain::TextBlock{"hello"}},
-        std::nullopt},
-       initial}));
+  auto start = runtime::RunStart{
+      id<domain::RunId>("run"),
+      {id<domain::SurfaceId>("tui"), id<domain::WorkspaceId>("chat"),
+       id<domain::PermissionProfileId>("observe"), std::nullopt},
+      {id<domain::MessageId>("user"),
+       domain::Role::user,
+       {domain::TextBlock{"hello"}},
+       std::nullopt},
+      initial};
+  start.provenance = provenance();
+  REQUIRE(kernel.start(std::move(start)));
   drain_until_questions(kernel, wake);
   REQUIRE(queued_executor->recorded_invocations().empty());
 
@@ -493,15 +715,17 @@ TEST_CASE("question answer persistence failure cannot publish a result",
        store.created},
       store, backend, &wake, {}, {}, tools);
   REQUIRE(durable);
-  REQUIRE((*durable)->start(
-      {id<domain::RunId>("run"),
-       {id<domain::SurfaceId>("tui"), id<domain::WorkspaceId>("chat"),
-        id<domain::PermissionProfileId>("observe"), std::nullopt},
-       {id<domain::MessageId>("user"),
-        domain::Role::user,
-        {domain::TextBlock{"hello"}},
-        std::nullopt},
-       initial}));
+  auto start = runtime::RunStart{
+      id<domain::RunId>("run"),
+      {id<domain::SurfaceId>("tui"), id<domain::WorkspaceId>("chat"),
+       id<domain::PermissionProfileId>("observe"), std::nullopt},
+      {id<domain::MessageId>("user"),
+       domain::Role::user,
+       {domain::TextBlock{"hello"}},
+       std::nullopt},
+      initial};
+  start.provenance = provenance();
+  REQUIRE((*durable)->start(std::move(start)));
   drain_until_questions(**durable, wake);
   const auto stored_before = store.events.size();
   store.fail_next_append = true;

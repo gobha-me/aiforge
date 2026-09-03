@@ -202,39 +202,46 @@ auto session_task_result() -> domain::SessionTaskResult {
 }
 
 auto run_provenance() -> domain::RunProvenance {
-  return {"0.10.0",
-          "venice",
-          std::string{"1.2.3"},
-          make_id<domain::ModelId>("model"),
-          domain::CredentialSourceReference{
-              domain::CredentialSourceKind::environment, "VENICE_API_KEY"},
-          {{"model",
-            std::string{"venice-model"},
-            true,
-            domain::ProvenanceSource::environment,
-            false,
-            {{domain::ProvenanceSource::environment,
-              domain::ProvenanceDisposition::selected, std::nullopt},
-             {domain::ProvenanceSource::file,
-              domain::ProvenanceDisposition::shadowed,
-              domain::ProvenanceDiagnosticCode::duplicate_source_value}}},
-           {"secret",
-            std::nullopt,
-            true,
-            domain::ProvenanceSource::file,
-            true,
-            {{domain::ProvenanceSource::file,
-              domain::ProvenanceDisposition::selected, std::nullopt}}}},
-          {{"aiforge", "0.10.0"}, {"sqlite3", "3.45.1"}},
-          {{"read",
-            {domain::Effect::read},
-            {{domain::Effect::read, "root", "/workspace"}}}},
-          {{"venice.chat.web-search", std::string{"auto"},
-            domain::RequestOptionSource::configuration},
-           {"venice.chat.include-system-prompt", std::nullopt,
-            domain::RequestOptionSource::provider_default},
-           {"venice.media.safe-mode", std::string{"off"},
-            domain::RequestOptionSource::session_override}}};
+  domain::RunProvenance result{
+      "0.10.0",
+      "venice",
+      std::string{"1.2.3"},
+      make_id<domain::ModelId>("model"),
+      domain::CredentialSourceReference{
+          domain::CredentialSourceKind::environment, "VENICE_API_KEY"},
+      {{"model",
+        std::string{"venice-model"},
+        true,
+        domain::ProvenanceSource::environment,
+        false,
+        {{domain::ProvenanceSource::environment,
+          domain::ProvenanceDisposition::selected, std::nullopt},
+         {domain::ProvenanceSource::file,
+          domain::ProvenanceDisposition::shadowed,
+          domain::ProvenanceDiagnosticCode::duplicate_source_value}}},
+       {"secret",
+        std::nullopt,
+        true,
+        domain::ProvenanceSource::file,
+        true,
+        {{domain::ProvenanceSource::file,
+          domain::ProvenanceDisposition::selected, std::nullopt}}}},
+      {{"aiforge", "0.10.0"}, {"sqlite3", "3.45.1"}},
+      {{"read",
+        {domain::Effect::read},
+        {{domain::Effect::read, "root", "/workspace"}},
+        "sha256:" + std::string(64, 'a')}},
+      {{"venice.chat.web-search", std::string{"auto"},
+        domain::RequestOptionSource::configuration},
+       {"venice.chat.include-system-prompt", std::nullopt,
+        domain::RequestOptionSource::provider_default},
+       {"venice.media.safe-mode", std::string{"off"},
+        domain::RequestOptionSource::session_override}}};
+  result.tool_profile = domain::ToolProfileProvenance{
+      make_id<domain::ToolProfileId>("essentials"),
+      make_id<domain::ToolProfileId>("model-safe"),
+      make_id<domain::ToolProfileId>("persona-safe")};
+  return result;
 }
 
 auto pricing_observation() -> domain::PricingObservation {
@@ -1164,6 +1171,124 @@ TEST_CASE("effective request option provenance round-trips strictly and reads "
   const auto wrong_shape = store->replay_events(session);
   REQUIRE_FALSE(wrong_shape);
   REQUIRE(wrong_shape.error().code == storage::SessionStoreErrorCode::corrupt);
+}
+
+TEST_CASE("tool profile provenance round-trips strictly and reads legacy "
+          "records",
+          "[storage][sqlite][codec][provenance][tool-profile]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "session", 100);
+  REQUIRE(store->append_events(
+      session,
+      std::array{event(1, started(), "start"),
+                 event(2, domain::RunProvenanceRecorded{run_provenance()},
+                       "profile")}));
+
+  const auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  const auto* recorded =
+      std::get_if<domain::RunProvenanceRecorded>(&replayed->at(1).payload);
+  REQUIRE(recorded != nullptr);
+  REQUIRE(recorded->provenance.tool_profile == run_provenance().tool_profile);
+  store.reset();
+
+  execute_sql(path, "UPDATE events SET payload_json=json_remove(payload_json,"
+                    "'$.provenance.tool_profile') WHERE event_id='profile'");
+  store = open_store(path);
+  const auto legacy = store->replay_events(session);
+  REQUIRE(legacy);
+  const auto* legacy_recorded =
+      std::get_if<domain::RunProvenanceRecorded>(&legacy->at(1).payload);
+  REQUIRE(legacy_recorded != nullptr);
+  REQUIRE_FALSE(legacy_recorded->provenance.tool_profile);
+  store.reset();
+
+  execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                    "'$.provenance.tool_profile',json_array()) "
+                    "WHERE event_id='profile'");
+  store = open_store(path);
+  auto malformed = store->replay_events(session);
+  REQUIRE_FALSE(malformed);
+  REQUIRE(malformed.error().code == storage::SessionStoreErrorCode::corrupt);
+  store.reset();
+
+  execute_sql(path,
+              "UPDATE events SET payload_json=json_set(payload_json,"
+              "'$.provenance.tool_profile',"
+              "json_object('model_maximum_profile_id',null,"
+              "'persona_maximum_profile_id',null)) WHERE event_id='profile'");
+  store = open_store(path);
+  malformed = store->replay_events(session);
+  REQUIRE_FALSE(malformed);
+  REQUIRE(malformed.error().code == storage::SessionStoreErrorCode::corrupt);
+  store.reset();
+
+  execute_sql(path,
+              "UPDATE events SET payload_json=json_set(payload_json,"
+              "'$.provenance.tool_profile',"
+              "json_object('selected_profile_id','essentials',"
+              "'model_maximum_profile_id',42,"
+              "'persona_maximum_profile_id',null)) WHERE event_id='profile'");
+  store = open_store(path);
+  malformed = store->replay_events(session);
+  REQUIRE_FALSE(malformed);
+  REQUIRE(malformed.error().code == storage::SessionStoreErrorCode::corrupt);
+  store.reset();
+
+  execute_sql(path,
+              "UPDATE events SET payload_json=json_set(payload_json,"
+              "'$.provenance.tool_profile',"
+              "json_object('selected_profile_id','bad profile',"
+              "'model_maximum_profile_id',null,"
+              "'persona_maximum_profile_id',null)) WHERE event_id='profile'");
+  store = open_store(path);
+  malformed = store->replay_events(session);
+  REQUIRE_FALSE(malformed);
+  REQUIRE(malformed.error().code == storage::SessionStoreErrorCode::corrupt);
+}
+
+TEST_CASE("tool registration digests round-trip and legacy absence is readable",
+          "[storage][sqlite][codec][provenance][tools][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "session", 100);
+  REQUIRE(store->append_events(
+      session,
+      std::array{event(1, started(), "start"),
+                 event(2, domain::RunProvenanceRecorded{run_provenance()},
+                       "provenance")}));
+
+  auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  const auto* recorded =
+      std::get_if<domain::RunProvenanceRecorded>(&replayed->at(1).payload);
+  REQUIRE(recorded != nullptr);
+  REQUIRE(recorded->provenance.tools.front().registration_digest ==
+          "sha256:" + std::string(64, 'a'));
+  store.reset();
+
+  execute_sql(path, "UPDATE events SET payload_json=json_remove(payload_json,"
+                    "'$.provenance.tools[0].registration_digest') "
+                    "WHERE event_id='provenance'");
+  store = open_store(path);
+  replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  recorded =
+      std::get_if<domain::RunProvenanceRecorded>(&replayed->at(1).payload);
+  REQUIRE(recorded != nullptr);
+  REQUIRE_FALSE(recorded->provenance.tools.front().registration_digest);
+  store.reset();
+
+  execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                    "'$.provenance.tools[0].registration_digest','sha256:BAD') "
+                    "WHERE event_id='provenance'");
+  store = open_store(path);
+  replayed = store->replay_events(session);
+  REQUIRE_FALSE(replayed);
+  REQUIRE(replayed.error().code == storage::SessionStoreErrorCode::corrupt);
 }
 
 TEST_CASE("bounded SQLite writer contention is retryable",
