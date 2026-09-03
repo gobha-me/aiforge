@@ -212,13 +212,23 @@ struct PersonaSetup {
 }
 
 [[nodiscard]] auto resolve_profile(const runtime::ToolRegistrySnapshot& tools,
-                                   const domain::ToolProfileId& profile_id,
-                                   const backend::ModelContextInfo& model)
+                                   runtime::ToolProfileSelection selection,
+                                   const runtime::ToolPolicy& tool_policy)
     -> std::expected<runtime::ToolProfileResolution, ChatSessionError> {
-  auto resolved = runtime::resolve_tool_profile(
-      tools, profile_id, model_tool_calling_support(model));
+  auto resolved =
+      runtime::resolve_tool_profile(tools, std::move(selection), tool_policy);
   if (!resolved) return std::unexpected(profile_error(resolved.error()));
   return std::move(*resolved);
+}
+
+template <typename Id>
+[[nodiscard]] auto profile_maximum(
+    const std::map<Id, domain::ToolProfileId>& maximums, const Id& id)
+    -> std::optional<domain::ToolProfileId> {
+  const auto found = maximums.find(id);
+  return found == maximums.end()
+             ? std::nullopt
+             : std::optional<domain::ToolProfileId>{found->second};
 }
 
 [[nodiscard]] auto tool_declaration_tokens(
@@ -449,6 +459,11 @@ struct ChatSession::Impl {
   backend::GenerationOptions generation_options;
   runtime::ToolRegistrySnapshot available_tools;
   domain::ToolProfileId tool_profile_id;
+  std::optional<std::vector<std::string>> desired_tool_names;
+  std::map<domain::ModelId, domain::ToolProfileId> model_tool_profile_maximums;
+  std::map<domain::PersonaId, domain::ToolProfileId>
+      persona_tool_profile_maximums;
+  std::shared_ptr<runtime::ToolPolicy> tool_policy;
   std::optional<domain::PermissionProfileId> permission_profile_id;
   ChatSessionLimits limits;
   bool is_durable{};
@@ -469,6 +484,17 @@ struct ChatSession::Impl {
   std::optional<domain::ContextBuildInput> active_context;
   std::vector<domain::RunEvent> pending_surface_events;
   std::unique_ptr<runtime::RunKernel> kernel;
+  std::uint64_t tool_profile_revision{};
+
+  [[nodiscard]] auto tool_selection() const -> runtime::ToolProfileSelection {
+    return {tool_profile_id, desired_tool_names,
+            profile_maximum(model_tool_profile_maximums, model_id),
+            persona_document
+                ? profile_maximum(persona_tool_profile_maximums,
+                                  persona_document->reference.persona_id)
+                : std::nullopt,
+            model_tool_calling_support(model)};
+  }
 };
 
 ChatSession::ChatSession(std::unique_ptr<Impl> impl) : m_impl(std::move(impl)) {
@@ -577,11 +603,27 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
       return error(ChatSessionErrorCode::internal_failure,
                    "default tool profile identity is invalid");
     }
-    if (auto resolved =
-            resolve_profile(available_tools, *initial_tool_profile, *model);
-        !resolved) {
-      return std::unexpected(std::move(resolved.error()));
+    for (const auto& [model_id, maximum] :
+         dependencies.model_tool_profile_maximums) {
+      static_cast<void>(model_id);
+      if (auto resolved =
+              runtime::resolve_tool_profile(available_tools, maximum, true);
+          !resolved) {
+        return std::unexpected(profile_error(resolved.error()));
+      }
     }
+    for (const auto& [persona_id, maximum] :
+         dependencies.persona_tool_profile_maximums) {
+      static_cast<void>(persona_id);
+      if (auto resolved =
+              runtime::resolve_tool_profile(available_tools, maximum, true);
+          !resolved) {
+        return std::unexpected(profile_error(resolved.error()));
+      }
+    }
+    auto tool_policy = dependencies.tool_policy
+                           ? dependencies.tool_policy
+                           : runtime::default_tool_policy();
     const bool durable = request.mode != ChatSessionOpen::Mode::ephemeral &&
                          session_store != nullptr;
     std::unique_ptr<runtime::RunKernel> kernel;
@@ -595,7 +637,7 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
                std::chrono::system_clock::now())},
           *session_store, backend, wake_sink,
           std::move(dependencies.timestamp_source), dependencies.run_limits,
-          std::move(dependencies.tools), std::move(dependencies.tool_policy));
+          std::move(dependencies.tools), tool_policy);
       if (!opened) {
         return error(ChatSessionErrorCode::session_failed,
                      "durable session could not be opened",
@@ -606,7 +648,7 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
       kernel = std::make_unique<runtime::RunKernel>(
           selected, backend, wake_sink,
           std::move(dependencies.timestamp_source), dependencies.run_limits,
-          std::move(dependencies.tools), std::move(dependencies.tool_policy));
+          std::move(dependencies.tools), tool_policy);
     }
 
     const bool allow_persona_attention =
@@ -618,6 +660,25 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
                                          stop_token, allow_persona_attention);
     if (!persona_setup) {
       return std::unexpected(std::move(persona_setup.error()));
+    }
+    const auto initial_persona_id =
+        persona_setup->document
+            ? std::optional<domain::PersonaId>{persona_setup->document
+                                                   ->reference.persona_id}
+            : std::nullopt;
+    auto initial_selection = runtime::ToolProfileSelection{
+        *initial_tool_profile, std::nullopt,
+        profile_maximum(dependencies.model_tool_profile_maximums,
+                        request.model_id),
+        initial_persona_id
+            ? profile_maximum(dependencies.persona_tool_profile_maximums,
+                              *initial_persona_id)
+            : std::nullopt,
+        model_tool_calling_support(*model)};
+    if (auto resolved =
+            resolve_profile(available_tools, initial_selection, *tool_policy);
+        !resolved) {
+      return std::unexpected(std::move(resolved.error()));
     }
     const auto persona_id =
         persona_setup->document
@@ -648,6 +709,10 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              std::move(request.generation_options),
              std::move(available_tools),
              std::move(*initial_tool_profile),
+             std::nullopt,
+             std::move(dependencies.model_tool_profile_maximums),
+             std::move(dependencies.persona_tool_profile_maximums),
+             std::move(tool_policy),
              std::move(dependencies.permission_profile_id),
              limits,
              durable,
@@ -667,7 +732,8 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              std::move(dependencies.runtime_version),
              std::nullopt,
              {},
-             std::move(kernel)});
+             std::move(kernel),
+             0});
     return std::unique_ptr<ChatSession>{new ChatSession{std::move(impl)}};
   } catch (...) {
     return error(ChatSessionErrorCode::internal_failure,
@@ -693,8 +759,9 @@ auto ChatSession::submit(std::string prompt)
       return error(ChatSessionErrorCode::run_failed,
                    "another interactive run is active");
     }
-    auto tool_profile = resolve_profile(m_impl->available_tools,
-                                        m_impl->tool_profile_id, m_impl->model);
+    auto tool_profile =
+        resolve_profile(m_impl->available_tools, m_impl->tool_selection(),
+                        *m_impl->tool_policy);
     if (!tool_profile) {
       return std::unexpected(std::move(tool_profile.error()));
     }
@@ -882,7 +949,11 @@ auto ChatSession::submit(std::string prompt)
     auto provenance = m_impl->provenance;
     if (provenance) {
       provenance->tool_profile = domain::ToolProfileProvenance{
-          m_impl->tool_profile_id, std::nullopt, std::nullopt};
+          tool_profile->selection.selected_profile_id,
+          tool_profile->selection.model_maximum_profile_id,
+          tool_profile->selection.persona_maximum_profile_id,
+          tool_profile->selection.desired_tool_names.value_or(
+              tool_profile->selected_profile.tool_names)};
     }
     backend::BackendRequest backend_request{
         *inference_id,
@@ -905,6 +976,7 @@ auto ChatSession::submit(std::string prompt)
          m_impl->model.pricing_observation});
     if (!started) return std::unexpected(kernel_error(started.error()));
     m_impl->active_context = std::move(continuation_context);
+    ++m_impl->tool_profile_revision;
 
     if (m_impl->persona_document) {
       m_impl->next_persona_selection = domain::PersonaSelection{
@@ -1226,6 +1298,15 @@ auto ChatSession::select_persona(std::string name)
     return error(ChatSessionErrorCode::context_failed,
                  "persona document is invalid");
   }
+  auto candidate_selection = m_impl->tool_selection();
+  candidate_selection.persona_maximum_profile_id = profile_maximum(
+      m_impl->persona_tool_profile_maximums, loaded->reference.persona_id);
+  if (auto profile =
+          resolve_profile(m_impl->available_tools,
+                          std::move(candidate_selection), *m_impl->tool_policy);
+      !profile) {
+    return std::unexpected(std::move(profile.error()));
+  }
   std::optional<domain::PersonaReference> previous;
   if (m_impl->persona_document) previous = m_impl->persona_document->reference;
   auto reference = loaded->reference;
@@ -1235,6 +1316,7 @@ auto ChatSession::select_persona(std::string name)
                                domain::PersonaSelectionSource::interactive,
                                std::move(reference), std::move(previous)};
   m_impl->persona_attention.clear();
+  ++m_impl->tool_profile_revision;
   return {};
 }
 
@@ -1242,6 +1324,14 @@ auto ChatSession::disable_persona() -> std::expected<void, ChatSessionError> {
   if (active()) {
     return error(ChatSessionErrorCode::run_failed,
                  "finish or cancel the active run before disabling a persona");
+  }
+  auto candidate_selection = m_impl->tool_selection();
+  candidate_selection.persona_maximum_profile_id.reset();
+  if (auto profile =
+          resolve_profile(m_impl->available_tools,
+                          std::move(candidate_selection), *m_impl->tool_policy);
+      !profile) {
+    return std::unexpected(std::move(profile.error()));
   }
   std::optional<domain::PersonaReference> previous;
   if (m_impl->persona_document) previous = m_impl->persona_document->reference;
@@ -1251,6 +1341,7 @@ auto ChatSession::disable_persona() -> std::expected<void, ChatSessionError> {
                                domain::PersonaSelectionSource::interactive,
                                std::nullopt, std::move(previous)};
   m_impl->persona_attention.clear();
+  ++m_impl->tool_profile_revision;
   return {};
 }
 
@@ -1355,8 +1446,14 @@ auto ChatSession::select_model(domain::ModelId model_id)
     return error(ChatSessionErrorCode::model_lookup_failed,
                  supported.error().redacted_message);
   }
-  if (auto profile = resolve_profile(m_impl->available_tools,
-                                     m_impl->tool_profile_id, *selected);
+  auto candidate_selection = m_impl->tool_selection();
+  candidate_selection.model_maximum_profile_id =
+      profile_maximum(m_impl->model_tool_profile_maximums, model_id);
+  candidate_selection.model_tool_calling_support =
+      model_tool_calling_support(*selected);
+  if (auto profile =
+          resolve_profile(m_impl->available_tools,
+                          std::move(candidate_selection), *m_impl->tool_policy);
       !profile) {
     return std::unexpected(std::move(profile.error()));
   }
@@ -1365,6 +1462,7 @@ auto ChatSession::select_model(domain::ModelId model_id)
   m_impl->output_tokens = output_tokens;
   m_impl->generation_options.max_output_tokens = output_tokens;
   if (m_impl->provenance) m_impl->provenance->model_id = m_impl->model_id;
+  ++m_impl->tool_profile_revision;
   return {};
 }
 
@@ -1374,17 +1472,222 @@ auto ChatSession::select_tool_profile(domain::ToolProfileId profile_id)
     return error(ChatSessionErrorCode::run_failed,
                  "finish or cancel the active run before selecting tools");
   }
-  auto resolved =
-      resolve_profile(m_impl->available_tools, profile_id, m_impl->model);
+  auto resolved = resolve_profile(
+      m_impl->available_tools,
+      runtime::ToolProfileSelection{
+          profile_id, std::nullopt,
+          profile_maximum(m_impl->model_tool_profile_maximums,
+                          m_impl->model_id),
+          m_impl->persona_document
+              ? profile_maximum(m_impl->persona_tool_profile_maximums,
+                                m_impl->persona_document->reference.persona_id)
+              : std::nullopt,
+          model_tool_calling_support(m_impl->model)},
+      *m_impl->tool_policy);
   if (!resolved) return std::unexpected(std::move(resolved.error()));
   m_impl->tool_profile_id = std::move(profile_id);
+  m_impl->desired_tool_names.reset();
+  ++m_impl->tool_profile_revision;
+  return {};
+}
+
+auto ChatSession::reset_tool_narrowing()
+    -> std::expected<void, ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before selecting tools");
+  }
+  auto selection = m_impl->tool_selection();
+  selection.desired_tool_names.reset();
+  auto resolved =
+      resolve_profile(m_impl->available_tools, selection, *m_impl->tool_policy);
+  if (!resolved) return std::unexpected(std::move(resolved.error()));
+  m_impl->desired_tool_names.reset();
+  ++m_impl->tool_profile_revision;
+  return {};
+}
+
+auto ChatSession::set_tool_enabled(std::string tool_name, const bool enabled)
+    -> std::expected<void, ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before selecting tools");
+  }
+  auto current = tool_profile_state();
+  if (!current) return std::unexpected(std::move(current.error()));
+  if (std::ranges::find(current->selected_profile.tool_names, tool_name) ==
+      current->selected_profile.tool_names.end()) {
+    return error(ChatSessionErrorCode::invalid_input,
+                 "tool is not a member of the selected profile");
+  }
+  const auto desired = current->selection.desired_tool_names.value_or(
+      current->selected_profile.tool_names);
+  std::vector<std::string> candidate;
+  candidate.reserve(current->selected_profile.tool_names.size());
+  for (const auto& name : current->selected_profile.tool_names) {
+    const bool currently_enabled =
+        std::ranges::find(desired, name) != desired.end();
+    if ((name == tool_name && enabled) ||
+        (name != tool_name && currently_enabled)) {
+      candidate.push_back(name);
+    }
+  }
+  auto selection = current->selection;
+  selection.desired_tool_names = candidate;
+  auto resolved =
+      resolve_profile(m_impl->available_tools, selection, *m_impl->tool_policy);
+  if (!resolved) return std::unexpected(std::move(resolved.error()));
+  m_impl->desired_tool_names = std::move(candidate);
+  ++m_impl->tool_profile_revision;
+  return {};
+}
+
+auto ChatSession::set_tool_category_enabled(
+    const runtime::ToolCategory category, const bool enabled)
+    -> std::expected<void, ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before selecting tools");
+  }
+  auto current = tool_profile_state();
+  if (!current) return std::unexpected(std::move(current.error()));
+  auto members = runtime::tool_profile_category_members(
+      m_impl->available_tools, m_impl->tool_profile_id, category);
+  if (!members) return std::unexpected(profile_error(members.error()));
+  auto desired = current->selection.desired_tool_names.value_or(
+      current->selected_profile.tool_names);
+  std::vector<std::string> candidate;
+  candidate.reserve(current->selected_profile.tool_names.size());
+  for (const auto& name : current->selected_profile.tool_names) {
+    const bool category_member =
+        std::ranges::find(*members, name) != members->end();
+    const bool currently_enabled =
+        std::ranges::find(desired, name) != desired.end();
+    if ((category_member && enabled) ||
+        (!category_member && currently_enabled)) {
+      candidate.push_back(name);
+    }
+  }
+  auto selection = current->selection;
+  selection.desired_tool_names = candidate;
+  auto resolved =
+      resolve_profile(m_impl->available_tools, selection, *m_impl->tool_policy);
+  if (!resolved) return std::unexpected(std::move(resolved.error()));
+  m_impl->desired_tool_names = std::move(candidate);
+  ++m_impl->tool_profile_revision;
+  return {};
+}
+
+auto ChatSession::set_model_tool_profile_maximum(
+    std::optional<domain::ToolProfileId> profile_id)
+    -> std::expected<void, ChatSessionError> {
+  auto prepared = prepare_model_tool_profile_maximum(std::move(profile_id));
+  if (!prepared) return std::unexpected(std::move(prepared.error()));
+  return commit_tool_profile_maximum(std::move(*prepared));
+}
+
+auto ChatSession::prepare_model_tool_profile_maximum(
+    std::optional<domain::ToolProfileId> profile_id) const
+    -> std::expected<PreparedToolProfileMaximum, ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before selecting tools");
+  }
+  auto selection = m_impl->tool_selection();
+  selection.model_maximum_profile_id = profile_id;
+  auto resolved =
+      resolve_profile(m_impl->available_tools, selection, *m_impl->tool_policy);
+  if (!resolved) return std::unexpected(std::move(resolved.error()));
+  return PreparedToolProfileMaximum{
+      PreparedToolProfileMaximum::Subject{m_impl->model_id},
+      std::move(profile_id), m_impl->tool_profile_revision};
+}
+
+auto ChatSession::set_persona_tool_profile_maximum(
+    std::optional<domain::ToolProfileId> profile_id)
+    -> std::expected<void, ChatSessionError> {
+  auto prepared = prepare_persona_tool_profile_maximum(std::move(profile_id));
+  if (!prepared) return std::unexpected(std::move(prepared.error()));
+  return commit_tool_profile_maximum(std::move(*prepared));
+}
+
+auto ChatSession::prepare_persona_tool_profile_maximum(
+    std::optional<domain::ToolProfileId> profile_id) const
+    -> std::expected<PreparedToolProfileMaximum, ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before selecting tools");
+  }
+  if (!m_impl->persona_document) {
+    return error(ChatSessionErrorCode::invalid_input,
+                 "select a persona before configuring its tool maximum");
+  }
+  auto selection = m_impl->tool_selection();
+  selection.persona_maximum_profile_id = profile_id;
+  auto resolved =
+      resolve_profile(m_impl->available_tools, selection, *m_impl->tool_policy);
+  if (!resolved) return std::unexpected(std::move(resolved.error()));
+  return PreparedToolProfileMaximum{
+      PreparedToolProfileMaximum::Subject{
+          m_impl->persona_document->reference.persona_id},
+      std::move(profile_id), m_impl->tool_profile_revision};
+}
+
+auto ChatSession::commit_tool_profile_maximum(
+    PreparedToolProfileMaximum prepared)
+    -> std::expected<void, ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before selecting tools");
+  }
+  if (prepared.m_revision != m_impl->tool_profile_revision) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "tool selection changed after the maximum was prepared");
+  }
+  auto selection = m_impl->tool_selection();
+  if (const auto* model = std::get_if<domain::ModelId>(&prepared.m_subject)) {
+    if (*model != m_impl->model_id) {
+      return error(ChatSessionErrorCode::run_failed,
+                   "model changed after the maximum was prepared");
+    }
+    selection.model_maximum_profile_id = prepared.m_profile_id;
+  } else {
+    const auto& persona = std::get<domain::PersonaId>(prepared.m_subject);
+    if (!m_impl->persona_document ||
+        persona != m_impl->persona_document->reference.persona_id) {
+      return error(ChatSessionErrorCode::run_failed,
+                   "persona changed after the maximum was prepared");
+    }
+    selection.persona_maximum_profile_id = prepared.m_profile_id;
+  }
+  auto resolved =
+      resolve_profile(m_impl->available_tools, selection, *m_impl->tool_policy);
+  if (!resolved) return std::unexpected(std::move(resolved.error()));
+
+  if (const auto* model = std::get_if<domain::ModelId>(&prepared.m_subject)) {
+    if (prepared.m_profile_id) {
+      m_impl->model_tool_profile_maximums.insert_or_assign(
+          *model, *prepared.m_profile_id);
+    } else {
+      m_impl->model_tool_profile_maximums.erase(*model);
+    }
+  } else {
+    const auto& persona = std::get<domain::PersonaId>(prepared.m_subject);
+    if (prepared.m_profile_id) {
+      m_impl->persona_tool_profile_maximums.insert_or_assign(
+          persona, *prepared.m_profile_id);
+    } else {
+      m_impl->persona_tool_profile_maximums.erase(persona);
+    }
+  }
+  ++m_impl->tool_profile_revision;
   return {};
 }
 
 auto ChatSession::tool_profile_state() const
     -> std::expected<runtime::ToolProfileResolution, ChatSessionError> {
-  return resolve_profile(m_impl->available_tools, m_impl->tool_profile_id,
-                         m_impl->model);
+  return resolve_profile(m_impl->available_tools, m_impl->tool_selection(),
+                         *m_impl->tool_policy);
 }
 
 auto ChatSession::set_generation_options(

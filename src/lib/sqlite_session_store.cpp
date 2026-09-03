@@ -2412,26 +2412,37 @@ template <typename IdType>
 
 [[nodiscard]] auto tool_profile_provenance_json(
     const domain::ToolProfileProvenance& profile) -> Json {
-  return {{"selected_profile_id", id_text(profile.selected_profile_id)},
-          {"model_maximum_profile_id",
-           optional_id_json(profile.model_maximum_profile_id)},
-          {"persona_maximum_profile_id",
-           optional_id_json(profile.persona_maximum_profile_id)}};
+  Json result{{"selected_profile_id", id_text(profile.selected_profile_id)},
+              {"model_maximum_profile_id",
+               optional_id_json(profile.model_maximum_profile_id)},
+              {"persona_maximum_profile_id",
+               optional_id_json(profile.persona_maximum_profile_id)}};
+  if (profile.desired_tool_names) {
+    result["desired_tool_names"] = *profile.desired_tool_names;
+  }
+  return result;
 }
 
 [[nodiscard]] auto parse_tool_profile_provenance(const Json& value)
     -> domain::ToolProfileProvenance {
-  if (!value.is_object() || value.size() != 3 ||
+  if (!value.is_object() || (value.size() != 3 && value.size() != 4) ||
       !value.contains("selected_profile_id") ||
       !value.contains("model_maximum_profile_id") ||
-      !value.contains("persona_maximum_profile_id")) {
+      !value.contains("persona_maximum_profile_id") ||
+      (value.size() == 4 && !value.contains("desired_tool_names"))) {
     throw CodecFailure{"tool profile provenance is invalid"};
+  }
+  std::optional<std::vector<std::string>> desired_tool_names;
+  if (const auto desired = value.find("desired_tool_names");
+      desired != value.end()) {
+    desired_tool_names = desired->get<std::vector<std::string>>();
   }
   return {parse_id<domain::ToolProfileId>(value.at("selected_profile_id")),
           parse_optional_id<domain::ToolProfileId>(
               value.at("model_maximum_profile_id")),
           parse_optional_id<domain::ToolProfileId>(
-              value.at("persona_maximum_profile_id"))};
+              value.at("persona_maximum_profile_id")),
+          std::move(desired_tool_names)};
 }
 
 [[nodiscard]] auto tool_restriction_name(

@@ -243,6 +243,24 @@ namespace {
         RunProvenanceErrorCode::invalid_tool_profile,
         "a tool profile reference is empty, oversized, or malformed");
   }
+  if (profile->desired_tool_names) {
+    if (profile->desired_tool_names->size() > limits.maximum_tools) {
+      return failure(RunProvenanceErrorCode::invalid_tool_profile,
+                     "the desired tool subset exceeds its entry limit");
+    }
+    std::vector<std::string_view> seen;
+    seen.reserve(profile->desired_tool_names->size());
+    for (const auto& name : *profile->desired_tool_names) {
+      if (!bounded_text(name, limits.maximum_identity_bytes) ||
+          name.find_first_of(" \t\r\n") != std::string::npos ||
+          name.find_first_of("*?[]{}") != std::string::npos ||
+          std::ranges::find(seen, name) != seen.end()) {
+        return failure(RunProvenanceErrorCode::invalid_tool_profile,
+                       "the desired tool subset is malformed or duplicated");
+      }
+      seen.push_back(name);
+    }
+  }
   return {};
 }
 
@@ -524,6 +542,10 @@ namespace {
   if (profile->persona_maximum_profile_id) {
     total += profile->persona_maximum_profile_id->value().size();
   }
+  if (profile->desired_tool_names) {
+    for (const auto& name : *profile->desired_tool_names)
+      total += name.size();
+  }
   return total;
 }
 
@@ -574,9 +596,12 @@ auto validate_tool_policy_provenance(const ToolPolicyProvenance& provenance,
       std::optional<ToolPolicyProvenance>{provenance}, limits);
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Durable provenance validates every bounded section before acceptance.
 auto validate_run_provenance(const RunProvenance& provenance,
                              const RunProvenanceLimits limits)
     -> std::expected<void, RunProvenanceError> {
+  // clang-format on
   if (limits.maximum_configuration_entries == 0 ||
       limits.maximum_decisions_per_entry == 0 ||
       limits.maximum_key_bytes == 0 || limits.maximum_value_bytes == 0 ||
@@ -635,6 +660,15 @@ auto validate_run_provenance(const RunProvenance& provenance,
   if (auto profile = validate_tool_profile(provenance.tool_profile, limits);
       !profile) {
     return profile;
+  }
+  if (provenance.tool_profile && provenance.tool_profile->desired_tool_names &&
+      std::ranges::any_of(provenance.tools, [&](const auto& tool) {
+        return std::ranges::find(*provenance.tool_profile->desired_tool_names,
+                                 tool.tool_name) ==
+               provenance.tool_profile->desired_tool_names->end();
+      })) {
+    return failure(RunProvenanceErrorCode::invalid_tool_profile,
+                   "an effective tool is absent from the exact desired subset");
   }
   if (auto policy = validate_tool_policy_impl(provenance.tool_policy, limits);
       !policy) {

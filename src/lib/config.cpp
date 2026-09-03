@@ -1,6 +1,7 @@
 #include <aiforge/config/config.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <concepts>
@@ -10,6 +11,9 @@
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+
+#include <aiforge/detail/utf8_text.hpp>
+#include <aiforge/runtime/tool_profiles.hpp>
 
 namespace aiforge::config {
 namespace {
@@ -55,6 +59,8 @@ namespace {
       return std::holds_alternative<std::string>(value);
     case ConfigValueKind::text_list:
       return std::holds_alternative<std::vector<std::string>>(value);
+    case ConfigValueKind::text_map:
+      return std::holds_alternative<ConfigTextMap>(value);
   }
   return false;
 }
@@ -98,14 +104,23 @@ namespace {
   return true;
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Closed variants require explicit bounded validation branches.
 [[nodiscard]] auto validate_value(const ConfigKeySpec& spec,
                                   const ConfigValue& value,
                                   const ConfigSource source)
     -> std::expected<void, ConfigDiagnostic> {
+  // clang-format on
   if (!kind_matches(spec.value_kind, value)) {
     return std::unexpected(
         diagnostic(ConfigDiagnosticCode::invalid_value, source, spec.id,
                    "the value type does not match the configuration key"));
+  }
+  if (spec.value_kind == ConfigValueKind::text_map &&
+      source != ConfigSource::file) {
+    return std::unexpected(
+        diagnostic(ConfigDiagnosticCode::invalid_value, source, spec.id,
+                   "configuration maps are supported only by the file source"));
   }
   if (const auto* text = std::get_if<std::string>(&value);
       text != nullptr && text->size() > spec.maximum_text_bytes) {
@@ -137,6 +152,35 @@ namespace {
       return std::unexpected(diagnostic(ConfigDiagnosticCode::invalid_value,
                                         source, spec.id,
                                         "a list item is not valid UTF-8"));
+    }
+  }
+  if (const auto* map = std::get_if<ConfigTextMap>(&value)) {
+    if (map->size() > spec.maximum_list_items) {
+      return std::unexpected(diagnostic(ConfigDiagnosticCode::too_many_values,
+                                        source, spec.id,
+                                        "the map exceeds its entry limit"));
+    }
+    std::unordered_set<std::string_view> keys;
+    for (const auto& entry : *map) {
+      if (entry.key.size() > spec.maximum_text_bytes ||
+          entry.value.size() > spec.maximum_text_bytes) {
+        return std::unexpected(
+            diagnostic(ConfigDiagnosticCode::value_too_large, source, spec.id,
+                       "a map key or value exceeds its byte limit"));
+      }
+      if (!detail::is_safe_utf8_text(entry.key) ||
+          !detail::is_safe_utf8_text(entry.value) ||
+          entry.key.find_first_of("\r\n\t") != std::string::npos ||
+          entry.value.find_first_of("\r\n\t") != std::string::npos) {
+        return std::unexpected(
+            diagnostic(ConfigDiagnosticCode::invalid_value, source, spec.id,
+                       "a map key or value is not safe single-line UTF-8"));
+      }
+      if (!keys.insert(entry.key).second) {
+        return std::unexpected(
+            diagnostic(ConfigDiagnosticCode::invalid_value, source, spec.id,
+                       "configuration map keys must be unique"));
+      }
     }
   }
   return {};
@@ -172,6 +216,12 @@ template <typename Integer>
 }
 
 } // namespace
+
+auto validate_config_value(const ConfigKeySpec& spec, const ConfigValue& value,
+                           const ConfigSource source)
+    -> std::expected<void, ConfigDiagnostic> {
+  return validate_value(spec, value, source);
+}
 
 auto ResolvedConfig::find(const std::string_view key) const
     -> const ResolvedConfigEntry* {
@@ -230,6 +280,9 @@ auto parse_config_value(const ConfigKeySpec& spec,
         diagnostic(ConfigDiagnosticCode::invalid_value, source, spec.id,
                    "the value is invalid for the configuration key"));
   };
+  // Map values have no delimiter-based command-line or environment grammar.
+  // They are accepted only as native objects by the configuration-file adapter.
+  if (spec.value_kind == ConfigValueKind::text_map) return invalid();
   if (spec.value_kind != ConfigValueKind::text_list && values.size() != 1) {
     return invalid();
   }
@@ -274,6 +327,7 @@ auto parse_config_value(const ConfigKeySpec& spec,
       parsed = std::move(list);
       break;
     }
+    case ConfigValueKind::text_map: return invalid();
   }
   if (auto valid = validate_value(spec, parsed, source); !valid) {
     return std::unexpected(std::move(valid.error()));
@@ -281,7 +335,10 @@ auto parse_config_value(const ConfigKeySpec& spec,
   return parsed;
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Closed variants retain explicit deterministic text formats.
 auto format_config_value(const ConfigValue& value) -> std::string {
+  // clang-format on
   return std::visit(
       []<typename Value>(const Value& concrete) -> std::string {
         if constexpr (std::same_as<Value, bool>) {
@@ -293,6 +350,15 @@ auto format_config_value(const ConfigValue& value) -> std::string {
           for (const auto& item : concrete) {
             if (!result.empty()) result.append(",");
             result.append(item);
+          }
+          return result;
+        } else if constexpr (std::same_as<Value, ConfigTextMap>) {
+          std::string result;
+          for (const auto& entry : concrete) {
+            if (!result.empty()) result.append(",");
+            result.append(entry.key);
+            result.append("=");
+            result.append(entry.value);
           }
           return result;
         } else {
@@ -512,8 +578,111 @@ auto builtin_config_registry() -> const ConfigRegistry& {
       {"memory.context.max_tokens", ConfigValueKind::unsigned_integer,
        std::string{"AIFORGE_MEMORY_CONTEXT_MAX_TOKENS"},
        ConfigValue{std::uint64_t{2048}}, false, true, 32, 1},
+      {std::string{model_maximum_tool_profiles_key}, ConfigValueKind::text_map,
+       std::nullopt, std::nullopt, false, true, domain::ModelId::max_size, 256},
+      {std::string{persona_maximum_tool_profiles_key},
+       ConfigValueKind::text_map, std::nullopt, std::nullopt, false, true,
+       domain::PersonaId::max_size, 256},
   }};
   return registry;
+}
+
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Both identity namespaces are validated before associations are returned.
+auto resolve_tool_profile_maximum_mappings(const ResolvedConfig& resolved)
+    -> std::expected<ToolProfileMaximumMappings, ConfigDiagnostic> {
+  // clang-format on
+  constexpr std::array keys{model_maximum_tool_profiles_key,
+                            persona_maximum_tool_profiles_key};
+  const auto affects_mapping_namespace = [&](const std::string_view key) {
+    if (std::ranges::find(keys, key) != keys.end()) return true;
+    constexpr std::array prefixes{std::string_view{"tools.models"},
+                                  std::string_view{"tools.personas"}};
+    return std::ranges::any_of(prefixes, [&](const auto prefix) {
+      return key == prefix ||
+             (key.size() > prefix.size() && key.starts_with(prefix) &&
+              key[prefix.size()] == '.');
+    });
+  };
+  for (const auto& issue : resolved.diagnostics) {
+    if (affects_mapping_namespace(issue.key)) return std::unexpected(issue);
+  }
+
+  const auto parse_profile = [](const std::string& value,
+                                const ConfigSource source,
+                                const std::string_view key)
+      -> std::expected<domain::ToolProfileId, ConfigDiagnostic> {
+    auto profile_id = domain::ToolProfileId::from(value);
+    if (!profile_id ||
+        std::ranges::find(runtime::builtin_tool_profiles(), *profile_id,
+                          &runtime::ToolProfile::profile_id) ==
+            runtime::builtin_tool_profiles().end()) {
+      return std::unexpected(diagnostic(
+          ConfigDiagnosticCode::invalid_value, source, std::string{key},
+          "a maximum tool profile reference is not a built-in profile"));
+    }
+    return std::move(*profile_id);
+  };
+
+  ToolProfileMaximumMappings result;
+  const auto parse =
+      [&]<typename Id>(const std::string_view key,
+                       std::map<Id, domain::ToolProfileId>& destination)
+      -> std::expected<void, ConfigDiagnostic> {
+    const auto* entry = resolved.find(key);
+    if (entry == nullptr) {
+      return std::unexpected(
+          diagnostic(ConfigDiagnosticCode::invalid_registry,
+                     ConfigSource::compiled_default, std::string{key},
+                     "the maximum tool profile configuration key is missing"));
+    }
+    if (!entry->value) return {};
+    const auto source = entry->source.value_or(ConfigSource::file);
+    const auto& registry = builtin_config_registry();
+    const auto spec = std::ranges::find(registry.keys, key, &ConfigKeySpec::id);
+    if (spec == registry.keys.end()) {
+      return std::unexpected(diagnostic(
+          ConfigDiagnosticCode::invalid_registry,
+          ConfigSource::compiled_default, std::string{key},
+          "the maximum tool profile configuration key is unregistered"));
+    }
+    if (auto valid = validate_config_value(*spec, *entry->value, source);
+        !valid) {
+      return std::unexpected(std::move(valid.error()));
+    }
+    const auto* mappings = std::get_if<ConfigTextMap>(&*entry->value);
+    if (mappings == nullptr) {
+      return std::unexpected(diagnostic(
+          ConfigDiagnosticCode::invalid_value, source, std::string{key},
+          "the maximum tool profile mapping has the wrong type"));
+    }
+    for (const auto& mapping : *mappings) {
+      auto id = Id::from(mapping.key);
+      if (!id) {
+        return std::unexpected(diagnostic(
+            ConfigDiagnosticCode::invalid_value, source, std::string{key},
+            "a maximum tool profile mapping identity is invalid"));
+      }
+      auto profile = parse_profile(mapping.value, source, key);
+      if (!profile) return std::unexpected(std::move(profile.error()));
+      if (!destination.emplace(std::move(*id), std::move(*profile)).second) {
+        return std::unexpected(diagnostic(
+            ConfigDiagnosticCode::invalid_value, source, std::string{key},
+            "maximum tool profile mapping identities must be unique"));
+      }
+    }
+    return {};
+  };
+
+  if (auto models = parse(model_maximum_tool_profiles_key, result.models);
+      !models) {
+    return std::unexpected(std::move(models.error()));
+  }
+  if (auto personas = parse(persona_maximum_tool_profiles_key, result.personas);
+      !personas) {
+    return std::unexpected(std::move(personas.error()));
+  }
+  return result;
 }
 
 } // namespace aiforge::config

@@ -3,12 +3,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <variant>
 #include <vector>
+
+#include <aiforge/domain/ids.hpp>
 
 namespace aiforge::config {
 
@@ -18,10 +21,20 @@ enum class ConfigValueKind {
   unsigned_integer,
   text,
   text_list,
+  text_map,
 };
 
+struct ConfigTextMapEntry {
+  std::string key;
+  std::string value;
+
+  auto operator==(const ConfigTextMapEntry&) const -> bool = default;
+};
+
+using ConfigTextMap = std::vector<ConfigTextMapEntry>;
+
 using ConfigValue = std::variant<bool, std::int64_t, std::uint64_t, std::string,
-                                 std::vector<std::string>>;
+                                 std::vector<std::string>, ConfigTextMap>;
 
 enum class ConfigSource {
   command_line,
@@ -115,6 +128,11 @@ struct ResolvedConfig {
 [[nodiscard]] auto validate_registry(const ConfigRegistry& registry)
     -> std::expected<void, ConfigDiagnostic>;
 
+[[nodiscard]] auto validate_config_value(const ConfigKeySpec& spec,
+                                         const ConfigValue& value,
+                                         ConfigSource source)
+    -> std::expected<void, ConfigDiagnostic>;
+
 [[nodiscard]] auto parse_config_value(const ConfigKeySpec& spec,
                                       std::span<const std::string_view> values,
                                       ConfigSource source)
@@ -131,5 +149,21 @@ struct ResolvedConfig {
     -> std::expected<ConfigLayer, ConfigDiagnostic>;
 
 [[nodiscard]] auto builtin_config_registry() -> const ConfigRegistry&;
+
+inline constexpr std::string_view model_maximum_tool_profiles_key{
+    "tools.models.maximum_profiles"};
+inline constexpr std::string_view persona_maximum_tool_profiles_key{
+    "tools.personas.maximum_profiles"};
+
+struct ToolProfileMaximumMappings {
+  std::map<domain::ModelId, domain::ToolProfileId> models;
+  std::map<domain::PersonaId, domain::ToolProfileId> personas;
+
+  auto operator==(const ToolProfileMaximumMappings&) const -> bool = default;
+};
+
+[[nodiscard]] auto resolve_tool_profile_maximum_mappings(
+    const ResolvedConfig& resolved)
+    -> std::expected<ToolProfileMaximumMappings, ConfigDiagnostic>;
 
 } // namespace aiforge::config

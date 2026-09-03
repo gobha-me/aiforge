@@ -66,7 +66,8 @@ auto provenance() -> RunProvenance {
   result.tool_profile =
       ToolProfileProvenance{make_id<ToolProfileId>("essentials"),
                             make_id<ToolProfileId>("model-safe"),
-                            make_id<ToolProfileId>("persona-safe")};
+                            make_id<ToolProfileId>("persona-safe"),
+                            std::vector<std::string>{"ask_user"}};
   return result;
 }
 
@@ -467,6 +468,25 @@ TEST_CASE("run provenance bounds named tool profile references",
   malformed_persona.tool_profile->persona_maximum_profile_id =
       make_id<ToolProfileId>("persona\\profile");
   REQUIRE(validate_run_provenance(malformed_persona).error().code ==
+          RunProvenanceErrorCode::invalid_tool_profile);
+
+  auto duplicate_desired = provenance();
+  duplicate_desired.tool_profile->desired_tool_names = {"ask_user", "ask_user"};
+  REQUIRE(validate_run_provenance(duplicate_desired).error().code ==
+          RunProvenanceErrorCode::invalid_tool_profile);
+
+  auto malformed_desired = provenance();
+  malformed_desired.tool_profile->desired_tool_names = {"bad tool"};
+  REQUIRE(validate_run_provenance(malformed_desired).error().code ==
+          RunProvenanceErrorCode::invalid_tool_profile);
+  malformed_desired.tool_profile->desired_tool_names = {"read*"};
+  REQUIRE(validate_run_provenance(malformed_desired).error().code ==
+          RunProvenanceErrorCode::invalid_tool_profile);
+
+  auto contradictory = provenance();
+  contradictory.tools = {{"ask_user", {}, {}, std::nullopt}};
+  contradictory.tool_profile->desired_tool_names = std::vector<std::string>{};
+  REQUIRE(validate_run_provenance(contradictory).error().code ==
           RunProvenanceErrorCode::invalid_tool_profile);
 
   auto bounded = provenance();

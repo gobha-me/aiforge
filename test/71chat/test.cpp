@@ -588,6 +588,201 @@ TEST_CASE("interactive tool profiles fail closed and change only while idle",
       runtime::ToolProfileAvailabilityReason::model_tool_calling_unsupported);
 }
 
+TEST_CASE(
+    "interactive tool narrowing composes exact session and identity ceilings",
+    "[chat][tools][profiles][persona][provenance][failure]") {
+  Backend backend;
+  backend.capabilities.emplace("tools", true);
+  backend.capabilities_by_model["blocked"]["tools"] = true;
+
+  runtime::ToolRegistry registry;
+  const auto add_tool = [&](std::string name,
+                            const runtime::ToolCategory category) {
+    const backend::ToolDeclaration declaration{
+        std::move(name),
+        "Test tool",
+        {"application/schema+json", R"({"type":"object"})"},
+        {},
+        {}};
+    REQUIRE(registry.register_tool(
+        declaration,
+        std::make_shared<testing::ScriptedToolExecutor>(
+            std::vector<testing::ScriptedToolExchange>{}),
+        {}, std::nullopt, category));
+  };
+  add_tool("ask_user", runtime::ToolCategory::interaction);
+  add_tool("propose_memory", runtime::ToolCategory::memory);
+  add_tool("read_repository_file", runtime::ToolCategory::repository);
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+
+  const auto persona = persona_document();
+  testing::ScriptedPersonaSource personas{
+      {}, {{"reviewer", persona}, {"reviewer", persona}}};
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.tools = *tools;
+  dependencies.persona_source = &personas;
+  dependencies.model_tool_profile_maximums.emplace(
+      make_id<domain::ModelId>("model"),
+      make_id<domain::ToolProfileId>("repository-read"));
+  dependencies.model_tool_profile_maximums.emplace(
+      make_id<domain::ModelId>("blocked"),
+      make_id<domain::ToolProfileId>("off"));
+  dependencies.persona_tool_profile_maximums.emplace(
+      persona.reference.persona_id,
+      make_id<domain::ToolProfileId>("essentials"));
+  domain::RunProvenance provenance{"test-version",
+                                   "test-backend",
+                                   std::nullopt,
+                                   make_id<domain::ModelId>("model"),
+                                   std::nullopt,
+                                   {},
+                                   {},
+                                   {}};
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt, provenance},
+      backend, backend, nullptr, nullptr, {}, {}, std::move(dependencies));
+  REQUIRE(session);
+
+  auto prepared_model = (*session)->prepare_model_tool_profile_maximum(
+      make_id<domain::ToolProfileId>("off"));
+  REQUIRE(prepared_model);
+  REQUIRE((*session)->select_model(make_id<domain::ModelId>("blocked")));
+  const auto stale_model =
+      (*session)->commit_tool_profile_maximum(std::move(*prepared_model));
+  REQUIRE_FALSE(stale_model);
+  REQUIRE(stale_model.error().code ==
+          surfaces::ChatSessionErrorCode::run_failed);
+  REQUIRE((*session)->select_model(make_id<domain::ModelId>("model")));
+
+  REQUIRE((*session)->select_persona("reviewer"));
+  auto prepared_persona = (*session)->prepare_persona_tool_profile_maximum(
+      make_id<domain::ToolProfileId>("off"));
+  REQUIRE(prepared_persona);
+  REQUIRE((*session)->disable_persona());
+  const auto stale_persona =
+      (*session)->commit_tool_profile_maximum(std::move(*prepared_persona));
+  REQUIRE_FALSE(stale_persona);
+  REQUIRE(stale_persona.error().code ==
+          surfaces::ChatSessionErrorCode::run_failed);
+
+  REQUIRE((*session)->select_tool_profile(
+      make_id<domain::ToolProfileId>("repository-read")));
+  REQUIRE((*session)->tool_profile_state()->effective_tools.size() == 3);
+  REQUIRE((*session)->set_tool_category_enabled(
+      runtime::ToolCategory::repository, false));
+  REQUIRE((*session)->tool_profile_state()->effective_tools.size() == 2);
+  REQUIRE((*session)->set_tool_enabled("read_repository_file", true));
+  REQUIRE((*session)->tool_profile_state()->effective_tools.size() == 3);
+
+  REQUIRE((*session)->select_persona("reviewer"));
+  auto persona_limited = (*session)->tool_profile_state();
+  REQUIRE(persona_limited);
+  REQUIRE(persona_limited->selection.desired_tool_names ==
+          std::optional<std::vector<std::string>>{
+              {"ask_user", "propose_memory", "read_repository_file"}});
+  REQUIRE(persona_limited->effective_tools.size() == 2);
+  REQUIRE(persona_limited->tool_availability.back().reason ==
+          runtime::ToolProfileAvailabilityReason::persona_profile_limit);
+
+  REQUIRE((*session)->select_model(make_id<domain::ModelId>("blocked")));
+  REQUIRE((*session)->tool_profile_state()->effective_tools.empty());
+  REQUIRE((*session)->select_model(make_id<domain::ModelId>("model")));
+  REQUIRE((*session)->disable_persona());
+  REQUIRE((*session)->tool_profile_state()->effective_tools.size() == 3);
+  const auto set_off = (*session)->set_model_tool_profile_maximum(
+      make_id<domain::ToolProfileId>("off"));
+  INFO((set_off ? std::string{} : set_off.error().message));
+  REQUIRE(set_off);
+  REQUIRE((*session)->tool_profile_state()->effective_tools.empty());
+  REQUIRE((*session)->set_model_tool_profile_maximum(std::nullopt));
+  REQUIRE((*session)->set_tool_enabled("propose_memory", false));
+
+  auto prepared_while_idle = (*session)->prepare_model_tool_profile_maximum(
+      make_id<domain::ToolProfileId>("off"));
+  REQUIRE(prepared_while_idle);
+
+  const auto submitted = (*session)->submit("bounded tools");
+  REQUIRE(submitted);
+  REQUIRE_FALSE(
+      (*session)->commit_tool_profile_maximum(std::move(*prepared_while_idle)));
+  REQUIRE_FALSE((*session)->reset_tool_narrowing());
+  REQUIRE_FALSE((*session)->set_tool_enabled("ask_user", false));
+  REQUIRE_FALSE((*session)->set_tool_category_enabled(
+      runtime::ToolCategory::interaction, false));
+  REQUIRE_FALSE((*session)->set_model_tool_profile_maximum(
+      make_id<domain::ToolProfileId>("off")));
+  REQUIRE_FALSE((*session)->set_persona_tool_profile_maximum(std::nullopt));
+
+  const auto recorded =
+      std::ranges::find_if(submitted->committed_events, [](const auto& event) {
+        return std::holds_alternative<domain::RunProvenanceRecorded>(
+            event.payload);
+      });
+  REQUIRE(recorded != submitted->committed_events.end());
+  const auto& exact =
+      std::get<domain::RunProvenanceRecorded>(recorded->payload).provenance;
+  REQUIRE(exact.tool_profile);
+  REQUIRE(exact.tool_profile->selected_profile_id.value() == "repository-read");
+  REQUIRE(exact.tool_profile->desired_tool_names ==
+          std::optional<std::vector<std::string>>{
+              {"ask_user", "read_repository_file"}});
+  REQUIRE_FALSE(exact.tool_profile->model_maximum_profile_id);
+  REQUIRE_FALSE(exact.tool_profile->persona_maximum_profile_id);
+  REQUIRE(exact.tools.size() == 2);
+  drain_to_end(**session);
+  REQUIRE(backend.requests.size() == 1);
+  REQUIRE(backend.requests.back().tools.size() == 2);
+
+  REQUIRE((*session)->select_tool_profile(
+      make_id<domain::ToolProfileId>("essentials")));
+  REQUIRE_FALSE((*session)->set_tool_enabled("read_repository_file", true));
+  REQUIRE((*session)->set_tool_enabled("ask_user", false));
+  REQUIRE((*session)->set_tool_enabled("propose_memory", false));
+  const auto explicitly_empty = (*session)->tool_profile_state();
+  REQUIRE(explicitly_empty);
+  REQUIRE(explicitly_empty->selection.desired_tool_names);
+  REQUIRE(explicitly_empty->selection.desired_tool_names->empty());
+  REQUIRE((*session)->reset_tool_narrowing());
+  REQUIRE_FALSE((*session)->tool_profile_state()->selection.desired_tool_names);
+
+  const auto reset_submission = (*session)->submit("reset tools");
+  REQUIRE(reset_submission);
+  const auto reset_provenance = std::ranges::find_if(
+      reset_submission->committed_events, [](const auto& event) {
+        return std::holds_alternative<domain::RunProvenanceRecorded>(
+            event.payload);
+      });
+  REQUIRE(reset_provenance != reset_submission->committed_events.end());
+  const auto& reset_profile =
+      std::get<domain::RunProvenanceRecorded>(reset_provenance->payload)
+          .provenance.tool_profile;
+  REQUIRE(reset_profile);
+  REQUIRE(
+      reset_profile->desired_tool_names ==
+      std::optional<std::vector<std::string>>{{"ask_user", "propose_memory"}});
+  drain_to_end(**session);
+
+  REQUIRE(
+      (*session)->select_tool_profile(make_id<domain::ToolProfileId>("off")));
+  const auto off_submission = (*session)->submit("off tools");
+  REQUIRE(off_submission);
+  const auto off_provenance = std::ranges::find_if(
+      off_submission->committed_events, [](const auto& event) {
+        return std::holds_alternative<domain::RunProvenanceRecorded>(
+            event.payload);
+      });
+  REQUIRE(off_provenance != off_submission->committed_events.end());
+  const auto& off_profile =
+      std::get<domain::RunProvenanceRecorded>(off_provenance->payload)
+          .provenance.tool_profile;
+  REQUIRE(off_profile);
+  REQUIRE(off_profile->desired_tool_names);
+  REQUIRE(off_profile->desired_tool_names->empty());
+  drain_to_end(**session);
+}
+
 TEST_CASE("interactive generation requirements fail closed before transport",
           "[chat][models][capabilities][failure]") {
   backend::GenerationOptions options;

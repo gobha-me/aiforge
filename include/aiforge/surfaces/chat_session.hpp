@@ -12,10 +12,12 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace aiforge::surfaces {
@@ -86,6 +88,9 @@ struct ChatSessionDependencies {
   runtime::RunKernelLimits run_limits{};
   runtime::ToolRegistrySnapshot tools{};
   std::shared_ptr<runtime::ToolPolicy> tool_policy;
+  std::map<domain::ModelId, domain::ToolProfileId> model_tool_profile_maximums;
+  std::map<domain::PersonaId, domain::ToolProfileId>
+      persona_tool_profile_maximums;
   // When present, every interactive run uses this stable launch-policy
   // identity. The default preserves the legacy per-run observe identity.
   std::optional<domain::PermissionProfileId> permission_profile_id;
@@ -124,6 +129,30 @@ class PreparedChatGenerationOptions final {
   std::uint64_t m_output_tokens{};
   backend::GenerationOptions m_options;
   std::optional<domain::RunProvenance> m_provenance;
+};
+
+class PreparedToolProfileMaximum final {
+ public:
+  PreparedToolProfileMaximum(const PreparedToolProfileMaximum&) = delete;
+  auto operator=(const PreparedToolProfileMaximum&)
+      -> PreparedToolProfileMaximum& = delete;
+  PreparedToolProfileMaximum(PreparedToolProfileMaximum&&) noexcept = default;
+  auto operator=(PreparedToolProfileMaximum&&) noexcept
+      -> PreparedToolProfileMaximum& = default;
+
+ private:
+  friend class ChatSession;
+  using Subject = std::variant<domain::ModelId, domain::PersonaId>;
+
+  PreparedToolProfileMaximum(Subject subject,
+                             std::optional<domain::ToolProfileId> profile_id,
+                             const std::uint64_t revision)
+      : m_subject(std::move(subject)), m_profile_id(std::move(profile_id)),
+        m_revision(revision) {}
+
+  Subject m_subject;
+  std::optional<domain::ToolProfileId> m_profile_id;
+  std::uint64_t m_revision{};
 };
 
 class ChatSession final {
@@ -183,6 +212,28 @@ class ChatSession final {
   [[nodiscard]] auto select_model(domain::ModelId model_id)
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto select_tool_profile(domain::ToolProfileId profile_id)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto reset_tool_narrowing()
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto set_tool_enabled(std::string tool_name, bool enabled)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto set_tool_category_enabled(runtime::ToolCategory category,
+                                               bool enabled)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto set_model_tool_profile_maximum(
+      std::optional<domain::ToolProfileId> profile_id)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto prepare_model_tool_profile_maximum(
+      std::optional<domain::ToolProfileId> profile_id) const
+      -> std::expected<PreparedToolProfileMaximum, ChatSessionError>;
+  [[nodiscard]] auto set_persona_tool_profile_maximum(
+      std::optional<domain::ToolProfileId> profile_id)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto prepare_persona_tool_profile_maximum(
+      std::optional<domain::ToolProfileId> profile_id) const
+      -> std::expected<PreparedToolProfileMaximum, ChatSessionError>;
+  [[nodiscard]] auto commit_tool_profile_maximum(
+      PreparedToolProfileMaximum prepared)
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto tool_profile_state() const
       -> std::expected<runtime::ToolProfileResolution, ChatSessionError>;

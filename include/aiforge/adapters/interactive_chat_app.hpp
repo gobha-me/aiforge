@@ -19,6 +19,7 @@
 #include <string_view>
 #include <termforge/core/app.hpp>
 #include <termforge/core/byte_sink.hpp>
+#include <variant>
 
 namespace aiforge::adapters {
 
@@ -38,6 +39,23 @@ using PreviewVeniceRequestSetting = std::function<
 using PersistVeniceRequestSetting = std::function<
     auto(const VeniceRequestSettingSave&)->std::expected<void, std::string>>;
 
+using ToolProfileMaximumSubject =
+    std::variant<domain::ModelId, domain::PersonaId>;
+
+struct ToolProfileMaximumSave {
+  ToolProfileMaximumSubject subject;
+  std::optional<domain::ToolProfileId> maximum_profile_id;
+};
+
+struct ToolProfileMaximumPersistError {
+  std::string message;
+  bool effect_may_have_applied{};
+};
+
+using PersistToolProfileMaximum =
+    std::function<auto(const ToolProfileMaximumSave&)
+                      ->std::expected<void, ToolProfileMaximumPersistError>>;
+
 struct InteractiveChatAppOptions {
   surfaces::ChatSessionDependencies session_dependencies{};
   termforge::ByteSink* rendered_output{};
@@ -52,6 +70,7 @@ struct InteractiveChatAppOptions {
   VeniceConfiguredRequestSettings configured_request_settings;
   PreviewVeniceRequestSetting preview_request_setting;
   PersistVeniceRequestSetting persist_request_setting;
+  PersistToolProfileMaximum persist_tool_profile_maximum;
 };
 
 struct InteractiveModelPickerAppOptions {

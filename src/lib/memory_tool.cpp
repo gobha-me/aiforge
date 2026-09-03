@@ -265,7 +265,8 @@ auto register_memory_tool(ToolRegistry& registry,
       memory_tool_declaration(configuration),
       std::make_shared<MemoryToolExecutor>(configuration),
       ToolExecutionLimits{std::size_t{64} * 1024U, 1, std::chrono::seconds{5}},
-      ToolExecutorContract{"aiforge.runtime.propose_memory", "1"});
+      ToolExecutorContract{"aiforge.runtime.propose_memory", "1"},
+      ToolCategory::memory);
 }
 
 } // namespace aiforge::runtime

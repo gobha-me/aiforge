@@ -69,7 +69,8 @@ auto configuration_provenance(const ResolvedConfig& resolved)
     domain::ConfigurationProvenanceEntry mapped{};
     mapped.key = entry.key;
     mapped.value_present = entry.value.has_value();
-    if (entry.value && !entry.sensitive) {
+    if (entry.value && !entry.sensitive &&
+        !std::holds_alternative<ConfigTextMap>(*entry.value)) {
       mapped.value = format_config_value(*entry.value);
     }
     if (entry.source) mapped.source = provenance_source(*entry.source);

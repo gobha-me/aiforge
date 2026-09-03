@@ -469,7 +469,8 @@ auto register_repository_read_tool(
         std::make_shared<RepositoryReadExecutor>(snapshots, sources,
                                                  std::move(configuration)),
         ToolExecutionLimits{output_limit, 1, timeout},
-        ToolExecutorContract{"aiforge.runtime.read_repository_file", "2"});
+        ToolExecutorContract{"aiforge.runtime.read_repository_file", "2"},
+        ToolCategory::repository);
   } catch (...) {
     return std::unexpected(
         ToolRegistryError{ToolRegistryErrorCode::internal_failure,
