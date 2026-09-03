@@ -173,6 +173,8 @@ TEST_CASE("repository-read rejects malformed paths before observing") {
       arguments(R"({"relative_path":"../secret"})"),
       arguments(R"({"relative_path":"src/../secret"})"),
       arguments(R"({"relative_path":"src//main.cpp"})"),
+      arguments(R"({"relative_path":"src/main.cpp/"})"),
+      arguments(R"({"relative_path":"src\\main.cpp"})"),
       arguments(R"({"relative_path":".git/config"})"),
       arguments(R"({"relative_path":"src/.git/config"})"),
       arguments(R"({"relative_path":"src\nmain.cpp"})"),
@@ -180,6 +182,7 @@ TEST_CASE("repository-read rejects malformed paths before observing") {
       arguments(std::string{"{\"relative_path\":\"\xC3\x28\"}"}),
   };
   for (const auto& value : invalid) {
+    CAPTURE(value.media_type, value.data);
     const auto result = tool.executor->validate(value);
     REQUIRE_FALSE(result);
     CHECK(result.error().code ==

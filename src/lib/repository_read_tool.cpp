@@ -137,6 +137,11 @@ class DuplicateJsonKey final : public std::exception {};
       })) {
     return false;
   }
+  if (value.front() == '/' || value.back() == '/' ||
+      value.find("//") != std::string::npos ||
+      value.find('\\') != std::string::npos) {
+    return false;
+  }
   const std::filesystem::path path{value};
   if (path.is_absolute() || path.has_root_name() || path.has_root_directory() ||
       path.generic_string() != value || path.lexically_normal() != path) {
