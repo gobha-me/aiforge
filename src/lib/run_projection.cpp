@@ -45,8 +45,11 @@ auto RunProjection::require_running() const
   return {};
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Legacy typed-event dispatcher preserves one ordered projection state machine.
 auto RunProjection::apply(const RunEvent& event)
     -> std::expected<void, ProjectionError> {
+  // clang-format on
   if (event.metadata.sequence == 0 || event.metadata.schema_version == 0) {
     return std::unexpected(
         ProjectionError{ProjectionErrorCode::invalid_envelope,

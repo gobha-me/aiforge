@@ -22,15 +22,15 @@ namespace {
 
 using Json = nlohmann::json;
 
-constexpr std::size_t kMaximumArgumentBytes{64U * 1024U};
-constexpr std::size_t kMaximumResultBytes{4U * 1024U * 1024U};
-constexpr std::uint64_t kMaximumSourceBytes{1024U * 1024U};
+constexpr std::size_t kMaximumArgumentBytes{std::size_t{64U} * 1024U};
+constexpr std::size_t kMaximumResultBytes{std::size_t{4U} * 1024U * 1024U};
+constexpr std::uint64_t kMaximumSourceBytes{std::uint64_t{1024U} * 1024U};
 constexpr repository::RepositorySnapshotLimits kSnapshotMaximums{
     16384,
     4096,
     kMaximumSourceBytes,
-    64U * 1024U * 1024U,
-    4U * 1024U * 1024U,
+    std::uint64_t{64U} * 1024U * 1024U,
+    std::size_t{4U} * 1024U * 1024U,
     std::chrono::seconds{5},
     std::chrono::seconds{15}};
 
@@ -326,7 +326,8 @@ class RepositoryReadExecutor final : public ToolExecutor {
       : m_snapshots(snapshots), m_sources(sources),
         m_configuration(std::move(configuration)) {}
 
-  auto validate(const domain::StructuredDataBlock& arguments) const
+  [[nodiscard]] auto validate(
+      const domain::StructuredDataBlock& arguments) const
       -> std::expected<ValidatedToolArguments, ToolExecutionError> override {
     auto path = parse_relative_path(arguments, m_configuration);
     if (!path) return std::unexpected(std::move(path.error()));

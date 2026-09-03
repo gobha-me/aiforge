@@ -2735,6 +2735,9 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                                     proposed->second.declared_effects,
                                     proposed->second.requested_scopes});
             } catch (...) {
+              current_resolution = std::unexpected(ToolPolicyError{
+                  ToolPolicyErrorCode::internal_failure,
+                  "tool policy replay validation failed internally", false});
             }
             if (!current_resolution ||
                 current_resolution->decision != policy->second ||
@@ -2989,8 +2992,9 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
           RunKernelErrorCode::invalid_start,
           "run start contains invalid identity or tool declarations"));
     }
-    if ((policy_provenance && policy_provenance->permission_profile_id !=
-                                  start.attributes.permission_profile_id) ||
+    if ((policy_provenance != nullptr &&
+         policy_provenance->permission_profile_id !=
+             start.attributes.permission_profile_id) ||
         (start.provenance && start.provenance->tool_policy)) {
       return std::unexpected(kernel_error(
           RunKernelErrorCode::invalid_start,
@@ -3079,7 +3083,7 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
                          "run provenance tool identity is kernel-owned"));
       }
       start.provenance->tools = std::move(effective_tool_provenance);
-      if (policy_provenance) {
+      if (policy_provenance != nullptr) {
         start.provenance->tool_policy = *policy_provenance;
       }
       // Validated before anything is recorded so an ephemeral run cannot carry

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <span>
 #include <string_view>
 #include <utility>
 
@@ -70,6 +71,73 @@ constexpr std::size_t kAllowOnceChoice = 1;
   return true;
 }
 
+[[nodiscard]] auto validate_effects(
+    const std::span<const domain::Effect> effects,
+    const std::size_t maximum_effects)
+    -> std::expected<void, ToolApprovalDialogError> {
+  if (effects.empty() || effects.size() > maximum_effects) {
+    return failure(ToolApprovalDialogErrorCode::invalid_request,
+                   "tool approval effects are empty or too numerous");
+  }
+  for (std::size_t index{}; index < effects.size(); ++index) {
+    const auto previous = effects.first(index);
+    if (!valid_effect(effects[index]) ||
+        std::ranges::find(previous, effects[index]) != previous.end()) {
+      return failure(ToolApprovalDialogErrorCode::invalid_request,
+                     "tool approval effects are invalid or duplicated");
+    }
+  }
+  return {};
+}
+
+[[nodiscard]] auto validate_scope_fields(
+    const domain::CapabilityScope& scope,
+    const std::span<const domain::Effect> effects,
+    const ToolApprovalDialogLimits& limits)
+    -> std::expected<void, ToolApprovalDialogError> {
+  if (!valid_effect(scope.effect) ||
+      std::ranges::find(effects, scope.effect) == effects.end()) {
+    return failure(ToolApprovalDialogErrorCode::invalid_request,
+                   "tool approval scope has an undeclared effect");
+  }
+  if (!is_single_line_safe(scope.kind) ||
+      scope.kind.size() > limits.maximum_scope_kind_bytes ||
+      !is_single_line_safe(scope.value) ||
+      scope.value.size() > limits.maximum_scope_value_bytes) {
+    return failure(ToolApprovalDialogErrorCode::invalid_request,
+                   "tool approval scope is empty, unsafe, or too large");
+  }
+  return {};
+}
+
+[[nodiscard]] auto validate_scopes(
+    const std::span<const domain::CapabilityScope> scopes,
+    const std::span<const domain::Effect> effects,
+    const ToolApprovalDialogLimits& limits, std::size_t& total)
+    -> std::expected<void, ToolApprovalDialogError> {
+  if (scopes.size() > limits.maximum_scopes) {
+    return failure(ToolApprovalDialogErrorCode::invalid_request,
+                   "tool approval scopes are too numerous");
+  }
+  for (std::size_t index{}; index < scopes.size(); ++index) {
+    const auto& scope = scopes[index];
+    if (auto valid = validate_scope_fields(scope, effects, limits); !valid) {
+      return valid;
+    }
+    const auto previous = scopes.first(index);
+    if (std::ranges::find(previous, scope) != previous.end()) {
+      return failure(ToolApprovalDialogErrorCode::invalid_request,
+                     "tool approval scope is duplicated");
+    }
+    if (!checked_add(total, scope.kind.size()) ||
+        !checked_add(total, scope.value.size())) {
+      return failure(ToolApprovalDialogErrorCode::invalid_request,
+                     "tool approval text size overflowed");
+    }
+  }
+  return {};
+}
+
 [[nodiscard]] auto validate(const PendingToolApprovalView& input,
                             const ToolApprovalDialogLimits& limits)
     -> std::expected<void, ToolApprovalDialogError> {
@@ -82,49 +150,14 @@ constexpr std::size_t kAllowOnceChoice = 1;
     return failure(ToolApprovalDialogErrorCode::invalid_request,
                    "tool approval name is empty, unsafe, or too large");
   }
-  if (input.effects.empty() || input.effects.size() > limits.maximum_effects) {
-    return failure(ToolApprovalDialogErrorCode::invalid_request,
-                   "tool approval effects are empty or too numerous");
+  if (auto valid = validate_effects(input.effects, limits.maximum_effects);
+      !valid) {
+    return valid;
   }
-  for (std::size_t index{}; index < input.effects.size(); ++index) {
-    if (!valid_effect(input.effects[index]) ||
-        std::find(input.effects.begin(), input.effects.begin() + index,
-                  input.effects[index]) != input.effects.begin() + index) {
-      return failure(ToolApprovalDialogErrorCode::invalid_request,
-                     "tool approval effects are invalid or duplicated");
-    }
-  }
-  if (input.scopes.size() > limits.maximum_scopes) {
-    return failure(ToolApprovalDialogErrorCode::invalid_request,
-                   "tool approval scopes are too numerous");
-  }
-
   std::size_t total = input.tool_name.size();
-  for (std::size_t index{}; index < input.scopes.size(); ++index) {
-    const auto& scope = input.scopes[index];
-    if (!valid_effect(scope.effect) ||
-        std::find(input.effects.begin(), input.effects.end(), scope.effect) ==
-            input.effects.end()) {
-      return failure(ToolApprovalDialogErrorCode::invalid_request,
-                     "tool approval scope has an undeclared effect");
-    }
-    if (!is_single_line_safe(scope.kind) ||
-        scope.kind.size() > limits.maximum_scope_kind_bytes ||
-        !is_single_line_safe(scope.value) ||
-        scope.value.size() > limits.maximum_scope_value_bytes) {
-      return failure(ToolApprovalDialogErrorCode::invalid_request,
-                     "tool approval scope is empty, unsafe, or too large");
-    }
-    if (std::find(input.scopes.begin(), input.scopes.begin() + index, scope) !=
-        input.scopes.begin() + index) {
-      return failure(ToolApprovalDialogErrorCode::invalid_request,
-                     "tool approval scope is duplicated");
-    }
-    if (!checked_add(total, scope.kind.size()) ||
-        !checked_add(total, scope.value.size())) {
-      return failure(ToolApprovalDialogErrorCode::invalid_request,
-                     "tool approval text size overflowed");
-    }
+  if (auto valid = validate_scopes(input.scopes, input.effects, limits, total);
+      !valid) {
+    return valid;
   }
   if (total > limits.maximum_total_text_bytes) {
     return failure(ToolApprovalDialogErrorCode::invalid_request,

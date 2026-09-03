@@ -26,7 +26,7 @@ struct ToolApprovalDialogLimits {
   std::size_t maximum_scopes{64};
   std::size_t maximum_scope_kind_bytes{256};
   std::size_t maximum_scope_value_bytes{4096};
-  std::size_t maximum_total_text_bytes{64U * 1024U};
+  std::size_t maximum_total_text_bytes{std::size_t{64} * 1024U};
   auto operator==(const ToolApprovalDialogLimits&) const -> bool = default;
 };
 

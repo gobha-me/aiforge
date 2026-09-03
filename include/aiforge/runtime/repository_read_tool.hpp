@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <string>
 
@@ -16,15 +17,15 @@ struct RepositoryReadToolConfiguration {
   repository::RepositorySnapshotLimits snapshot_limits{
       16384,
       4096,
-      1024U * 1024U,
-      64U * 1024U * 1024U,
-      4U * 1024U * 1024U,
+      std::uint64_t{1024U} * 1024U,
+      std::uint64_t{64U} * 1024U * 1024U,
+      std::size_t{4U} * 1024U * 1024U,
       std::chrono::seconds{5},
       std::chrono::seconds{15}};
-  repository::ExactSourceEditLimits read_limits{4096, 1024U * 1024U, 1,
-                                                std::chrono::seconds{30}};
-  std::size_t maximum_argument_bytes{16U * 1024U};
-  std::size_t maximum_result_bytes{2U * 1024U * 1024U};
+  repository::ExactSourceEditLimits read_limits{
+      4096, std::uint64_t{1024U} * 1024U, 1, std::chrono::seconds{30}};
+  std::size_t maximum_argument_bytes{std::size_t{16U} * 1024U};
+  std::size_t maximum_result_bytes{std::size_t{2U} * 1024U * 1024U};
   auto operator==(const RepositoryReadToolConfiguration&) const
       -> bool = default;
 };

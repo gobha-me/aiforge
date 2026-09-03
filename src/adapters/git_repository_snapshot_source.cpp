@@ -601,10 +601,10 @@ using ExactErrorCode = repository::ExactSourceEditErrorCode;
   RepositorySnapshotLimits result;
   result.maximum_path_bytes = limits.maximum_path_bytes;
   result.maximum_file_bytes = limits.maximum_source_bytes;
-  if (limits.maximum_source_bytes <= 1024U * 1024U) {
+  if (limits.maximum_source_bytes <= std::uint64_t{1024U} * 1024U) {
     result.maximum_entries = 16384;
-    result.maximum_total_bytes = 64U * 1024U * 1024U;
-    result.maximum_command_output_bytes = 4U * 1024U * 1024U;
+    result.maximum_total_bytes = std::uint64_t{64U} * 1024U * 1024U;
+    result.maximum_command_output_bytes = std::size_t{4U} * 1024U * 1024U;
     result.command_timeout = std::chrono::seconds{5};
     result.observation_timeout = std::chrono::seconds{15};
   }
@@ -695,6 +695,7 @@ struct OpenDirectory {
 [[nodiscard]] auto open_exact_root(const std::filesystem::path& root)
     -> std::expected<OpenDirectory, ExactError> {
   OpenDirectory result{
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX open API.
       OwnedDescriptor{::open(root.c_str(),
                              O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)},
       {},
@@ -737,26 +738,21 @@ struct OpenDirectory {
   return {};
 }
 
-[[nodiscard]] auto read_exact_file(
-    const std::filesystem::path& root, const std::string& relative,
-    const repository::ExactSourceEditLimits& limits,
-    const std::stop_token stop_token,
-    const std::chrono::steady_clock::time_point deadline,
-    const OpenDirectory* supplied_root_anchor = nullptr)
-    -> std::expected<ExactFileRead, ExactError> {
-  std::optional<OpenDirectory> local_root_anchor;
-  if (supplied_root_anchor == nullptr) {
-    auto opened = open_exact_root(root);
-    if (!opened) return std::unexpected(std::move(opened.error()));
-    local_root_anchor.emplace(std::move(*opened));
-    supplied_root_anchor = &*local_root_anchor;
-  }
+struct OpenExactPath {
   std::vector<OpenDirectory> directories;
-  directories.push_back(
-      {OwnedDescriptor{
-           ::fcntl(supplied_root_anchor->descriptor.get(), F_DUPFD_CLOEXEC, 0)},
-       supplied_root_anchor->before,
-       {}});
+  OwnedDescriptor descriptor;
+  struct stat before{};
+  std::string final_name;
+};
+
+[[nodiscard]] auto open_exact_path(const OpenDirectory& root_anchor,
+                                   const std::string& relative)
+    -> std::expected<OpenExactPath, ExactError> {
+  std::vector<OpenDirectory> directories;
+  directories.push_back({OwnedDescriptor{::fcntl(root_anchor.descriptor.get(),
+                                                 F_DUPFD_CLOEXEC, 0)},
+                         root_anchor.before,
+                         {}});
   if (directories.back().descriptor.get() < 0) {
     return errno_exact_failure("duplicating exact-source root", true);
   }
@@ -765,6 +761,7 @@ struct OpenDirectory {
   auto component = requested.begin();
   while (std::next(component) != requested.end()) {
     const auto name = component->string();
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX openat API.
     OpenDirectory next{OwnedDescriptor{::openat(
                            directories.back().descriptor.get(), name.c_str(),
                            O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)},
@@ -784,10 +781,13 @@ struct OpenDirectory {
     ++component;
   }
 
-  const auto final_name = component->string();
-  OwnedDescriptor descriptor{
-      ::openat(directories.back().descriptor.get(), final_name.c_str(),
-               O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)};
+  auto final_name = component->string();
+  const auto parent = directories.back().descriptor.get();
+  const auto* name = final_name.c_str();
+  constexpr int flags{O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK};
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX openat API.
+  const auto descriptor_value = ::openat(parent, name, flags);
+  OwnedDescriptor descriptor{descriptor_value};
   if (descriptor.get() < 0) {
     return opening_exact_failure("opening exact-source target");
   }
@@ -795,6 +795,61 @@ struct OpenDirectory {
   if (::fstat(descriptor.get(), &before) != 0) {
     return errno_exact_failure("inspecting exact-source target", true);
   }
+  return OpenExactPath{std::move(directories), std::move(descriptor), before,
+                       std::move(final_name)};
+}
+
+[[nodiscard]] auto exact_directory_unchanged(
+    const std::vector<OpenDirectory>& directories, const std::size_t index,
+    const std::filesystem::path& root) -> std::expected<void, ExactError> {
+  struct stat descriptor_state{};
+  struct stat path_state{};
+  if (::fstat(directories[index].descriptor.get(), &descriptor_state) != 0) {
+    return errno_exact_failure("rechecking exact-source parent", true);
+  }
+  if (!same_file_state(directories[index].before, descriptor_state)) {
+    return exact_failure(ExactErrorCode::concurrent_change,
+                         "exact-source path changed while being read", {}, {},
+                         true);
+  }
+  if (index == 0) {
+    if (::lstat(root.c_str(), &path_state) != 0) {
+      return errno_exact_failure("rechecking exact-source root", true);
+    }
+  } else if (::fstatat(directories[index - 1].descriptor.get(),
+                       directories[index].name_in_parent.c_str(), &path_state,
+                       AT_SYMLINK_NOFOLLOW) != 0) {
+    return errno_exact_failure("rechecking exact-source parent", true);
+  }
+  if (!same_file_state(descriptor_state, path_state) ||
+      !S_ISDIR(path_state.st_mode)) {
+    return exact_failure(ExactErrorCode::concurrent_change,
+                         "exact-source path changed while being read", {}, {},
+                         true);
+  }
+  return {};
+}
+
+[[nodiscard]] auto read_exact_file(
+    const std::filesystem::path& root, const std::string& relative,
+    const repository::ExactSourceEditLimits& limits,
+    const std::stop_token stop_token,
+    const std::chrono::steady_clock::time_point deadline,
+    const OpenDirectory* supplied_root_anchor = nullptr)
+    -> std::expected<ExactFileRead, ExactError> {
+  std::optional<OpenDirectory> local_root_anchor;
+  if (supplied_root_anchor == nullptr) {
+    auto opened = open_exact_root(root);
+    if (!opened) return std::unexpected(std::move(opened.error()));
+    local_root_anchor.emplace(std::move(*opened));
+    supplied_root_anchor = &*local_root_anchor;
+  }
+  auto opened = open_exact_path(*supplied_root_anchor, relative);
+  if (!opened) return std::unexpected(std::move(opened.error()));
+  const auto& directories = opened->directories;
+  const auto& descriptor = opened->descriptor;
+  const auto& before = opened->before;
+  const auto& final_name = opened->final_name;
   if (!S_ISREG(before.st_mode)) {
     return exact_failure(ExactErrorCode::unsupported_entry,
                          "exact-source target is not a regular file");
@@ -850,34 +905,9 @@ struct OpenDirectory {
                          true);
   }
   for (std::size_t index{}; index < directories.size(); ++index) {
-    struct stat descriptor_state{};
-    struct stat path_state{};
-    if (::fstat(directories[index].descriptor.get(), &descriptor_state) != 0) {
-      return errno_exact_failure("rechecking exact-source parent", true);
-    }
-    if (!same_file_state(directories[index].before, descriptor_state)) {
-      return exact_failure(ExactErrorCode::concurrent_change,
-                           "exact-source path changed while being read", {}, {},
-                           true);
-    }
-    if (index == 0) {
-      if (::lstat(root.c_str(), &path_state) != 0) {
-        return errno_exact_failure("rechecking exact-source root", true);
-      }
-    } else if (::fstatat(directories[index - 1].descriptor.get(),
-                         directories[index].name_in_parent.c_str(), &path_state,
-                         AT_SYMLINK_NOFOLLOW) != 0) {
-      return errno_exact_failure("rechecking exact-source parent", true);
-    }
-    if (!same_file_state(descriptor_state, path_state) ||
-        !S_ISDIR(path_state.st_mode)) {
-      return exact_failure(ExactErrorCode::concurrent_change,
-                           "exact-source path changed while being read", {}, {},
-                           true);
-    }
+    auto stable = exact_directory_unchanged(directories, index, root);
+    if (!stable) return std::unexpected(std::move(stable.error()));
   }
-  auto root_stable = exact_root_unchanged(*supplied_root_anchor, root);
-  if (!root_stable) return std::unexpected(std::move(root_stable.error()));
   return ExactFileRead{std::move(content), before.st_mode, before.st_dev,
                        before.st_ino};
 }
@@ -1226,6 +1256,21 @@ struct GitRepositorySnapshotSource::Impl {
     return domain::RepositoryRootIdentity{std::move(*id), canonical_path};
   }
 
+  [[nodiscard]] auto status_arguments(const std::string& root) const
+      -> std::vector<std::string> {
+    std::vector<std::string> arguments{"-C",
+                                       root,
+                                       "status",
+                                       "--porcelain=v2",
+                                       "--branch",
+                                       "-z",
+                                       "--untracked-files=all"};
+    if (command_policy == GitCommandPolicy::isolated_read_only) {
+      arguments.push_back("--ignore-submodules=all");
+    }
+    return arguments;
+  }
+
   [[nodiscard]] auto observe_git_once(const std::string& root,
                                       const std::string& object_format,
                                       const RepositorySnapshotLimits& limits,
@@ -1233,17 +1278,7 @@ struct GitRepositorySnapshotSource::Impl {
                                       const ObservationDeadline deadline) const
       -> std::expected<RepositorySnapshot, RepositorySnapshotError> {
     const std::string algorithm = "git-" + object_format;
-    std::vector<std::string> status_arguments{"-C",
-                                              root,
-                                              "status",
-                                              "--porcelain=v2",
-                                              "--branch",
-                                              "-z",
-                                              "--untracked-files=all"};
-    if (command_policy == GitCommandPolicy::isolated_read_only) {
-      status_arguments.push_back("--ignore-submodules=all");
-    }
-    auto status = git(status_arguments, {}, limits, stop_token, deadline);
+    auto status = git(status_arguments(root), {}, limits, stop_token, deadline);
     if (!status) return std::unexpected(std::move(status.error()));
     if (status->exit_code != 0) {
       return failure(RepositorySnapshotErrorCode::vcs_failure,
@@ -1660,6 +1695,7 @@ auto GitRepositorySnapshotSource::observe(
   }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Ordered flow.
 auto GitExactSourceEditor::read(repository::ExactSourceReadRequest request,
                                 const std::stop_token stop_token)
     -> std::expected<repository::ExactSourceReadResult,

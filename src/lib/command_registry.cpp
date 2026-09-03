@@ -219,6 +219,7 @@ auto version_handler(CommandContext& context) -> int {
   return values;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Legacy routing.
 auto one_shot_handler(CommandContext& context,
                       const std::string_view argument_id,
                       const bool allow_empty_for_interactive) -> int {
