@@ -20,6 +20,7 @@
 #include <utility>
 #include <variant>
 
+#include <aiforge/detail/utf8_text.hpp>
 #include <aiforge/model/catalog.hpp>
 
 #include <nlohmann/json.hpp>
@@ -508,6 +509,12 @@ struct VeniceRequestOptions {
     result.venice_parameters.emplace();
     result.venice_parameters->enable_web_search =
         std::move(extensions->web_search);
+    if (result.venice_parameters->enable_web_search) {
+      const bool enabled =
+          *result.venice_parameters->enable_web_search != "off";
+      result.venice_parameters->enable_web_citations = enabled;
+      result.venice_parameters->include_search_results_in_stream = enabled;
+    }
     result.venice_parameters->include_venice_system_prompt =
         extensions->include_system_prompt;
     result.venice_parameters->character_slug =
@@ -661,6 +668,63 @@ struct VeniceRequestOptions {
   return std::optional<domain::ReportedCost>{std::move(*cost)};
 }
 
+[[nodiscard]] auto checked_citations(
+    const std::vector<venice::ChatCitation>& citations)
+    -> std::expected<std::vector<domain::CitationBlock>,
+                     backend::BackendError> {
+  constexpr std::size_t maximum_citations{256};
+  constexpr std::size_t maximum_uri_bytes{4096};
+  constexpr std::size_t maximum_title_bytes{1024};
+  constexpr std::size_t maximum_total_bytes{256U * 1024U};
+  if (citations.size() > maximum_citations) {
+    return std::unexpected(
+        protocol_error("Venice stream reported too many citations"));
+  }
+
+  std::size_t total_bytes{};
+  std::vector<domain::CitationBlock> result;
+  result.reserve(citations.size());
+  for (const auto& citation : citations) {
+    const std::size_t scheme_bytes = citation.url.starts_with("https://")  ? 8U
+                                     : citation.url.starts_with("http://") ? 7U
+                                                                           : 0U;
+    const auto invalid_uri_character =
+        std::ranges::any_of(citation.url, [](const unsigned char character) {
+          return character <= 0x20U || character == 0x7fU;
+        });
+    const auto invalid_title_character =
+        std::ranges::any_of(citation.title, [](const unsigned char character) {
+          return character < 0x20U || character == 0x7fU;
+        });
+    const auto authority_end = citation.url.find_first_of("/?#", scheme_bytes);
+    const auto supported_uri =
+        scheme_bytes != 0 && citation.url.size() > scheme_bytes &&
+        authority_end != scheme_bytes && !invalid_uri_character;
+    const auto valid_title =
+        citation.title.empty() ||
+        (citation.title.size() <= maximum_title_bytes &&
+         !invalid_title_character &&
+         aiforge::detail::is_safe_utf8_text(citation.title));
+    if (!supported_uri || citation.url.size() > maximum_uri_bytes ||
+        !aiforge::detail::is_safe_utf8_text(citation.url) || !valid_title ||
+        citation.url.size() > maximum_total_bytes - total_bytes) {
+      return std::unexpected(
+          protocol_error("Venice stream reported an invalid citation"));
+    }
+    total_bytes += citation.url.size();
+    if (citation.title.size() > maximum_total_bytes - total_bytes) {
+      return std::unexpected(
+          protocol_error("Venice stream citations exceeded their byte limit"));
+    }
+    total_bytes += citation.title.size();
+    result.push_back(domain::CitationBlock{
+        citation.url, citation.title.empty()
+                          ? std::nullopt
+                          : std::optional<std::string>{citation.title}});
+  }
+  return result;
+}
+
 class VeniceStream final : public backend::BackendStream {
  public:
   VeniceStream(venice::Client& client, venice::ChatRequest request,
@@ -746,6 +810,10 @@ class VeniceStream final : public backend::BackendStream {
     std::map<domain::InvocationId, std::string> tool_thought_signatures;
     domain::Usage cumulative_usage;
     bool cost_emitted{};
+    bool citations_emitted{};
+    const bool citations_disabled =
+        m_request.venice_parameters &&
+        m_request.venice_parameters->enable_web_citations == false;
 
     const auto ensure_started = [&] -> bool {
       if (response_started) return true;
@@ -840,6 +908,26 @@ class VeniceStream final : public backend::BackendStream {
         if (!emit(backend::ToolCallDelta{std::move(*invocation), tool.name,
                                          tool.arguments})) {
           return false;
+        }
+      }
+
+      if (delta.citations && !citations_emitted) {
+        if (citations_disabled && !delta.citations->empty()) {
+          local_error = protocol_error(
+              "Venice stream reported citations while they were disabled");
+          return false;
+        }
+        auto citations = checked_citations(*delta.citations);
+        if (!citations) {
+          local_error = std::move(citations.error());
+          return false;
+        }
+        citations_emitted = true;
+        for (auto& citation : *citations) {
+          if (m_cancel.cancelled()) return false;
+          if (!emit(backend::CitationObserved{std::move(citation)})) {
+            return false;
+          }
         }
       }
 
