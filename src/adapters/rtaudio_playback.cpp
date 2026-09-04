@@ -63,7 +63,7 @@ constexpr std::uint64_t polls_per_second = 500;
   const auto remaining_frames = frames % sample_rate;
   const auto scaled_remainder = remaining_frames * polls_per_second;
   const auto partial_second_polls =
-      scaled_remainder / sample_rate +
+      (scaled_remainder / sample_rate) +
       static_cast<std::uint64_t>(scaled_remainder % sample_rate != 0);
   const auto duration_polls = whole_seconds * polls_per_second;
   const auto maximum = std::numeric_limits<std::uint64_t>::max();

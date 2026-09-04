@@ -58,6 +58,7 @@ struct ParsedPcmWav {
   std::size_t data_size{};
 };
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- RIFF parsing.
 [[nodiscard]] auto parse_pcm_wav(const std::span<const std::byte> encoded,
                                  const PcmWavLimits limits)
     -> std::expected<ParsedPcmWav, PcmWavError> {

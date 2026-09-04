@@ -99,10 +99,11 @@ class ContractCallback final : public PlaybackDeviceCallback {
     const auto remaining = total_frames - completed;
     const auto accepted_frames = std::min(frames, remaining);
     const auto accepted_samples = accepted_frames * channels;
-    std::copy_n(m_samples.data() + completed * channels, accepted_samples,
-                output.data());
-    std::fill(output.begin() + static_cast<std::ptrdiff_t>(accepted_samples),
-              output.end(), std::int16_t{});
+    const auto source_offset = completed * channels;
+    const auto source = std::span<const std::int16_t>{m_samples}.subspan(
+        source_offset, accepted_samples);
+    std::ranges::copy(source, output.begin());
+    std::ranges::fill(output.subspan(accepted_samples), std::int16_t{});
     m_frames.fetch_add(accepted_frames, std::memory_order_relaxed);
     if (accepted_frames == remaining) {
       m_terminal.store(true, std::memory_order_release);
