@@ -117,7 +117,11 @@ TEST_CASE("runner rejects unsafe launch options") {
   REQUIRE_FALSE(result);
   CHECK(result.error().code == isolation::RunnerErrorCode::invalid_options);
 
-  options.child_timeout = std::chrono::hours{1};
+  options.child_timeout = std::chrono::seconds{60};
+  result = isolation::run_evaluation(std::string(40, 'a'), options);
+  REQUIRE(result);
+
+  options.child_timeout = std::chrono::milliseconds{60001};
   result = isolation::run_evaluation(std::string(40, 'a'), options);
   REQUIRE_FALSE(result);
   CHECK(result.error().code == isolation::RunnerErrorCode::invalid_options);
@@ -128,7 +132,11 @@ TEST_CASE("runner rejects unsafe launch options") {
   REQUIRE_FALSE(result);
   CHECK(result.error().code == isolation::RunnerErrorCode::invalid_options);
 
-  options.cpu_limit_probe_timeout = std::chrono::hours{1};
+  options.cpu_limit_probe_timeout = std::chrono::seconds{60};
+  result = isolation::run_evaluation(std::string(40, 'a'), options);
+  REQUIRE(result);
+
+  options.cpu_limit_probe_timeout = std::chrono::milliseconds{60001};
   result = isolation::run_evaluation(std::string(40, 'a'), options);
   REQUIRE_FALSE(result);
   CHECK(result.error().code == isolation::RunnerErrorCode::invalid_options);
