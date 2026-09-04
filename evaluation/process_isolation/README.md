@@ -55,10 +55,13 @@ or raw child diagnostics. CI builds the evaluator with GCC and Clang on Ubuntu
 per compiler with the exact GitHub source SHA in both the report and artifact
 name.
 
-An evidence artifact is not a runtime capability cache. A later accepted ADR
-must select mechanisms and map every promised primitive to complete isolation
-levels. Production must then re-establish support at application launch and
-fail closed without downgrade.
+An evidence artifact is not a runtime capability cache. ADR 0018 selects the
+Linux mechanism conjunctions for each restriction level. Review of the v1/v2
+evidence found supplemental direct and brokered execution non-escape and
+capability-discard proofs that are tracked by issue #209 as schema v3. Until
+those proofs exist, v1/v2 alone leave every restricted level incomplete.
+Production must still re-establish support at application launch and fail
+closed without downgrade.
 
 ## Evidence v2
 
@@ -75,6 +78,20 @@ daemon/fan-out/leader-exit behavior, cancellation cleanup, and each required
 controller's limit behavior. PID observations are bound to pidfds; an
 unavailable identity proof fails closed rather than relying on a reusable
 numeric PID.
+
+The `cgroup_self_migration_denial` row attempts path-based writes to parent and
+sibling `cgroup.procs` files after applying its Landlock write guard. It does
+not attempt `cgroup.threads` migration, exercise
+`clone3(CLONE_INTO_CGROUP)` with its inherited delegated-root descriptor or
+another readable or `O_PATH` cgroup descriptor, or borrow a supervisor
+descriptor through another process. A denied `cgroup.procs` write is therefore
+not proof against those file-descriptor-based escape paths. The row also
+observes only direct payload or kernel-descendant migration. It does not prove
+that a payload
+permitted to create Unix sockets cannot ask a same-UID service manager, D-Bus
+broker, or other external broker to execute outside the task cgroup. Issue #209
+assigns a broader `payload_execution_nonescape` proof, covering direct and
+brokered execution, to schema v3.
 
 Filesystem rows separately measure read, complete mutation, and execute
 confinement;
@@ -139,3 +156,26 @@ weakening that strict gate. A hosted runner without explicit delegation fails
 the evidence step. Exit and signal handling stop, if necessary kill, and verify
 removal of the exact transient unit; incomplete unit cleanup dominates a
 successful capture.
+
+## Restriction-level evidence assessment
+
+`evidence_mapping.hpp` exposes the noninstalled ADR 0018 review helper. It
+accepts one complete v1 report, one complete v2 report, and the exact expected
+source revision. Missing, malformed, stale, conflicting, unavailable, or
+indeterminate evidence leaves the dependent level incomplete. Levels are
+cumulative and never downgrade. This result helps reviewers check retained
+engineering evidence; it is deliberately not a launch-time availability API.
+The helper covers only the v1/v2 row mapping and cannot establish a complete
+restriction level while the supplemental schema-v3 proofs in issue #209 are
+absent. In particular, v1/v2 do not prove denial of
+`clone3(CLONE_INTO_CGROUP)` and borrowed-descriptor cgroup escape, complete
+denial or containment of same-UID brokered execution available through Unix
+sockets at `low`, complete payload capability non-escalation, or high's
+post-private-root capability discard before and across descriptor-relative
+execution.
+The medium conjunction uses `combined_setup_order`, whose filesystem setup
+excludes private-root construction. High separately requires
+`private_root_combined_setup_order`. Its descriptor-entered fixed helper proves
+private-root construction precedes full-root confinement, network denial,
+setup-descriptor closure, and the payload-ready marker; it does not claim a
+second descriptor-relative execution after private-root setup.
