@@ -4004,6 +4004,17 @@ struct EncodedPayload {
   std::string document;
 };
 
+auto validate_payload_schema_for_encoding(const domain::RunEvent& event)
+    -> void {
+  if (event.metadata.schema_version < 2) return;
+  const auto* proposed = std::get_if<domain::ToolProposed>(&event.payload);
+  if (proposed == nullptr) return;
+  if (!proposed->spend_quote || !proposed->validated_arguments) {
+    throw CodecFailure{
+        "tool proposal schema version 2 requires a complete durable offer"};
+  }
+}
+
 [[nodiscard]] auto encode_payload(const domain::RunEvent& event)
     -> std::expected<EncodedPayload, SessionStoreError> {
   try {
@@ -4025,6 +4036,7 @@ struct EncodedPayload {
           store_error(SessionStoreErrorCode::invalid_argument,
                       "known event schema cannot carry an opaque payload"));
     }
+    validate_payload_schema_for_encoding(event);
     if (event.metadata.schema_version == 1) {
       if (const auto* proposed =
               std::get_if<domain::ToolProposed>(&event.payload);
