@@ -22,6 +22,11 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Install Linux audio development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends libasound2-dev
+
       - name: Install Clang Tidy 20
         run: |
           wget https://apt.llvm.org/llvm.sh
@@ -75,10 +80,14 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Install Linux audio development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends libasound2-dev
+
       - name: Install Clang standard library
         if: matrix.compiler == 'Clang'
         run: |
-          sudo apt-get update
           sudo apt-get install --no-install-recommends libc++-18-dev libc++abi-18-dev
 
       - name: Configure
@@ -86,6 +95,7 @@ jobs:
           cmake -B "${{ matrix.build_dir }}" ${{ matrix.toolchain }}
           -Daiforge_DRAWFORGE_EVALUATION=ON
           -Daiforge_PROCESS_ISOLATION_EVALUATION=ON
+          -Daiforge_AUDIO_DEVICE_EVALUATION=ON
 
       - name: Build
         run: cmake --build "${{ matrix.build_dir }}" --parallel 2
@@ -112,4 +122,19 @@ jobs:
         with:
           name: process-isolation-evidence-${{ matrix.compiler }}-${{ github.sha }}
           path: ${{ matrix.build_dir }}/process-isolation-evidence.json
+          if-no-files-found: error
+
+      - name: Capture audio-device evidence
+        run: >-
+          timeout 30s
+          "${{ matrix.build_dir }}/evaluation/audio_device/aiforge_audio_device_evaluation"
+          --source-sha "$GITHUB_SHA"
+          --output "${{ matrix.build_dir }}/audio-device-evidence.json"
+
+      - name: Upload exact-SHA audio-device evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: audio-device-evidence-${{ matrix.compiler }}-${{ github.sha }}
+          path: ${{ matrix.build_dir }}/audio-device-evidence.json
           if-no-files-found: error
