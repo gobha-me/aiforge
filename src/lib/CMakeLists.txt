@@ -60,6 +60,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   scripted_repository_snapshot_source.cpp
   scripted_session_store.cpp
   scripted_tool_executor.cpp
+  scripted_user_global_instruction_source.cpp
   slash_commands.cpp
   sqlite_session_store.cpp
   task_scheduler.cpp
@@ -69,6 +70,8 @@ add_library(${PROJECT_NAME}_lib STATIC
   tool_profiles.cpp
   tool_registry.cpp
   usage_ledger.cpp
+  user_global_instruction.cpp
+  user_global_instructions.cpp
   verification_evidence.cpp
   wav.cpp
 )

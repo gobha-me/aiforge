@@ -20,6 +20,7 @@
 #include <variant>
 #include <vector>
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <httplib.h>
@@ -27,6 +28,7 @@
 
 #include <aiforge/adapters/ask_user_dialog.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
+#include <aiforge/adapters/filesystem_user_global_instruction_source.hpp>
 #include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/json_model_catalog_cache.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
@@ -413,6 +415,13 @@ auto write_file(const std::filesystem::path& path, const std::string& bytes)
   REQUIRE(output);
   output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
   REQUIRE(output);
+}
+
+auto read_file(const std::filesystem::path& path) -> std::string {
+  std::ifstream input{path, std::ios::binary};
+  REQUIRE(input);
+  return {std::istreambuf_iterator<char>{input},
+          std::istreambuf_iterator<char>{}};
 }
 
 } // namespace
@@ -1192,6 +1201,262 @@ TEST_CASE("interactive model selection rejects stale and unusable entries",
   REQUIRE_FALSE(malformed);
   REQUIRE(malformed.error() ==
           "selected text model has invalid context metadata");
+}
+
+TEST_CASE("global instruction paths follow fixed XDG configuration semantics",
+          "[adapter][global-instructions][failure]") {
+  const auto xdg = adapters::resolve_user_global_instruction_path(
+      {.xdg_config_home = std::filesystem::path{"/tmp/xdg"},
+       .home = std::filesystem::path{"/tmp/home"}});
+  REQUIRE(xdg ==
+          std::filesystem::path{"/tmp/xdg/aiforge/instructions/global.md"});
+
+  const auto home = adapters::resolve_user_global_instruction_path(
+      {.xdg_config_home = std::filesystem::path{"relative"},
+       .home = std::filesystem::path{"/tmp/home"}});
+  REQUIRE(home == std::filesystem::path{
+                      "/tmp/home/.config/aiforge/instructions/global.md"});
+
+  const auto missing = adapters::resolve_user_global_instruction_path({});
+  REQUIRE_FALSE(missing);
+  REQUIRE(missing.error().code ==
+          instructions::UserGlobalInstructionErrorCode::missing_home);
+}
+
+TEST_CASE("filesystem global instructions are private bounded exact writes",
+          "[adapter][global-instructions][editor]") {
+  TempDirectory temporary{"aiforge-global-instruction"};
+  const auto path = temporary.path() / "aiforge" / "instructions" / "global.md";
+  adapters::FilesystemUserGlobalInstructionSource source{path};
+
+  const auto missing = source.load();
+  REQUIRE(missing);
+  REQUIRE_FALSE(*missing);
+
+  const instructions::UserGlobalInstructionWrite create{
+      std::nullopt, "Review carefully.\n", {}};
+  const auto created = source.write(create);
+  REQUIRE(created);
+  REQUIRE_FALSE(created->previous);
+  REQUIRE(created->resulting.source_id.value() ==
+          domain::user_global_instruction_source_identity);
+  REQUIRE(created->resulting.source_location ==
+          domain::user_global_instruction_source_location);
+  REQUIRE(created->resulting.content_digest.byte_size == create.text.size());
+  REQUIRE((std::filesystem::status(path.parent_path()).permissions() &
+           std::filesystem::perms::all) == std::filesystem::perms::owner_all);
+  REQUIRE((std::filesystem::status(path).permissions() &
+           std::filesystem::perms::all) ==
+          (std::filesystem::perms::owner_read |
+           std::filesystem::perms::owner_write));
+
+  const auto duplicate = source.write(create);
+  REQUIRE_FALSE(duplicate);
+  REQUIRE(duplicate.error().code ==
+          instructions::UserGlobalInstructionEditorErrorCode::already_exists);
+  REQUIRE_FALSE(duplicate.error().may_have_applied);
+
+  const instructions::UserGlobalInstructionWrite replace{
+      created->resulting, "Use exact evidence.\n", {}};
+  const auto replaced = source.write(replace);
+  REQUIRE(replaced);
+  REQUIRE(replaced->previous == created->resulting);
+  REQUIRE(replaced->resulting != created->resulting);
+  const auto loaded = source.load();
+  REQUIRE(loaded);
+  REQUIRE(*loaded);
+  REQUIRE((*loaded)->text == replace.text);
+  REQUIRE((*loaded)->reference == replaced->resulting);
+
+  const auto stale = source.write(replace);
+  REQUIRE_FALSE(stale);
+  REQUIRE(stale.error().code ==
+          instructions::UserGlobalInstructionEditorErrorCode::source_mismatch);
+  REQUIRE(stale.error().observed == replaced->resulting);
+  REQUIRE_FALSE(stale.error().may_have_applied);
+
+  const auto bounded = source.load({.maximum_file_bytes = 4});
+  REQUIRE_FALSE(bounded);
+  REQUIRE(bounded.error().code ==
+          instructions::UserGlobalInstructionErrorCode::resource_exhausted);
+
+  std::stop_source cancellation;
+  cancellation.request_stop();
+  const auto cancelled = source.write(
+      {replaced->resulting, "must not publish", {}}, cancellation.get_token());
+  REQUIRE_FALSE(cancelled);
+  REQUIRE(cancelled.error().code ==
+          instructions::UserGlobalInstructionEditorErrorCode::cancelled);
+  REQUIRE(read_file(path) == replace.text);
+}
+
+TEST_CASE("filesystem global instructions reject hostile paths and entries",
+          "[adapter][global-instructions][failure]") {
+  TempDirectory temporary{"aiforge-global-hostile"};
+  const auto app = temporary.path() / "aiforge";
+  const auto root = app / "instructions";
+  const auto path = root / "global.md";
+  REQUIRE(std::filesystem::create_directories(root));
+  REQUIRE(::chmod(app.c_str(), 0700) == 0);
+  REQUIRE(::chmod(root.c_str(), 0700) == 0);
+
+  write_file(temporary.path() / "outside.md", "outside");
+  std::error_code link_error;
+  std::filesystem::create_symlink(temporary.path() / "outside.md", path,
+                                  link_error);
+  REQUIRE_FALSE(link_error);
+  adapters::FilesystemUserGlobalInstructionSource source{path};
+  const auto escaped = source.load();
+  REQUIRE_FALSE(escaped);
+  REQUIRE(escaped.error().code ==
+          instructions::UserGlobalInstructionErrorCode::path_escape);
+
+  REQUIRE(std::filesystem::remove(path));
+  write_file(path, "private");
+  REQUIRE(::chmod(path.c_str(), 0644) == 0);
+  const auto broad = source.load();
+  REQUIRE_FALSE(broad);
+  REQUIRE(broad.error().code ==
+          instructions::UserGlobalInstructionErrorCode::permission_denied);
+
+  REQUIRE(::chmod(path.c_str(), 0600) == 0);
+  std::filesystem::create_hard_link(path, root / "alias.md", link_error);
+  REQUIRE_FALSE(link_error);
+  const auto linked = source.load();
+  REQUIRE_FALSE(linked);
+  REQUIRE(linked.error().code ==
+          instructions::UserGlobalInstructionErrorCode::unsupported_entry);
+  REQUIRE(std::filesystem::remove(root / "alias.md"));
+
+  REQUIRE(std::filesystem::remove(path));
+  REQUIRE(std::filesystem::create_directory(path));
+  const auto directory = source.load();
+  REQUIRE_FALSE(directory);
+  REQUIRE(directory.error().code ==
+          instructions::UserGlobalInstructionErrorCode::unsupported_entry);
+
+  REQUIRE(std::filesystem::remove(path));
+  REQUIRE(::mkfifo(path.c_str(), 0600) == 0);
+  const auto fifo = source.load();
+  REQUIRE_FALSE(fifo);
+  REQUIRE(fifo.error().code ==
+          instructions::UserGlobalInstructionErrorCode::unsupported_entry);
+
+  const auto real_app = temporary.path() / "real-aiforge";
+  REQUIRE(std::filesystem::create_directories(real_app / "instructions"));
+  REQUIRE(::chmod(real_app.c_str(), 0700) == 0);
+  REQUIRE(::chmod((real_app / "instructions").c_str(), 0700) == 0);
+  const auto alias_app = temporary.path() / "alias-aiforge";
+  std::filesystem::create_directory_symlink(real_app, alias_app, link_error);
+  REQUIRE_FALSE(link_error);
+  adapters::FilesystemUserGlobalInstructionSource traversed{
+      alias_app / "instructions" / "global.md"};
+  const auto parent_escape = traversed.load();
+  REQUIRE_FALSE(parent_escape);
+  REQUIRE(parent_escape.error().code ==
+          instructions::UserGlobalInstructionErrorCode::path_escape);
+}
+
+TEST_CASE("filesystem global instructions reject embedded null paths",
+          "[adapter][global-instructions][failure]") {
+  TempDirectory temporary{"aiforge-global-null-path"};
+  const auto root = temporary.path() / "aiforge" / "instructions";
+  const auto path = root / "global.md";
+  REQUIRE(std::filesystem::create_directories(root));
+  REQUIRE(::chmod((temporary.path() / "aiforge").c_str(), 0700) == 0);
+  REQUIRE(::chmod(root.c_str(), 0700) == 0);
+  write_file(path, "must remain private");
+  REQUIRE(::chmod(path.c_str(), 0600) == 0);
+
+  auto poisoned_path = temporary.path().string();
+  poisoned_path.push_back('\0');
+  poisoned_path += "shadow/aiforge/instructions/global.md";
+  adapters::FilesystemUserGlobalInstructionSource source{
+      std::filesystem::path{poisoned_path}};
+
+  const auto loaded = source.load();
+  REQUIRE_FALSE(loaded);
+  REQUIRE(loaded.error().code ==
+          instructions::UserGlobalInstructionErrorCode::invalid_request);
+  REQUIRE(loaded.error().message.find(temporary.path().string()) ==
+          std::string::npos);
+  REQUIRE(loaded.error().message.find("must remain private") ==
+          std::string::npos);
+
+  REQUIRE(std::filesystem::remove(path));
+  const auto written = source.write({std::nullopt, "must not publish", {}});
+  REQUIRE_FALSE(written);
+  REQUIRE(written.error().code ==
+          instructions::UserGlobalInstructionEditorErrorCode::invalid_request);
+  REQUIRE(written.error().message.find(temporary.path().string()) ==
+          std::string::npos);
+  REQUIRE(written.error().message.find("must not publish") ==
+          std::string::npos);
+  REQUIRE_FALSE(std::filesystem::exists(path));
+}
+
+TEST_CASE("filesystem global replacement preserves racing external content",
+          "[adapter][global-instructions][editor][failure]") {
+  TempDirectory temporary{"aiforge-global-race"};
+  const auto root = temporary.path() / "aiforge" / "instructions";
+  const auto path = root / "global.md";
+  adapters::FilesystemUserGlobalInstructionSource initial{path};
+  const auto created = initial.write({std::nullopt, "original", {}});
+  REQUIRE(created);
+
+  bool raced{};
+  adapters::FilesystemUserGlobalInstructionSource racing{
+      path,
+      [&](const adapters::UserGlobalInstructionFilesystemCheckpointStage stage)
+          -> std::expected<void,
+                           instructions::UserGlobalInstructionEditorError> {
+        if (stage == adapters::UserGlobalInstructionFilesystemCheckpointStage::
+                         replacement_ready &&
+            !raced) {
+          raced = true;
+          write_file(path, "external change");
+        }
+        return {};
+      }};
+  const auto replacement =
+      racing.write({created->resulting, "must not replace external", {}});
+  REQUIRE_FALSE(replacement);
+  REQUIRE(
+      replacement.error().code ==
+      instructions::UserGlobalInstructionEditorErrorCode::concurrent_change);
+  REQUIRE_FALSE(replacement.error().may_have_applied);
+  REQUIRE(read_file(path) == "external change");
+
+  const auto current = initial.load();
+  REQUIRE(current);
+  REQUIRE(*current);
+  const auto detached = temporary.path() / "detached-instructions";
+  adapters::FilesystemUserGlobalInstructionSource swapping{
+      path,
+      [&](const adapters::UserGlobalInstructionFilesystemCheckpointStage stage)
+          -> std::expected<void,
+                           instructions::UserGlobalInstructionEditorError> {
+        if (stage == adapters::UserGlobalInstructionFilesystemCheckpointStage::
+                         root_revalidation_ready) {
+          std::filesystem::rename(root, detached);
+          REQUIRE(std::filesystem::create_directory(root));
+          REQUIRE(::chmod(root.c_str(), 0700) == 0);
+        }
+        return {};
+      }};
+  const auto swapped =
+      swapping.write({(*current)->reference, "published detached", {}});
+  REQUIRE_FALSE(swapped);
+  REQUIRE(
+      swapped.error().code ==
+      instructions::UserGlobalInstructionEditorErrorCode::concurrent_change);
+  REQUIRE(swapped.error().may_have_applied);
+  REQUIRE(swapped.error().message.find(temporary.path().string()) ==
+          std::string::npos);
+  REQUIRE(swapped.error().message.find("published detached") ==
+          std::string::npos);
+  REQUIRE_FALSE(std::filesystem::exists(path));
+  REQUIRE(read_file(detached / "global.md") == "published detached");
 }
 
 TEST_CASE("persona roots follow XDG configuration semantics",

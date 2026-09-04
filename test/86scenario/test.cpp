@@ -221,6 +221,89 @@ class NoEditor final : public surfaces::DraftEditor {
   }
 };
 
+class ScenarioDraftEditor final : public surfaces::DraftEditor {
+ public:
+  auto edit(std::string_view, std::stop_token stop_token)
+      -> std::expected<std::string, surfaces::DraftEditorError> override {
+    if (stop_token.stop_requested()) {
+      return std::unexpected(
+          surfaces::DraftEditorError{surfaces::DraftEditorErrorCode::cancelled,
+                                     "scenario instruction edit cancelled"});
+    }
+    ++m_calls;
+    return "# User-global instructions\n\nEdited scenario instruction.\n";
+  }
+
+  [[nodiscard]] auto calls() const noexcept -> std::size_t { return m_calls; }
+
+ private:
+  std::size_t m_calls{};
+};
+
+class ScenarioUserGlobalInstructions final
+    : public instructions::UserGlobalInstructionSource,
+      public instructions::UserGlobalInstructionEditor {
+ public:
+  ScenarioUserGlobalInstructions() {
+    instructions::UserGlobalInstructionWrite request{
+        std::nullopt, "Initial scenario instruction.\n", {}};
+    auto prepared =
+        instructions::prepare_user_global_instruction_write(request);
+    if (prepared) m_document = std::move(*prepared);
+  }
+
+  auto load(instructions::UserGlobalInstructionLimits,
+            std::stop_token stop_token)
+      -> std::expected<std::optional<domain::UserGlobalInstructionDocument>,
+                       instructions::UserGlobalInstructionError> override {
+    if (stop_token.stop_requested()) {
+      return std::unexpected(instructions::UserGlobalInstructionError{
+          instructions::UserGlobalInstructionErrorCode::cancelled,
+          "scenario instruction load cancelled", false});
+    }
+    ++m_loads;
+    return m_document;
+  }
+
+  auto write(instructions::UserGlobalInstructionWrite request,
+             std::stop_token stop_token)
+      -> std::expected<
+          instructions::UserGlobalInstructionWriteReceipt,
+          instructions::UserGlobalInstructionEditorError> override {
+    if (stop_token.stop_requested()) {
+      return std::unexpected(instructions::UserGlobalInstructionEditorError{
+          instructions::UserGlobalInstructionEditorErrorCode::cancelled,
+          "scenario instruction write cancelled", std::nullopt, false, false});
+    }
+    const auto current =
+        m_document
+            ? std::optional<
+                  domain::UserGlobalInstructionReference>{m_document->reference}
+            : std::nullopt;
+    if (request.expected != current) {
+      return std::unexpected(instructions::UserGlobalInstructionEditorError{
+          instructions::UserGlobalInstructionEditorErrorCode::concurrent_change,
+          "scenario instruction digest is stale", current, true, false});
+    }
+    auto prepared =
+        instructions::prepare_user_global_instruction_write(request);
+    if (!prepared) return std::unexpected(std::move(prepared.error()));
+    ++m_writes;
+    const auto receipt = instructions::UserGlobalInstructionWriteReceipt{
+        current, prepared->reference};
+    m_document = std::move(*prepared);
+    return receipt;
+  }
+
+  [[nodiscard]] auto loads() const noexcept -> std::size_t { return m_loads; }
+  [[nodiscard]] auto writes() const noexcept -> std::size_t { return m_writes; }
+
+ private:
+  std::optional<domain::UserGlobalInstructionDocument> m_document;
+  std::size_t m_loads{};
+  std::size_t m_writes{};
+};
+
 class ScenarioCatalogSource final : public model::CatalogSource {
  public:
   auto fetch(std::stop_token)
@@ -1997,6 +2080,83 @@ auto request_settings_scenario() -> testing::TuiScenario {
   return value;
 }
 
+auto user_global_instruction_manager_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-user-global-instructions-cancel-resize";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {120, 30, 1200, 600};
+  const auto key = [](const termforge::Key selected) {
+    return testing::TuiScenarioPost{termforge::KeyEvent{
+        selected, 0, false, false, false, termforge::KeyAction::Press}};
+  };
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/instructions"}}},
+      {0, key(termforge::Key::Enter)},
+      {1, testing::TuiScenarioResize{{8, 3, 80, 60}}},
+      {2, testing::TuiScenarioResize{{120, 30, 1200, 600}}},
+      {3, key(termforge::Key::Enter)},
+      {4, key(termforge::Key::Escape)},
+      {5, testing::TuiScenarioPost{termforge::PasteEvent{"/instructions"}}},
+      {5, key(termforge::Key::Enter)},
+      {6, key(termforge::Key::Escape)},
+      {7, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Char, U'd', true, false, false,
+              termforge::KeyAction::Press}}},
+  };
+  value.limits.maximum_frames = 16;
+  return value;
+}
+
+auto user_global_instruction_toggle_scenario(const std::string& operation)
+    -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-user-global-instructions-" + operation;
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 8, 1000, 160};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/instructions " +
+                                                         operation}}},
+      {0, enter},
+      {2, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Char, U'd', true, false, false,
+              termforge::KeyAction::Press}}},
+  };
+  value.limits.maximum_frames = 12;
+  return value;
+}
+
+auto user_global_instruction_toggle_run_scenario() -> testing::TuiScenario {
+  auto value = user_global_instruction_toggle_scenario("off");
+  value.scenario_id = "interactive-user-global-instructions-provenance";
+  value.backend_script = {"response-started",  "delta:hello", "usage", "cost",
+                          "response-finished", "end"};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/instructions off"}}},
+      {0, enter},
+      {1, testing::TuiScenarioPost{termforge::PasteEvent{"question"}}},
+      {1, enter},
+      {2, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {3, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {4, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {5, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {6, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {7, testing::TuiScenarioRelease{testing::TuiScenarioProducer::backend}},
+      {9, testing::TuiScenarioPost{termforge::KeyEvent{
+              termforge::Key::Char, U'd', true, false, false,
+              termforge::KeyAction::Press}}},
+  };
+  value.limits.maximum_frames = 24;
+  return value;
+}
+
 auto persona_manager_cancel_scenario() -> testing::TuiScenario {
   testing::TuiScenario value;
   value.scenario_id = "interactive-persona-manager-cancel-resize";
@@ -2210,12 +2370,18 @@ auto chat_factory(
     std::optional<config::ConfigSource> shadow_source = std::nullopt,
     const bool report_persist_calls = false, const bool with_personas = false,
     const bool with_characters = false, const bool character_drift = false,
-    const bool report_character_run = false)
+    const bool report_character_run = false,
+    const bool with_user_global_instructions = false,
+    const bool instruction_persistence_failure = false,
+    const bool instruction_persistence_uncertain = false,
+    std::optional<bool> instruction_environment_override = std::nullopt)
     -> testing::TuiScenarioTargetFactory {
   return [with_catalog, with_persistence, stale_preview, persistence_failure,
           shadow_source, report_persist_calls, with_personas, with_characters,
-          character_drift, report_character_run](
-             const testing::TuiScenarioPass pass, termforge::ByteSink* output)
+          character_drift, report_character_run, with_user_global_instructions,
+          instruction_persistence_failure, instruction_persistence_uncertain,
+          instruction_environment_override](const testing::TuiScenarioPass pass,
+                                            termforge::ByteSink* output)
              -> std::expected<testing::TuiScenarioTarget,
                               testing::TuiScenarioError> {
     auto pipe = std::make_shared<Pipe>();
@@ -2227,7 +2393,12 @@ auto chat_factory(
     auto backend_state = std::make_shared<GatedBackendState>();
     if (stale_preview) backend_state->set_web_search_support(true);
     auto backend = std::make_shared<GatedBackend>(backend_state);
-    auto editor = std::make_shared<NoEditor>();
+    std::shared_ptr<surfaces::DraftEditor> editor =
+        with_user_global_instructions
+            ? std::static_pointer_cast<surfaces::DraftEditor>(
+                  std::make_shared<ScenarioDraftEditor>())
+            : std::static_pointer_cast<surfaces::DraftEditor>(
+                  std::make_shared<NoEditor>());
     auto catalog_source = std::make_shared<ScenarioCatalogSource>();
     auto catalog = std::make_shared<model::CatalogService>(*catalog_source);
     auto characters =
@@ -2240,6 +2411,9 @@ auto chat_factory(
             std::vector<domain::PersonaSummary>{}},
         std::vector<testing::PersonaLoadExchange>{});
     auto persona_editor = std::make_shared<testing::ScriptedPersonaEditor>();
+    auto user_global_instructions =
+        std::make_shared<ScenarioUserGlobalInstructions>();
+    auto instruction_config_saves = std::make_shared<std::size_t>();
     adapters::InteractiveChatAppOptions options;
     options.live_wake_enabled = pass == testing::TuiScenarioPass::record;
     options.poll_worker_updates = false;
@@ -2294,6 +2468,46 @@ auto chat_factory(
         return {};
       };
     }
+    if (with_user_global_instructions) {
+      options.user_global_instruction_path =
+          "/scenario/config/aiforge/instructions/global.md";
+      options.user_global_instructions_enabled = true;
+      options.session_dependencies.user_global_instruction_source =
+          user_global_instructions.get();
+      options.session_dependencies.user_global_instruction_editor =
+          user_global_instructions.get();
+      options.session_dependencies.user_global_instructions_enabled = true;
+      options.preview_user_global_instruction_enabled =
+          [instruction_environment_override](const bool requested)
+          -> std::expected<adapters::UserGlobalInstructionEnablePreview,
+                           std::string> {
+        const auto effective =
+            instruction_environment_override.value_or(requested);
+        domain::ConfigurationProvenanceEntry provenance;
+        provenance.key = config::user_global_instructions_enabled_key;
+        provenance.value = effective ? "true" : "false";
+        provenance.value_present = true;
+        provenance.source = instruction_environment_override
+                                ? domain::ProvenanceSource::environment
+                                : domain::ProvenanceSource::file;
+        return adapters::UserGlobalInstructionEnablePreview{
+            effective, std::move(provenance)};
+      };
+      options.persist_user_global_instruction_enabled =
+          [instruction_config_saves, instruction_persistence_failure,
+           instruction_persistence_uncertain](const bool)
+          -> std::expected<void,
+                           adapters::UserGlobalInstructionEnablePersistError> {
+        ++*instruction_config_saves;
+        if (instruction_persistence_failure) {
+          return std::unexpected(
+              adapters::UserGlobalInstructionEnablePersistError{
+                  "scenario instruction config persistence failed",
+                  instruction_persistence_uncertain});
+        }
+        return {};
+      };
+    }
     options.wake_observer = [backend_state] { backend_state->observe_wake(); };
     options.rendered_output = output;
     options.rendered_frame = [frame](const termforge::Screen& screen) {
@@ -2312,7 +2526,7 @@ auto chat_factory(
     const auto model_id = make_id<domain::ModelId>("model");
     surfaces::ChatSessionOpen open{
         model_id, surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt};
-    if (report_character_run) {
+    if (report_character_run || with_user_global_instructions) {
       open.provenance = domain::RunProvenance{"test-revision",
                                               "scenario",
                                               std::nullopt,
@@ -2339,7 +2553,8 @@ auto chat_factory(
               termforge::TerminalIo{pipe->read_fd(), -1}, capabilities);
         },
         [raw, backend, editor, catalog_source, catalog, characters, personas,
-         persona_editor] {
+         persona_editor, user_global_instructions,
+         with_user_global_instructions] {
           static_cast<void>(backend);
           static_cast<void>(editor);
           static_cast<void>(catalog_source);
@@ -2347,7 +2562,14 @@ auto chat_factory(
           static_cast<void>(characters);
           static_cast<void>(personas);
           static_cast<void>(persona_editor);
-          return raw->run();
+          static_cast<void>(user_global_instructions);
+          for (;;) {
+            const auto result = raw->run();
+            if (!with_user_global_instructions || !raw->pending_edit()) {
+              return result;
+            }
+            raw->perform_edit();
+          }
         },
         [backend_state](const std::string_view step) {
           if (step == "cancelled") return backend_state->wait_for_wake(3);
@@ -2376,7 +2598,9 @@ auto chat_factory(
         [frame] { return *frame; },
         [raw, backend, editor, catalog_source, catalog, characters,
          persist_calls, report_persist_calls, personas, persona_editor,
-         with_personas, with_characters, backend_state, report_character_run] {
+         with_personas, with_characters, backend_state, report_character_run,
+         user_global_instructions, instruction_config_saves,
+         with_user_global_instructions] {
           static_cast<void>(backend);
           static_cast<void>(editor);
           static_cast<void>(catalog_source);
@@ -2384,7 +2608,11 @@ auto chat_factory(
           static_cast<void>(personas);
           static_cast<void>(persona_editor);
           std::ostringstream state;
-          state << raw->status_text();
+          if (with_user_global_instructions && raw->failure_state()) {
+            state << raw->failure_state()->message;
+          } else {
+            state << raw->status_text();
+          }
           if (raw->pending_edit()) state << "|pending-edit";
           for (const auto& event : raw->events()) {
             state << '|' << event.metadata.sequence << ':'
@@ -2394,6 +2622,34 @@ auto chat_factory(
             }
           }
           if (report_persist_calls) state << "|persist=" << *persist_calls;
+          if (with_user_global_instructions) {
+            state << "|instruction-loads=" << user_global_instructions->loads()
+                  << "|instruction-writes="
+                  << user_global_instructions->writes()
+                  << "|instruction-config-saves=" << *instruction_config_saves;
+            for (const auto& event : raw->events()) {
+              const auto* recorded =
+                  std::get_if<domain::RunProvenanceRecorded>(&event.payload);
+              if (recorded == nullptr) continue;
+              const auto setting = std::ranges::find(
+                  recorded->provenance.configuration,
+                  config::user_global_instructions_enabled_key,
+                  &domain::ConfigurationProvenanceEntry::key);
+              if (setting == recorded->provenance.configuration.end()) continue;
+              state << "|instruction-provenance="
+                    << setting->value.value_or("none") << '@';
+              if (!setting->source) {
+                state << "none";
+              } else if (*setting->source == domain::ProvenanceSource::file) {
+                state << "file";
+              } else if (*setting->source ==
+                         domain::ProvenanceSource::environment) {
+                state << "environment";
+              } else {
+                state << "other";
+              }
+            }
+          }
           if (with_personas) {
             state << "|persona-creates="
                   << persona_editor->recorded_creates().size()
@@ -3713,6 +3969,88 @@ TEST_CASE("request settings panel cancels atomically across tiny resizes",
           std::string::npos);
   REQUIRE(result->recorded.wire_output.find("(provider default)") !=
           std::string::npos);
+}
+
+TEST_CASE("user-global instruction manager is bounded and cancel-safe",
+          "[scenario][chat][instructions][failure]") {
+  const auto result = testing::run_tui_scenario(
+      user_global_instruction_manager_scenario(),
+      chat_factory(false, false, false, false, std::nullopt, false, false,
+                   false, false, false, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "User-global instructions unchanged|instruction-loads=2|"
+          "instruction-writes=0|instruction-config-saves=0");
+  REQUIRE(result->recorded.wire_output.find("Authority: user-global") !=
+          std::string::npos);
+  REQUIRE(result->recorded.wire_output.find("Bytes: 30 / 1048576") !=
+          std::string::npos);
+  REQUIRE(result->recorded.wire_output.find("Digest: sha256:") !=
+          std::string::npos);
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames,
+      [](const std::string& frame) { return frame.starts_with("8x3:"); }));
+}
+
+TEST_CASE("user-global instruction toggle persists before activation",
+          "[scenario][chat][instructions][config]") {
+  const auto result = testing::run_tui_scenario(
+      user_global_instruction_toggle_scenario("off"),
+      chat_factory(false, false, false, false, std::nullopt, false, false,
+                   false, false, false, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "Disabled user-global instructions for future runs; the document "
+          "was retained|instruction-loads=0|instruction-writes=0|"
+          "instruction-config-saves=1");
+}
+
+TEST_CASE("user-global instruction persistence failure leaves state unchanged",
+          "[scenario][chat][instructions][config][failure]") {
+  const auto result = testing::run_tui_scenario(
+      user_global_instruction_toggle_scenario("off"),
+      chat_factory(false, false, false, false, std::nullopt, false, false,
+                   false, false, false, true, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "scenario instruction config persistence failed|instruction-loads="
+          "0|instruction-writes=0|instruction-config-saves=1");
+}
+
+TEST_CASE("user-global instruction toggle reports an environment winner",
+          "[scenario][chat][instructions][config]") {
+  const auto result = testing::run_tui_scenario(
+      user_global_instruction_toggle_scenario("off"),
+      chat_factory(false, false, false, false, std::nullopt, false, false,
+                   false, false, false, true, false, false, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state ==
+          "Saved user-global instruction default; active environment value "
+          "still wins for future runs|instruction-loads=0|"
+          "instruction-writes=0|instruction-config-saves=1");
+}
+
+TEST_CASE("user-global instruction toggle reaches next-run provenance",
+          "[scenario][chat][instructions][config][provenance]") {
+  const auto result = testing::run_tui_scenario(
+      user_global_instruction_toggle_run_scenario(),
+      chat_factory(false, false, false, false, std::nullopt, false, false,
+                   false, false, false, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(
+      result->recorded.semantic_state.find(
+          "|instruction-config-saves=1|instruction-provenance=false@file") !=
+      std::string::npos);
 }
 
 TEST_CASE("persona manager cancels without writes across tiny resizes",

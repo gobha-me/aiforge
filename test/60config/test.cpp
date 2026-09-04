@@ -672,6 +672,42 @@ TEST_CASE("Venice system-prompt config preserves absence and explicit false",
       }));
 }
 
+TEST_CASE("user-global instruction enablement defaults on and fails closed",
+          "[config][instructions][failure]") {
+  EnvironmentGuard environment{"AIFORGE_INSTRUCTIONS_GLOBAL_ENABLED",
+                               std::nullopt};
+  const auto defaults = resolve_config(builtin_config_registry(), {});
+  REQUIRE(defaults);
+  REQUIRE(resolve_user_global_instructions_enabled(*defaults) == true);
+
+  const ConfigLayer disabled{
+      ConfigSource::file,
+      {{std::string{user_global_instructions_enabled_key}, ConfigValue{false},
+        std::nullopt}},
+      {}};
+  const std::array disabled_layers{disabled};
+  const auto resolved =
+      resolve_config(builtin_config_registry(), disabled_layers);
+  REQUIRE(resolved);
+  REQUIRE(resolve_user_global_instructions_enabled(*resolved) == false);
+
+  const ConfigLayer malformed{
+      ConfigSource::file,
+      {{std::string{user_global_instructions_enabled_key}, std::nullopt,
+        ConfigDiagnostic{ConfigDiagnosticCode::invalid_value,
+                         ConfigSource::file,
+                         std::string{user_global_instructions_enabled_key},
+                         "the setting is invalid"}}},
+      {}};
+  const std::array malformed_layers{malformed};
+  const auto rejected =
+      resolve_config(builtin_config_registry(), malformed_layers);
+  REQUIRE(rejected);
+  const auto enabled = resolve_user_global_instructions_enabled(*rejected);
+  REQUIRE_FALSE(enabled);
+  REQUIRE(enabled.error().code == ConfigDiagnosticCode::invalid_value);
+}
+
 TEST_CASE("malformed persisted Venice request settings fail closed",
           "[config][venice][file][failure]") {
   TemporaryDirectory temporary;
@@ -921,6 +957,7 @@ TEST_CASE("config CLI keeps content and diagnostics on their streams",
   REQUIRE(output == "model\t<unset>\tunset\n"
                     "venice.web_search\t<unset>\tunset\n"
                     "venice.include_system_prompt\t<unset>\tunset\n"
+                    "instructions.global.enabled\ttrue\tdefault\n"
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n"
@@ -968,6 +1005,7 @@ TEST_CASE("malformed files are diagnostic for reads but never overwritten",
   REQUIRE(output == "model\t<unset>\tunset\n"
                     "venice.web_search\t<unset>\tunset\n"
                     "venice.include_system_prompt\t<unset>\tunset\n"
+                    "instructions.global.enabled\ttrue\tdefault\n"
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n"
@@ -997,6 +1035,7 @@ TEST_CASE("read-only resolution survives an unavailable config home",
   REQUIRE(output == "model\tenvironment-model\tenvironment\n"
                     "venice.web_search\t<unset>\tunset\n"
                     "venice.include_system_prompt\t<unset>\tunset\n"
+                    "instructions.global.enabled\ttrue\tdefault\n"
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n"

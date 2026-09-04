@@ -569,6 +569,10 @@ auto builtin_config_registry() -> const ConfigRegistry& {
       {"venice.include_system_prompt", ConfigValueKind::boolean,
        std::string{"AIFORGE_VENICE_INCLUDE_SYSTEM_PROMPT"}, std::nullopt, false,
        true, 5, 1},
+      {std::string{user_global_instructions_enabled_key},
+       ConfigValueKind::boolean,
+       std::string{"AIFORGE_INSTRUCTIONS_GLOBAL_ENABLED"}, ConfigValue{true},
+       false, true, 5, 1},
       {"memory.global.capture", ConfigValueKind::text,
        std::string{"AIFORGE_MEMORY_GLOBAL_CAPTURE"},
        ConfigValue{std::string{"off"}}, false, true, 16, 1},
@@ -683,6 +687,33 @@ auto resolve_tool_profile_maximum_mappings(const ResolvedConfig& resolved)
     return std::unexpected(std::move(personas.error()));
   }
   return result;
+}
+
+auto resolve_user_global_instructions_enabled(const ResolvedConfig& resolved)
+    -> std::expected<bool, ConfigDiagnostic> {
+  for (const auto& issue : resolved.diagnostics) {
+    if (issue.key == user_global_instructions_enabled_key ||
+        issue.key == "instructions" || issue.key == "instructions.global" ||
+        issue.key.starts_with("instructions.global.")) {
+      return std::unexpected(issue);
+    }
+  }
+  const auto* entry = resolved.find(user_global_instructions_enabled_key);
+  if (entry == nullptr || !entry->value) {
+    return std::unexpected(diagnostic(
+        ConfigDiagnosticCode::invalid_registry, ConfigSource::compiled_default,
+        std::string{user_global_instructions_enabled_key},
+        "the user-global instruction enable setting is missing"));
+  }
+  const auto* enabled = std::get_if<bool>(&*entry->value);
+  if (enabled == nullptr) {
+    return std::unexpected(diagnostic(
+        ConfigDiagnosticCode::invalid_value,
+        entry->source.value_or(ConfigSource::file),
+        std::string{user_global_instructions_enabled_key},
+        "the user-global instruction enable setting has the wrong type"));
+  }
+  return *enabled;
 }
 
 } // namespace aiforge::config

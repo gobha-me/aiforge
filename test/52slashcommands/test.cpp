@@ -177,7 +177,7 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   const auto& registry = builtin_slash_command_registry();
   const auto listed = registry.describe();
   REQUIRE(listed);
-  REQUIRE(listed->size() == 15);
+  REQUIRE(listed->size() == 16);
   REQUIRE((*listed)[0].name == "help");
   REQUIRE((*listed)[1].name == "quit");
   REQUIRE((*listed)[2].name == "clear");
@@ -187,12 +187,13 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   REQUIRE((*listed)[6].name == "character");
   REQUIRE((*listed)[7].name == "model");
   REQUIRE((*listed)[8].name == "settings");
-  REQUIRE((*listed)[9].name == "tools");
-  REQUIRE((*listed)[10].name == "reasoning");
-  REQUIRE((*listed)[11].name == "usage");
-  REQUIRE((*listed)[12].name == "plan");
-  REQUIRE((*listed)[13].name == "tasks");
-  REQUIRE((*listed)[14].name == "memory");
+  REQUIRE((*listed)[9].name == "instructions");
+  REQUIRE((*listed)[10].name == "tools");
+  REQUIRE((*listed)[11].name == "reasoning");
+  REQUIRE((*listed)[12].name == "usage");
+  REQUIRE((*listed)[13].name == "plan");
+  REQUIRE((*listed)[14].name == "tasks");
+  REQUIRE((*listed)[15].name == "memory");
 
   const auto memory = registry.dispatch("/memory search convention");
   REQUIRE(memory);
@@ -311,6 +312,30 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
       registry.dispatch("/settings", {.run_active = true, .stop_token = {}});
   REQUIRE_FALSE(active_settings);
   REQUIRE(active_settings.error().code ==
+          SlashCommandErrorCode::unavailable_command);
+
+  const auto instructions = registry.dispatch("/instructions");
+  REQUIRE(instructions);
+  REQUIRE((*instructions)->action ==
+          SlashCommandAction::manage_user_global_instructions);
+  REQUIRE_FALSE((*instructions)->subject);
+  for (const auto state : {"on", "off"}) {
+    const auto toggled =
+        registry.dispatch("/instructions " + std::string{state});
+    REQUIRE(toggled);
+    REQUIRE((*toggled)->action ==
+            SlashCommandAction::manage_user_global_instructions);
+    REQUIRE((*toggled)->subject == state);
+  }
+  for (const auto invalid : {"/instructions auto", "/instructions on now"}) {
+    const auto rejected = registry.dispatch(invalid);
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error().code == SlashCommandErrorCode::invalid_arguments);
+  }
+  const auto active_instructions = registry.dispatch(
+      "/instructions", {.run_active = true, .stop_token = {}});
+  REQUIRE_FALSE(active_instructions);
+  REQUIRE(active_instructions.error().code ==
           SlashCommandErrorCode::unavailable_command);
 
   const auto tools = registry.dispatch("/tools");

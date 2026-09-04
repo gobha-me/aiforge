@@ -325,6 +325,23 @@ using ToolTargetValidator = auto (*)(std::string_view) -> bool;
   return no_arguments(arguments, SlashCommandAction::manage_request_settings);
 }
 
+[[nodiscard]] auto instructions_handler(std::string_view arguments,
+                                        const SlashCommandContext&)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  arguments = trim_arguments(arguments);
+  if (arguments.empty()) {
+    return SlashCommandResult{
+        SlashCommandAction::manage_user_global_instructions, std::nullopt};
+  }
+  if (arguments == "on" || arguments == "off") {
+    return SlashCommandResult{
+        SlashCommandAction::manage_user_global_instructions,
+        std::string{arguments}};
+  }
+  return command_error(SlashCommandErrorCode::invalid_arguments,
+                       "instructions accepts on or off");
+}
+
 [[nodiscard]] auto tools_handler(std::string_view arguments,
                                  const SlashCommandContext&)
     -> std::expected<SlashCommandResult, SlashCommandError> {
@@ -438,6 +455,10 @@ using ToolTargetValidator = auto (*)(std::string_view) -> bool;
       {"settings", "settings", "",
        "Inspect or change request settings for future runs.", idle_available,
        settings_handler},
+      {"instructions", "instructions", "[on | off]",
+       "Inspect, edit, enable, or disable user-global instructions for future "
+       "runs.",
+       idle_available, instructions_handler},
       {"tools", "tools",
        "[profile <id> | off | reset | category <id> <on|off> | tool <name> "
        "<on|off> | model-max <id>|inherit | persona-max <id>|inherit]",

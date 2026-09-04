@@ -88,14 +88,15 @@ assumption throughout the application.
 Prompt inputs retain provenance and precedence. Expected layers include:
 
 - application/runtime contract;
+- user-global instructions;
 - workspace instructions;
 - project instructions such as AGENTS files;
 - persona;
 - session/task instructions;
 - conversation content and selected evidence.
 
-The exact precedence policy needs an ADR before implementation. Persona and
-project content cannot override runtime safety or capability policy. Content
+ADR 0012 defines the exact precedence policy. User-global, persona, and project
+content cannot override runtime safety or capability policy. Content
 read from files, web results, cluster resources, tool output, and artifacts is
 untrusted evidence by default, not a new instruction layer merely because it
 contains imperative text.

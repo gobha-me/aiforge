@@ -17,6 +17,8 @@
 #include <variant>
 #include <vector>
 
+#include <aiforge/instructions/editor.hpp>
+#include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
@@ -101,6 +103,39 @@ auto provenance() -> domain::RunProvenance {
               domain::ProvenanceDisposition::selected, std::nullopt}}}},
           {{"aiforge", "0.10.0"}},
           {}};
+}
+
+auto user_global_document(std::string text = "Global defaults.")
+    -> domain::UserGlobalInstructionDocument {
+  const auto prepared = instructions::prepare_user_global_instruction_write(
+      {std::nullopt, std::move(text), {}});
+  REQUIRE(prepared);
+  return *prepared;
+}
+
+auto add_user_global(backend::BackendRequest& value,
+                     const domain::UserGlobalInstructionDocument& document)
+    -> void {
+  value.context.entries.insert(
+      std::next(value.context.entries.begin()),
+      domain::ContextEntry{
+          make_id<domain::ContextEntryId>("user-global-context"),
+          domain::ContextEntryKind::instruction,
+          domain::InstructionLayer::user_global,
+          domain::Message{make_id<domain::MessageId>("user-global-message"),
+                          domain::Role::system,
+                          {domain::TextBlock{document.text}},
+                          std::nullopt},
+          {document.reference.source_id, document.reference.source_location,
+           document.reference.content_digest.algorithm + ":" +
+               document.reference.content_digest.value},
+          0,
+          1,
+          document.text.size()});
+  value.context.decisions.push_back(
+      {make_id<domain::ContextEntryId>("user-global-context"),
+       domain::ContextDecision::admitted, std::nullopt});
+  value.context.estimated_input_tokens += document.text.size();
 }
 
 template <typename Payload>
@@ -312,6 +347,130 @@ TEST_CASE("run kernel rejects persona provenance that does not match context",
   REQUIRE(duplicate_context.error().code ==
           runtime::RunKernelErrorCode::invalid_start);
   REQUIRE(kernel.event_log().events().empty());
+}
+
+TEST_CASE("run kernel binds user-global instructions to exact provenance",
+          "[runtime][instructions][provenance][failure]") {
+  testing::ScriptedBackend fake{{}};
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake};
+  const auto document = user_global_document();
+
+  SECTION("recorded reference without context is rejected") {
+    auto start = run_start();
+    start.provenance = provenance();
+    start.provenance->user_global_instruction = document.reference;
+    const auto result = kernel.start(std::move(start));
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().code == runtime::RunKernelErrorCode::invalid_start);
+    REQUIRE(kernel.event_log().events().empty());
+  }
+
+  SECTION("context without a recorded reference is rejected") {
+    auto start = run_start();
+    add_user_global(start.request, document);
+    const auto result = kernel.start(std::move(start));
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().code == runtime::RunKernelErrorCode::invalid_start);
+    REQUIRE(kernel.event_log().events().empty());
+  }
+
+  SECTION("a mismatched reference is rejected") {
+    auto start = run_start();
+    add_user_global(start.request, document);
+    start.provenance = provenance();
+    start.provenance->user_global_instruction = document.reference;
+    start.provenance->user_global_instruction->content_digest.value =
+        std::string(64, 'b');
+    const auto result = kernel.start(std::move(start));
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().code == runtime::RunKernelErrorCode::invalid_start);
+    REQUIRE(kernel.event_log().events().empty());
+  }
+
+  SECTION("claimed digest must hash the exact context text") {
+    auto start = run_start();
+    add_user_global(start.request, document);
+    start.provenance = provenance();
+    start.provenance->user_global_instruction = document.reference;
+    auto& entry = start.request.context.entries[1];
+    const auto forged = std::string(64, 'b');
+    start.provenance->user_global_instruction->content_digest.value = forged;
+    entry.provenance.digest = "sha256:" + forged;
+    const auto result = kernel.start(std::move(start));
+    REQUIRE_FALSE(result);
+    REQUIRE(result.error().code == runtime::RunKernelErrorCode::invalid_start);
+    REQUIRE(kernel.event_log().events().empty());
+  }
+}
+
+TEST_CASE("run kernel rejects user-global mutation on a continuation",
+          "[runtime][instructions][continuation][failure]") {
+  runtime::ToolRegistry registry;
+  REQUIRE(runtime::register_ask_user_tool(registry, true));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  const auto declarations = tools->declarations();
+  auto initial_request = request(declarations);
+  const auto document = user_global_document("Pinned for this run.");
+  add_user_global(initial_request, document);
+  testing::ScriptedBackend fake{{testing::ScriptedExchange{
+      initial_request,
+      testing::StreamScript{{
+          step(backend::ResponseStarted{"response"}),
+          step(backend::ToolCallDelta{
+              make_id<domain::InvocationId>("ask-call"), "ask_user",
+              R"({"questions":[{"id":"choice","prompt":"Choose","kind":"one","required":true,"minimum_selections":1,"maximum_selections":1,"options":[{"id":"yes","label":"Yes"}]}]})"}),
+          step(backend::ResponseFinished{domain::FinishReason::tool_call}),
+          testing::EndOfStream{},
+      }}}}};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            fake,
+                            &wake,
+                            {},
+                            {},
+                            std::move(*tools)};
+  auto start = run_start(initial_request);
+  start.provenance = provenance();
+  start.provenance->user_global_instruction = document.reference;
+  REQUIRE(kernel.start(std::move(start)));
+
+  const auto run = make_id<domain::RunId>("run");
+  for (int attempt = 0; attempt < 100 && !kernel.pending_question_input();
+       ++attempt) {
+    REQUIRE(kernel.drain());
+    if (!kernel.pending_question_input()) {
+      static_cast<void>(wake.wait_for_change(wake.count()));
+    }
+  }
+  const auto pending = kernel.pending_question_input();
+  REQUIRE(pending);
+  REQUIRE(kernel.answer_questions(
+      run, pending->invocation_id,
+      {{make_id<domain::QuestionId>("choice"), {"yes"}, std::nullopt}}));
+
+  auto continuation = request(declarations);
+  add_user_global(continuation,
+                  user_global_document("Changed during the same run."));
+  continuation.context.entries.push_back(domain::ContextEntry{
+      make_id<domain::ContextEntryId>("tool-result-context"),
+      domain::ContextEntryKind::tool_result,
+      std::nullopt,
+      domain::Message{make_id<domain::MessageId>("tool-result-message"),
+                      domain::Role::tool,
+                      {domain::TextBlock{"answer recorded"}},
+                      pending->invocation_id},
+      {make_id<domain::ContextSourceId>("tool-result-source"), std::nullopt,
+       std::nullopt},
+      0,
+      2,
+      2});
+  const auto continued = kernel.continue_run(run, std::move(continuation));
+  REQUIRE_FALSE(continued);
+  REQUIRE(continued.error().code ==
+          runtime::RunKernelErrorCode::continuation_not_ready);
+  REQUIRE(fake.recorded_requests().size() == 1);
+  REQUIRE(kernel.cancel_run(run, "test cleanup"));
 }
 
 TEST_CASE("premature backend EOF becomes a redacted failed run",

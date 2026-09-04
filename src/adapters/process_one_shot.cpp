@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <aiforge/adapters/filesystem_persona_source.hpp>
+#include <aiforge/adapters/filesystem_user_global_instruction_source.hpp>
 #include <aiforge/adapters/process_credentials.hpp>
 #include <aiforge/adapters/process_model_catalog.hpp>
 #include <aiforge/adapters/process_provenance.hpp>
@@ -256,6 +257,12 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
                                         : cli::CommandFailureKind::runtime,
                      generation_options.error());
     }
+    auto user_global_instructions_enabled =
+        config::resolve_user_global_instructions_enabled(*resolved);
+    if (!user_global_instructions_enabled) {
+      return failure(cli::CommandFailureKind::runtime,
+                     user_global_instructions_enabled.error().message);
+    }
     auto catalog = ProcessModelCatalog::create();
     if (!catalog)
       return failure(cli::CommandFailureKind::runtime, catalog.error().message);
@@ -307,6 +314,19 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
     std::optional<FilesystemPersonaSource> personas;
     if (persona_root) personas.emplace(std::move(*persona_root));
     auto* persona_source = personas ? &*personas : nullptr;
+    std::optional<FilesystemUserGlobalInstructionSource>
+        user_global_instruction_source;
+    if (*user_global_instructions_enabled) {
+      auto instruction_path = process_user_global_instruction_path();
+      if (!instruction_path) {
+        return failure(cli::CommandFailureKind::runtime,
+                       instruction_path.error().message);
+      }
+      user_global_instruction_source.emplace(std::move(*instruction_path));
+    }
+    auto* global_source = user_global_instruction_source
+                              ? &*user_global_instruction_source
+                              : nullptr;
     surfaces::OneShotRequest one_shot_request{
         std::string{request.prompt},
         std::move(*input),
@@ -332,10 +352,15 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
       repository_id = snapshot->root.repository_id;
     }
     if (session_mode == surfaces::OneShotRequest::SessionMode::ephemeral) {
+      surfaces::OneShotDependencies dependencies;
+      dependencies.user_global_instruction_source = global_source;
+      dependencies.user_global_instructions_enabled =
+          *user_global_instructions_enabled;
       surfaces::OneShotSurface surface{backend,
                                        (*catalog)->service(),
                                        {m_maximum_input_bytes, 4096},
-                                       persona_source};
+                                       persona_source,
+                                       std::move(dependencies)};
       result = surface.run(std::move(one_shot_request), output, error,
                            environment.stop_token);
     } else {
@@ -374,17 +399,19 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
         }
         tools = std::move(*snapshot);
       }
-      surfaces::OneShotSurface surface{backend,
-                                       (*catalog)->service(),
-                                       **store,
-                                       {m_maximum_input_bytes, 4096},
-                                       persona_source,
-                                       {std::move(tools),
-                                        {},
-                                        &memory_controller,
-                                        *memory_settings,
-                                        repository_id,
-                                        runtime_version()}};
+      surfaces::OneShotDependencies dependencies;
+      dependencies.tools = std::move(tools);
+      dependencies.memory_controller = &memory_controller;
+      dependencies.memory_settings = *memory_settings;
+      dependencies.repository_id = repository_id;
+      dependencies.runtime_version = runtime_version();
+      dependencies.user_global_instruction_source = global_source;
+      dependencies.user_global_instructions_enabled =
+          *user_global_instructions_enabled;
+      surfaces::OneShotSurface surface{
+          backend,        (*catalog)->service(),
+          **store,        {m_maximum_input_bytes, 4096},
+          persona_source, std::move(dependencies)};
       result = surface.run(std::move(one_shot_request), output, error,
                            environment.stop_token);
     }

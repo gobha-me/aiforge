@@ -1,8 +1,11 @@
+#include <aiforge/instructions/editor.hpp>
 #include <aiforge/runtime/ask_user_tool.hpp>
+#include <aiforge/runtime/tool_launch_policy.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
 #include <aiforge/testing/scripted_persona_editor.hpp>
 #include <aiforge/testing/scripted_persona_source.hpp>
 #include <aiforge/testing/scripted_tool_executor.hpp>
+#include <aiforge/testing/scripted_user_global_instruction_source.hpp>
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
@@ -162,6 +165,51 @@ class QuestionBackend final : public backend::Backend,
   bool tool_support{true};
 };
 
+class ApprovalStream final : public backend::BackendStream {
+ public:
+  auto next(std::stop_token)
+      -> std::expected<std::optional<backend::BackendEvent>,
+                       backend::BackendError> override {
+    switch (m_step++) {
+      case 0:
+        return backend::BackendEvent{
+            backend::ResponseStarted{"approval-response"}};
+      case 1:
+        return backend::BackendEvent{
+            backend::ToolCallDelta{make_id<domain::InvocationId>("write-call"),
+                                   "read_repository_file", "{}"}};
+      case 2:
+        return backend::BackendEvent{
+            backend::ResponseFinished{domain::FinishReason::tool_call}};
+      default: return std::optional<backend::BackendEvent>{};
+    }
+  }
+
+ private:
+  int m_step{};
+};
+
+class ApprovalBackend final : public backend::Backend,
+                              public backend::ModelContextProvider {
+ public:
+  auto lookup(const domain::ModelId& model_id, std::stop_token)
+      -> std::expected<backend::ModelContextInfo,
+                       backend::BackendError> override {
+    return backend::ModelContextInfo{
+        model_id, 100000, 4096, std::nullopt,
+        backend::ModelCapabilityMap{{"tools", true}}};
+  }
+
+  auto start(backend::BackendRequest request, std::stop_token)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    requests.push_back(std::move(request));
+    return std::make_unique<ApprovalStream>();
+  }
+
+  std::vector<backend::BackendRequest> requests;
+};
+
 auto usd_cost(const std::string& value) -> domain::ReportedCost {
   auto amount = domain::MonetaryAmount::create(
                     "USD", domain::DecimalAmount::from(value).value())
@@ -268,6 +316,19 @@ auto drain_to_question(surfaces::ChatSession& session)
   return *pending;
 }
 
+auto drain_to_approval(surfaces::ChatSession& session)
+    -> runtime::PendingToolApproval {
+  for (int attempt = 0; attempt < 200 && !session.pending_tool_approval();
+       ++attempt) {
+    const auto events = session.drain();
+    REQUIRE(events);
+    if (events->empty()) std::this_thread::sleep_for(2ms);
+  }
+  const auto pending = session.pending_tool_approval();
+  REQUIRE(pending);
+  return *pending;
+}
+
 auto text_messages(const backend::BackendRequest& request,
                    const domain::Role role) -> std::vector<std::string> {
   std::vector<std::string> result;
@@ -289,6 +350,14 @@ auto persona_document(std::string text = "Review carefully.")
            "personas/reviewer.md",
            {"sha256", std::string(64, 'a'), text.size()}},
           std::move(text)};
+}
+
+auto user_global_document(std::string text = "Use terse answers.")
+    -> domain::UserGlobalInstructionDocument {
+  const auto prepared = instructions::prepare_user_global_instruction_write(
+      {std::nullopt, std::move(text), {}});
+  REQUIRE(prepared);
+  return *prepared;
 }
 
 auto create_receipt(const persona::PersonaCreate& request)
@@ -365,6 +434,249 @@ TEST_CASE("interactive turns stream and reuse completed conversation context",
   REQUIRE(backend.requests[1].tools.empty());
   REQUIRE((*session)->submitted_prompts() ==
           std::vector<std::string>{"first\nline", "second"});
+}
+
+TEST_CASE("interactive global instruction loading fails before backend work",
+          "[chat][instructions][failure]") {
+  Backend backend;
+  testing::ScriptedUserGlobalInstructionSource failing{{
+      instructions::UserGlobalInstructionError{
+          instructions::UserGlobalInstructionErrorCode::io_failure,
+          "sanitized source failure", true},
+  }};
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.user_global_instruction_source = &failing;
+  dependencies.user_global_instructions_enabled = true;
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt,
+       domain::RunProvenance{"test",
+                             "test",
+                             std::nullopt,
+                             make_id<domain::ModelId>("model"),
+                             std::nullopt,
+                             {},
+                             {},
+                             {}}},
+      backend, backend, nullptr, nullptr, {}, {}, dependencies);
+  REQUIRE(session);
+  const auto failed = (*session)->submit("must not be sent");
+  REQUIRE_FALSE(failed);
+  REQUIRE(failed.error().code ==
+          surfaces::ChatSessionErrorCode::context_failed);
+  REQUIRE(backend.requests.empty());
+  REQUIRE((*session)->event_log().events().empty());
+
+  std::stop_source cancellation;
+  testing::ScriptedUserGlobalInstructionSource cancelled{{
+      std::optional<domain::UserGlobalInstructionDocument>{
+          user_global_document()},
+  }};
+  surfaces::ChatSessionDependencies cancelled_dependencies;
+  cancelled_dependencies.user_global_instruction_source = &cancelled;
+  cancelled_dependencies.user_global_instructions_enabled = true;
+  auto cancelled_session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt,
+       domain::RunProvenance{"test",
+                             "test",
+                             std::nullopt,
+                             make_id<domain::ModelId>("model"),
+                             std::nullopt,
+                             {},
+                             {},
+                             {}}},
+      backend, backend, nullptr, nullptr, cancellation.get_token(), {},
+      cancelled_dependencies);
+  REQUIRE(cancelled_session);
+  cancellation.request_stop();
+  const auto stopped = (*cancelled_session)->submit("also not sent");
+  REQUIRE_FALSE(stopped);
+  REQUIRE(stopped.error().code == surfaces::ChatSessionErrorCode::cancelled);
+  REQUIRE(cancelled.remaining_loads() == 1);
+  REQUIRE(backend.requests.empty());
+  REQUIRE((*cancelled_session)->event_log().events().empty());
+}
+
+TEST_CASE("interactive global instructions are optional ordered and attributed",
+          "[chat][instructions][provenance]") {
+  const auto document = user_global_document();
+
+  SECTION("enabled and present") {
+    Backend backend;
+    testing::ScriptedUserGlobalInstructionSource source{{
+        std::optional<domain::UserGlobalInstructionDocument>{document},
+    }};
+    surfaces::ChatSessionDependencies dependencies;
+    dependencies.user_global_instruction_source = &source;
+    dependencies.user_global_instructions_enabled = true;
+    auto session = surfaces::ChatSession::open(
+        {make_id<domain::ModelId>("model"),
+         surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt,
+         domain::RunProvenance{"test",
+                               "test",
+                               std::nullopt,
+                               make_id<domain::ModelId>("model"),
+                               std::nullopt,
+                               {},
+                               {},
+                               {}}},
+        backend, backend, nullptr, nullptr, {}, {}, dependencies);
+    REQUIRE(session);
+    const auto submitted = (*session)->submit("hello");
+    REQUIRE(submitted);
+    drain_to_end(**session);
+    REQUIRE(backend.requests.size() == 1);
+    const auto& entries = backend.requests.front().context.entries;
+    REQUIRE(entries.size() >= 3);
+    REQUIRE(entries[0].instruction_layer ==
+            domain::InstructionLayer::application_runtime);
+    REQUIRE(entries[1].instruction_layer ==
+            domain::InstructionLayer::user_global);
+    REQUIRE(
+        entries[1].message.content ==
+        std::vector<domain::ContentBlock>{domain::TextBlock{document.text}});
+    REQUIRE(entries[1].provenance.source_id == document.reference.source_id);
+    REQUIRE(entries[1].provenance.source_location ==
+            document.reference.source_location);
+    REQUIRE(entries[1].provenance.digest ==
+            "sha256:" + document.reference.content_digest.value);
+    const auto recorded = std::ranges::find_if(
+        submitted->committed_events, [](const domain::RunEvent& event) {
+          return std::holds_alternative<domain::RunProvenanceRecorded>(
+              event.payload);
+        });
+    REQUIRE(recorded != submitted->committed_events.end());
+    REQUIRE(std::get<domain::RunProvenanceRecorded>(recorded->payload)
+                .provenance.user_global_instruction == document.reference);
+  }
+
+  SECTION("enabled and missing") {
+    Backend backend;
+    testing::ScriptedUserGlobalInstructionSource source{{
+        std::optional<domain::UserGlobalInstructionDocument>{},
+    }};
+    surfaces::ChatSessionDependencies dependencies;
+    dependencies.user_global_instruction_source = &source;
+    dependencies.user_global_instructions_enabled = true;
+    auto session = surfaces::ChatSession::open(
+        {make_id<domain::ModelId>("model"),
+         surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt,
+         domain::RunProvenance{"test",
+                               "test",
+                               std::nullopt,
+                               make_id<domain::ModelId>("model"),
+                               std::nullopt,
+                               {},
+                               {},
+                               {}}},
+        backend, backend, nullptr, nullptr, {}, {}, dependencies);
+    REQUIRE(session);
+    REQUIRE((*session)->submit("hello"));
+    drain_to_end(**session);
+    REQUIRE(std::ranges::none_of(backend.requests.front().context.entries,
+                                 [](const auto& entry) {
+                                   return entry.instruction_layer ==
+                                          domain::InstructionLayer::user_global;
+                                 }));
+  }
+
+  SECTION("disabled does not consult the source") {
+    Backend backend;
+    testing::ScriptedUserGlobalInstructionSource source{{
+        std::optional<domain::UserGlobalInstructionDocument>{document},
+    }};
+    surfaces::ChatSessionDependencies dependencies;
+    dependencies.user_global_instruction_source = &source;
+    dependencies.user_global_instructions_enabled = false;
+    auto session = surfaces::ChatSession::open(
+        {make_id<domain::ModelId>("model"),
+         surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt,
+         domain::RunProvenance{"test",
+                               "test",
+                               std::nullopt,
+                               make_id<domain::ModelId>("model"),
+                               std::nullopt,
+                               {},
+                               {},
+                               {}}},
+        backend, backend, nullptr, nullptr, {}, {}, dependencies);
+    REQUIRE(session);
+    REQUIRE((*session)->submit("hello"));
+    drain_to_end(**session);
+    REQUIRE(source.remaining_loads() == 1);
+    REQUIRE(std::ranges::none_of(backend.requests.front().context.entries,
+                                 [](const auto& entry) {
+                                   return entry.instruction_layer ==
+                                          domain::InstructionLayer::user_global;
+                                 }));
+  }
+}
+
+TEST_CASE("interactive continuations retain their run-start global snapshot",
+          "[chat][instructions][tools][continuation]") {
+  QuestionBackend backend;
+  runtime::ToolRegistry registry;
+  REQUIRE(runtime::register_ask_user_tool(registry, true));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  const auto original = user_global_document("Original run snapshot.");
+  const auto changed = user_global_document("Changed after run start.");
+  testing::ScriptedUserGlobalInstructionSource source{{
+      std::optional<domain::UserGlobalInstructionDocument>{original},
+      std::optional<domain::UserGlobalInstructionDocument>{changed},
+  }};
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.tools = std::move(*tools);
+  dependencies.user_global_instruction_source = &source;
+  dependencies.user_global_instructions_enabled = true;
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt,
+       domain::RunProvenance{"test",
+                             "test",
+                             std::nullopt,
+                             make_id<domain::ModelId>("model"),
+                             std::nullopt,
+                             {},
+                             {},
+                             {}}},
+      backend, backend, nullptr, nullptr, {}, {}, std::move(dependencies));
+  REQUIRE(session);
+
+  const auto first = (*session)->submit("ask first");
+  REQUIRE(first);
+  const auto pending = drain_to_question(**session);
+  REQUIRE(source.remaining_loads() == 1);
+  REQUIRE((*session)->answer_questions(
+      pending.run_id, pending.invocation_id,
+      {{make_id<domain::QuestionId>("format"), {"short"}, std::nullopt}}));
+  drain_to_end(**session);
+  REQUIRE(backend.requests.size() == 2);
+  REQUIRE(source.remaining_loads() == 1);
+  for (const auto& request : backend.requests) {
+    const auto global =
+        std::ranges::find_if(request.context.entries, [](const auto& entry) {
+          return entry.instruction_layer ==
+                 domain::InstructionLayer::user_global;
+        });
+    REQUIRE(global != request.context.entries.end());
+    REQUIRE(global->message.content == std::vector<domain::ContentBlock>{
+                                           domain::TextBlock{original.text}});
+  }
+
+  const auto second = (*session)->submit("new run");
+  REQUIRE(second);
+  drain_to_end(**session);
+  REQUIRE(backend.requests.size() == 3);
+  REQUIRE(source.remaining_loads() == 0);
+  const auto global = std::ranges::find_if(
+      backend.requests.back().context.entries, [](const auto& entry) {
+        return entry.instruction_layer == domain::InstructionLayer::user_global;
+      });
+  REQUIRE(global != backend.requests.back().context.entries.end());
+  REQUIRE(global->message.content ==
+          std::vector<domain::ContentBlock>{domain::TextBlock{changed.text}});
 }
 
 TEST_CASE("interactive turns preserve registered tool declarations",
@@ -521,6 +833,232 @@ TEST_CASE("durable ask_user continuation retains its originating tool subset",
   }
   SECTION("current model capability metadata cannot narrow the run") {
     run_case(false, false);
+  }
+}
+
+TEST_CASE("recovered questions require the exact run-start global snapshot",
+          "[chat][instructions][questions][storage][failure]") {
+  const auto original = user_global_document("Pinned before restart.");
+  const auto changed = user_global_document("Changed after restart.");
+  auto malformed = original;
+  malformed.text = "bad\x1btext";
+  auto bad_digest = original;
+  bad_digest.text.front() = 'X';
+
+  const auto run_case =
+      [&](std::vector<testing::UserGlobalInstructionLoadOutcome> outcomes,
+          const bool attach_source, const bool expect_success) {
+        QuestionBackend backend;
+        MemoryStore store;
+        runtime::ToolRegistry registry;
+        REQUIRE(runtime::register_ask_user_tool(registry, true));
+        auto tools = registry.snapshot();
+        REQUIRE(tools);
+        testing::ScriptedUserGlobalInstructionSource create_source{{
+            std::optional<domain::UserGlobalInstructionDocument>{original},
+        }};
+        surfaces::ChatSessionDependencies create_dependencies;
+        create_dependencies.tools = *tools;
+        create_dependencies.user_global_instruction_source = &create_source;
+        create_dependencies.user_global_instructions_enabled = true;
+        auto created = surfaces::ChatSession::open(
+            {make_id<domain::ModelId>("model"),
+             surfaces::ChatSessionOpen::Mode::create, std::nullopt,
+             domain::RunProvenance{"test",
+                                   "test",
+                                   std::nullopt,
+                                   make_id<domain::ModelId>("model"),
+                                   std::nullopt,
+                                   {},
+                                   {},
+                                   {}}},
+            backend, backend, &store, nullptr, {}, {}, create_dependencies);
+        REQUIRE(created);
+        const auto session_id = (*created)->session_id();
+        const auto submitted = (*created)->submit("ask before restart");
+        REQUIRE(submitted);
+        const auto pending = drain_to_question(**created);
+        created->reset();
+
+        testing::ScriptedUserGlobalInstructionSource resume_source{
+            std::move(outcomes)};
+        surfaces::ChatSessionDependencies resume_dependencies;
+        resume_dependencies.tools = std::move(*tools);
+        resume_dependencies.user_global_instruction_source =
+            attach_source ? &resume_source : nullptr;
+        resume_dependencies.user_global_instructions_enabled = true;
+        auto resumed = surfaces::ChatSession::open(
+            {make_id<domain::ModelId>("model"),
+             surfaces::ChatSessionOpen::Mode::resume, session_id},
+            backend, backend, &store, nullptr, {}, {},
+            std::move(resume_dependencies));
+        REQUIRE(resumed);
+        REQUIRE((*resumed)->pending_question_input());
+        const auto event_count = (*resumed)->event_log().events().size();
+        const auto answered = (*resumed)->answer_questions(
+            pending.run_id, pending.invocation_id,
+            {{make_id<domain::QuestionId>("format"), {"short"}, std::nullopt}});
+        if (expect_success) {
+          REQUIRE(answered);
+          REQUIRE(resume_source.remaining_loads() == 0);
+          drain_to_end(**resumed);
+          REQUIRE(backend.requests.size() == 2);
+          REQUIRE(resume_source.remaining_loads() == 0);
+          const auto global = std::ranges::find_if(
+              backend.requests.back().context.entries, [](const auto& entry) {
+                return entry.instruction_layer ==
+                       domain::InstructionLayer::user_global;
+              });
+          REQUIRE(global != backend.requests.back().context.entries.end());
+          REQUIRE(global->message.content ==
+                  std::vector<domain::ContentBlock>{
+                      domain::TextBlock{original.text}});
+        } else {
+          REQUIRE_FALSE(answered);
+          REQUIRE(answered.error().code ==
+                  surfaces::ChatSessionErrorCode::context_failed);
+          REQUIRE((*resumed)->event_log().events().size() == event_count);
+          REQUIRE((*resumed)->pending_question_input());
+          REQUIRE(backend.requests.size() == 1);
+          REQUIRE((*resumed)->cancel_active("discard stale recovered run"));
+          REQUIRE_FALSE((*resumed)->active());
+        }
+      };
+
+  SECTION("exact snapshot is loaded once and retained") {
+    run_case({std::optional<domain::UserGlobalInstructionDocument>{original}},
+             true, true);
+  }
+  SECTION("changed snapshot") {
+    run_case({std::optional<domain::UserGlobalInstructionDocument>{changed}},
+             true, false);
+  }
+  SECTION("removed snapshot") {
+    run_case({std::optional<domain::UserGlobalInstructionDocument>{}}, true,
+             false);
+  }
+  SECTION("malformed snapshot") {
+    run_case({std::optional<domain::UserGlobalInstructionDocument>{malformed}},
+             true, false);
+  }
+  SECTION("content that does not match its claimed digest") {
+    run_case({std::optional<domain::UserGlobalInstructionDocument>{bad_digest}},
+             true, false);
+  }
+  SECTION("unavailable snapshot") {
+    run_case({instructions::UserGlobalInstructionError{
+                 instructions::UserGlobalInstructionErrorCode::io_failure,
+                 "sanitized unavailable source", true}},
+             true, false);
+  }
+  SECTION("missing source capability") {
+    run_case({}, false, false);
+  }
+}
+
+TEST_CASE("recovered approvals cannot bypass global snapshot validation",
+          "[chat][instructions][approval][storage][failure]") {
+  const auto original = user_global_document("Pinned approval snapshot.");
+  const auto changed = user_global_document("Changed approval snapshot.");
+  const auto run_case =
+      [&](const domain::UserGlobalInstructionDocument& current,
+          const bool expect_success) {
+        ApprovalBackend backend;
+        MemoryStore store;
+        const backend::ToolDeclaration declaration{
+            "read_repository_file",
+            "Read a repository file",
+            {"application/schema+json", R"({"type":"object"})"},
+            {domain::Effect::read},
+            {{domain::Effect::read, "filesystem.root", "/repo"}}};
+        auto executor = std::make_shared<testing::ScriptedToolExecutor>(
+            std::vector<testing::ScriptedToolExchange>{});
+        runtime::ToolRegistry registry;
+        REQUIRE(registry.register_tool(
+            declaration, executor, {},
+            runtime::ToolExecutorContract{"test.read_repository_file", "1"},
+            runtime::ToolCategory::repository));
+        auto tools = registry.snapshot();
+        REQUIRE(tools);
+        const auto permission =
+            make_id<domain::PermissionProfileId>("tools-medium-prompt-v1");
+        auto policy = runtime::make_tool_launch_policy(
+            *tools, {permission,
+                     runtime::RestrictionLevel::medium,
+                     runtime::ApprovalMode::prompt,
+                     {}});
+        REQUIRE(policy);
+        testing::ScriptedUserGlobalInstructionSource create_source{{
+            std::optional<domain::UserGlobalInstructionDocument>{original},
+        }};
+        surfaces::ChatSessionDependencies create_dependencies;
+        create_dependencies.tools = *tools;
+        create_dependencies.tool_policy = *policy;
+        create_dependencies.permission_profile_id = permission;
+        create_dependencies.user_global_instruction_source = &create_source;
+        create_dependencies.user_global_instructions_enabled = true;
+        auto created = surfaces::ChatSession::open(
+            {make_id<domain::ModelId>("model"),
+             surfaces::ChatSessionOpen::Mode::create, std::nullopt,
+             domain::RunProvenance{"test",
+                                   "test",
+                                   std::nullopt,
+                                   make_id<domain::ModelId>("model"),
+                                   std::nullopt,
+                                   {},
+                                   {},
+                                   {}}},
+            backend, backend, &store, nullptr, {}, {}, create_dependencies);
+        REQUIRE(created);
+        REQUIRE((*created)->select_tool_profile(
+            make_id<domain::ToolProfileId>("repository-read")));
+        const auto submitted = (*created)->submit("request a write");
+        REQUIRE(submitted);
+        const auto pending = drain_to_approval(**created);
+        const auto session_id = (*created)->session_id();
+        created->reset();
+
+        testing::ScriptedUserGlobalInstructionSource resume_source{{
+            std::optional<domain::UserGlobalInstructionDocument>{current},
+        }};
+        surfaces::ChatSessionDependencies resume_dependencies;
+        resume_dependencies.tools = *tools;
+        resume_dependencies.tool_policy = *policy;
+        resume_dependencies.permission_profile_id = permission;
+        resume_dependencies.user_global_instruction_source = &resume_source;
+        resume_dependencies.user_global_instructions_enabled = true;
+        auto resumed = surfaces::ChatSession::open(
+            {make_id<domain::ModelId>("model"),
+             surfaces::ChatSessionOpen::Mode::resume, session_id},
+            backend, backend, &store, nullptr, {}, {},
+            std::move(resume_dependencies));
+        REQUIRE(resumed);
+        REQUIRE((*resumed)->pending_tool_approval());
+        const auto event_count = (*resumed)->event_log().events().size();
+        const auto decided = (*resumed)->decide_tool_approval(
+            submitted->run_id, pending.invocation_id,
+            {domain::ApprovalDecision::denied, {}});
+        if (expect_success) {
+          REQUIRE(decided);
+          REQUIRE_FALSE((*resumed)->pending_tool_approval());
+          REQUIRE(resume_source.remaining_loads() == 0);
+        } else {
+          REQUIRE_FALSE(decided);
+          REQUIRE(decided.error().code ==
+                  surfaces::ChatSessionErrorCode::context_failed);
+          REQUIRE((*resumed)->event_log().events().size() == event_count);
+          REQUIRE((*resumed)->pending_tool_approval());
+          REQUIRE((*resumed)->cancel_active("discard stale approval"));
+          REQUIRE_FALSE((*resumed)->active());
+        }
+        REQUIRE(executor->recorded_invocations().empty());
+      };
+
+  SECTION("exact snapshot permits a decision") {
+    run_case(original, true);
+  }
+  SECTION("changed snapshot blocks a decision") {
+    run_case(changed, false);
   }
 }
 

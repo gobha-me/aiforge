@@ -1183,6 +1183,59 @@ TEST_CASE("effective request option provenance round-trips strictly and reads "
   REQUIRE(wrong_shape.error().code == storage::SessionStoreErrorCode::corrupt);
 }
 
+TEST_CASE("user-global instruction provenance round-trips and reads legacy "
+          "records",
+          "[storage][sqlite][codec][provenance][instructions][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "session", 100);
+  auto provenance = run_provenance();
+  provenance.user_global_instruction = domain::UserGlobalInstructionReference{
+      make_id<domain::ContextSourceId>(
+          std::string{domain::user_global_instruction_source_identity}),
+      std::string{domain::user_global_instruction_source_location},
+      {"sha256", std::string(64, 'a'), 6}};
+  REQUIRE(store->append_events(
+      session, std::array{event(1, started(), "start"),
+                          event(2, domain::RunProvenanceRecorded{provenance},
+                                "instructions")}));
+
+  auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  const auto* recorded =
+      std::get_if<domain::RunProvenanceRecorded>(&replayed->at(1).payload);
+  REQUIRE(recorded != nullptr);
+  REQUIRE(recorded->provenance.user_global_instruction ==
+          provenance.user_global_instruction);
+  store.reset();
+
+  execute_sql(path, "UPDATE events SET payload_json=json_remove(payload_json,"
+                    "'$.provenance.user_global_instruction') WHERE "
+                    "event_id='instructions'");
+  store = open_store(path);
+  replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  recorded =
+      std::get_if<domain::RunProvenanceRecorded>(&replayed->at(1).payload);
+  REQUIRE(recorded != nullptr);
+  REQUIRE_FALSE(recorded->provenance.user_global_instruction);
+  store.reset();
+
+  execute_sql(
+      path,
+      "UPDATE events SET payload_json=json_set(payload_json,"
+      "'$.provenance.user_global_instruction',json_object('source_id',"
+      "'wrong','source_location','instructions/global.md','content_digest',"
+      "json_object('algorithm','sha256','value','" +
+          std::string(64, 'a') +
+          "','byte_size',6))) WHERE event_id='instructions'");
+  store = open_store(path);
+  replayed = store->replay_events(session);
+  REQUIRE_FALSE(replayed);
+  REQUIRE(replayed.error().code == storage::SessionStoreErrorCode::corrupt);
+}
+
 TEST_CASE("tool profile provenance round-trips strictly and reads legacy "
           "records",
           "[storage][sqlite][codec][provenance][tool-profile]") {

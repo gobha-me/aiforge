@@ -722,6 +722,60 @@ using WorkerUpdate =
       payload);
 }
 
+[[nodiscard]] auto user_global_context_matches(
+    const domain::ConstructedContext& context,
+    const std::optional<domain::UserGlobalInstructionReference>& expected)
+    -> bool {
+  const auto count = std::ranges::count_if(
+      context.entries, [](const domain::ContextEntry& entry) {
+        return entry.kind == domain::ContextEntryKind::instruction &&
+               entry.instruction_layer == domain::InstructionLayer::user_global;
+      });
+  if (!expected) return count == 0;
+  if (count != 1 ||
+      !domain::validate_user_global_instruction_reference(*expected)) {
+    return false;
+  }
+  const auto found = std::ranges::find_if(
+      context.entries, [](const domain::ContextEntry& entry) {
+        return entry.kind == domain::ContextEntryKind::instruction &&
+               entry.instruction_layer == domain::InstructionLayer::user_global;
+      });
+  if (found == context.entries.end() ||
+      found->provenance.source_id != expected->source_id ||
+      found->provenance.source_location != expected->source_location ||
+      found->provenance.digest != expected->content_digest.algorithm + ":" +
+                                      expected->content_digest.value ||
+      found->message.role != domain::Role::system ||
+      found->message.invocation_id || !found->message.tool_calls.empty() ||
+      found->message.content.size() != 1) {
+    return false;
+  }
+  const auto* text =
+      std::get_if<domain::TextBlock>(found->message.content.data());
+  if (text == nullptr ||
+      text->text.size() != expected->content_digest.byte_size) {
+    return false;
+  }
+  detail::Sha256 digest;
+  digest.update(std::as_bytes(std::span{text->text.data(), text->text.size()}));
+  return expected->content_digest.algorithm == "sha256" &&
+         digest.finish() == expected->content_digest.value;
+}
+
+[[nodiscard]] auto recorded_user_global_instruction(
+    const domain::SessionEventLog& event_log, const domain::RunId& run_id)
+    -> std::optional<domain::UserGlobalInstructionReference> {
+  for (const auto& event : event_log.events()) {
+    if (event.metadata.run_id != run_id) continue;
+    if (const auto* recorded =
+            std::get_if<domain::RunProvenanceRecorded>(&event.payload)) {
+      return recorded->provenance.user_global_instruction;
+    }
+  }
+  return std::nullopt;
+}
+
 } // namespace
 
 struct RunKernel::Impl {
@@ -3035,6 +3089,17 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
           return entry.kind == domain::ContextEntryKind::instruction &&
                  entry.instruction_layer == domain::InstructionLayer::persona;
         });
+    const auto user_global_reference =
+        start.provenance
+            ? start.provenance->user_global_instruction
+            : std::optional<domain::UserGlobalInstructionReference>{};
+    if (!user_global_context_matches(start.request.context,
+                                     user_global_reference)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "run user-global instruction provenance does not match constructed "
+          "context"));
+    }
     if (!start.persona_selection) {
       if (start.attributes.persona_id || persona_entries != 0) {
         return std::unexpected(
@@ -4438,6 +4503,9 @@ auto RunKernel::continue_run(
                      Impl::InvocationState::terminal;
             }) ||
         request.tools != active.tools.declarations() ||
+        !user_global_context_matches(
+            request.context,
+            recorded_user_global_instruction(m_impl->event_log, run_id)) ||
         (pricing_observation &&
          (pricing_observation->model_id != request.model_id ||
           !domain::validate_pricing_observation(*pricing_observation)))) {

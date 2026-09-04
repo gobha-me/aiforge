@@ -16,9 +16,11 @@
 #include <variant>
 #include <vector>
 
+#include <aiforge/instructions/editor.hpp>
 #include <aiforge/surfaces/one_shot.hpp>
 #include <aiforge/testing/scripted_persona_source.hpp>
 #include <aiforge/testing/scripted_tool_executor.hpp>
+#include <aiforge/testing/scripted_user_global_instruction_source.hpp>
 
 namespace {
 
@@ -221,6 +223,14 @@ auto persona_document(std::string text = "Review carefully.")
            "personas/reviewer.md",
            {"sha256", std::string(64, 'a'), text.size()}},
           std::move(text)};
+}
+
+auto user_global_document(std::string text = "Persistent private defaults.")
+    -> domain::UserGlobalInstructionDocument {
+  const auto prepared = instructions::prepare_user_global_instruction_write(
+      {std::nullopt, std::move(text), {}});
+  REQUIRE(prepared);
+  return *prepared;
 }
 
 class MemoryStore final : public storage::SessionStore {
@@ -914,6 +924,166 @@ TEST_CASE("one-shot spend ceiling allows crossing then blocks durable resume",
   REQUIRE_FALSE(widened);
   REQUIRE(widened.error().code == surfaces::OneShotErrorCode::invalid_input);
   REQUIRE(backend.captured.size() == 1);
+}
+
+TEST_CASE("one-shot global instructions fail before backend transport",
+          "[one-shot][instructions][failure]") {
+  FakeModels models;
+  ConversationBackend backend;
+  std::ostringstream output;
+  std::ostringstream error;
+
+  testing::ScriptedUserGlobalInstructionSource failing{{
+      instructions::UserGlobalInstructionError{
+          instructions::UserGlobalInstructionErrorCode::io_failure,
+          "sanitized source failure", true},
+  }};
+  surfaces::OneShotDependencies dependencies;
+  dependencies.user_global_instruction_source = &failing;
+  dependencies.user_global_instructions_enabled = true;
+  surfaces::OneShotSurface surface{backend, models, {}, nullptr, dependencies};
+  const auto failed = surface.run(
+      {"must not be sent", std::nullopt, make_id<domain::ModelId>("model"),
+       surfaces::OneShotRequest::SessionMode::ephemeral, std::nullopt,
+       run_provenance()},
+      output, error);
+  REQUIRE_FALSE(failed);
+  REQUIRE(failed.error().code == surfaces::OneShotErrorCode::context_failed);
+  REQUIRE(backend.captured.empty());
+
+  std::stop_source cancellation;
+  cancellation.request_stop();
+  testing::ScriptedUserGlobalInstructionSource cancelled{{
+      std::optional<domain::UserGlobalInstructionDocument>{
+          user_global_document()},
+  }};
+  surfaces::OneShotDependencies cancelled_dependencies;
+  cancelled_dependencies.user_global_instruction_source = &cancelled;
+  cancelled_dependencies.user_global_instructions_enabled = true;
+  surfaces::OneShotSurface cancelled_surface{
+      backend, models, {}, nullptr, cancelled_dependencies};
+  const auto stopped = cancelled_surface.run(
+      {"also not sent", std::nullopt, make_id<domain::ModelId>("model"),
+       surfaces::OneShotRequest::SessionMode::ephemeral, std::nullopt,
+       run_provenance()},
+      output, error, cancellation.get_token());
+  REQUIRE_FALSE(stopped);
+  REQUIRE(stopped.error().code == surfaces::OneShotErrorCode::cancelled);
+  REQUIRE(cancelled.remaining_loads() == 1);
+  REQUIRE(backend.captured.empty());
+}
+
+TEST_CASE("one-shot global instructions have parity without durable text",
+          "[one-shot][instructions][provenance]") {
+  FakeModels models;
+  ConversationBackend backend;
+  MemoryStore store;
+  const auto document =
+      user_global_document("private-global-marker-never-durable");
+  testing::ScriptedUserGlobalInstructionSource source{{
+      std::optional<domain::UserGlobalInstructionDocument>{document},
+  }};
+  surfaces::OneShotDependencies dependencies;
+  dependencies.user_global_instruction_source = &source;
+  dependencies.user_global_instructions_enabled = true;
+  surfaces::OneShotSurface surface{backend, models,  store,
+                                   {},      nullptr, dependencies};
+  std::ostringstream output;
+  std::ostringstream error;
+  const auto result =
+      surface.run({"hello", std::nullopt, make_id<domain::ModelId>("model"),
+                   surfaces::OneShotRequest::SessionMode::create, std::nullopt,
+                   run_provenance()},
+                  output, error);
+  REQUIRE(result);
+  REQUIRE(backend.captured.size() == 1);
+  const auto global = std::ranges::find_if(
+      backend.captured.front().context.entries, [](const auto& entry) {
+        return entry.instruction_layer == domain::InstructionLayer::user_global;
+      });
+  REQUIRE(global != backend.captured.front().context.entries.end());
+  REQUIRE(global->message.content ==
+          std::vector<domain::ContentBlock>{domain::TextBlock{document.text}});
+  REQUIRE(global->provenance.source_location ==
+          document.reference.source_location);
+  REQUIRE(global->provenance.digest ==
+          "sha256:" + document.reference.content_digest.value);
+
+  const auto& persisted = store.histories[result->session_id];
+  const auto recorded =
+      std::ranges::find_if(persisted, [](const domain::RunEvent& event) {
+        return std::holds_alternative<domain::RunProvenanceRecorded>(
+            event.payload);
+      });
+  REQUIRE(recorded != persisted.end());
+  REQUIRE(std::get<domain::RunProvenanceRecorded>(recorded->payload)
+              .provenance.user_global_instruction == document.reference);
+  bool leaked{};
+  for (const auto& event : persisted) {
+    std::visit(
+        [&](const auto& payload) {
+          if constexpr (requires { payload.message.content; }) {
+            leaked =
+                leaked ||
+                std::ranges::any_of(
+                    payload.message.content,
+                    [&](const domain::ContentBlock& block) {
+                      const auto* text = std::get_if<domain::TextBlock>(&block);
+                      return text != nullptr && text->text == document.text;
+                    });
+          }
+          if constexpr (requires { payload.delta; }) {
+            const auto* text = std::get_if<domain::TextBlock>(&payload.delta);
+            leaked = leaked || (text != nullptr && text->text == document.text);
+          }
+        },
+        event.payload);
+  }
+  REQUIRE_FALSE(leaked);
+  REQUIRE(output.str().find(document.text) == std::string::npos);
+  REQUIRE(error.str().find(document.text) == std::string::npos);
+}
+
+TEST_CASE("one-shot disabled and missing global instructions contribute none",
+          "[one-shot][instructions]") {
+  const auto run_case = [](const bool enabled) {
+    FakeModels models;
+    ConversationBackend backend;
+    const auto document = user_global_document();
+    testing::ScriptedUserGlobalInstructionSource source{
+        enabled ? std::vector<
+                      testing::UserGlobalInstructionLoadOutcome>{std::optional<
+                      domain::UserGlobalInstructionDocument>{}}
+                : std::vector<testing::UserGlobalInstructionLoadOutcome>{
+                      std::optional<domain::UserGlobalInstructionDocument>{
+                          document}}};
+    surfaces::OneShotDependencies dependencies;
+    dependencies.user_global_instruction_source = &source;
+    dependencies.user_global_instructions_enabled = enabled;
+    surfaces::OneShotSurface surface{
+        backend, models, {}, nullptr, dependencies};
+    std::ostringstream output;
+    std::ostringstream error;
+    const auto result =
+        surface.run({"hello", std::nullopt, make_id<domain::ModelId>("model"),
+                     surfaces::OneShotRequest::SessionMode::ephemeral,
+                     std::nullopt, run_provenance()},
+                    output, error);
+    REQUIRE(result);
+    REQUIRE(backend.captured.size() == 1);
+    REQUIRE(std::ranges::none_of(backend.captured.front().context.entries,
+                                 [](const auto& entry) {
+                                   return entry.instruction_layer ==
+                                          domain::InstructionLayer::user_global;
+                                 }));
+    REQUIRE(source.remaining_loads() == (enabled ? 0 : 1));
+  };
+  SECTION("missing") {
+    run_case(true);
+  }
+  SECTION("disabled") {
+    run_case(false);
+  }
 }
 
 TEST_CASE("one-shot personas are injected recorded and identity-checked",
