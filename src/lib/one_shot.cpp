@@ -881,6 +881,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                                 "one-shot tool history is invalid");
         }
         if (tool_messages->size() > appended_tool_messages) {
+          auto continuation_input = build_input;
           for (auto index = appended_tool_messages;
                index < tool_messages->size(); ++index) {
             const auto continuation_suffix = next_suffix();
@@ -893,7 +894,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
               return one_shot_error(OneShotErrorCode::context_failed,
                                     "tool result context could not be built");
             }
-            build_input.content.push_back(
+            continuation_input.content.push_back(
                 {*entry_id,
                  (*tool_messages)[index].role == domain::Role::assistant
                      ? domain::ContextContentKind::conversation
@@ -901,13 +902,13 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                  std::move((*tool_messages)[index]),
                  {*source_id, std::string{"one-shot:tool-continuation"},
                   std::nullopt},
-                 static_cast<std::uint64_t>(build_input.content.size()) + 1,
+                 static_cast<std::uint64_t>(continuation_input.content.size()) +
+                     1,
                  *estimated});
           }
-          appended_tool_messages = tool_messages->size();
 
           auto continuation_context =
-              runtime::ContextBuilder{}.build(build_input);
+              runtime::ContextBuilder{}.build(continuation_input);
           if (!continuation_context) {
             return one_shot_error(OneShotErrorCode::context_failed,
                                   "tool results exceed model context capacity");
@@ -941,6 +942,10 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                   runtime::RunKernelErrorCode::continuation_not_ready) {
             return one_shot_error(OneShotErrorCode::run_failed,
                                   "one-shot continuation failed");
+          }
+          if (continued) {
+            build_input = std::move(continuation_input);
+            appended_tool_messages = tool_messages->size();
           }
         }
       }

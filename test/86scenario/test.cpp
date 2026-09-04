@@ -810,6 +810,14 @@ class QuestionBackendState final {
         std::string_view{"continuation-end"},
     };
     std::unique_lock lock{m_mutex};
+    if (description == "interrupt-cancelled") {
+      if (!m_interrupt_wake_baseline || !m_condition.wait_for(lock, 1s, [&] {
+            return m_wakes > *m_interrupt_wake_baseline;
+          })) {
+        return std::unexpected("question cancellation update was not posted");
+      }
+      return {};
+    }
     if (!m_condition.wait_for(lock, 1s,
                               [&] { return m_waiting_calls > m_released; })) {
       return std::unexpected("question backend did not reach its boundary");
@@ -828,10 +836,11 @@ class QuestionBackendState final {
         })) {
       return std::unexpected("question backend did not acknowledge its step");
     }
-    if (wait_for_wake &&
+    if ((wait_for_wake || released == 4U) &&
         !m_condition.wait_for(lock, 1s, [&] { return m_wakes >= released; })) {
       return std::unexpected("question backend update was not posted");
     }
+    if (released == 4U) m_interrupt_wake_baseline = m_wakes;
     return {};
   }
 
@@ -856,6 +865,7 @@ class QuestionBackendState final {
   std::size_t m_released{};
   std::size_t m_wakes{};
   std::size_t m_ended_streams{};
+  std::optional<std::size_t> m_interrupt_wake_baseline;
   bool m_valid{true};
 };
 
@@ -1440,7 +1450,9 @@ auto question_scenario(const bool interrupt = false) -> testing::TuiScenario {
   value.initial_size = {100, 14, 1000, 280};
   value.backend_script = {"question-started", "question-call",
                           "question-finished", "question-end"};
-  if (!interrupt) {
+  if (interrupt) {
+    value.backend_script.push_back("interrupt-cancelled");
+  } else {
     value.backend_script.insert(value.backend_script.end(),
                                 {"continuation-started", "continuation-delta",
                                  "continuation-finished", "continuation-end"});
@@ -1460,6 +1472,8 @@ auto question_scenario(const bool interrupt = false) -> testing::TuiScenario {
     value.steps.push_back({6, testing::TuiScenarioPost{termforge::KeyEvent{
                                   termforge::Key::Char, U'c', true, false,
                                   false, termforge::KeyAction::Press}}});
+    value.steps.push_back({7, testing::TuiScenarioRelease{
+                                  testing::TuiScenarioProducer::backend}});
     value.steps.push_back(
         {8, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}});
     value.steps.push_back({8, enter});
