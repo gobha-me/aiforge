@@ -48,9 +48,10 @@ redirect, header-injection, multipart-metadata, and receive-time response-size
 guards. RasterForge v0.5.0 supplies
 bounded static PNG, JPEG, and WebP validation for generated-image artifacts. It
 is active with the process adapters through `${PROJECT_NAME}_DEPS`.
-Top-level Linux builds also enable the private RtAudio 6.0.1 ALSA playback
-adapter by default. Set `aiforge_AUDIO_PLAYBACK=OFF` for a device-free build;
-core and consumed subdirectory builds remain device-dependency free by default.
+Top-level Linux builds also enable the private RtAudio 6.0.1 ALSA playback and
+capture adapters by default. Set `aiforge_AUDIO_PLAYBACK=OFF` and
+`aiforge_AUDIO_CAPTURE=OFF` for a device-free build; core and consumed
+subdirectory builds remain device-dependency free by default.
 
 Durable session storage uses SQLite 3 behind a neutral storage port. CMake
 prefers an installed SQLite 3.45.1 or newer and otherwise builds the pinned
@@ -113,6 +114,10 @@ export VENICE_API_KEY=your-key      # takes precedence over the stored key
   --artifact audio-artifact-id --output copy.wav
 ./build/src/bin/aiforge audio play --session audio-session-id \
   --artifact audio-artifact-id
+./build/src/bin/aiforge audio capture --sample-rate 48000 --channels 1 \
+  --frames 240000
+./build/src/bin/aiforge audio capture --sample-rate 48000 --channels 2 \
+  --frames 240000 --output recording.wav
 ./build/src/bin/aiforge                 # interactive Chat
 ./build/src/bin/aiforge --continue      # interactive latest session
 printf '%s\n' '{"schema_version":1,"request_id":"inspect-1","operation":"inspect"}' \
@@ -150,6 +155,15 @@ never model-callable, and session replay never opens an audio device. Missing
 hardware, permission failure, or unsupported audio leaves the durable artifact
 available for export. See
 [`ADR 0014`](docs/adr/0014-bounded-pcm-audio-device-boundary.md).
+
+Local microphone capture is likewise an explicit Linux-only command. The
+invocation itself authorizes device access and stderr shows its active
+open/start/stream/stop/close lifecycle. Mono or stereo signed-16 capture is
+bounded by the exact sample rate and frame count. By default the samples are
+discarded after stdout reports aggregate frame, callback, and overrun counts;
+`--output` separately authorizes exclusive creation of an owner-only PCM16 WAV.
+Captured samples and device identity never enter a session, event, provider
+request, log, or diagnostic, and replay never opens the microphone.
 
 ## Run kernel
 

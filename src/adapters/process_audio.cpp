@@ -28,8 +28,15 @@
 #include <aiforge/surfaces/audio.hpp>
 
 #ifdef AIFORGE_HAS_RTAUDIO_PLAYBACK
-#include "playback_device.hpp"
 #include "rtaudio_playback.hpp"
+#endif
+#ifdef AIFORGE_HAS_RTAUDIO_CAPTURE
+#include "capture_device.hpp"
+#include "rtaudio_capture.hpp"
+#endif
+#if defined(AIFORGE_HAS_RTAUDIO_PLAYBACK) ||                                   \
+    defined(AIFORGE_HAS_RTAUDIO_CAPTURE)
+#include "audio_device_gate.hpp"
 #endif
 
 #ifndef _WIN32
@@ -251,12 +258,12 @@ class Descriptor final {
 #endif
 }
 
-[[nodiscard]] auto export_bytes(const storage::ArtifactRead& artifact,
+[[nodiscard]] auto export_bytes(const std::span<const std::byte> content,
                                 const std::filesystem::path& path,
                                 const std::stop_token stop_token)
     -> std::expected<void, cli::CommandFailure> {
 #ifdef _WIN32
-  static_cast<void>(artifact);
+  static_cast<void>(content);
   static_cast<void>(path);
   static_cast<void>(stop_token);
   return failure(cli::CommandFailureKind::runtime,
@@ -271,14 +278,13 @@ class Descriptor final {
                    errno == EEXIST ? "output path already exists"
                                    : "output file could not be created");
   std::size_t offset{};
-  while (offset < artifact.content.size()) {
+  while (offset < content.size()) {
     if (stop_token.stop_requested()) {
       static_cast<void>(::unlink(path.c_str()));
       return failure(cli::CommandFailureKind::cancelled, "export cancelled");
     }
-    const auto count =
-        ::write(descriptor.get(), artifact.content.data() + offset,
-                artifact.content.size() - offset);
+    const auto count = ::write(descriptor.get(), content.data() + offset,
+                               content.size() - offset);
     if (count < 0) {
       if (errno == EINTR) continue;
       static_cast<void>(::unlink(path.c_str()));
@@ -391,6 +397,17 @@ class Descriptor final {
   return {cli::CommandFailureKind::runtime, error.message};
 }
 
+[[nodiscard]] auto capture_failure(const audio::CaptureError& error)
+    -> cli::CommandFailure {
+  if (error.code == audio::CaptureErrorCode::cancelled)
+    return {cli::CommandFailureKind::cancelled, error.message};
+  if (error.code == audio::CaptureErrorCode::invalid_format ||
+      error.code == audio::CaptureErrorCode::invalid_request ||
+      error.code == audio::CaptureErrorCode::too_large)
+    return {cli::CommandFailureKind::usage, error.message};
+  return {cli::CommandFailureKind::runtime, error.message};
+}
+
 [[nodiscard]] auto stage_name(const audio::PlaybackStage stage)
     -> std::string_view {
   switch (stage) {
@@ -421,11 +438,52 @@ class ProcessPlaybackObserver final : public audio::PlaybackObserver {
   std::ostream& m_error;
 };
 
+[[nodiscard]] auto stage_name(const audio::CaptureStage stage)
+    -> std::string_view {
+  switch (stage) {
+    case audio::CaptureStage::open: return "opening";
+    case audio::CaptureStage::start: return "starting";
+    case audio::CaptureStage::stream: return "active";
+    case audio::CaptureStage::stop: return "stopping";
+    case audio::CaptureStage::close: return "closing";
+  }
+  return "unknown";
+}
+
+class ProcessCaptureObserver final : public audio::CaptureObserver {
+ public:
+  explicit ProcessCaptureObserver(std::ostream& error) : m_error{error} {}
+
+  [[nodiscard]] auto stage_changed(const audio::CaptureStage stage) noexcept
+      -> bool override {
+    try {
+      m_error << "aiforge: capture=" << stage_name(stage) << '\n';
+      return static_cast<bool>(m_error);
+    } catch (...) {
+      return false;
+    }
+  }
+
+ private:
+  std::ostream& m_error;
+};
+
+#if defined(AIFORGE_HAS_RTAUDIO_PLAYBACK) ||                                   \
+    defined(AIFORGE_HAS_RTAUDIO_CAPTURE)
+[[nodiscard]] auto production_audio_device_gate()
+    -> std::shared_ptr<AudioDeviceGate> {
+  static const auto gate = std::make_shared<AudioDeviceGate>();
+  return gate;
+}
+#endif
+
 #ifdef AIFORGE_HAS_RTAUDIO_PLAYBACK
 class ProcessPlaybackPort final : public audio::PlaybackPort {
  public:
-  explicit ProcessPlaybackPort(std::unique_ptr<RtAudioNative> native)
-      : m_device{std::move(native)}, m_controller{m_gate, m_device} {}
+  ProcessPlaybackPort(std::shared_ptr<AudioDeviceGate> gate,
+                      std::unique_ptr<RtAudioNative> native)
+      : m_gate{std::move(gate)}, m_device{std::move(native)},
+        m_controller{*m_gate, m_device} {}
 
   [[nodiscard]] auto play(audio::Signed16Buffer buffer,
                           const std::stop_token stop_token,
@@ -437,7 +495,7 @@ class ProcessPlaybackPort final : public audio::PlaybackPort {
  private:
   // The gate owns quarantined callbacks and is deliberately destroyed after
   // the device/native state that may still retain their addresses.
-  AudioDeviceGate m_gate;
+  std::shared_ptr<AudioDeviceGate> m_gate;
   RtAudioPlaybackDevice m_device;
   PlaybackController m_controller;
 };
@@ -455,7 +513,8 @@ class ProcessPlaybackPort final : public audio::PlaybackPort {
       return failure(cli::CommandFailureKind::runtime,
                      "audio playback is unavailable");
     try {
-      return std::make_shared<ProcessPlaybackPort>(std::move(*native));
+      return std::make_shared<ProcessPlaybackPort>(
+          production_audio_device_gate(), std::move(*native));
     } catch (...) {
       return failure(cli::CommandFailureKind::runtime,
                      "audio playback could not be initialized");
@@ -468,11 +527,58 @@ class ProcessPlaybackPort final : public audio::PlaybackPort {
 #endif
 }
 
+[[nodiscard]] auto production_capture_port()
+    -> std::expected<std::shared_ptr<audio::CapturePort>, cli::CommandFailure> {
+#ifdef AIFORGE_HAS_RTAUDIO_CAPTURE
+  class ProcessCapturePort final : public audio::CapturePort {
+   public:
+    ProcessCapturePort(std::shared_ptr<AudioDeviceGate> gate,
+                       std::unique_ptr<RtAudioCaptureNative> native)
+        : m_gate{std::move(gate)}, m_device{std::move(native)},
+          m_controller{*m_gate, m_device} {}
+
+    [[nodiscard]] auto capture(audio::CaptureRequest request,
+                               const std::stop_token stop_token,
+                               audio::CaptureObserver* observer) noexcept
+        -> std::expected<audio::CaptureResult, audio::CaptureError> override {
+      return m_controller.capture(request, stop_token, observer);
+    }
+
+   private:
+    std::shared_ptr<AudioDeviceGate> m_gate;
+    RtAudioCaptureDevice m_device;
+    CaptureController m_controller;
+  };
+  static const auto service =
+      []() -> std::expected<std::shared_ptr<audio::CapturePort>,
+                            cli::CommandFailure> {
+    auto native = make_rtaudio_capture_native();
+    if (!native)
+      return failure(cli::CommandFailureKind::runtime,
+                     "audio capture is unavailable");
+    try {
+      return std::make_shared<ProcessCapturePort>(
+          production_audio_device_gate(), std::move(*native));
+    } catch (...) {
+      return failure(cli::CommandFailureKind::runtime,
+                     "audio capture could not be initialized");
+    }
+  }();
+  return service;
+#else
+  return failure(cli::CommandFailureKind::runtime,
+                 "audio capture is unavailable in this build");
+#endif
+}
+
 } // namespace
 
-ProcessAudioCommand::ProcessAudioCommand(PlaybackFactory playback_factory)
-    : m_playback_factory{std::move(playback_factory)} {
+ProcessAudioCommand::ProcessAudioCommand(PlaybackFactory playback_factory,
+                                         CaptureFactory capture_factory)
+    : m_playback_factory{std::move(playback_factory)},
+      m_capture_factory{std::move(capture_factory)} {
   if (!m_playback_factory) m_playback_factory = production_playback_port;
+  if (!m_capture_factory) m_capture_factory = production_capture_port;
 }
 
 auto ProcessAudioCommand::synthesize(SynthesizeRequest request,
@@ -516,8 +622,8 @@ auto ProcessAudioCommand::synthesize(SynthesizeRequest request,
                                    environment.stop_token);
     if (!artifact) return std::unexpected(std::move(artifact.error()));
     if (request.output_path) {
-      auto exported =
-          export_bytes(*artifact, *request.output_path, environment.stop_token);
+      auto exported = export_bytes(artifact->content, *request.output_path,
+                                   environment.stop_token);
       if (!exported) return std::unexpected(std::move(exported.error()));
     }
     output << "session=" << result->session_id.value()
@@ -617,8 +723,8 @@ auto ProcessAudioCommand::export_artifact(ExportRequest request,
     auto artifact =
         read_validated(*stores->artifacts, *selected, environment.stop_token);
     if (!artifact) return std::unexpected(std::move(artifact.error()));
-    auto exported =
-        export_bytes(*artifact, request.output_path, environment.stop_token);
+    auto exported = export_bytes(artifact->content, request.output_path,
+                                 environment.stop_token);
     if (!exported) return std::unexpected(std::move(exported.error()));
     output << "session=" << request.session_id.value()
            << " artifact=" << selected->artifact_id.value()
@@ -674,6 +780,67 @@ auto ProcessAudioCommand::play(PlayRequest request,
   } catch (...) {
     return failure(cli::CommandFailureKind::runtime,
                    "audio playback command failed internally");
+  }
+}
+
+auto ProcessAudioCommand::capture(CaptureRequest request,
+                                  cli::CommandEnvironment& environment,
+                                  std::ostream& output, std::ostream& error)
+    -> std::expected<void, cli::CommandFailure> {
+  try {
+    if ((request.channels != 1 && request.channels != 2) ||
+        request.sample_rate < 8000 || request.sample_rate > 192000 ||
+        request.frames == 0)
+      return failure(cli::CommandFailureKind::usage,
+                     "audio capture request is invalid");
+    const auto bytes_per_frame =
+        static_cast<std::size_t>(request.channels) * sizeof(std::int16_t);
+    const auto maximum_payload = request.output_path
+                                     ? maximum_audio_bytes - std::size_t{44}
+                                     : maximum_audio_bytes;
+    if (request.frames > maximum_payload / bytes_per_frame)
+      return failure(cli::CommandFailureKind::usage,
+                     "audio capture exceeds its configured limits");
+    auto port = m_capture_factory();
+    if (!port) return std::unexpected(std::move(port.error()));
+    if (*port == nullptr)
+      return failure(cli::CommandFailureKind::runtime,
+                     "audio capture could not be initialized");
+    ProcessCaptureObserver observer{error};
+    auto captured = (*port)->capture(
+        {{request.sample_rate, request.channels}, request.frames},
+        environment.stop_token, &observer);
+    if (!captured) return std::unexpected(capture_failure(captured.error()));
+    if (captured->buffer.format !=
+            audio::Signed16Format{request.sample_rate, request.channels} ||
+        captured->buffer.interleaved_samples.size() !=
+            request.frames * static_cast<std::size_t>(request.channels) ||
+        captured->stats.frames != request.frames ||
+        captured->stats.callbacks == 0 || captured->stats.overruns != 0 ||
+        captured->stats.late_callbacks != 0)
+      return failure(cli::CommandFailureKind::runtime,
+                     "audio capture returned an invalid result");
+    if (request.output_path) {
+      auto encoded = audio::encode_pcm16_wav(
+          captured->buffer,
+          {.maximum_bytes = maximum_audio_bytes, .maximum_channels = 2});
+      if (!encoded)
+        return failure(cli::CommandFailureKind::runtime,
+                       "captured audio could not be encoded");
+      auto persisted =
+          export_bytes(*encoded, *request.output_path, environment.stop_token);
+      if (!persisted) return std::unexpected(std::move(persisted.error()));
+    }
+    output << "frames=" << captured->stats.frames
+           << " callbacks=" << captured->stats.callbacks
+           << " overruns=" << captured->stats.overruns << '\n';
+    if (!output)
+      return failure(cli::CommandFailureKind::runtime,
+                     "audio capture output failed");
+    return {};
+  } catch (...) {
+    return failure(cli::CommandFailureKind::runtime,
+                   "audio capture command failed internally");
   }
 }
 

@@ -49,6 +49,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   scripted_audio_service.cpp
   scripted_backend.cpp
   scripted_child_runner.cpp
+  scripted_capture_port.cpp
   scripted_exact_source_editor.cpp
   scripted_hosted_review_check.cpp
   scripted_image_generator.cpp

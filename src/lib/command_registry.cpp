@@ -2,11 +2,13 @@
 #include <aiforge/config/config.hpp>
 #include <aiforge/config/file_store.hpp>
 #include <algorithm>
+#include <charconv>
 #include <exception>
 #include <iostream>
 #include <optional>
 #include <ostream>
 #include <sstream>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <version.hpp>
@@ -571,6 +573,57 @@ auto audio_play_handler(CommandContext& context) -> int {
                         context);
 }
 
+template <typename Value>
+[[nodiscard]] auto parse_unsigned_value(const std::string_view text)
+    -> std::optional<Value> {
+  static_assert(std::is_unsigned_v<Value>);
+  if (text.empty()) return std::nullopt;
+  Value value{};
+  const auto parsed =
+      std::from_chars(text.data(), text.data() + text.size(), value);
+  if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
+    return std::nullopt;
+  return value;
+}
+
+auto audio_capture_handler(CommandContext& context) -> int {
+  const auto sample_rate =
+      parsed_text_values(context.invocation, "audio.capture.sample-rate");
+  const auto channels =
+      parsed_text_values(context.invocation, "audio.capture.channels");
+  const auto frames =
+      parsed_text_values(context.invocation, "audio.capture.frames");
+  const auto output =
+      parsed_text_values(context.invocation, "audio.capture.output");
+  if (!sample_rate || sample_rate->size() != 1) return usage_exit_code;
+  if (!channels || channels->size() != 1) return usage_exit_code;
+  if (!frames || frames->size() != 1) return usage_exit_code;
+  if (output && (output->size() != 1 || output->front().empty()))
+    return usage_exit_code;
+  const auto parsed_rate =
+      parse_unsigned_value<std::uint32_t>(sample_rate->front());
+  const auto parsed_channels =
+      parse_unsigned_value<std::uint16_t>(channels->front());
+  const auto parsed_frames = parse_unsigned_value<std::size_t>(frames->front());
+  if (!parsed_rate) return usage_exit_code;
+  if (!parsed_channels) return usage_exit_code;
+  if (!parsed_frames) return usage_exit_code;
+  const auto rate = *parsed_rate;
+  const auto channel_count = *parsed_channels;
+  const auto frame_count = *parsed_frames;
+  if (rate < 8000 || rate > 192000 ||
+      (channel_count != 1 && channel_count != 2) || frame_count == 0)
+    return usage_exit_code;
+  std::optional<std::string> output_path;
+  if (output) output_path = output->front();
+  if (context.environment.audio == nullptr) return unavailable_handler(context);
+  return command_result(
+      context.environment.audio->capture(
+          {rate, channel_count, frame_count, std::move(output_path)},
+          context.environment, context.output, context.error),
+      context);
+}
+
 auto image_generate_handler(CommandContext& context) -> int {
   const auto prompt =
       parsed_text_values(context.invocation, "image.generate.prompt");
@@ -1098,7 +1151,7 @@ auto builtin_command_registry() -> const CommandRegistry& {
          "Prompt text for a one-shot request."}},
        {{"audio",
          "audio",
-         "Synthesize, transcribe, play, or export durable PCM WAV artifacts.",
+         "Synthesize, transcribe, capture, play, or export PCM WAV audio.",
          true,
          {},
          {},
@@ -1188,6 +1241,41 @@ auto builtin_command_registry() -> const CommandRegistry& {
            {},
            {},
            audio_export_handler},
+          {"audio-capture",
+           "capture",
+           "Capture bounded PCM16 audio from the local input device.",
+           false,
+           {{{"audio.capture.sample-rate",
+              {"--sample-rate"},
+              ArgumentValueKind::text,
+              1,
+              1},
+             "rate",
+             "Set the sample rate from 8000 through 192000 Hz."},
+            {{"audio.capture.channels",
+              {"--channels"},
+              ArgumentValueKind::text,
+              1,
+              1},
+             "1|2",
+             "Capture mono or stereo interleaved samples."},
+            {{"audio.capture.frames",
+              {"--frames"},
+              ArgumentValueKind::text,
+              1,
+              1},
+             "count",
+             "Set the exact bounded frame count."},
+            {{"audio.capture.output",
+              {"--output"},
+              ArgumentValueKind::text,
+              0,
+              1},
+             "path",
+             "Create a PCM16 WAV output path exclusively."}},
+           {},
+           {},
+           audio_capture_handler},
           {"audio-play",
            "play",
            "Play a durable PCM16 WAV artifact on the local output device.",

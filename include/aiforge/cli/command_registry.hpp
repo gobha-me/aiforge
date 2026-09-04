@@ -5,6 +5,7 @@
 #include <aiforge/domain/money.hpp>
 #include <aiforge/persona/source.hpp>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <iosfwd>
 #include <optional>
@@ -149,6 +150,13 @@ class AudioCommand {
     std::optional<domain::ArtifactId> artifact_id;
   };
 
+  struct CaptureRequest {
+    std::uint32_t sample_rate{};
+    std::uint16_t channels{};
+    std::size_t frames{};
+    std::optional<std::string> output_path;
+  };
+
   [[nodiscard]] virtual auto synthesize(SynthesizeRequest request,
                                         CommandEnvironment& environment,
                                         std::ostream& output,
@@ -167,6 +175,10 @@ class AudioCommand {
   [[nodiscard]] virtual auto play(PlayRequest request,
                                   CommandEnvironment& environment,
                                   std::ostream& output, std::ostream& error)
+      -> std::expected<void, CommandFailure> = 0;
+  [[nodiscard]] virtual auto capture(CaptureRequest request,
+                                     CommandEnvironment& environment,
+                                     std::ostream& output, std::ostream& error)
       -> std::expected<void, CommandFailure> = 0;
 };
 

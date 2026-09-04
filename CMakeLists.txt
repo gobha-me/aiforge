@@ -37,6 +37,15 @@ option(${PROJECT_NAME}_AUDIO_PLAYBACK
   "Build the production Linux ALSA PCM playback adapter"
   ${_aiforge_audio_playback_default})
 unset(_aiforge_audio_playback_default)
+set(_aiforge_audio_capture_default OFF)
+if (PROJECT_IS_TOP_LEVEL AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+    ${PROJECT_NAME}_BUILD_ADAPTERS)
+  set(_aiforge_audio_capture_default ON)
+endif ()
+option(${PROJECT_NAME}_AUDIO_CAPTURE
+  "Build the production Linux ALSA PCM capture adapter"
+  ${_aiforge_audio_capture_default})
+unset(_aiforge_audio_capture_default)
 
 if (${PROJECT_NAME}_DRAWFORGE_EVALUATION AND NOT ${PROJECT_NAME}_BUILD_ADAPTERS)
   message(FATAL_ERROR "aiforge_DRAWFORGE_EVALUATION requires aiforge_BUILD_ADAPTERS")
@@ -60,6 +69,12 @@ endif ()
 if (${PROJECT_NAME}_AUDIO_PLAYBACK AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
   message(FATAL_ERROR "aiforge_AUDIO_PLAYBACK is supported only on Linux")
 endif ()
+if (${PROJECT_NAME}_AUDIO_CAPTURE AND NOT ${PROJECT_NAME}_BUILD_ADAPTERS)
+  message(FATAL_ERROR "aiforge_AUDIO_CAPTURE requires aiforge_BUILD_ADAPTERS")
+endif ()
+if (${PROJECT_NAME}_AUDIO_CAPTURE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  message(FATAL_ERROR "aiforge_AUDIO_CAPTURE is supported only on Linux")
+endif ()
 
 # This is the dependency activation point. Recipes not named here are inert.
 set(${PROJECT_NAME}_DEPS
@@ -76,7 +91,7 @@ endif ()
 if (${PROJECT_NAME}_AUDIO_DEVICE_EVALUATION)
   list(APPEND ${PROJECT_NAME}_DEPS miniaudio rtaudio)
 endif ()
-if (${PROJECT_NAME}_AUDIO_PLAYBACK)
+if (${PROJECT_NAME}_AUDIO_PLAYBACK OR ${PROJECT_NAME}_AUDIO_CAPTURE)
   list(APPEND ${PROJECT_NAME}_DEPS rtaudio)
 endif ()
 list(REMOVE_DUPLICATES ${PROJECT_NAME}_DEPS)
