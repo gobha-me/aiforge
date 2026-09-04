@@ -154,6 +154,8 @@ inline constexpr std::string_view model_maximum_tool_profiles_key{
     "tools.models.maximum_profiles"};
 inline constexpr std::string_view persona_maximum_tool_profiles_key{
     "tools.personas.maximum_profiles"};
+inline constexpr std::string_view user_global_instructions_enabled_key{
+    "instructions.global.enabled"};
 
 struct ToolProfileMaximumMappings {
   std::map<domain::ModelId, domain::ToolProfileId> models;
@@ -165,5 +167,8 @@ struct ToolProfileMaximumMappings {
 [[nodiscard]] auto resolve_tool_profile_maximum_mappings(
     const ResolvedConfig& resolved)
     -> std::expected<ToolProfileMaximumMappings, ConfigDiagnostic>;
+
+[[nodiscard]] auto resolve_user_global_instructions_enabled(
+    const ResolvedConfig& resolved) -> std::expected<bool, ConfigDiagnostic>;
 
 } // namespace aiforge::config

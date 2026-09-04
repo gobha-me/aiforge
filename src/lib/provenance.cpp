@@ -577,6 +577,13 @@ namespace {
   total += request_option_bytes(provenance.effective_request_options);
   total += tool_profile_bytes(provenance.tool_profile);
   total += tool_policy_bytes(provenance.tool_policy);
+  if (provenance.user_global_instruction) {
+    const auto& reference = *provenance.user_global_instruction;
+    total += reference.source_id.value().size() +
+             reference.source_location.size() +
+             reference.content_digest.algorithm.size() +
+             reference.content_digest.value.size();
+  }
   return total;
 }
 
@@ -678,6 +685,22 @@ auto validate_run_provenance(const RunProvenance& provenance,
           provenance.effective_request_options, limits);
       !options) {
     return options;
+  }
+  if (provenance.user_global_instruction) {
+    if (auto valid = validate_user_global_instruction_reference(
+            *provenance.user_global_instruction);
+        !valid) {
+      return failure(RunProvenanceErrorCode::invalid_user_global_instruction,
+                     "the user-global instruction provenance is invalid");
+    }
+    const auto& reference = *provenance.user_global_instruction;
+    if (reference.source_location.size() > limits.maximum_identity_bytes ||
+        reference.content_digest.algorithm.size() >
+            limits.maximum_identity_bytes ||
+        reference.content_digest.value.size() > limits.maximum_identity_bytes) {
+      return failure(RunProvenanceErrorCode::invalid_user_global_instruction,
+                     "the user-global instruction provenance is too large");
+    }
   }
   if (total_bytes(provenance) > limits.maximum_total_bytes) {
     return failure(RunProvenanceErrorCode::resource_exhausted,

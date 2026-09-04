@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <aiforge/domain/content.hpp>
+#include <aiforge/domain/user_global_instruction.hpp>
 
 namespace aiforge::domain {
 
@@ -172,6 +173,8 @@ struct RunProvenance {
   std::vector<EffectiveRequestOption> effective_request_options{};
   std::optional<ToolProfileProvenance> tool_profile{};
   std::optional<ToolPolicyProvenance> tool_policy{};
+  // Exact run-scoped instruction identity. Document text is never durable.
+  std::optional<UserGlobalInstructionReference> user_global_instruction{};
   auto operator==(const RunProvenance&) const -> bool = default;
 };
 
@@ -211,6 +214,7 @@ enum class RunProvenanceErrorCode {
   resource_exhausted,
   invalid_tool_profile,
   invalid_tool_policy,
+  invalid_user_global_instruction,
 };
 
 struct RunProvenanceError {

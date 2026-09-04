@@ -2633,6 +2633,13 @@ template <typename IdType>
     result["tool_policy"] =
         tool_policy_provenance_json(*provenance.tool_policy);
   }
+  if (provenance.user_global_instruction) {
+    const auto& reference = *provenance.user_global_instruction;
+    result["user_global_instruction"] =
+        Json{{"source_id", id_text(reference.source_id)},
+             {"source_location", reference.source_location},
+             {"content_digest", digest_json(reference.content_digest)}};
+  }
   return result;
 }
 
@@ -2701,6 +2708,13 @@ template <typename IdType>
   }
   if (const auto policy = value.find("tool_policy"); policy != value.end()) {
     provenance.tool_policy = parse_tool_policy_provenance(*policy);
+  }
+  if (const auto instruction = value.find("user_global_instruction");
+      instruction != value.end()) {
+    provenance.user_global_instruction = domain::UserGlobalInstructionReference{
+        parse_id<domain::ContextSourceId>(instruction->at("source_id")),
+        instruction->at("source_location").get<std::string>(),
+        parse_digest(instruction->at("content_digest"))};
   }
   if (!domain::validate_run_provenance(provenance)) {
     throw CodecFailure{"run provenance is invalid"};

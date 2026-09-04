@@ -1,5 +1,6 @@
 #include <aiforge/adapters/ask_user_dialog.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
+#include <aiforge/adapters/filesystem_user_global_instruction_source.hpp>
 #include <aiforge/adapters/git_exact_source_editor.hpp>
 #include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
@@ -821,6 +822,14 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_persist_request_setting(std::move(options.persist_request_setting)),
         m_persist_tool_profile_maximum(
             std::move(options.persist_tool_profile_maximum)),
+        m_user_global_instruction_path(
+            std::move(options.user_global_instruction_path)),
+        m_user_global_instructions_enabled(
+            options.user_global_instructions_enabled),
+        m_preview_user_global_instruction_enabled(
+            std::move(options.preview_user_global_instruction_enabled)),
+        m_persist_user_global_instruction_enabled(
+            std::move(options.persist_user_global_instruction_enabled)),
         m_open_template(std::move(open)),
         m_session_dependencies(std::move(options.session_dependencies)),
         m_bridge(*this, options.live_wake_enabled,
@@ -888,6 +897,24 @@ class ChatAppImpl final : public InteractiveChatApp {
 
   auto perform_edit() -> void override {
     m_pending_edit = false;
+    if (m_pending_user_global_instruction_edit) {
+      auto pending = std::move(*m_pending_user_global_instruction_edit);
+      m_pending_user_global_instruction_edit.reset();
+      auto edited = m_editor.edit(pending.text, m_stop_token);
+      if (!edited) {
+        m_status = edited.error().message;
+        sync_composer_focus();
+        return;
+      }
+      if (*edited == pending.text) {
+        m_status = "User-global instructions unchanged";
+        sync_composer_focus();
+        return;
+      }
+      show_user_global_instruction_review(std::move(pending.expected),
+                                          std::move(*edited));
+      return;
+    }
     const auto original = m_composer.text();
     auto edited = m_editor.edit(original, m_stop_token);
     if (!edited) {
@@ -2194,6 +2221,10 @@ class ChatAppImpl final : public InteractiveChatApp {
         if (!show_request_settings()) return false;
         m_composer.clear();
         return true;
+      case surfaces::SlashCommandAction::manage_user_global_instructions:
+        if (!manage_user_global_instructions(command.subject)) return false;
+        m_composer.clear();
+        return true;
       case surfaces::SlashCommandAction::manage_tool_profile:
         if (!show_tool_profiles()) return false;
         m_composer.clear();
@@ -2494,7 +2525,8 @@ class ChatAppImpl final : public InteractiveChatApp {
   auto request_close(std::function<void()> action = {}) -> void {
     if (!action) action = [this] { quit(); };
     if (m_close_dialog_active || m_plan_review_active ||
-        m_settings_dialog_active || m_persona_manager_active ||
+        m_settings_dialog_active || m_user_global_instruction_dialog_active ||
+        m_user_global_instruction_review_active || m_persona_manager_active ||
         m_persona_editor_active) {
       m_status = "Close is unavailable while another decision is open";
       return;
@@ -3184,6 +3216,344 @@ class ChatAppImpl final : public InteractiveChatApp {
                                     .dismiss_on_click_outside = false});
     m_status = "Inspect request settings";
     return true;
+  }
+
+  [[nodiscard]] auto user_global_instruction_summary(
+      const std::optional<domain::UserGlobalInstructionDocument>& document)
+      const -> std::string {
+    const auto maximum_bytes =
+        m_session->user_global_instruction_limits().maximum_file_bytes;
+    const auto bytes = document ? document->text.size() : 0U;
+    const auto estimated_tokens = bytes;
+    std::string summary =
+        std::string{"Enabled: "} +
+        (m_user_global_instructions_enabled ? "on" : "off") +
+        " (future runs; an active run remains pinned)\n" +
+        "Present: " + (document ? std::string{"yes"} : std::string{"no"}) +
+        "\nAuthority: user-global instruction layer\nPath: " +
+        (m_user_global_instruction_path.empty()
+             ? std::string{domain::user_global_instruction_source_location}
+             : m_user_global_instruction_path) +
+        "\nBytes: " + std::to_string(bytes) + " / " +
+        std::to_string(maximum_bytes) +
+        "\nConservative context estimate: " + std::to_string(estimated_tokens) +
+        " tokens (one per byte)";
+    if (document) {
+      summary += "\nDigest: " + document->reference.content_digest.algorithm +
+                 ":" + document->reference.content_digest.value;
+    } else {
+      summary += "\nDigest: none";
+    }
+    return summary;
+  }
+
+  auto show_user_global_instruction_document(
+      const std::optional<domain::UserGlobalInstructionDocument>& document)
+      -> void {
+    std::vector<std::string> lines;
+    lines.push_back(user_global_instruction_summary(document));
+    lines.emplace_back();
+    if (!document) {
+      lines.push_back("The fixed user-global instruction document does not "
+                      "exist. Use /instructions and choose Edit to create it.");
+    } else {
+      lines.push_back("Document content:");
+      std::string_view remaining{document->text};
+      while (true) {
+        const auto newline = remaining.find('\n');
+        lines.emplace_back(remaining.substr(0, newline));
+        if (newline == std::string_view::npos) break;
+        remaining.remove_prefix(newline + 1U);
+      }
+    }
+    show_panel("User-global instructions", std::move(lines),
+               "Viewing user-global instructions; Esc returns to chat");
+  }
+
+  auto request_user_global_instruction_edit(
+      std::optional<domain::UserGlobalInstructionReference> expected,
+      std::string text) -> void {
+    m_pending_user_global_instruction_edit = {
+        std::move(expected), text.empty()
+                                 ? std::string{"# User-global instructions\n\n"}
+                                 : std::move(text)};
+    m_pending_edit = true;
+    sync_composer_focus();
+    quit();
+  }
+
+  auto save_user_global_instruction(
+      std::optional<domain::UserGlobalInstructionReference> expected,
+      std::string text) -> void {
+    instructions::UserGlobalInstructionWrite request{
+        std::move(expected), std::move(text),
+        m_session->user_global_instruction_limits()};
+    auto written = m_session->write_user_global_instruction(request);
+    if (!written) {
+      if (written.error().effect_may_have_applied) {
+        fail({cli::CommandFailureKind::runtime,
+              "User-global instruction persistence may have applied; "
+              "restart and reload before retrying: " +
+                  written.error().message});
+        return;
+      }
+      m_status = written.error().message;
+      return;
+    }
+    auto valid = instructions::validate_user_global_instruction_write_receipt(
+        request, *written);
+    if (!valid) {
+      fail({cli::CommandFailureKind::runtime,
+            "User-global instruction persistence returned an uncertain "
+            "receipt; restart and reload before retrying"});
+      return;
+    }
+    m_status = "Saved user-global instructions; future runs will use the new "
+               "digest";
+  }
+
+  auto show_user_global_instruction_review(
+      std::optional<domain::UserGlobalInstructionReference> expected,
+      std::string text) -> void {
+    instructions::UserGlobalInstructionWrite request{
+        expected, text, m_session->user_global_instruction_limits()};
+    auto prepared =
+        instructions::prepare_user_global_instruction_write(request);
+    if (!prepared) {
+      m_status = prepared.error().message;
+      sync_composer_focus();
+      return;
+    }
+    if (!m_user_global_instruction_review_dialog) {
+      m_user_global_instruction_review_dialog =
+          std::make_unique<termforge::ChoiceWizardDialog>();
+    }
+    termforge::ChoiceWizardPage page;
+    page.title = "Review user-global instructions";
+    page.text = user_global_instruction_summary(*prepared) +
+                "\n\nReview the exact proposed document before saving. A "
+                "stale digest will be rejected.\n\n" +
+                prepared->text;
+    page.mode = termforge::ChoiceMode::Single;
+    page.minimum_selected = 1;
+    page.maximum_selected = 1;
+    page.choices = {
+        {"Save", "Compare the observed digest and atomically replace the "
+                 "fixed document."},
+        {"Back", "Return the proposed content to the external editor."}};
+    page.selected_indices = {1};
+    if (!m_user_global_instruction_review_dialog->set_pages(
+            {std::move(page)})) {
+      m_status = "User-global instruction review rejected its content";
+      sync_composer_focus();
+      return;
+    }
+    m_user_global_instruction_review_dialog->on_result(
+        [this, expected = std::move(expected), text = std::move(text)](
+            std::optional<termforge::ChoiceWizardResult> result) mutable {
+          pop_modal();
+          m_user_global_instruction_review_active = false;
+          if (!result) {
+            m_status = "User-global instructions unchanged";
+            return;
+          }
+          if (result->pages.size() != 1 ||
+              result->pages.front().selected_indices.size() != 1) {
+            m_status = "User-global instruction review returned an invalid "
+                       "choice";
+            return;
+          }
+          switch (result->pages.front().selected_indices.front()) {
+            case 0:
+              save_user_global_instruction(std::move(expected),
+                                           std::move(text));
+              return;
+            case 1:
+              request_user_global_instruction_edit(std::move(expected),
+                                                   std::move(text));
+              return;
+            default:
+              m_status = "User-global instruction review returned an invalid "
+                         "choice";
+              return;
+          }
+        });
+    m_user_global_instruction_review_active = true;
+    push_modal(*m_user_global_instruction_review_dialog,
+               {.backdrop = termforge::Backdrop::Dim,
+                .dismiss_on_click_outside = false});
+    m_status = "Review user-global instructions before saving";
+  }
+
+  // clang-format off
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit preview, provenance validation, persistence, and activation stages keep the fail-closed transaction auditable.
+  auto set_user_global_instructions_enabled(const bool enabled) -> bool {
+    // clang-format on
+    if (!m_preview_user_global_instruction_enabled ||
+        !m_persist_user_global_instruction_enabled) {
+      m_status = "Persisted user-global instruction settings are unavailable";
+      return false;
+    }
+    auto previewed = m_preview_user_global_instruction_enabled(enabled);
+    if (!previewed) {
+      m_status = previewed.error();
+      return false;
+    }
+    std::optional<std::vector<domain::ConfigurationProvenanceEntry>>
+        candidate_configuration;
+    if (m_open_template.provenance) {
+      auto& configuration = candidate_configuration.emplace(
+          m_open_template.provenance->configuration);
+      auto existing = std::ranges::find(
+          configuration, previewed->configuration_provenance.key,
+          &domain::ConfigurationProvenanceEntry::key);
+      if (existing == configuration.end()) {
+        configuration.push_back(previewed->configuration_provenance);
+      } else {
+        *existing = previewed->configuration_provenance;
+      }
+      auto candidate_provenance = *m_open_template.provenance;
+      candidate_provenance.configuration = configuration;
+      if (!domain::validate_run_provenance(candidate_provenance)) {
+        m_status =
+            "User-global instruction configuration provenance is invalid";
+        return false;
+      }
+    }
+    auto persisted = m_persist_user_global_instruction_enabled(enabled);
+    if (!persisted) {
+      if (persisted.error().effect_may_have_applied) {
+        fail({cli::CommandFailureKind::runtime,
+              "User-global instruction enable persistence may have applied; "
+              "restart and reload before retrying: " +
+                  persisted.error().message});
+      } else {
+        m_status = persisted.error().message;
+      }
+      return false;
+    }
+    auto activated = m_session->set_user_global_instructions_enabled(
+        previewed->effective_enabled, candidate_configuration);
+    if (!activated) {
+      m_status =
+          "User-global instruction setting was saved, but the live session "
+          "changed before it could be activated";
+      return false;
+    }
+    m_user_global_instructions_enabled = previewed->effective_enabled;
+    m_session_dependencies.user_global_instructions_enabled =
+        previewed->effective_enabled;
+    if (m_open_template.provenance && candidate_configuration) {
+      m_open_template.provenance->configuration =
+          std::move(*candidate_configuration);
+    }
+    const auto source = previewed->configuration_provenance.source;
+    const bool shadowed =
+        source && (*source == domain::ProvenanceSource::command_line ||
+                   *source == domain::ProvenanceSource::environment);
+    const auto source_name = [&]() -> std::string_view {
+      if (!source) return "unknown";
+      switch (*source) {
+        case domain::ProvenanceSource::command_line: return "command-line";
+        case domain::ProvenanceSource::environment: return "environment";
+        case domain::ProvenanceSource::file: return "file";
+        case domain::ProvenanceSource::compiled_default:
+          return "compiled default";
+      }
+      return "unknown";
+    }();
+    if (shadowed) {
+      m_status = "Saved user-global instruction default; active " +
+                 std::string{source_name} + " value still wins for future runs";
+    } else {
+      m_status = previewed->effective_enabled
+                     ? "Enabled user-global instructions for future runs"
+                     : "Disabled user-global instructions for future runs; "
+                       "the document was retained";
+    }
+    return true;
+  }
+
+  auto show_user_global_instruction_manager() -> bool {
+    auto document = m_session->load_user_global_instruction();
+    if (!document) {
+      m_status = document.error().message;
+      return false;
+    }
+    if (!m_user_global_instruction_dialog) {
+      m_user_global_instruction_dialog =
+          std::make_unique<termforge::ChoiceWizardDialog>();
+    }
+    termforge::ChoiceWizardPage page;
+    page.title = "User-global instructions";
+    page.text = user_global_instruction_summary(*document);
+    page.mode = termforge::ChoiceMode::Single;
+    page.minimum_selected = 1;
+    page.maximum_selected = 1;
+    page.choices = {
+        {"View", "View the fixed document and its authority metadata."},
+        {"Edit", *document ? "Edit with a digest precondition."
+                           : "Create the fixed instruction document."},
+        {m_user_global_instructions_enabled ? "Disable" : "Enable",
+         m_user_global_instructions_enabled
+             ? "Disable future-run use without deleting the document."
+             : "Enable the document for future runs."}};
+    page.selected_indices = {0};
+    if (!m_user_global_instruction_dialog->set_pages({std::move(page)})) {
+      m_status = "User-global instruction manager rejected its content";
+      return false;
+    }
+    m_user_global_instruction_dialog->on_result(
+        [this, document = std::move(*document)](
+            std::optional<termforge::ChoiceWizardResult> result) mutable {
+          pop_modal();
+          m_user_global_instruction_dialog_active = false;
+          if (!result) {
+            m_status = "User-global instructions unchanged";
+            return;
+          }
+          if (result->pages.size() != 1 ||
+              result->pages.front().selected_indices.size() != 1) {
+            m_status = "User-global instruction manager returned an invalid "
+                       "choice";
+            return;
+          }
+          switch (result->pages.front().selected_indices.front()) {
+            case 0: show_user_global_instruction_document(document); return;
+            case 1:
+              request_user_global_instruction_edit(
+                  document ? std::optional{document->reference} : std::nullopt,
+                  document ? std::move(document->text) : std::string{});
+              return;
+            case 2:
+              static_cast<void>(set_user_global_instructions_enabled(
+                  !m_user_global_instructions_enabled));
+              return;
+            default:
+              m_status = "User-global instruction manager returned an invalid "
+                         "choice";
+              return;
+          }
+        });
+    m_user_global_instruction_dialog_active = true;
+    push_modal(*m_user_global_instruction_dialog,
+               {.backdrop = termforge::Backdrop::Dim,
+                .dismiss_on_click_outside = false});
+    m_status = "Inspect user-global instructions";
+    return true;
+  }
+
+  auto manage_user_global_instructions(
+      const std::optional<std::string>& operation) -> bool {
+    if (m_session->active()) {
+      m_status = "Finish or cancel the active run before changing instructions";
+      return false;
+    }
+    if (!operation) return show_user_global_instruction_manager();
+    if (*operation == "on") return set_user_global_instructions_enabled(true);
+    if (*operation == "off") return set_user_global_instructions_enabled(false);
+    m_status = "User-global instruction operation is invalid";
+    return false;
   }
 
   // clang-format off
@@ -3880,6 +4250,10 @@ class ChatAppImpl final : public InteractiveChatApp {
   PreviewVeniceRequestSetting m_preview_request_setting;
   PersistVeniceRequestSetting m_persist_request_setting;
   PersistToolProfileMaximum m_persist_tool_profile_maximum;
+  std::string m_user_global_instruction_path;
+  bool m_user_global_instructions_enabled{};
+  PreviewUserGlobalInstructionEnabled m_preview_user_global_instruction_enabled;
+  PersistUserGlobalInstructionEnabled m_persist_user_global_instruction_enabled;
   surfaces::ChatSessionOpen m_open_template;
   surfaces::ChatSessionDependencies m_session_dependencies;
   TermForgeRunBridge m_bridge;
@@ -3907,6 +4281,10 @@ class ChatAppImpl final : public InteractiveChatApp {
   std::unique_ptr<ModelPickerDialog> m_model_picker;
   std::unique_ptr<ProviderCharacterPickerDialog> m_provider_character_picker;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_settings_dialog;
+  std::unique_ptr<termforge::ChoiceWizardDialog>
+      m_user_global_instruction_dialog;
+  std::unique_ptr<termforge::ChoiceWizardDialog>
+      m_user_global_instruction_review_dialog;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_tool_profile_dialog;
   std::unique_ptr<termforge::ChoiceWizardDialog> m_tool_approval_dialog;
   std::unique_ptr<ToolApprovalDialogController> m_tool_approval_controller;
@@ -3919,6 +4297,8 @@ class ChatAppImpl final : public InteractiveChatApp {
   bool m_plan_review_active{};
   bool m_close_dialog_active{};
   bool m_settings_dialog_active{};
+  bool m_user_global_instruction_dialog_active{};
+  bool m_user_global_instruction_review_active{};
   bool m_tool_profile_dialog_active{};
   bool m_tool_approval_dialog_active{};
   bool m_question_dialog_active{};
@@ -3927,6 +4307,12 @@ class ChatAppImpl final : public InteractiveChatApp {
   std::optional<std::pair<domain::SessionId, domain::PlanRevisionId>>
       m_reviewed_plan;
   std::function<void()> m_close_action;
+  struct PendingUserGlobalInstructionEdit {
+    std::optional<domain::UserGlobalInstructionReference> expected;
+    std::string text;
+  };
+  std::optional<PendingUserGlobalInstructionEdit>
+      m_pending_user_global_instruction_edit;
 };
 
 class ModelPickerAppImpl final : public InteractiveModelPickerApp {
@@ -4153,6 +4539,24 @@ auto ProcessInteractiveCommand::execute(Request request,
     auto persona_root = process_persona_root();
     std::optional<FilesystemPersonaSource> personas;
     if (persona_root) personas.emplace(std::move(*persona_root));
+    auto user_global_instructions_enabled =
+        config::resolve_user_global_instructions_enabled(*resolved);
+    if (!user_global_instructions_enabled) {
+      return failure(cli::CommandFailureKind::runtime,
+                     user_global_instructions_enabled.error().message);
+    }
+    auto resolved_user_global_instruction_path =
+        process_user_global_instruction_path();
+    if (!resolved_user_global_instruction_path &&
+        *user_global_instructions_enabled) {
+      return failure(cli::CommandFailureKind::runtime,
+                     resolved_user_global_instruction_path.error().message);
+    }
+    std::optional<FilesystemUserGlobalInstructionSource>
+        user_global_instructions;
+    if (resolved_user_global_instruction_path) {
+      user_global_instructions.emplace(*resolved_user_global_instruction_path);
+    }
     surfaces::ChatSessionOpen open{std::move(*model),
                                    mode,
                                    std::move(request.session_id),
@@ -4274,6 +4678,12 @@ auto ProcessInteractiveCommand::execute(Request request,
     app_options.model_catalog = &(*catalog)->service();
     app_options.provider_character_catalog = provider_character_catalog;
     app_options.configured_request_settings = *request_settings;
+    app_options.user_global_instruction_path =
+        resolved_user_global_instruction_path
+            ? resolved_user_global_instruction_path->string()
+            : std::string{domain::user_global_instruction_source_location};
+    app_options.user_global_instructions_enabled =
+        *user_global_instructions_enabled;
     auto persisted_tool_profile_maximums =
         std::make_shared<config::ToolProfileMaximumMappings>(
             std::move(*tool_profile_maximums));
@@ -4324,11 +4734,59 @@ auto ProcessInteractiveCommand::execute(Request request,
         return persist_tool_profile_maximum_mapping(
             store, *persisted_tool_profile_maximums, save);
       };
+      if (user_global_instructions) {
+        app_options.preview_user_global_instruction_enabled =
+            [requested_model = request.model,
+             requested_web_search = request.web_search,
+             &diagnostics](const bool enabled)
+            -> std::expected<UserGlobalInstructionEnablePreview, std::string> {
+          const auto key =
+              std::string{config::user_global_instructions_enabled_key};
+          auto candidate =
+              load_config(diagnostics, requested_model, requested_web_search,
+                          config::ConfigCandidate{
+                              key, config::ConfigValue{enabled}, std::nullopt});
+          if (!candidate) return std::unexpected(candidate.error().message);
+          auto effective =
+              config::resolve_user_global_instructions_enabled(*candidate);
+          if (!effective) return std::unexpected(effective.error().message);
+          auto provenance = config::configuration_provenance(*candidate);
+          auto selected = std::ranges::find(
+              provenance, key, &domain::ConfigurationProvenanceEntry::key);
+          if (selected == provenance.end()) {
+            return std::unexpected(
+                "persisted user-global instruction setting has no "
+                "configuration provenance");
+          }
+          return UserGlobalInstructionEnablePreview{*effective,
+                                                    std::move(*selected)};
+        };
+        app_options.persist_user_global_instruction_enabled =
+            [path = *config_path](const bool enabled)
+            -> std::expected<void, UserGlobalInstructionEnablePersistError> {
+          config::JsonConfigFileStore store{path};
+          auto persisted =
+              store.set(config::builtin_config_registry(),
+                        config::user_global_instructions_enabled_key, enabled);
+          if (!persisted) {
+            return std::unexpected(UserGlobalInstructionEnablePersistError{
+                persisted.error().message,
+                persisted.error().effect_may_have_applied});
+          }
+          return {};
+        };
+      }
     }
     app_options.session_dependencies.persona_source =
         personas ? &*personas : nullptr;
     app_options.session_dependencies.persona_editor =
         personas ? &*personas : nullptr;
+    app_options.session_dependencies.user_global_instruction_source =
+        user_global_instructions ? &*user_global_instructions : nullptr;
+    app_options.session_dependencies.user_global_instruction_editor =
+        user_global_instructions ? &*user_global_instructions : nullptr;
+    app_options.session_dependencies.user_global_instructions_enabled =
+        *user_global_instructions_enabled;
     app_options.session_dependencies.tools = std::move(tools);
     app_options.session_dependencies.tool_policy = std::move(*tool_policy);
     app_options.session_dependencies.model_tool_profile_maximums =

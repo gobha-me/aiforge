@@ -35,6 +35,7 @@ enum class SlashCommandAction {
   disable_provider_character,
   choose_model,
   manage_request_settings,
+  manage_user_global_instructions,
   manage_tool_profile,
   select_tool_profile,
   disable_tools,

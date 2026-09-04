@@ -1,6 +1,8 @@
 #pragma once
 
 #include <aiforge/backend/backend.hpp>
+#include <aiforge/instructions/editor.hpp>
+#include <aiforge/instructions/source.hpp>
 #include <aiforge/persona/editor.hpp>
 #include <aiforge/persona/source.hpp>
 #include <aiforge/runtime/memory_controller.hpp>
@@ -97,6 +99,10 @@ struct ChatSessionDependencies {
   persona::PersonaSource* persona_source{};
   persona::PersonaEditor* persona_editor{};
   persona::PersonaLimits persona_limits{};
+  instructions::UserGlobalInstructionSource* user_global_instruction_source{};
+  instructions::UserGlobalInstructionEditor* user_global_instruction_editor{};
+  instructions::UserGlobalInstructionLimits user_global_instruction_limits{};
+  bool user_global_instructions_enabled{};
   runtime::MemoryController* memory_controller{};
   runtime::MemorySettings memory_settings{};
   std::optional<domain::RepositoryId> repository_id;
@@ -254,6 +260,21 @@ class ChatSession final {
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto persona_state() const -> ChatPersonaState;
   [[nodiscard]] auto persona_limits() const noexcept -> persona::PersonaLimits;
+  [[nodiscard]] auto load_user_global_instruction()
+      -> std::expected<std::optional<domain::UserGlobalInstructionDocument>,
+                       ChatSessionError>;
+  [[nodiscard]] auto write_user_global_instruction(
+      instructions::UserGlobalInstructionWrite request)
+      -> std::expected<instructions::UserGlobalInstructionWriteReceipt,
+                       ChatSessionError>;
+  [[nodiscard]] auto set_user_global_instructions_enabled(
+      bool enabled,
+      std::optional<std::vector<domain::ConfigurationProvenanceEntry>>
+          configuration = std::nullopt)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto user_global_instructions_enabled() const noexcept -> bool;
+  [[nodiscard]] auto user_global_instruction_limits() const noexcept
+      -> instructions::UserGlobalInstructionLimits;
 
   [[nodiscard]] auto plan_task_state(
       std::optional<domain::RepositoryId> repository_id = std::nullopt)
@@ -291,6 +312,8 @@ class ChatSession final {
  private:
   struct Impl;
   explicit ChatSession(std::unique_ptr<Impl> impl);
+  [[nodiscard]] auto validate_recovered_pending_run()
+      -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto continue_if_ready()
       -> std::expected<std::vector<domain::RunEvent>, ChatSessionError>;
   std::unique_ptr<Impl> m_impl;

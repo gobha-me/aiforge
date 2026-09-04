@@ -12,6 +12,7 @@ namespace aiforge::domain {
 
 enum class InstructionLayer {
   application_runtime,
+  user_global,
   workspace,
   project,
   persona,

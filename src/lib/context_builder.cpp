@@ -30,11 +30,12 @@ using namespace domain;
 [[nodiscard]] auto layer_rank(const InstructionLayer layer) -> std::uint32_t {
   switch (layer) {
     case InstructionLayer::application_runtime: return 0;
-    case InstructionLayer::workspace: return 1;
-    case InstructionLayer::project: return 2;
-    case InstructionLayer::persona: return 3;
-    case InstructionLayer::session: return 4;
-    case InstructionLayer::task: return 5;
+    case InstructionLayer::user_global: return 1;
+    case InstructionLayer::workspace: return 2;
+    case InstructionLayer::project: return 3;
+    case InstructionLayer::persona: return 4;
+    case InstructionLayer::session: return 5;
+    case InstructionLayer::task: return 6;
     case InstructionLayer::unknown:
       return std::numeric_limits<std::uint32_t>::max();
   }

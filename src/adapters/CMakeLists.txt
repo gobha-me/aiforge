@@ -3,6 +3,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   ask_user_dialog.cpp
   filesystem_artifact_store.cpp
   filesystem_persona_source.cpp
+  filesystem_user_global_instruction_source.cpp
   git_repository_snapshot_source.cpp
   json_model_catalog_cache.cpp
   model_picker_dialog.cpp

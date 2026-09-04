@@ -3,6 +3,7 @@
 #include <aiforge/runtime/context_builder.hpp>
 #include <aiforge/runtime/persona.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
+#include <aiforge/runtime/user_global_instructions.hpp>
 #include <aiforge/surfaces/one_shot.hpp>
 #include <algorithm>
 #include <atomic>
@@ -27,6 +28,29 @@ namespace {
                                   std::string message)
     -> std::unexpected<OneShotError> {
   return std::unexpected(OneShotError{code, std::move(message)});
+}
+
+[[nodiscard]] auto load_user_global_document(
+    instructions::UserGlobalInstructionSource* source,
+    const instructions::UserGlobalInstructionLimits limits,
+    const std::stop_token stop_token)
+    -> std::expected<std::optional<domain::UserGlobalInstructionDocument>,
+                     OneShotError> {
+  if (source == nullptr) return std::nullopt;
+  auto loaded = source->load(limits, stop_token);
+  if (!loaded) {
+    return one_shot_error(
+        loaded.error().code ==
+                instructions::UserGlobalInstructionErrorCode::cancelled
+            ? OneShotErrorCode::cancelled
+            : OneShotErrorCode::context_failed,
+        loaded.error().message);
+  }
+  if (*loaded && !domain::validate_user_global_instruction_document(**loaded)) {
+    return one_shot_error(OneShotErrorCode::context_failed,
+                          "user-global instruction document is invalid");
+  }
+  return std::move(*loaded);
 }
 
 [[nodiscard]] auto valid_utf8(const std::string_view value) -> bool {
@@ -677,6 +701,15 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
     if (!resolved_persona) {
       return std::unexpected(std::move(resolved_persona.error()));
     }
+    std::optional<domain::UserGlobalInstructionDocument>
+        user_global_instruction;
+    if (m_dependencies.user_global_instructions_enabled) {
+      auto loaded = load_user_global_document(
+          m_dependencies.user_global_instruction_source,
+          m_dependencies.user_global_instruction_limits, stop_token);
+      if (!loaded) return std::unexpected(std::move(loaded.error()));
+      user_global_instruction = std::move(*loaded);
+    }
 
     auto run_id = make_id<domain::RunId>("run", suffix);
     auto inference_id = make_id<domain::InferenceId>("inference", suffix);
@@ -719,6 +752,9 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
         mandatory += item.estimated_tokens;
       if (resolved_persona->document) {
         mandatory += resolved_persona->document->text.size();
+      }
+      if (user_global_instruction) {
+        mandatory += user_global_instruction->text.size();
       }
       const auto maximum_input = model->context_window_tokens - output_tokens;
       const auto available = mandatory < maximum_input
@@ -772,6 +808,16 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       }
       build_input.instructions.push_back(std::move(*persona_instruction));
     }
+    if (user_global_instruction) {
+      auto instruction = runtime::user_global_instruction_input(
+          *user_global_instruction,
+          static_cast<std::uint64_t>(user_global_instruction->text.size()));
+      if (!instruction) {
+        return one_shot_error(OneShotErrorCode::context_failed,
+                              instruction.error().message);
+      }
+      build_input.instructions.push_back(std::move(*instruction));
+    }
 
     if (request.stdin_evidence && !request.stdin_evidence->empty()) {
       auto evidence_message_id =
@@ -808,6 +854,19 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                                             std::move(*context),
                                             m_dependencies.tools.declarations(),
                                             request.generation_options};
+    if (request.provenance) {
+      request.provenance->user_global_instruction =
+          user_global_instruction
+              ? std::optional<
+                    domain::
+                        UserGlobalInstructionReference>{user_global_instruction
+                                                            ->reference}
+              : std::nullopt;
+    } else if (user_global_instruction) {
+      return one_shot_error(OneShotErrorCode::context_failed,
+                            "user-global instruction provenance is "
+                            "unavailable");
+    }
     const auto run_event_offset = kernel->event_log().events().size();
     auto started = kernel->start(
         {*run_id,

@@ -11,6 +11,7 @@
 
 #include <aiforge/backend/backend.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
+#include <aiforge/instructions/source.hpp>
 #include <aiforge/persona/source.hpp>
 #include <aiforge/runtime/memory_controller.hpp>
 #include <aiforge/runtime/tool_policy.hpp>
@@ -98,6 +99,9 @@ struct OneShotDependencies {
   runtime::MemorySettings memory_settings{};
   std::optional<domain::RepositoryId> repository_id;
   std::string runtime_version{"unknown"};
+  instructions::UserGlobalInstructionSource* user_global_instruction_source{};
+  instructions::UserGlobalInstructionLimits user_global_instruction_limits{};
+  bool user_global_instructions_enabled{};
 };
 
 class OneShotSurface final {

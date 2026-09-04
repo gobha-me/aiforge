@@ -56,6 +56,21 @@ using PersistToolProfileMaximum =
     std::function<auto(const ToolProfileMaximumSave&)
                       ->std::expected<void, ToolProfileMaximumPersistError>>;
 
+struct UserGlobalInstructionEnablePersistError {
+  std::string message;
+  bool effect_may_have_applied{};
+};
+
+struct UserGlobalInstructionEnablePreview {
+  bool effective_enabled{true};
+  domain::ConfigurationProvenanceEntry configuration_provenance;
+};
+
+using PreviewUserGlobalInstructionEnabled = std::function<
+    auto(bool)->std::expected<UserGlobalInstructionEnablePreview, std::string>>;
+using PersistUserGlobalInstructionEnabled = std::function<
+    auto(bool)->std::expected<void, UserGlobalInstructionEnablePersistError>>;
+
 struct InteractiveChatAppOptions {
   surfaces::ChatSessionDependencies session_dependencies{};
   termforge::ByteSink* rendered_output{};
@@ -71,6 +86,10 @@ struct InteractiveChatAppOptions {
   PreviewVeniceRequestSetting preview_request_setting;
   PersistVeniceRequestSetting persist_request_setting;
   PersistToolProfileMaximum persist_tool_profile_maximum;
+  std::string user_global_instruction_path;
+  bool user_global_instructions_enabled{};
+  PreviewUserGlobalInstructionEnabled preview_user_global_instruction_enabled;
+  PersistUserGlobalInstructionEnabled persist_user_global_instruction_enabled;
 };
 
 struct InteractiveModelPickerAppOptions {

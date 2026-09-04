@@ -315,6 +315,35 @@ TEST_CASE("run provenance validation refuses secrets and malformed identity",
           RunProvenanceErrorCode::too_many_entries);
 }
 
+TEST_CASE("run provenance rejects malformed user-global instruction identity",
+          "[domain][failure][provenance][instructions]") {
+  auto invalid_source = provenance();
+  invalid_source.user_global_instruction = UserGlobalInstructionReference{
+      make_id<ContextSourceId>("untrusted-global-source"),
+      std::string{user_global_instruction_source_location},
+      {"sha256", std::string(64, 'a'), 7}};
+  REQUIRE(validate_run_provenance(invalid_source).error().code ==
+          RunProvenanceErrorCode::invalid_user_global_instruction);
+
+  auto invalid_location = provenance();
+  invalid_location.user_global_instruction = UserGlobalInstructionReference{
+      make_id<ContextSourceId>(
+          std::string{user_global_instruction_source_identity}),
+      "absolute/or/alternate/global.md",
+      {"sha256", std::string(64, 'a'), 7}};
+  REQUIRE(validate_run_provenance(invalid_location).error().code ==
+          RunProvenanceErrorCode::invalid_user_global_instruction);
+
+  auto invalid_digest = provenance();
+  invalid_digest.user_global_instruction = UserGlobalInstructionReference{
+      make_id<ContextSourceId>(
+          std::string{user_global_instruction_source_identity}),
+      std::string{user_global_instruction_source_location},
+      {"sha256", std::string(63, 'a'), 7}};
+  REQUIRE(validate_run_provenance(invalid_digest).error().code ==
+          RunProvenanceErrorCode::invalid_user_global_instruction);
+}
+
 TEST_CASE("run provenance validation bounds identity, credentials, and tools",
           "[domain][failure][provenance]") {
   auto empty_version = provenance();

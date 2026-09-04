@@ -1,7 +1,9 @@
+#include <aiforge/detail/sha256.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/runtime/context_builder.hpp>
 #include <aiforge/runtime/persona.hpp>
 #include <aiforge/runtime/tool_profiles.hpp>
+#include <aiforge/runtime/user_global_instructions.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
 #include <algorithm>
 #include <atomic>
@@ -10,6 +12,7 @@
 #include <cstdint>
 #include <iterator>
 #include <limits>
+#include <span>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -191,6 +194,87 @@ struct PersonaSetup {
               ? ChatSessionErrorCode::invalid_input
               : ChatSessionErrorCode::context_failed,
           value.message, value.retryable, value.may_have_applied};
+}
+
+[[nodiscard]] auto user_global_source_error(
+    const instructions::UserGlobalInstructionError& value) -> ChatSessionError {
+  return {value.code == instructions::UserGlobalInstructionErrorCode::cancelled
+              ? ChatSessionErrorCode::cancelled
+          : value.code ==
+                  instructions::UserGlobalInstructionErrorCode::invalid_request
+              ? ChatSessionErrorCode::invalid_input
+              : ChatSessionErrorCode::context_failed,
+          value.message, value.retryable};
+}
+
+[[nodiscard]] auto user_global_editor_error(
+    const instructions::UserGlobalInstructionEditorError& value)
+    -> ChatSessionError {
+  return {value.code ==
+                  instructions::UserGlobalInstructionEditorErrorCode::cancelled
+              ? ChatSessionErrorCode::cancelled
+          : value.code == instructions::UserGlobalInstructionEditorErrorCode::
+                              invalid_request ||
+                  value.code ==
+                      instructions::UserGlobalInstructionEditorErrorCode::
+                          malformed_text
+              ? ChatSessionErrorCode::invalid_input
+              : ChatSessionErrorCode::context_failed,
+          value.message, value.retryable, value.may_have_applied};
+}
+
+[[nodiscard]] auto recorded_user_global_instruction(
+    const domain::SessionEventLog& event_log, const domain::RunId& run_id)
+    -> std::optional<domain::UserGlobalInstructionReference> {
+  for (const auto& event : event_log.events()) {
+    if (event.metadata.run_id != run_id) continue;
+    if (const auto* recorded =
+            std::get_if<domain::RunProvenanceRecorded>(&event.payload)) {
+      return recorded->provenance.user_global_instruction;
+    }
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] auto load_user_global_document(
+    instructions::UserGlobalInstructionSource* source,
+    const instructions::UserGlobalInstructionLimits limits,
+    const std::stop_token stop_token)
+    -> std::expected<std::optional<domain::UserGlobalInstructionDocument>,
+                     ChatSessionError> {
+  if (source == nullptr) return std::nullopt;
+  auto loaded = source->load(limits, stop_token);
+  if (!loaded) {
+    return std::unexpected(user_global_source_error(loaded.error()));
+  }
+  if (*loaded) {
+    if (!domain::validate_user_global_instruction_document(**loaded)) {
+      return error(ChatSessionErrorCode::context_failed,
+                   "user-global instruction document is invalid");
+    }
+    aiforge::detail::Sha256 digest;
+    digest.update(std::as_bytes(
+        std::span{(*loaded)->text.data(), (*loaded)->text.size()}));
+    if (digest.finish() != (*loaded)->reference.content_digest.value) {
+      return error(ChatSessionErrorCode::context_failed,
+                   "user-global instruction content digest is invalid");
+    }
+  }
+  return std::move(*loaded);
+}
+
+[[nodiscard]] auto append_user_global_instruction(
+    domain::ContextBuildInput& input,
+    const domain::UserGlobalInstructionDocument& document)
+    -> std::expected<void, ChatSessionError> {
+  auto instruction = runtime::user_global_instruction_input(
+      document, static_cast<std::uint64_t>(document.text.size()));
+  if (!instruction) {
+    return error(ChatSessionErrorCode::context_failed,
+                 instruction.error().message);
+  }
+  input.instructions.push_back(std::move(*instruction));
+  return {};
 }
 
 [[nodiscard]] auto model_tool_calling_support(
@@ -472,6 +556,10 @@ struct ChatSession::Impl {
   persona::PersonaSource* persona_source{};
   persona::PersonaEditor* persona_editor{};
   persona::PersonaLimits persona_limits{};
+  instructions::UserGlobalInstructionSource* user_global_instruction_source{};
+  instructions::UserGlobalInstructionEditor* user_global_instruction_editor{};
+  instructions::UserGlobalInstructionLimits user_global_instruction_limits{};
+  bool user_global_instructions_enabled{};
   std::stop_token stop_token;
   std::optional<domain::PersonaDocument> persona_document;
   std::optional<domain::PersonaSelection> next_persona_selection;
@@ -482,6 +570,9 @@ struct ChatSession::Impl {
   std::optional<domain::RepositoryId> repository_id;
   std::string runtime_version;
   std::optional<domain::ContextBuildInput> active_context;
+  bool recovered_pending_run_validation_required{};
+  std::optional<domain::UserGlobalInstructionDocument>
+      recovered_user_global_instruction;
   std::vector<domain::RunEvent> pending_surface_events;
   std::unique_ptr<runtime::RunKernel> kernel;
   std::uint64_t tool_profile_revision{};
@@ -500,6 +591,39 @@ struct ChatSession::Impl {
 ChatSession::ChatSession(std::unique_ptr<Impl> impl) : m_impl(std::move(impl)) {
 }
 ChatSession::~ChatSession() = default;
+
+auto ChatSession::validate_recovered_pending_run()
+    -> std::expected<void, ChatSessionError> {
+  if (!m_impl->recovered_pending_run_validation_required) return {};
+  const auto run_id = m_impl->kernel->active_run_id();
+  if (!run_id) {
+    m_impl->recovered_pending_run_validation_required = false;
+    m_impl->recovered_user_global_instruction.reset();
+    return {};
+  }
+  const auto expected =
+      recorded_user_global_instruction(m_impl->kernel->event_log(), *run_id);
+  if (!expected) {
+    m_impl->recovered_pending_run_validation_required = false;
+    m_impl->recovered_user_global_instruction.reset();
+    return {};
+  }
+  if (m_impl->user_global_instruction_source == nullptr) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "recorded user-global instruction source is unavailable");
+  }
+  auto loaded = load_user_global_document(
+      m_impl->user_global_instruction_source,
+      m_impl->user_global_instruction_limits, m_impl->stop_token);
+  if (!loaded) return std::unexpected(std::move(loaded.error()));
+  if (!*loaded || (*loaded)->reference != *expected) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "user-global instruction changed since this run started");
+  }
+  m_impl->recovered_user_global_instruction = std::move(**loaded);
+  m_impl->recovered_pending_run_validation_required = false;
+  return {};
+}
 
 // clang-format off
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit durable checks.
@@ -701,6 +825,9 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
                      recovered.error().message, recovered.error().retryable);
       }
     }
+    const bool recovered_pending_run =
+        durable && request.mode != ChatSessionOpen::Mode::create &&
+        kernel->active_run_id().has_value();
     auto impl = std::make_unique<Impl>(
         Impl{request.model_id,
              *model,
@@ -721,6 +848,10 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              dependencies.persona_source,
              dependencies.persona_editor,
              dependencies.persona_limits,
+             dependencies.user_global_instruction_source,
+             dependencies.user_global_instruction_editor,
+             dependencies.user_global_instruction_limits,
+             dependencies.user_global_instructions_enabled,
              stop_token,
              std::move(persona_setup->document),
              std::move(persona_setup->next_selection),
@@ -730,6 +861,8 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              dependencies.memory_settings,
              std::move(dependencies.repository_id),
              std::move(dependencies.runtime_version),
+             std::nullopt,
+             recovered_pending_run,
              std::nullopt,
              {},
              std::move(kernel),
@@ -773,6 +906,15 @@ auto ChatSession::submit(std::string prompt)
     if (!m_impl->persona_attention.empty()) {
       return error(ChatSessionErrorCode::context_failed,
                    m_impl->persona_attention);
+    }
+    std::optional<domain::UserGlobalInstructionDocument>
+        user_global_instruction;
+    if (m_impl->user_global_instructions_enabled) {
+      auto loaded = load_user_global_document(
+          m_impl->user_global_instruction_source,
+          m_impl->user_global_instruction_limits, m_impl->stop_token);
+      if (!loaded) return std::unexpected(std::move(loaded.error()));
+      user_global_instruction = std::move(*loaded);
     }
     auto ceiling = rebuild_spend_ceiling(m_impl->kernel->event_log());
     if (!ceiling) return std::unexpected(std::move(ceiling.error()));
@@ -882,6 +1024,10 @@ auto ChatSession::submit(std::string prompt)
         bounded =
             bounded && add_mandatory(m_impl->persona_document->text.size());
       }
+      if (user_global_instruction) {
+        bounded =
+            bounded && add_mandatory(user_global_instruction->text.size());
+      }
       if (!bounded) {
         return error(ChatSessionErrorCode::context_failed,
                      "required context accounting overflowed");
@@ -938,6 +1084,13 @@ auto ChatSession::submit(std::string prompt)
       }
       input.instructions.push_back(std::move(*persona_instruction));
     }
+    if (user_global_instruction) {
+      if (auto appended =
+              append_user_global_instruction(input, *user_global_instruction);
+          !appended) {
+        return std::unexpected(std::move(appended.error()));
+      }
+    }
     auto continuation_context = input;
     auto context = runtime::ContextBuilder{}.build(std::move(input));
     if (!context) {
@@ -948,12 +1101,22 @@ auto ChatSession::submit(std::string prompt)
     const auto before = m_impl->kernel->event_log().events().size();
     auto provenance = m_impl->provenance;
     if (provenance) {
+      provenance->user_global_instruction =
+          user_global_instruction
+              ? std::optional<
+                    domain::
+                        UserGlobalInstructionReference>{user_global_instruction
+                                                            ->reference}
+              : std::nullopt;
       provenance->tool_profile = domain::ToolProfileProvenance{
           tool_profile->selection.selected_profile_id,
           tool_profile->selection.model_maximum_profile_id,
           tool_profile->selection.persona_maximum_profile_id,
           tool_profile->selection.desired_tool_names.value_or(
               tool_profile->selected_profile.tool_names)};
+    } else if (user_global_instruction) {
+      return error(ChatSessionErrorCode::context_failed,
+                   "user-global instruction provenance is unavailable");
     }
     backend::BackendRequest backend_request{
         *inference_id,
@@ -1011,6 +1174,9 @@ auto ChatSession::continue_if_ready()
       m_impl->kernel->pending_question_input()) {
     return std::vector<domain::RunEvent>{};
   }
+  if (auto validated = validate_recovered_pending_run(); !validated) {
+    return std::unexpected(std::move(validated.error()));
+  }
 
   const auto* active_tools = m_impl->kernel->active_tool_declarations();
   if (active_tools == nullptr) {
@@ -1067,6 +1233,33 @@ auto ChatSession::continue_if_ready()
                      persona_instruction.error().message);
       }
       base.instructions.push_back(std::move(*persona_instruction));
+    }
+    const auto recorded_instruction =
+        recorded_user_global_instruction(m_impl->kernel->event_log(), *run_id);
+    if (recorded_instruction) {
+      std::optional<domain::UserGlobalInstructionDocument> loaded;
+      if (m_impl->recovered_user_global_instruction) {
+        loaded = m_impl->recovered_user_global_instruction;
+      } else {
+        if (m_impl->user_global_instruction_source == nullptr) {
+          return error(
+              ChatSessionErrorCode::context_failed,
+              "recorded user-global instruction source is unavailable");
+        }
+        auto current = load_user_global_document(
+            m_impl->user_global_instruction_source,
+            m_impl->user_global_instruction_limits, m_impl->stop_token);
+        if (!current) return std::unexpected(std::move(current.error()));
+        loaded = std::move(*current);
+      }
+      if (!loaded || loaded->reference != *recorded_instruction) {
+        return error(ChatSessionErrorCode::context_failed,
+                     "user-global instruction changed since this run started");
+      }
+      if (auto appended = append_user_global_instruction(base, *loaded);
+          !appended) {
+        return std::unexpected(std::move(appended.error()));
+      }
     }
     m_impl->active_context = base;
   }
@@ -1176,7 +1369,11 @@ auto ChatSession::drain()
   }
   result.insert(result.end(), std::make_move_iterator(continued->begin()),
                 std::make_move_iterator(continued->end()));
-  if (!m_impl->kernel->active_run_id()) m_impl->active_context.reset();
+  if (!m_impl->kernel->active_run_id()) {
+    m_impl->active_context.reset();
+    m_impl->recovered_pending_run_validation_required = false;
+    m_impl->recovered_user_global_instruction.reset();
+  }
   return result;
 }
 
@@ -1187,6 +1384,9 @@ auto ChatSession::cancel_active(std::optional<std::string> reason)
   const auto before = m_impl->kernel->event_log().events().size();
   auto cancelled = m_impl->kernel->cancel_run(*run, std::move(reason));
   if (!cancelled) return std::unexpected(kernel_error(cancelled.error()));
+  m_impl->active_context.reset();
+  m_impl->recovered_pending_run_validation_required = false;
+  m_impl->recovered_user_global_instruction.reset();
   const auto events = m_impl->kernel->event_log().events();
   for (std::size_t index = before; index < events.size(); ++index) {
     m_impl->pending_surface_events.push_back(events[index]);
@@ -1208,6 +1408,9 @@ auto ChatSession::decide_tool_approval(
     const domain::RunId& run_id, const domain::InvocationId& invocation_id,
     runtime::ToolApprovalResolution resolution)
     -> std::expected<void, ChatSessionError> {
+  if (auto validated = validate_recovered_pending_run(); !validated) {
+    return std::unexpected(std::move(validated.error()));
+  }
   const auto before = m_impl->kernel->event_log().events().size();
   auto decided = m_impl->kernel->decide_approval(run_id, invocation_id,
                                                  std::move(resolution));
@@ -1223,6 +1426,9 @@ auto ChatSession::answer_questions(const domain::RunId& run_id,
                                    const domain::InvocationId& invocation_id,
                                    std::vector<domain::QuestionAnswer> answers)
     -> std::expected<void, ChatSessionError> {
+  if (auto validated = validate_recovered_pending_run(); !validated) {
+    return std::unexpected(std::move(validated.error()));
+  }
   const auto before = m_impl->kernel->event_log().events().size();
   auto answered = m_impl->kernel->answer_questions(run_id, invocation_id,
                                                    std::move(answers));
@@ -1238,6 +1444,9 @@ auto ChatSession::cancel_questions(const domain::RunId& run_id,
                                    const domain::InvocationId& invocation_id,
                                    std::optional<std::string> reason)
     -> std::expected<void, ChatSessionError> {
+  if (auto validated = validate_recovered_pending_run(); !validated) {
+    return std::unexpected(std::move(validated.error()));
+  }
   const auto before = m_impl->kernel->event_log().events().size();
   auto cancelled = m_impl->kernel->cancel_questions(run_id, invocation_id,
                                                     std::move(reason));
@@ -1799,6 +2008,77 @@ auto ChatSession::persona_limits() const noexcept -> persona::PersonaLimits {
   return m_impl->persona_limits;
 }
 
+auto ChatSession::load_user_global_instruction()
+    -> std::expected<std::optional<domain::UserGlobalInstructionDocument>,
+                     ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before viewing global "
+                 "instructions");
+  }
+  if (m_impl->user_global_instruction_source == nullptr) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "user-global instruction source is unavailable");
+  }
+  return load_user_global_document(m_impl->user_global_instruction_source,
+                                   m_impl->user_global_instruction_limits,
+                                   m_impl->stop_token);
+}
+
+auto ChatSession::write_user_global_instruction(
+    instructions::UserGlobalInstructionWrite request)
+    -> std::expected<instructions::UserGlobalInstructionWriteReceipt,
+                     ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before editing global "
+                 "instructions");
+  }
+  if (m_impl->user_global_instruction_editor == nullptr) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "user-global instruction editor is unavailable");
+  }
+  request.limits = m_impl->user_global_instruction_limits;
+  auto written = m_impl->user_global_instruction_editor->write(
+      std::move(request), m_impl->stop_token);
+  if (!written) {
+    return std::unexpected(user_global_editor_error(written.error()));
+  }
+  return std::move(*written);
+}
+
+auto ChatSession::set_user_global_instructions_enabled(
+    const bool enabled,
+    std::optional<std::vector<domain::ConfigurationProvenanceEntry>>
+        configuration) -> std::expected<void, ChatSessionError> {
+  if (active()) {
+    return error(ChatSessionErrorCode::run_failed,
+                 "finish or cancel the active run before changing global "
+                 "instructions");
+  }
+  auto provenance = m_impl->provenance;
+  if (provenance && configuration) {
+    provenance->configuration = std::move(*configuration);
+    if (auto valid = domain::validate_run_provenance(*provenance); !valid) {
+      return error(ChatSessionErrorCode::invalid_input,
+                   "user-global instruction configuration provenance is "
+                   "invalid");
+    }
+  }
+  m_impl->user_global_instructions_enabled = enabled;
+  m_impl->provenance = std::move(provenance);
+  return {};
+}
+
+auto ChatSession::user_global_instructions_enabled() const noexcept -> bool {
+  return m_impl->user_global_instructions_enabled;
+}
+
+auto ChatSession::user_global_instruction_limits() const noexcept
+    -> instructions::UserGlobalInstructionLimits {
+  return m_impl->user_global_instruction_limits;
+}
+
 auto ChatSession::plan_task_state(
     std::optional<domain::RepositoryId> repository_id)
     -> std::expected<runtime::PlanTaskState, ChatSessionError> {
@@ -1816,6 +2096,9 @@ auto ChatSession::decide_plan(const domain::RunId& run_id,
                               domain::PlanRevisionDecision decision,
                               runtime::PlanApprovalEnvironment environment)
     -> std::expected<runtime::PlanDecisionOutcome, ChatSessionError> {
+  if (auto validated = validate_recovered_pending_run(); !validated) {
+    return std::unexpected(std::move(validated.error()));
+  }
   runtime::PlanTaskController controller{*m_impl->kernel,
                                          m_impl->session_store};
   auto result =
