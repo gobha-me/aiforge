@@ -414,3 +414,146 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   REQUIRE_FALSE(stopped);
   REQUIRE(stopped.error().code == SlashCommandErrorCode::cancelled);
 }
+
+TEST_CASE("tool slash mutations are typed, bounded, and fail closed",
+          "[slash][tools]") {
+  const auto& registry = builtin_slash_command_registry();
+
+  const std::vector<std::string> malformed{
+      "/tools profile",
+      "/tools profile two names",
+      "/tools profile Bad",
+      "/tools off now",
+      "/tools reset now",
+      "/tools category",
+      "/tools category memory",
+      "/tools category memory auto",
+      "/tools category memory On",
+      "/tools category unknown on",
+      "/tools category Bad on",
+      "/tools category memory on now",
+      "/tools tool",
+      "/tools tool ask_user",
+      "/tools tool ask_user auto",
+      "/tools tool ask*user on",
+      "/tools tool ask_user off now",
+      "/tools model-max",
+      "/tools model-max Bad",
+      "/tools model-max inherit now",
+      "/tools persona-max",
+      "/tools persona-max Bad",
+      "/tools persona-max inherit now",
+      std::string{"/tools tool safe"} + "\xC2\x85" + " on",
+      std::string{"/tools tool safe"} + "\xE2\x80\xAE" + " on",
+  };
+  for (const auto& command : malformed) {
+    CAPTURE(command);
+    const auto rejected = registry.dispatch(command);
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error().code == SlashCommandErrorCode::invalid_arguments);
+  }
+
+  const std::string maximum_identifier(64, 'a');
+  const std::string oversized_identifier(65, 'a');
+  const std::string maximum_tool_name(128, 't');
+  const std::string oversized_tool_name(129, 't');
+  REQUIRE(registry.dispatch("/tools profile " + maximum_identifier));
+  REQUIRE_FALSE(registry.dispatch("/tools profile " + oversized_identifier));
+  REQUIRE_FALSE(
+      registry.dispatch("/tools category " + oversized_identifier + " on"));
+  REQUIRE(registry.dispatch("/tools tool " + maximum_tool_name + " on"));
+  REQUIRE_FALSE(
+      registry.dispatch("/tools tool " + oversized_tool_name + " on"));
+  REQUIRE(registry.dispatch("/tools model-max " + maximum_identifier));
+  REQUIRE_FALSE(registry.dispatch("/tools model-max " + oversized_identifier));
+  REQUIRE(registry.dispatch("/tools persona-max " + maximum_identifier));
+  REQUIRE_FALSE(
+      registry.dispatch("/tools persona-max " + oversized_identifier));
+
+  for (const auto& command : {
+           "/tools profile essentials",
+           "/tools off",
+           "/tools reset",
+           "/tools category memory on",
+           "/tools category memory off",
+           "/tools tool ask_user on",
+           "/tools tool ask_user off",
+           "/tools model-max repository-read",
+           "/tools model-max inherit",
+           "/tools persona-max off",
+           "/tools persona-max inherit",
+       }) {
+    CAPTURE(command);
+    const auto rejected =
+        registry.dispatch(command, {.run_active = true, .stop_token = {}});
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error().code ==
+            SlashCommandErrorCode::unavailable_command);
+  }
+
+  struct ExpectedMutation {
+    std::string command;
+    SlashCommandAction action;
+    std::optional<std::string> subject;
+  };
+  const std::vector<ExpectedMutation> mutations{
+      {"/tools profile repository-read",
+       SlashCommandAction::select_tool_profile, "repository-read"},
+      {"/tools profile off", SlashCommandAction::select_tool_profile, "off"},
+      {"/tools off", SlashCommandAction::disable_tools, std::nullopt},
+      {"/tools reset", SlashCommandAction::reset_tool_narrowing, std::nullopt},
+      {"/tools category repository on",
+       SlashCommandAction::enable_tool_category, "repository"},
+      {"/tools category repository off",
+       SlashCommandAction::disable_tool_category, "repository"},
+      {"/tools tool read_repository_file on", SlashCommandAction::enable_tool,
+       "read_repository_file"},
+      {"/tools tool read_repository_file off", SlashCommandAction::disable_tool,
+       "read_repository_file"},
+      {"/tools model-max essentials",
+       SlashCommandAction::set_model_tool_profile_maximum, "essentials"},
+      {"/tools model-max off",
+       SlashCommandAction::set_model_tool_profile_maximum, "off"},
+      {"/tools model-max inherit",
+       SlashCommandAction::inherit_model_tool_profile_maximum, std::nullopt},
+      {"/tools persona-max off",
+       SlashCommandAction::set_persona_tool_profile_maximum, "off"},
+      {"/tools persona-max essentials",
+       SlashCommandAction::set_persona_tool_profile_maximum, "essentials"},
+      {"/tools persona-max inherit",
+       SlashCommandAction::inherit_persona_tool_profile_maximum, std::nullopt},
+  };
+  for (const auto& expected : mutations) {
+    CAPTURE(expected.command);
+    const auto result = registry.dispatch(expected.command);
+    REQUIRE(result);
+    REQUIRE(result->has_value());
+    REQUIRE((*result)->action == expected.action);
+    REQUIRE((*result)->subject == expected.subject);
+  }
+
+  for (const auto category :
+       {"interaction", "memory", "repository", "process", "media", "other"}) {
+    CAPTURE(category);
+    const auto result =
+        registry.dispatch("/tools category " + std::string{category} + " on");
+    REQUIRE(result);
+    REQUIRE((*result)->action == SlashCommandAction::enable_tool_category);
+    REQUIRE((*result)->subject == category);
+  }
+
+  const auto provider_tool = registry.dispatch("/tools tool mcp.read-file on");
+  REQUIRE(provider_tool);
+  REQUIRE((*provider_tool)->action == SlashCommandAction::enable_tool);
+  REQUIRE((*provider_tool)->subject == "mcp.read-file");
+
+  const auto descriptions = registry.describe("tools");
+  REQUIRE(descriptions);
+  REQUIRE(descriptions->size() == 1);
+  REQUIRE(descriptions->front().arguments.find("category") !=
+          std::string::npos);
+  REQUIRE(descriptions->front().arguments.find("model-max") !=
+          std::string::npos);
+  REQUIRE(descriptions->front().arguments.find("persona-max") !=
+          std::string::npos);
+}

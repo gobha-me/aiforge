@@ -491,6 +491,22 @@ TEST_CASE(
   REQUIRE(result.error().code ==
           runtime::ToolRegistryErrorCode::invalid_declaration);
 
+  result = registry.register_tool(declaration("invalid-category"), executor, {},
+                                  std::nullopt,
+                                  static_cast<runtime::ToolCategory>(100));
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code ==
+          runtime::ToolRegistryErrorCode::invalid_declaration);
+
+  REQUIRE(runtime::tool_category_name(runtime::ToolCategory::repository) ==
+          "repository");
+  REQUIRE(runtime::tool_category_from_name("process") ==
+          runtime::ToolCategory::process);
+  REQUIRE_FALSE(runtime::tool_category_from_name("unknown"));
+  REQUIRE(runtime::all_tool_categories().size() == 6);
+  REQUIRE(runtime::all_tool_categories().back() ==
+          runtime::ToolCategory::other);
+
   REQUIRE(registry.register_tool(declaration(), executor));
   const auto snapshot = snapshot_of(registry);
   REQUIRE(snapshot.size() == 1);
@@ -516,9 +532,11 @@ TEST_CASE("tool registry subsets are bounded atomic registry-ordered snapshots",
   const runtime::ToolExecutorContract first_contract{"test.first", "1"};
   const runtime::ToolExecutorContract second_contract{"test.second", "2"};
   REQUIRE(registry.register_tool(declaration("first"), first_executor,
-                                 first_limits, first_contract));
+                                 first_limits, first_contract,
+                                 runtime::ToolCategory::repository));
   REQUIRE(registry.register_tool(declaration("second"), second_executor,
-                                 second_limits, second_contract));
+                                 second_limits, second_contract,
+                                 runtime::ToolCategory::process));
   const auto full = snapshot_of(registry);
 
   const std::vector<std::string> reverse{"second", "first"};
@@ -534,9 +552,11 @@ TEST_CASE("tool registry subsets are bounded atomic registry-ordered snapshots",
   REQUIRE(first->executor == first_executor);
   REQUIRE(first->limits == first_limits);
   REQUIRE(first->executor_contract == first_contract);
+  REQUIRE(first->category == runtime::ToolCategory::repository);
   REQUIRE(second->executor == second_executor);
   REQUIRE(second->limits == second_limits);
   REQUIRE(second->executor_contract == second_contract);
+  REQUIRE(second->category == runtime::ToolCategory::process);
 
   const std::vector<std::string> duplicate{"first", "first"};
   const auto duplicated = full.subset(duplicate);

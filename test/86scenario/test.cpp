@@ -810,6 +810,14 @@ class QuestionBackendState final {
         std::string_view{"continuation-end"},
     };
     std::unique_lock lock{m_mutex};
+    if (description == "interrupt-cancelled") {
+      if (!m_interrupt_wake_baseline || !m_condition.wait_for(lock, 1s, [&] {
+            return m_wakes > *m_interrupt_wake_baseline;
+          })) {
+        return std::unexpected("question cancellation update was not posted");
+      }
+      return {};
+    }
     if (!m_condition.wait_for(lock, 1s,
                               [&] { return m_waiting_calls > m_released; })) {
       return std::unexpected("question backend did not reach its boundary");
@@ -828,10 +836,11 @@ class QuestionBackendState final {
         })) {
       return std::unexpected("question backend did not acknowledge its step");
     }
-    if (wait_for_wake &&
+    if ((wait_for_wake || released == 4U) &&
         !m_condition.wait_for(lock, 1s, [&] { return m_wakes >= released; })) {
       return std::unexpected("question backend update was not posted");
     }
+    if (released == 4U) m_interrupt_wake_baseline = m_wakes;
     return {};
   }
 
@@ -856,6 +865,7 @@ class QuestionBackendState final {
   std::size_t m_released{};
   std::size_t m_wakes{};
   std::size_t m_ended_streams{};
+  std::optional<std::size_t> m_interrupt_wake_baseline;
   bool m_valid{true};
 };
 
@@ -1440,7 +1450,9 @@ auto question_scenario(const bool interrupt = false) -> testing::TuiScenario {
   value.initial_size = {100, 14, 1000, 280};
   value.backend_script = {"question-started", "question-call",
                           "question-finished", "question-end"};
-  if (!interrupt) {
+  if (interrupt) {
+    value.backend_script.push_back("interrupt-cancelled");
+  } else {
     value.backend_script.insert(value.backend_script.end(),
                                 {"continuation-started", "continuation-delta",
                                  "continuation-finished", "continuation-end"});
@@ -1460,6 +1472,8 @@ auto question_scenario(const bool interrupt = false) -> testing::TuiScenario {
     value.steps.push_back({6, testing::TuiScenarioPost{termforge::KeyEvent{
                                   termforge::Key::Char, U'c', true, false,
                                   false, termforge::KeyAction::Press}}});
+    value.steps.push_back({7, testing::TuiScenarioRelease{
+                                  testing::TuiScenarioProducer::backend}});
     value.steps.push_back(
         {8, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}});
     value.steps.push_back({8, enter});
@@ -1599,6 +1613,9 @@ auto tool_profile_scenario() -> testing::TuiScenario {
   const auto down = testing::TuiScenarioPost{
       termforge::KeyEvent{termforge::Key::Down, 0, false, false, false,
                           termforge::KeyAction::Press}};
+  const auto escape = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Escape, 0, false, false, false,
+                          termforge::KeyAction::Press}};
   value.steps = {
       {0, testing::TuiScenarioPost{termforge::PasteEvent{"/tools off"}}},
       {0, enter},
@@ -1607,28 +1624,128 @@ auto tool_profile_scenario() -> testing::TuiScenario {
       {2, enter},
       {4, testing::TuiScenarioPost{termforge::PasteEvent{"/tools"}}},
       {4, enter},
-      {5, testing::TuiScenarioResize{{8, 3, 80, 60}}},
-      {6, testing::TuiScenarioResize{{100, 18, 1000, 360}}},
-      {7, down},
-      {7, down},
+      {5, enter},
+      {6, testing::TuiScenarioResize{{8, 3, 80, 60}}},
+      {7, testing::TuiScenarioResize{{100, 18, 1000, 360}}},
+      {7, escape},
       {8, enter},
-      {10, testing::TuiScenarioPost{termforge::PasteEvent{
-               "/session resume target-session"}}},
+      {9, down},
+      {9, down},
       {10, enter},
-      {12, testing::TuiScenarioPost{termforge::PasteEvent{"/tools"}}},
-      {12, enter},
-      {14, enter},
-      {16, testing::TuiScenarioPost{termforge::PasteEvent{"/tools off"}}},
+      {11, testing::TuiScenarioPost{termforge::PasteEvent{
+               "/session resume target-session"}}},
+      {11, enter},
+      {13, testing::TuiScenarioPost{termforge::PasteEvent{"/tools"}}},
+      {13, enter},
+      {15, enter},
       {16, enter},
-      {18, testing::TuiScenarioPost{termforge::PasteEvent{"/session new"}}},
+      {17, testing::TuiScenarioPost{termforge::PasteEvent{"/tools off"}}},
+      {17, enter},
+      {19, testing::TuiScenarioPost{termforge::PasteEvent{"/session new"}}},
+      {19, enter},
+      {21, testing::TuiScenarioPost{termforge::PasteEvent{"/tools"}}},
+      {21, enter},
+      {23, enter},
+      {24, enter},
+      {25, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
+      {25, enter},
+  };
+  value.limits.maximum_frames = 48;
+  return value;
+}
+
+auto tool_maximum_persistence_failure_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-tool-maximum-persistence-failure";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 18, 1000, 360};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0,
+       testing::TuiScenarioPost{termforge::PasteEvent{"/tools model-max off"}}},
+      {0, enter},
+      {2, testing::TuiScenarioPost{termforge::PasteEvent{"/tools"}}},
+      {2, enter},
+      {3, enter},
+      {4, enter},
+      {6, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
+      {6, enter},
+  };
+  value.limits.maximum_frames = 20;
+  return value;
+}
+
+auto tool_maximum_indeterminate_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-tool-maximum-indeterminate";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {100, 18, 1000, 360};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0,
+       testing::TuiScenarioPost{termforge::PasteEvent{"/tools model-max off"}}},
+      {0, enter},
+  };
+  value.limits.maximum_frames = 8;
+  return value;
+}
+
+auto tool_manager_children_scenario() -> testing::TuiScenario {
+  testing::TuiScenario value;
+  value.scenario_id = "interactive-tool-manager-children";
+  value.corpus_version = "1";
+  value.application_revision = "test-revision";
+  value.initial_size = {120, 18, 1200, 360};
+  const auto enter = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Enter, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  const auto down = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Down, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  const auto escape = testing::TuiScenarioPost{
+      termforge::KeyEvent{termforge::Key::Escape, 0, false, false, false,
+                          termforge::KeyAction::Press}};
+  value.steps = {
+      {0, testing::TuiScenarioPost{termforge::PasteEvent{"/tools"}}},
+      {0, enter},
+      {2, down},
+      {2, enter},
+      {4, escape},
+      {6, down},
+      {6, down},
+      {6, enter},
+      {8, escape},
+      {10, down},
+      {10, down},
+      {10, down},
+      {10, enter},
+      {12, escape},
+      {14, down},
+      {14, down},
+      {14, down},
+      {14, down},
+      {14, enter},
+      {16, testing::TuiScenarioPost{termforge::PasteEvent{
+               "/tools category interaction off"}}},
+      {16, enter},
+      {18, testing::TuiScenarioPost{termforge::PasteEvent{
+               "/tools tool propose_memory off"}}},
       {18, enter},
-      {20, testing::TuiScenarioPost{termforge::PasteEvent{"/tools"}}},
+      {20, testing::TuiScenarioPost{termforge::PasteEvent{
+               "/tools tool ask_user off"}}},
       {20, enter},
+      {22, testing::TuiScenarioPost{termforge::PasteEvent{"/tools reset"}}},
       {22, enter},
       {24, testing::TuiScenarioPost{termforge::PasteEvent{"/quit"}}},
       {24, enter},
   };
-  value.limits.maximum_frames = 48;
+  value.limits.maximum_frames = 32;
   return value;
 }
 
@@ -2882,7 +2999,9 @@ auto ephemeral_session_scenario() -> testing::TuiScenario {
 }
 
 auto session_factory(const bool durable, const bool fail_listing = false,
-                     const bool report_mutations = false)
+                     const bool report_mutations = false,
+                     const bool fail_tool_persistence = false,
+                     const bool indeterminate_tool_persistence = false)
     -> testing::TuiScenarioTargetFactory {
   return [=](testing::TuiScenarioPass, termforge::ByteSink* output)
              -> std::expected<testing::TuiScenarioTarget,
@@ -2899,6 +3018,7 @@ auto session_factory(const bool durable, const bool fail_listing = false,
     auto store = std::make_shared<SessionScenarioStore>(fail_listing);
     auto frame = std::make_shared<std::string>();
     auto suffix = std::make_shared<std::uint64_t>();
+    auto tool_saves = std::make_shared<std::size_t>();
     adapters::InteractiveChatAppOptions options;
     options.live_wake_enabled = false;
     options.poll_worker_updates = false;
@@ -2911,6 +3031,17 @@ auto session_factory(const bool durable, const bool fail_listing = false,
     };
     options.session_dependencies.timestamp_source = [] {
       return domain::EventTimestamp{123ms};
+    };
+    options.persist_tool_profile_maximum =
+        [tool_saves, fail_tool_persistence, indeterminate_tool_persistence](
+            const adapters::ToolProfileMaximumSave&)
+        -> std::expected<void, adapters::ToolProfileMaximumPersistError> {
+      ++*tool_saves;
+      if (fail_tool_persistence) {
+        return std::unexpected(adapters::ToolProfileMaximumPersistError{
+            "simulated persistence failure", indeterminate_tool_persistence});
+      }
+      return {};
     };
     auto app = adapters::make_interactive_chat_app(
         *backend, *backend, durable ? store.get() : nullptr,
@@ -2944,7 +3075,8 @@ auto session_factory(const bool durable, const bool fail_listing = false,
           return std::unexpected("session scenario has no tool script");
         },
         [frame] { return *frame; },
-        [raw, backend, editor, store, backend_state, report_mutations] {
+        [raw, backend, editor, store, backend_state, report_mutations,
+         tool_saves, fail_tool_persistence] {
           static_cast<void>(backend);
           static_cast<void>(editor);
           static_cast<void>(store);
@@ -2953,6 +3085,12 @@ auto session_factory(const bool durable, const bool fail_listing = false,
             state += "|appends=" + std::to_string(store->append_calls());
             state += "|inferences=" +
                      std::to_string(backend_state->initialize_calls());
+          }
+          if (fail_tool_persistence) {
+            state += "|tool-saves=" + std::to_string(*tool_saves);
+          }
+          if (const auto failure = raw->failure_state()) {
+            state += "|failure=" + failure->message;
           }
           return state;
         }};
@@ -3228,8 +3366,14 @@ TEST_CASE("interactive tool profile commands remain session local",
         return frame.find("Choose a Chat tool profile") != std::string::npos;
       });
   REQUIRE(picker_open != result->recorded.normalized_frames.end());
-  const auto selected_off = std::ranges::find_if(
+  const auto manager_reopened = std::ranges::find_if(
       std::next(picker_open), result->recorded.normalized_frames.end(),
+      [](const std::string& frame) {
+        return frame.find("Choose a tool manager action") != std::string::npos;
+      });
+  REQUIRE(manager_reopened != result->recorded.normalized_frames.end());
+  const auto selected_off = std::ranges::find_if(
+      std::next(manager_reopened), result->recorded.normalized_frames.end(),
       [](const std::string& frame) {
         return frame.find("Selected Off") != std::string::npos;
       });
@@ -3265,6 +3409,63 @@ TEST_CASE("interactive tool profile commands remain session local",
       std::next(new_session), result->recorded.normalized_frames.end(),
       [](const std::string& frame) {
         return frame.find("Selected Essentials") != std::string::npos;
+      }));
+}
+
+TEST_CASE(
+    "failed tool maximum persistence leaves the session selection unchanged",
+    "[scenario][chat][tools][profiles][persistence][failure]") {
+  const auto result =
+      testing::run_tui_scenario(tool_maximum_persistence_failure_scenario(),
+                                session_factory(false, false, false, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state.find("tool-saves=1") !=
+          std::string::npos);
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("Tool maximum unchanged") != std::string::npos;
+      }));
+}
+
+TEST_CASE("indeterminate tool maximum persistence terminates fail closed",
+          "[scenario][chat][tools][profiles][persistence][failure]") {
+  const auto result = testing::run_tui_scenario(
+      tool_maximum_indeterminate_scenario(),
+      session_factory(false, false, false, true, true));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  REQUIRE(result->recorded.semantic_state.find("indeterminate result") !=
+          std::string::npos);
+}
+
+TEST_CASE("tool manager child routes and direct narrowing replay exactly",
+          "[scenario][chat][tools][profiles][manager]") {
+  const auto result = testing::run_tui_scenario(
+      tool_manager_children_scenario(), session_factory(false));
+  INFO((result ? std::string{} : result.error().message));
+  REQUIRE(result);
+  REQUIRE(result->recorded == result->replayed);
+  for (const auto status :
+       {std::string_view{"Choose enabled tool categories"},
+        std::string_view{"Choose individual tools"},
+        std::string_view{"Choose a maximum tool profile"}}) {
+    CAPTURE(status);
+    REQUIRE(std::ranges::any_of(
+        result->recorded.normalized_frames, [status](const std::string& frame) {
+          return frame.find(status) != std::string::npos;
+        }));
+  }
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("Select a persona before configuring") !=
+               std::string::npos;
+      }));
+  REQUIRE(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const std::string& frame) {
+        return frame.find("Session desired: none") != std::string::npos;
       }));
 }
 

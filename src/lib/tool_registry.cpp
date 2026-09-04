@@ -4,6 +4,7 @@
 #include <aiforge/detail/utf8_text.hpp>
 
 #include <algorithm>
+#include <array>
 #include <iterator>
 #include <ranges>
 #include <set>
@@ -21,6 +22,9 @@ constexpr std::size_t kMaximumSchemaBytes{std::size_t{1024} * 1024U};
 constexpr std::size_t kMaximumScopeBytes{std::size_t{16} * 1024U};
 constexpr std::size_t kMaximumSubsetTools{256};
 constexpr std::size_t kMaximumExecutorContractBytes{128};
+constexpr std::array kToolCategories{
+    ToolCategory::interaction, ToolCategory::memory, ToolCategory::repository,
+    ToolCategory::process,     ToolCategory::media,  ToolCategory::other};
 
 [[nodiscard]] auto has_control_character(const std::string_view value) -> bool {
   return std::ranges::any_of(value, [](const unsigned char character) {
@@ -62,6 +66,19 @@ constexpr std::size_t kMaximumExecutorContractBytes{128};
            value.find_first_of("\r\n\t") == std::string_view::npos;
   };
   return valid_field(contract.identity) && valid_field(contract.version);
+}
+
+[[nodiscard]] auto valid_category(const ToolCategory category) noexcept
+    -> bool {
+  switch (category) {
+    case ToolCategory::interaction:
+    case ToolCategory::memory:
+    case ToolCategory::repository:
+    case ToolCategory::process:
+    case ToolCategory::media:
+    case ToolCategory::other: return true;
+  }
+  return false;
 }
 
 [[nodiscard]] auto valid_declaration(
@@ -130,6 +147,34 @@ constexpr std::size_t kMaximumExecutorContractBytes{128};
 
 } // namespace
 
+auto tool_category_name(const ToolCategory category) noexcept
+    -> std::string_view {
+  switch (category) {
+    case ToolCategory::interaction: return "interaction";
+    case ToolCategory::memory: return "memory";
+    case ToolCategory::repository: return "repository";
+    case ToolCategory::process: return "process";
+    case ToolCategory::media: return "media";
+    case ToolCategory::other: return "other";
+  }
+  return "other";
+}
+
+auto tool_category_from_name(const std::string_view name) noexcept
+    -> std::optional<ToolCategory> {
+  if (name == "interaction") return ToolCategory::interaction;
+  if (name == "memory") return ToolCategory::memory;
+  if (name == "repository") return ToolCategory::repository;
+  if (name == "process") return ToolCategory::process;
+  if (name == "media") return ToolCategory::media;
+  if (name == "other") return ToolCategory::other;
+  return std::nullopt;
+}
+
+auto all_tool_categories() noexcept -> std::span<const ToolCategory> {
+  return kToolCategories;
+}
+
 auto ToolRegistrySnapshot::declarations() const noexcept
     -> const std::vector<backend::ToolDeclaration>& {
   return m_declarations;
@@ -181,8 +226,8 @@ auto ToolRegistrySnapshot::subset(const std::span<const std::string> names)
 auto ToolRegistry::register_tool(
     backend::ToolDeclaration declaration,
     std::shared_ptr<ToolExecutor> executor, ToolExecutionLimits limits,
-    std::optional<ToolExecutorContract> executor_contract)
-    -> std::expected<void, ToolRegistryError> {
+    std::optional<ToolExecutorContract> executor_contract,
+    const ToolCategory category) -> std::expected<void, ToolRegistryError> {
   try {
     if (!executor) {
       return std::unexpected(
@@ -195,6 +240,9 @@ auto ToolRegistry::register_tool(
     if (executor_contract && !valid_executor_contract(*executor_contract)) {
       return invalid("tool executor contract identity or version is invalid");
     }
+    if (!valid_category(category)) {
+      return invalid("tool category is invalid");
+    }
     if (std::ranges::any_of(m_tools, [&](const auto& tool) {
           return tool.declaration.name == declaration.name;
         })) {
@@ -204,7 +252,7 @@ auto ToolRegistry::register_tool(
     }
     m_tools.push_back(RegisteredTool{std::move(declaration), limits,
                                      std::move(executor),
-                                     std::move(executor_contract)});
+                                     std::move(executor_contract), category});
     return {};
   } catch (...) {
     return std::unexpected(

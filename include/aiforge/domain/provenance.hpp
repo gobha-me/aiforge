@@ -103,6 +103,9 @@ struct ToolProfileProvenance {
   ToolProfileId selected_profile_id;
   std::optional<ToolProfileId> model_maximum_profile_id;
   std::optional<ToolProfileId> persona_maximum_profile_id;
+  // Nullopt identifies legacy runs that predate exact per-tool narrowing. An
+  // empty vector records an explicit choice to advertise no tools.
+  std::optional<std::vector<std::string>> desired_tool_names{};
   auto operator==(const ToolProfileProvenance&) const -> bool = default;
 };
 

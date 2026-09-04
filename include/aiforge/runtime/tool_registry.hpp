@@ -71,6 +71,24 @@ struct ToolExecutorContract {
   auto operator==(const ToolExecutorContract&) const -> bool = default;
 };
 
+// Runtime-only presentation and selection metadata. Categories never enter a
+// provider declaration and do not imply effects, scopes, or approval.
+enum class ToolCategory {
+  interaction,
+  memory,
+  repository,
+  process,
+  media,
+  other,
+};
+
+[[nodiscard]] auto tool_category_name(ToolCategory category) noexcept
+    -> std::string_view;
+[[nodiscard]] auto tool_category_from_name(std::string_view name) noexcept
+    -> std::optional<ToolCategory>;
+[[nodiscard]] auto all_tool_categories() noexcept
+    -> std::span<const ToolCategory>;
+
 struct ToolInvocation {
   domain::InvocationId invocation_id;
   std::optional<domain::InvocationId> parent_invocation_id;
@@ -128,6 +146,7 @@ struct RegisteredTool {
   ToolExecutionLimits limits;
   std::shared_ptr<ToolExecutor> executor;
   std::optional<ToolExecutorContract> executor_contract;
+  ToolCategory category{ToolCategory::other};
 };
 
 class ToolRegistrySnapshot final {
@@ -160,7 +179,8 @@ class ToolRegistry final {
   [[nodiscard]] auto register_tool(
       backend::ToolDeclaration declaration,
       std::shared_ptr<ToolExecutor> executor, ToolExecutionLimits limits = {},
-      std::optional<ToolExecutorContract> executor_contract = std::nullopt)
+      std::optional<ToolExecutorContract> executor_contract = std::nullopt,
+      ToolCategory category = ToolCategory::other)
       -> std::expected<void, ToolRegistryError>;
 
   [[nodiscard]] auto snapshot() const

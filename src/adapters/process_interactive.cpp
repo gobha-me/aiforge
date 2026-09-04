@@ -31,6 +31,7 @@
 #include <aiforge/surfaces/chat_session.hpp>
 #include <aiforge/surfaces/slash_commands.hpp>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -327,11 +328,11 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
         }
       }
       layers.push_back(std::move(*file));
-    } else if (file_override) {
+    } else {
+      // An unreadable document may contain narrowing ceilings. Ignoring it
+      // could silently widen tool availability, so interactive startup fails
+      // closed whether or not this load was preparing a mutation.
       return failure(cli::CommandFailureKind::runtime, file.error().message);
-    } else if (!warning(diagnostics, file.error().message)) {
-      return failure(cli::CommandFailureKind::runtime,
-                     "diagnostic output failed");
     }
   }
   auto resolved = config::resolve_config(registry, layers);
@@ -388,6 +389,47 @@ struct VeniceConfigMutation {
                                   config::ConfigValue{false}};
   }
   return std::unexpected("Venice system-prompt setting is invalid");
+}
+
+[[nodiscard]] auto persist_tool_profile_maximum_mapping(
+    config::JsonConfigFileStore& store,
+    config::ToolProfileMaximumMappings& mappings,
+    const ToolProfileMaximumSave& save)
+    -> std::expected<void, ToolProfileMaximumPersistError> {
+  std::string_view key;
+  std::string subject;
+  if (const auto* model = std::get_if<domain::ModelId>(&save.subject)) {
+    key = config::model_maximum_tool_profiles_key;
+    subject = model->value();
+  } else {
+    const auto& persona = std::get<domain::PersonaId>(save.subject);
+    key = config::persona_maximum_tool_profiles_key;
+    subject = persona.value();
+  }
+  auto persisted = store.update_text_map_entry(
+      config::builtin_config_registry(), key, std::move(subject),
+      save.maximum_profile_id
+          ? std::optional<std::string>{save.maximum_profile_id->value()}
+          : std::nullopt);
+  if (!persisted) {
+    return std::unexpected(ToolProfileMaximumPersistError{
+        persisted.error().message, persisted.error().effect_may_have_applied});
+  }
+  if (const auto* model = std::get_if<domain::ModelId>(&save.subject)) {
+    if (save.maximum_profile_id) {
+      mappings.models.insert_or_assign(*model, *save.maximum_profile_id);
+    } else {
+      mappings.models.erase(*model);
+    }
+  } else {
+    const auto& persona = std::get<domain::PersonaId>(save.subject);
+    if (save.maximum_profile_id) {
+      mappings.personas.insert_or_assign(persona, *save.maximum_profile_id);
+    } else {
+      mappings.personas.erase(persona);
+    }
+  }
+  return {};
 }
 
 [[nodiscard]] auto configured_model(const config::ResolvedConfig& resolved)
@@ -777,6 +819,8 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_configured_request_settings(options.configured_request_settings),
         m_preview_request_setting(std::move(options.preview_request_setting)),
         m_persist_request_setting(std::move(options.persist_request_setting)),
+        m_persist_tool_profile_maximum(
+            std::move(options.persist_tool_profile_maximum)),
         m_open_template(std::move(open)),
         m_session_dependencies(std::move(options.session_dependencies)),
         m_bridge(*this, options.live_wake_enabled,
@@ -2162,6 +2206,47 @@ class ChatAppImpl final : public InteractiveChatApp {
         return select_tool_profile(*command.subject);
       case surfaces::SlashCommandAction::disable_tools:
         return select_tool_profile("off");
+      case surfaces::SlashCommandAction::reset_tool_narrowing:
+        return finish_tool_mutation(m_session->reset_tool_narrowing());
+      case surfaces::SlashCommandAction::enable_tool_category:
+      case surfaces::SlashCommandAction::disable_tool_category:
+        if (!command.subject) {
+          m_status = "A tool category is required";
+          return false;
+        }
+        return set_tool_category(
+            *command.subject,
+            command.action ==
+                surfaces::SlashCommandAction::enable_tool_category);
+      case surfaces::SlashCommandAction::enable_tool:
+      case surfaces::SlashCommandAction::disable_tool:
+        if (!command.subject) {
+          m_status = "A tool name is required";
+          return false;
+        }
+        return finish_tool_mutation(m_session->set_tool_enabled(
+            *command.subject,
+            command.action == surfaces::SlashCommandAction::enable_tool));
+      case surfaces::SlashCommandAction::set_model_tool_profile_maximum:
+      case surfaces::SlashCommandAction::set_persona_tool_profile_maximum: {
+        if (!command.subject) {
+          m_status = "A maximum tool profile is required";
+          return false;
+        }
+        auto maximum = domain::ToolProfileId::from(*command.subject);
+        if (!maximum) {
+          m_status = "Maximum tool profile identity is invalid";
+          return false;
+        }
+        return persist_tool_profile_maximum(
+            command.action ==
+                surfaces::SlashCommandAction::set_persona_tool_profile_maximum,
+            std::move(*maximum));
+      }
+      case surfaces::SlashCommandAction::inherit_model_tool_profile_maximum:
+        return persist_tool_profile_maximum(false, std::nullopt);
+      case surfaces::SlashCommandAction::inherit_persona_tool_profile_maximum:
+        return persist_tool_profile_maximum(true, std::nullopt);
       case surfaces::SlashCommandAction::set_reasoning_visibility: {
         if (!command.subject) {
           m_status = "Reasoning visibility is required";
@@ -3101,9 +3186,38 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
+  // clang-format off
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Exhaustive ceiling and availability rendering keeps the manager auditable.
   [[nodiscard]] auto tool_profile_summary(
       const runtime::ToolProfileResolution& state) const -> std::string {
+    // clang-format on
     std::string summary = "Selected " + state.selected_profile.name + ".";
+    if (state.selection.desired_tool_names) {
+      summary += " Session desired:";
+      if (state.selection.desired_tool_names->empty()) summary += " none";
+      for (const auto& name : *state.selection.desired_tool_names) {
+        summary += " " + name;
+      }
+      summary += ".";
+    } else {
+      summary += " Session desired: all selected-profile tools.";
+    }
+    summary += " Model maximum: ";
+    summary +=
+        state.selection.model_maximum_profile_id
+            ? std::string{state.selection.model_maximum_profile_id->value()}
+            : "inherit";
+    summary += ". Persona maximum: ";
+    summary +=
+        state.selection.persona_maximum_profile_id
+            ? std::string{state.selection.persona_maximum_profile_id->value()}
+            : "inherit";
+    summary += ".";
+    summary += " Model tool calling: ";
+    summary += !state.selection.model_tool_calling_support   ? "unknown"
+               : *state.selection.model_tool_calling_support ? "supported"
+                                                             : "unsupported";
+    summary += ".";
     if (state.effective_tools.empty()) {
       summary += " Effective tools: none.";
     } else {
@@ -3112,6 +3226,39 @@ class ChatAppImpl final : public InteractiveChatApp {
         summary += " " + declaration.name;
       }
       summary += ".";
+    }
+    const auto* policy = m_session_dependencies.tool_policy
+                             ? m_session_dependencies.tool_policy->provenance()
+                             : nullptr;
+    if (policy != nullptr) {
+      summary += " Launch authority effects:";
+      if (policy->effect_ceiling.empty()) summary += " none";
+      for (const auto effect : policy->effect_ceiling) {
+        summary += " " + std::string{effect_text(effect)};
+      }
+      summary += ". Capability ceilings:";
+      if (policy->capability_ceiling.empty()) summary += " none";
+      for (const auto& scope : policy->capability_ceiling) {
+        summary += " " + std::string{effect_text(scope.effect)} + ":" +
+                   scope.kind + "=" + scope.value;
+      }
+      summary += ". Approval: ";
+      switch (policy->approval_mode) {
+        case domain::ToolApprovalMode::prompt: summary += "prompt"; break;
+        case domain::ToolApprovalMode::automatic: summary += "auto"; break;
+        case domain::ToolApprovalMode::allow_all: summary += "allow-all"; break;
+      }
+      summary += ". Restriction: ";
+      switch (policy->restriction_level) {
+        case domain::ToolRestrictionLevel::high: summary += "high"; break;
+        case domain::ToolRestrictionLevel::medium: summary += "medium"; break;
+        case domain::ToolRestrictionLevel::low: summary += "low"; break;
+        case domain::ToolRestrictionLevel::none: summary += "none"; break;
+      }
+      summary += ".";
+    } else {
+      summary += " Launch policy provenance unavailable; authority-bearing "
+                 "declarations are unavailable.";
     }
     for (const auto& availability : state.tool_availability) {
       if (availability.reason ==
@@ -3148,7 +3295,99 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
-  auto show_tool_profiles() -> bool {
+  auto finish_tool_mutation(
+      std::expected<void, surfaces::ChatSessionError> changed) -> bool {
+    if (!changed) {
+      m_status = changed.error().message;
+      return false;
+    }
+    auto state = m_session->tool_profile_state();
+    if (!state) {
+      m_status = state.error().message;
+      return false;
+    }
+    m_help_visible = false;
+    m_composer.clear();
+    m_status = tool_profile_summary(*state);
+    return true;
+  }
+
+  auto set_tool_category(const std::string_view category_name,
+                         const bool enabled) -> bool {
+    const auto category = runtime::tool_category_from_name(category_name);
+    if (!category) {
+      m_status = "Tool category is invalid";
+      return false;
+    }
+    return finish_tool_mutation(
+        m_session->set_tool_category_enabled(*category, enabled));
+  }
+
+  auto persist_tool_profile_maximum(
+      const bool persona, std::optional<domain::ToolProfileId> profile_id)
+      -> bool {
+    if (!m_persist_tool_profile_maximum) {
+      m_status = "Tool maximum persistence is unavailable";
+      return false;
+    }
+    ToolProfileMaximumSubject subject{m_session->model_id()};
+    if (persona) {
+      const auto persona_state = m_session->persona_state();
+      if (!persona_state.selected) {
+        m_status = "Select a persona before configuring its tool maximum";
+        return false;
+      }
+      subject = persona_state.selected->persona_id;
+    }
+    ToolProfileMaximumSave save{std::move(subject), profile_id};
+    auto prepared =
+        persona ? m_session->prepare_persona_tool_profile_maximum(profile_id)
+                : m_session->prepare_model_tool_profile_maximum(profile_id);
+    if (!prepared) {
+      m_status = prepared.error().message;
+      return false;
+    }
+    auto persisted = m_persist_tool_profile_maximum(save);
+    if (!persisted) {
+      m_composer.clear();
+      if (persisted.error().effect_may_have_applied) {
+        fail({cli::CommandFailureKind::runtime,
+              "Tool maximum persistence had an indeterminate result: " +
+                  persisted.error().message});
+      } else {
+        m_status = "Tool maximum unchanged: " + persisted.error().message;
+      }
+      return false;
+    }
+    const auto changed =
+        m_session->commit_tool_profile_maximum(std::move(*prepared));
+    if (!changed) {
+      fail({cli::CommandFailureKind::runtime,
+            "Tool maximum was persisted but could not be activated: " +
+                changed.error().message});
+      return false;
+    }
+    if (const auto* model = std::get_if<domain::ModelId>(&save.subject)) {
+      if (profile_id) {
+        m_session_dependencies.model_tool_profile_maximums.insert_or_assign(
+            *model, *profile_id);
+      } else {
+        m_session_dependencies.model_tool_profile_maximums.erase(*model);
+      }
+    } else if (const auto* selected_persona =
+                   std::get_if<domain::PersonaId>(&save.subject)) {
+      if (profile_id) {
+        m_session_dependencies.persona_tool_profile_maximums.insert_or_assign(
+            *selected_persona, *profile_id);
+      } else {
+        m_session_dependencies.persona_tool_profile_maximums.erase(
+            *selected_persona);
+      }
+    }
+    return finish_tool_mutation({});
+  }
+
+  auto show_tool_profile_picker() -> bool {
     if (m_session->active()) {
       m_status = "Finish or cancel the active run before selecting tools";
       return false;
@@ -3194,7 +3433,7 @@ class ChatAppImpl final : public InteractiveChatApp {
           m_tool_profile_dialog_active = false;
           if (!result || result->pages.size() != 1 ||
               result->pages.front().selected_indices.size() != 1) {
-            m_status = "Tool profile unchanged";
+            static_cast<void>(show_tool_profiles());
             return;
           }
           const auto selected = result->pages.front().selected_indices.front();
@@ -3208,6 +3447,282 @@ class ChatAppImpl final : public InteractiveChatApp {
     push_modal(*m_tool_profile_dialog, {.backdrop = termforge::Backdrop::Dim,
                                         .dismiss_on_click_outside = false});
     m_status = "Choose a Chat tool profile";
+    return true;
+  }
+
+  auto show_tool_category_picker() -> bool {
+    auto state = m_session->tool_profile_state();
+    if (!state) {
+      m_status = state.error().message;
+      return false;
+    }
+    constexpr std::array categories{
+        runtime::ToolCategory::interaction, runtime::ToolCategory::memory,
+        runtime::ToolCategory::repository,  runtime::ToolCategory::process,
+        runtime::ToolCategory::media,       runtime::ToolCategory::other};
+    termforge::ChoiceWizardPage page;
+    page.title = "Tool categories";
+    page.text = tool_profile_summary(*state) +
+                " Categories only narrow exact selected-profile members.";
+    page.mode = termforge::ChoiceMode::Multiple;
+    page.minimum_selected = 0;
+    page.maximum_selected = categories.size();
+    const auto desired = state->selection.desired_tool_names.value_or(
+        state->selected_profile.tool_names);
+    for (std::size_t index = 0; index < categories.size(); ++index) {
+      const auto members = runtime::tool_profile_category_members(
+          m_session_dependencies.tools, state->selected_profile.profile_id,
+          categories[index]);
+      const bool enabled =
+          members && !members->empty() &&
+          std::ranges::all_of(*members, [&](const auto& name) {
+            return std::ranges::find(desired, name) != desired.end();
+          });
+      page.choices.push_back(
+          {std::string{runtime::tool_category_name(categories[index])},
+           members && !members->empty()
+               ? "Toggle the category's exact registered profile members."
+               : "No registered member in the selected profile."});
+      if (enabled) page.selected_indices.push_back(index);
+    }
+    if (!m_tool_profile_dialog->set_pages({std::move(page)})) {
+      m_status = "Tool category dialog rejected its choices";
+      return false;
+    }
+    m_tool_profile_dialog->on_result(
+        [this,
+         categories](std::optional<termforge::ChoiceWizardResult> result) {
+          pop_modal();
+          m_tool_profile_dialog_active = false;
+          if (!result || result->pages.size() != 1) {
+            static_cast<void>(show_tool_profiles());
+            return;
+          }
+          const auto& selected = result->pages.front().selected_indices;
+          for (std::size_t index = 0; index < categories.size(); ++index) {
+            const bool enabled =
+                std::ranges::find(selected, index) != selected.end();
+            auto changed = m_session->set_tool_category_enabled(
+                categories[index], enabled);
+            if (!changed) {
+              m_status = changed.error().message;
+              return;
+            }
+          }
+          static_cast<void>(finish_tool_mutation({}));
+        });
+    m_tool_profile_dialog_active = true;
+    push_modal(*m_tool_profile_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                        .dismiss_on_click_outside = false});
+    m_status = "Choose enabled tool categories";
+    return true;
+  }
+
+  // clang-format off
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Exact effects and scopes are rendered beside every selectable declaration.
+  auto show_individual_tool_picker() -> bool {
+    // clang-format on
+    auto state = m_session->tool_profile_state();
+    if (!state) {
+      m_status = state.error().message;
+      return false;
+    }
+    if (state->selected_profile.tool_names.empty()) {
+      m_status = "The selected profile contains no individual tools";
+      return false;
+    }
+    termforge::ChoiceWizardPage page;
+    page.title = "Individual tools";
+    page.text = tool_profile_summary(*state) +
+                " A checked tool remains subject to every other ceiling.";
+    page.mode = termforge::ChoiceMode::Multiple;
+    page.minimum_selected = 0;
+    page.maximum_selected = state->selected_profile.tool_names.size();
+    const auto desired = state->selection.desired_tool_names.value_or(
+        state->selected_profile.tool_names);
+    for (std::size_t index = 0;
+         index < state->selected_profile.tool_names.size(); ++index) {
+      const auto& name = state->selected_profile.tool_names[index];
+      const auto* registered = m_session_dependencies.tools.find(name);
+      std::string description =
+          registered != nullptr
+              ? "Category: " + std::string{runtime::tool_category_name(
+                                   registered->category)}
+              : "Not registered in this runtime";
+      if (registered != nullptr && !registered->declaration.effects.empty()) {
+        description += "; effects:";
+        for (const auto effect : registered->declaration.effects)
+          description += " " + std::string{effect_text(effect)};
+      }
+      if (registered != nullptr &&
+          !registered->declaration.capability_scopes.empty()) {
+        description += "; scopes:";
+        for (const auto& scope : registered->declaration.capability_scopes) {
+          description += " " + std::string{effect_text(scope.effect)} + ":" +
+                         scope.kind + "=" + scope.value;
+        }
+      }
+      page.choices.push_back({name, std::move(description)});
+      if (std::ranges::find(desired, name) != desired.end())
+        page.selected_indices.push_back(index);
+    }
+    if (!m_tool_profile_dialog->set_pages({std::move(page)})) {
+      m_status = "Tool selection dialog rejected its choices";
+      return false;
+    }
+    const auto tool_names = state->selected_profile.tool_names;
+    m_tool_profile_dialog->on_result(
+        [this,
+         tool_names](std::optional<termforge::ChoiceWizardResult> result) {
+          pop_modal();
+          m_tool_profile_dialog_active = false;
+          if (!result || result->pages.size() != 1) {
+            static_cast<void>(show_tool_profiles());
+            return;
+          }
+          const auto& selected = result->pages.front().selected_indices;
+          for (std::size_t index = 0; index < tool_names.size(); ++index) {
+            const bool enabled =
+                std::ranges::find(selected, index) != selected.end();
+            auto changed =
+                m_session->set_tool_enabled(tool_names[index], enabled);
+            if (!changed) {
+              m_status = changed.error().message;
+              return;
+            }
+          }
+          static_cast<void>(finish_tool_mutation({}));
+        });
+    m_tool_profile_dialog_active = true;
+    push_modal(*m_tool_profile_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                        .dismiss_on_click_outside = false});
+    m_status = "Choose individual tools";
+    return true;
+  }
+
+  auto show_tool_maximum_picker(const bool persona) -> bool {
+    if (persona && !m_session->persona_state().selected) {
+      m_status = "Select a persona before configuring its tool maximum";
+      return false;
+    }
+    auto state = m_session->tool_profile_state();
+    if (!state) {
+      m_status = state.error().message;
+      return false;
+    }
+    termforge::ChoiceWizardPage page;
+    page.title = persona ? "Persona tool maximum" : "Model tool maximum";
+    page.text = "Choose an exact built-in maximum profile. Inherit clears the "
+                "association; Off is an explicit deny-all maximum.";
+    page.mode = termforge::ChoiceMode::Single;
+    page.minimum_selected = 1;
+    page.maximum_selected = 1;
+    page.choices.push_back({"Inherit", "No associated maximum profile."});
+    const auto current = persona ? state->selection.persona_maximum_profile_id
+                                 : state->selection.model_maximum_profile_id;
+    if (!current) page.selected_indices = {0};
+    std::vector<domain::ToolProfileId> profiles;
+    for (const auto& profile : runtime::builtin_tool_profiles()) {
+      profiles.push_back(profile.profile_id);
+      page.choices.push_back(
+          {profile.name,
+           "Maximum profile " + std::string{profile.profile_id.value()}});
+      if (current == profile.profile_id) {
+        page.selected_indices = {profiles.size()};
+      }
+    }
+    if (!m_tool_profile_dialog->set_pages({std::move(page)})) {
+      m_status = "Tool maximum dialog rejected its choices";
+      return false;
+    }
+    m_tool_profile_dialog->on_result(
+        [this, persona, profiles = std::move(profiles)](
+            std::optional<termforge::ChoiceWizardResult> result) mutable {
+          pop_modal();
+          m_tool_profile_dialog_active = false;
+          if (!result || result->pages.size() != 1 ||
+              result->pages.front().selected_indices.size() != 1) {
+            static_cast<void>(show_tool_profiles());
+            return;
+          }
+          const auto selected = result->pages.front().selected_indices.front();
+          if (selected > profiles.size()) {
+            m_status = "Tool maximum dialog returned an invalid choice";
+            return;
+          }
+          static_cast<void>(persist_tool_profile_maximum(
+              persona, selected == 0 ? std::nullopt
+                                     : std::optional<domain::ToolProfileId>{
+                                           profiles[selected - 1]}));
+        });
+    m_tool_profile_dialog_active = true;
+    push_modal(*m_tool_profile_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                        .dismiss_on_click_outside = false});
+    m_status = "Choose a maximum tool profile";
+    return true;
+  }
+
+  auto show_tool_profiles() -> bool {
+    if (m_session->active()) {
+      m_status = "Finish or cancel the active run before selecting tools";
+      return false;
+    }
+    if (!m_tool_profile_dialog) {
+      m_tool_profile_dialog = std::make_unique<termforge::ChoiceWizardDialog>();
+    }
+    auto state = m_session->tool_profile_state();
+    if (!state) {
+      m_status = state.error().message;
+      return false;
+    }
+    termforge::ChoiceWizardPage page;
+    page.title = "Manage Chat tools";
+    page.text =
+        tool_profile_summary(*state) +
+        " Every operation narrows declarations and grants no authority.";
+    page.mode = termforge::ChoiceMode::Single;
+    page.minimum_selected = 1;
+    page.maximum_selected = 1;
+    page.choices = {
+        {"Named profile", "Choose the selected built-in profile."},
+        {"Categories", "Enable or disable runtime tool categories."},
+        {"Individual tools", "Narrow exact tools in the selected profile."},
+        {"Model maximum", "Set or inherit this model's maximum profile."},
+        {"Persona maximum", "Set or inherit the active persona maximum."},
+        {"Reset narrowing", "Restore all tools in the selected profile."}};
+    page.selected_indices = {0};
+    if (!m_tool_profile_dialog->set_pages({std::move(page)})) {
+      m_status = "Tool manager rejected its choices";
+      return false;
+    }
+    m_tool_profile_dialog->on_result(
+        [this](std::optional<termforge::ChoiceWizardResult> result) {
+          pop_modal();
+          m_tool_profile_dialog_active = false;
+          if (!result || result->pages.size() != 1 ||
+              result->pages.front().selected_indices.size() != 1) {
+            m_status = "Tool selection unchanged";
+            return;
+          }
+          switch (result->pages.front().selected_indices.front()) {
+            case 0: static_cast<void>(show_tool_profile_picker()); return;
+            case 1: static_cast<void>(show_tool_category_picker()); return;
+            case 2: static_cast<void>(show_individual_tool_picker()); return;
+            case 3: static_cast<void>(show_tool_maximum_picker(false)); return;
+            case 4: static_cast<void>(show_tool_maximum_picker(true)); return;
+            case 5:
+              static_cast<void>(
+                  finish_tool_mutation(m_session->reset_tool_narrowing()));
+              return;
+            default:
+              m_status = "Tool manager returned an invalid choice";
+              return;
+          }
+        });
+    m_tool_profile_dialog_active = true;
+    push_modal(*m_tool_profile_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                        .dismiss_on_click_outside = false});
+    m_status = "Choose a tool manager action";
     return true;
   }
 
@@ -3364,6 +3879,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   VeniceRequestSettingOverrides m_request_setting_overrides;
   PreviewVeniceRequestSetting m_preview_request_setting;
   PersistVeniceRequestSetting m_persist_request_setting;
+  PersistToolProfileMaximum m_persist_tool_profile_maximum;
   surfaces::ChatSessionOpen m_open_template;
   surfaces::ChatSessionDependencies m_session_dependencies;
   TermForgeRunBridge m_bridge;
@@ -3551,6 +4067,12 @@ auto ProcessInteractiveCommand::execute(Request request,
     }
     auto resolved = load_config(diagnostics, request.model, request.web_search);
     if (!resolved) return std::unexpected(std::move(resolved.error()));
+    auto tool_profile_maximums =
+        config::resolve_tool_profile_maximum_mappings(*resolved);
+    if (!tool_profile_maximums) {
+      return failure(cli::CommandFailureKind::runtime,
+                     tool_profile_maximums.error().message);
+    }
     auto generation_options = venice_generation_options(*resolved);
     if (!generation_options) {
       return failure(request.web_search ? cli::CommandFailureKind::usage
@@ -3752,6 +4274,9 @@ auto ProcessInteractiveCommand::execute(Request request,
     app_options.model_catalog = &(*catalog)->service();
     app_options.provider_character_catalog = provider_character_catalog;
     app_options.configured_request_settings = *request_settings;
+    auto persisted_tool_profile_maximums =
+        std::make_shared<config::ToolProfileMaximumMappings>(
+            std::move(*tool_profile_maximums));
     if (auto config_path = config::process_config_path(); config_path) {
       app_options.preview_request_setting =
           [requested_model = request.model,
@@ -3791,6 +4316,14 @@ auto ProcessInteractiveCommand::execute(Request request,
         if (!changed) return std::unexpected(changed.error().message);
         return {};
       };
+      app_options.persist_tool_profile_maximum =
+          [path = *config_path,
+           persisted_tool_profile_maximums](const ToolProfileMaximumSave& save)
+          -> std::expected<void, ToolProfileMaximumPersistError> {
+        config::JsonConfigFileStore store{path};
+        return persist_tool_profile_maximum_mapping(
+            store, *persisted_tool_profile_maximums, save);
+      };
     }
     app_options.session_dependencies.persona_source =
         personas ? &*personas : nullptr;
@@ -3798,6 +4331,10 @@ auto ProcessInteractiveCommand::execute(Request request,
         personas ? &*personas : nullptr;
     app_options.session_dependencies.tools = std::move(tools);
     app_options.session_dependencies.tool_policy = std::move(*tool_policy);
+    app_options.session_dependencies.model_tool_profile_maximums =
+        persisted_tool_profile_maximums->models;
+    app_options.session_dependencies.persona_tool_profile_maximums =
+        persisted_tool_profile_maximums->personas;
     app_options.session_dependencies.permission_profile_id =
         std::move(permission_profile_id);
     app_options.session_dependencies.memory_controller =

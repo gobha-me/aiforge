@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <concepts>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -130,9 +131,126 @@ class DuplicateJsonKey final : public std::exception {
   }
 }
 
+[[nodiscard]] auto sync_directory(const std::filesystem::path& directory,
+                                  const std::string_view action)
+    -> std::expected<void, ConfigFileError> {
+  // clang-format off
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX open flags enforce the fail-closed directory handle boundary.
+  UniqueFd descriptor{::open(directory.c_str(),
+                             O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)};
+  // clang-format on
+  if (!descriptor) {
+    return std::unexpected(
+        error_from_errno(ConfigFileErrorCode::sync_failed, directory, action));
+  }
+  if (::fsync(descriptor.get()) != 0) {
+    return std::unexpected(
+        error_from_errno(ConfigFileErrorCode::sync_failed, directory, action));
+  }
+  return {};
+}
+
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Ancestor creation, race checks, and durability syncs are explicit boundaries.
+[[nodiscard]] auto create_directory_chain(const std::filesystem::path& path)
+    -> std::expected<void, ConfigFileError> {
+  // clang-format on
+  std::vector<std::filesystem::path> missing;
+  auto current = path;
+  std::error_code filesystem_error;
+  while (!current.empty()) {
+    const auto status =
+        std::filesystem::symlink_status(current, filesystem_error);
+    if (filesystem_error &&
+        filesystem_error != std::errc::no_such_file_or_directory) {
+      return std::unexpected(
+          file_error(ConfigFileErrorCode::write_failed, current,
+                     "cannot inspect the configuration base directory"));
+    }
+    filesystem_error.clear();
+    if (std::filesystem::exists(status)) {
+      if (std::filesystem::is_symlink(status)) {
+        return std::unexpected(
+            file_error(ConfigFileErrorCode::path_escape, current,
+                       "a configuration base directory cannot be a symlink"));
+      }
+      if (!std::filesystem::is_directory(status)) {
+        return std::unexpected(
+            file_error(ConfigFileErrorCode::not_regular, current,
+                       "the configuration base path is not a directory"));
+      }
+      break;
+    }
+    missing.push_back(current);
+    const auto parent = current.parent_path();
+    if (parent == current) break;
+    current = parent;
+  }
+  for (const auto& missing_directory : missing | std::views::reverse) {
+    if (::mkdir(missing_directory.c_str(), 0700) != 0 && errno != EEXIST) {
+      return std::unexpected(
+          error_from_errno(ConfigFileErrorCode::write_failed, missing_directory,
+                           "cannot create the configuration base directory"));
+    }
+    const auto created_status =
+        std::filesystem::symlink_status(missing_directory, filesystem_error);
+    if (filesystem_error || std::filesystem::is_symlink(created_status) ||
+        !std::filesystem::is_directory(created_status)) {
+      return std::unexpected(
+          file_error(ConfigFileErrorCode::path_escape, missing_directory,
+                     "a new configuration base path is not a real directory"));
+    }
+    if (auto synced = sync_directory(
+            missing_directory, "cannot sync a new configuration directory");
+        !synced) {
+      return synced;
+    }
+    if (auto synced =
+            sync_directory(missing_directory.parent_path(),
+                           "cannot sync a configuration directory parent");
+        !synced) {
+      return synced;
+    }
+  }
+  return {};
+}
+
+[[nodiscard]] auto validate_app_directory(
+    const std::filesystem::path& directory)
+    -> std::expected<void, ConfigFileError> {
+  std::error_code filesystem_error;
+  const auto status =
+      std::filesystem::symlink_status(directory, filesystem_error);
+  if (filesystem_error || std::filesystem::is_symlink(status)) {
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::path_escape, directory,
+                   "the AIForge configuration directory cannot be a symlink"));
+  }
+  if (!std::filesystem::is_directory(status)) {
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::not_regular, directory,
+                   "the AIForge configuration path is not a directory"));
+  }
+  struct stat info{};
+  if (::stat(directory.c_str(), &info) != 0) {
+    return std::unexpected(
+        error_from_errno(ConfigFileErrorCode::read_failed, directory,
+                         "cannot inspect directory permissions"));
+  }
+  if ((info.st_mode & 0077) != 0) {
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::insecure_permissions, directory,
+                   "the AIForge configuration directory must have mode 0700"));
+  }
+  return {};
+}
+
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Existing, new, and raced directory states have distinct checks.
 [[nodiscard]] auto check_app_directory(const std::filesystem::path& directory,
                                        const bool create)
     -> std::expected<void, ConfigFileError> {
+  // clang-format on
   std::error_code error;
   const auto status = std::filesystem::symlink_status(directory, error);
   if (error && error != std::errc::no_such_file_or_directory) {
@@ -141,47 +259,36 @@ class DuplicateJsonKey final : public std::exception {
                    "cannot inspect the configuration directory"));
   }
   if (std::filesystem::exists(status)) {
-    if (std::filesystem::is_symlink(status)) {
-      return std::unexpected(file_error(
-          ConfigFileErrorCode::path_escape, directory,
-          "the AIForge configuration directory cannot be a symlink"));
-    }
-    if (!std::filesystem::is_directory(status)) {
-      return std::unexpected(
-          file_error(ConfigFileErrorCode::not_regular, directory,
-                     "the AIForge configuration path is not a directory"));
-    }
-    struct stat info{};
-    if (::stat(directory.c_str(), &info) != 0) {
-      return std::unexpected(
-          error_from_errno(ConfigFileErrorCode::read_failed, directory,
-                           "cannot inspect directory permissions"));
-    }
-    if ((info.st_mode & 0077) != 0) {
-      return std::unexpected(file_error(
-          ConfigFileErrorCode::insecure_permissions, directory,
-          "the AIForge configuration directory must have mode 0700"));
-    }
-    return {};
+    return validate_app_directory(directory);
   }
   if (!create) return {};
 
   const auto base = directory.parent_path();
-  std::filesystem::create_directories(base, error);
-  if (error) {
-    return std::unexpected(
-        file_error(ConfigFileErrorCode::write_failed, base,
-                   "cannot create the configuration base directory"));
-  }
-  if (::mkdir(directory.c_str(), 0700) != 0 && errno != EEXIST) {
+  if (auto created = create_directory_chain(base); !created) return created;
+  const bool made_directory = ::mkdir(directory.c_str(), 0700) == 0;
+  if (!made_directory && errno != EEXIST) {
     return std::unexpected(
         error_from_errno(ConfigFileErrorCode::write_failed, directory,
                          "cannot create the AIForge configuration directory"));
   }
-  if (::chmod(directory.c_str(), 0700) != 0) {
+  if (!made_directory) {
+    if (auto checked = validate_app_directory(directory); !checked) {
+      return checked;
+    }
+  } else if (::chmod(directory.c_str(), 0700) != 0) {
     return std::unexpected(
         error_from_errno(ConfigFileErrorCode::write_failed, directory,
                          "cannot secure the AIForge configuration directory"));
+  }
+  if (auto synced = sync_directory(
+          directory, "cannot sync the new AIForge configuration directory");
+      !synced) {
+    return synced;
+  }
+  if (auto synced = sync_directory(
+          base, "cannot sync the AIForge configuration directory parent");
+      !synced) {
+    return synced;
   }
   return {};
 }
@@ -241,6 +348,23 @@ class DuplicateJsonKey final : public std::exception {
       ParsedDocument{std::move(*parsed), info.st_mode}};
 }
 
+[[nodiscard]] auto json_text_map(const Json& value, const ConfigKeySpec& spec)
+    -> std::expected<ConfigValue, ConfigDiagnostic> {
+  const auto invalid = [&]() {
+    return std::unexpected(ConfigDiagnostic{
+        ConfigDiagnosticCode::invalid_value, ConfigSource::file, spec.id,
+        "the JSON value type does not match the configuration key"});
+  };
+  if (!value.is_object()) return invalid();
+  ConfigTextMap result;
+  result.reserve(value.size());
+  for (auto iterator = value.begin(); iterator != value.end(); ++iterator) {
+    if (!iterator.value().is_string()) return invalid();
+    result.push_back({iterator.key(), iterator.value().get<std::string>()});
+  }
+  return ConfigValue{std::move(result)};
+}
+
 [[nodiscard]] auto json_value(const Json& value, const ConfigKeySpec& spec)
     -> std::expected<ConfigValue, ConfigDiagnostic> {
   const auto invalid = [&]() {
@@ -292,6 +416,7 @@ class DuplicateJsonKey final : public std::exception {
         }
         return ConfigValue{std::move(result)};
       }
+      case ConfigValueKind::text_map: return json_text_map(value, spec);
     }
   } catch (const Json::exception&) {
     return invalid();
@@ -324,8 +449,29 @@ auto collect_leaf_keys(const Json& value, const std::string& prefix,
   if (!prefix.empty()) output.push_back(prefix);
 }
 
+[[nodiscard]] auto known_leaf(const ConfigRegistry& registry,
+                              const std::string_view leaf) -> bool {
+  return std::ranges::any_of(registry.keys, [&](const auto& spec) {
+    if (leaf == spec.id) return true;
+    return spec.value_kind == ConfigValueKind::text_map &&
+           leaf.size() > spec.id.size() && leaf.starts_with(spec.id) &&
+           leaf[spec.id.size()] == '.';
+  });
+}
+
 [[nodiscard]] auto config_value_json(const ConfigValue& value) -> Json {
-  return std::visit([](const auto& concrete) { return Json(concrete); }, value);
+  return std::visit(
+      []<typename Value>(const Value& concrete) {
+        if constexpr (std::same_as<Value, ConfigTextMap>) {
+          auto result = Json::object();
+          for (const auto& entry : concrete)
+            result[entry.key] = entry.value;
+          return result;
+        } else {
+          return Json(concrete);
+        }
+      },
+      value);
 }
 
 [[nodiscard]] auto apply_set(Json& root, const std::string_view key,
@@ -409,6 +555,15 @@ auto apply_unset(Json& root, const std::string_view key) -> void {
     cleanup();
     return std::unexpected(std::move(error));
   }
+  UniqueFd directory{::open(path.parent_path().c_str(),
+                            O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)};
+  if (!directory) {
+    auto error =
+        error_from_errno(ConfigFileErrorCode::sync_failed, path.parent_path(),
+                         "cannot open the configuration directory");
+    cleanup();
+    return std::unexpected(std::move(error));
+  }
   descriptor.reset();
   if (::rename(temporary.c_str(), path.c_str()) != 0) {
     auto error = error_from_errno(ConfigFileErrorCode::rename_failed, path,
@@ -416,12 +571,12 @@ auto apply_unset(Json& root, const std::string_view key) -> void {
     cleanup();
     return std::unexpected(std::move(error));
   }
-  UniqueFd directory{::open(path.parent_path().c_str(),
-                            O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)};
-  if (!directory || ::fsync(directory.get()) != 0) {
-    return std::unexpected(
+  if (::fsync(directory.get()) != 0) {
+    auto error =
         error_from_errno(ConfigFileErrorCode::sync_failed, path.parent_path(),
-                         "cannot sync the configuration directory"));
+                         "cannot sync the configuration directory");
+    error.effect_may_have_applied = true;
+    return std::unexpected(std::move(error));
   }
   return {};
 }
@@ -477,10 +632,23 @@ template <typename Mutation>
                    "refusing to replace a configuration file with permissions "
                    "broader than 0600"));
   }
+  const auto original = root;
   if (auto changed = mutation(root, *spec); !changed) {
     return std::unexpected(std::move(changed.error()));
   }
-  return write_document(path, root);
+  auto written = write_document(path, root);
+  if (written || !written.error().effect_may_have_applied) return written;
+
+  auto original_error = std::move(written.error());
+  auto restored = write_document(path, original);
+  if (restored) {
+    original_error.effect_may_have_applied = false;
+    return std::unexpected(std::move(original_error));
+  }
+  original_error.message +=
+      "; the prior configuration could not be restored or verified";
+  original_error.effect_may_have_applied = true;
+  return std::unexpected(std::move(original_error));
 }
 
 } // namespace
@@ -554,13 +722,10 @@ auto JsonConfigFileStore::load(const ConfigRegistry& registry) const
       }
     }
 
-    std::unordered_set<std::string> known;
-    for (const auto& spec : registry.keys)
-      known.insert(spec.id);
     std::vector<std::string> leaves;
     collect_leaf_keys(document->value().root, {}, leaves);
     for (auto& leaf : leaves) {
-      if (!known.contains(leaf)) {
+      if (!known_leaf(registry, leaf)) {
         layer.diagnostics.push_back(
             {ConfigDiagnosticCode::unknown_key, ConfigSource::file,
              std::move(leaf),
@@ -588,26 +753,9 @@ auto JsonConfigFileStore::set(const ConfigRegistry& registry,
         m_path, registry, key,
         [&](Json& root,
             const ConfigKeySpec& spec) -> std::expected<void, ConfigFileError> {
-          std::vector<std::string_view> raw_list;
-          std::string rendered;
-          if (spec.value_kind == ConfigValueKind::text_list) {
-            const auto* list = std::get_if<std::vector<std::string>>(&value);
-            if (list == nullptr) {
-              return std::unexpected(
-                  file_error(ConfigFileErrorCode::malformed, m_path,
-                             "the value is invalid for the configuration key"));
-            }
-            raw_list.reserve(list->size());
-            for (const auto& item : *list)
-              raw_list.push_back(item);
-          } else {
-            // Re-run public type and size validation without exposing JSON.
-            rendered = format_config_value(value);
-            raw_list.push_back(rendered);
-          }
-          const auto validated =
-              parse_config_value(spec, raw_list, ConfigSource::file);
-          if (!validated || *validated != value) {
+          if (auto validated =
+                  validate_config_value(spec, value, ConfigSource::file);
+              !validated) {
             return std::unexpected(
                 file_error(ConfigFileErrorCode::malformed, m_path,
                            "the value is invalid for the configuration key"));
@@ -631,6 +779,54 @@ auto JsonConfigFileStore::unset(const ConfigRegistry& registry,
                          apply_unset(root, key);
                          return {};
                        });
+  } catch (...) {
+    return std::unexpected(
+        file_error(ConfigFileErrorCode::write_failed, m_path,
+                   "the configuration file adapter failed safely"));
+  }
+}
+
+auto JsonConfigFileStore::update_text_map_entry(
+    const ConfigRegistry& registry, const std::string_view key,
+    std::string map_entry_key, std::optional<std::string> value)
+    -> std::expected<void, ConfigFileError> {
+  try {
+    return mutate_file(
+        m_path, registry, key,
+        [&](Json& root,
+            const ConfigKeySpec& spec) -> std::expected<void, ConfigFileError> {
+          if (spec.value_kind != ConfigValueKind::text_map) {
+            return std::unexpected(
+                file_error(ConfigFileErrorCode::malformed, m_path,
+                           "the configuration key is not a text map"));
+          }
+          ConfigTextMap mappings;
+          if (const auto* existing = find_json_value(root, key);
+              existing != nullptr) {
+            auto parsed = json_value(*existing, spec);
+            if (!parsed) {
+              return std::unexpected(
+                  file_error(ConfigFileErrorCode::malformed, m_path,
+                             "the existing text-map configuration is invalid"));
+            }
+            mappings = std::get<ConfigTextMap>(std::move(*parsed));
+          }
+          std::erase_if(mappings, [&](const auto& entry) {
+            return entry.key == map_entry_key;
+          });
+          if (value) {
+            mappings.push_back({std::move(map_entry_key), std::move(*value)});
+          }
+          ConfigValue updated{std::move(mappings)};
+          if (auto validated =
+                  validate_config_value(spec, updated, ConfigSource::file);
+              !validated) {
+            return std::unexpected(
+                file_error(ConfigFileErrorCode::malformed, m_path,
+                           "the updated text-map configuration is invalid"));
+          }
+          return apply_set(root, key, updated, m_path);
+        });
   } catch (...) {
     return std::unexpected(
         file_error(ConfigFileErrorCode::write_failed, m_path,

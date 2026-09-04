@@ -1,9 +1,12 @@
+#include <aiforge/runtime/tool_launch_policy.hpp>
 #include <aiforge/runtime/tool_profiles.hpp>
 #include <aiforge/testing/scripted_tool_executor.hpp>
 
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <string>
 #include <utility>
@@ -35,14 +38,32 @@ auto declaration(std::string name, const bool authority_bearing = false)
               : std::vector<domain::CapabilityScope>{}};
 }
 
-auto register_tool(runtime::ToolRegistry& registry, const std::string& name,
-                   const bool authority_bearing = false)
+auto register_tool(
+    runtime::ToolRegistry& registry, const std::string& name,
+    const bool authority_bearing = false,
+    const runtime::ToolCategory category = runtime::ToolCategory::other)
     -> std::shared_ptr<testing::ScriptedToolExecutor> {
   auto executor = std::make_shared<testing::ScriptedToolExecutor>(
       std::vector<testing::ScriptedToolExchange>{});
-  REQUIRE(
-      registry.register_tool(declaration(name, authority_bearing), executor));
+  REQUIRE(registry.register_tool(declaration(name, authority_bearing), executor,
+                                 {}, std::nullopt, category));
   return executor;
+}
+
+auto launch_policy(
+    const runtime::ToolRegistrySnapshot& tools,
+    const runtime::RestrictionLevel restriction =
+        runtime::RestrictionLevel::medium,
+    const runtime::ApprovalMode approval = runtime::ApprovalMode::allow_all,
+    std::vector<std::string> automatic = {})
+    -> std::shared_ptr<runtime::ToolPolicy> {
+  auto permission_profile =
+      domain::PermissionProfileId::from("test-launch-profile").value();
+  auto policy = runtime::make_tool_launch_policy(
+      tools, {std::move(permission_profile), restriction, approval,
+              std::move(automatic)});
+  REQUIRE(policy);
+  return std::move(*policy);
 }
 
 } // namespace
@@ -260,4 +281,139 @@ TEST_CASE("off and unknown profile selection never enroll registry tools",
   REQUIRE_FALSE(unknown);
   REQUIRE(unknown.error().code ==
           runtime::ToolProfileErrorCode::unknown_profile);
+}
+
+TEST_CASE("category helpers expand only registered selected-profile members",
+          "[tool-profile][category]") {
+  runtime::ToolRegistry registry;
+  static_cast<void>(register_tool(registry, "read_repository_file", true,
+                                  runtime::ToolCategory::repository));
+  static_cast<void>(register_tool(registry, "ask_user", false,
+                                  runtime::ToolCategory::interaction));
+  static_cast<void>(register_tool(registry, "outside", false,
+                                  runtime::ToolCategory::repository));
+  const auto snapshot = registry.snapshot();
+  REQUIRE(snapshot);
+
+  const auto repository = runtime::tool_profile_category_members(
+      *snapshot, profile_id("repository-read"),
+      runtime::ToolCategory::repository);
+  REQUIRE(repository == std::vector<std::string>{"read_repository_file"});
+  const auto interaction = runtime::tool_profile_category_members(
+      *snapshot, profile_id("repository-read"),
+      runtime::ToolCategory::interaction);
+  REQUIRE(interaction == std::vector<std::string>{"ask_user"});
+  REQUIRE_FALSE(runtime::tool_profile_category_members(
+      *snapshot, profile_id("missing"), runtime::ToolCategory::repository));
+  REQUIRE_FALSE(runtime::tool_profile_category_members(
+      *snapshot, profile_id("repository-read"),
+      static_cast<runtime::ToolCategory>(100)));
+}
+
+TEST_CASE(
+    "exact session model and persona subsets only narrow built-in profiles",
+    "[tool-profile][narrowing][failure]") {
+  runtime::ToolRegistry registry;
+  static_cast<void>(register_tool(registry, "read_repository_file", true,
+                                  runtime::ToolCategory::repository));
+  static_cast<void>(register_tool(registry, "propose_memory"));
+  static_cast<void>(register_tool(registry, "ask_user"));
+  static_cast<void>(register_tool(registry, "outside"));
+  const auto snapshot = registry.snapshot();
+  REQUIRE(snapshot);
+  const auto policy = launch_policy(*snapshot);
+
+  auto selection = runtime::ToolProfileSelection{
+      profile_id("repository-read"),
+      std::vector<std::string>{"read_repository_file", "ask_user"},
+      profile_id("essentials"), std::nullopt, true};
+  auto resolved = runtime::resolve_tool_profile(*snapshot, selection, *policy);
+  REQUIRE(resolved);
+  REQUIRE(resolved->effective_tools.size() == 1);
+  REQUIRE(resolved->effective_tools.declarations().front().name == "ask_user");
+  REQUIRE(resolved->effective_tools.find("outside") == nullptr);
+  REQUIRE(resolved->selection.desired_tool_names ==
+          std::vector<std::string>{"ask_user", "read_repository_file"});
+  REQUIRE(resolved->tool_availability ==
+          std::vector<runtime::ToolProfileToolAvailability>{
+              {"ask_user", runtime::ToolProfileAvailabilityReason::available},
+              {"propose_memory",
+               runtime::ToolProfileAvailabilityReason::session_tool_disabled},
+              {"read_repository_file",
+               runtime::ToolProfileAvailabilityReason::model_profile_limit}});
+
+  selection.model_maximum_profile_id = std::nullopt;
+  selection.persona_maximum_profile_id = profile_id("off");
+  resolved = runtime::resolve_tool_profile(*snapshot, selection, *policy);
+  REQUIRE(resolved);
+  REQUIRE(resolved->effective_tools.empty());
+  REQUIRE(resolved->tool_availability.front().reason ==
+          runtime::ToolProfileAvailabilityReason::persona_profile_limit);
+
+  selection.persona_maximum_profile_id = std::nullopt;
+  selection.desired_tool_names = std::vector<std::string>{"outside"};
+  REQUIRE_FALSE(runtime::resolve_tool_profile(*snapshot, selection, *policy));
+  selection.desired_tool_names =
+      std::vector<std::string>{"ask_user", "ask_user"};
+  resolved = runtime::resolve_tool_profile(*snapshot, selection, *policy);
+  REQUIRE_FALSE(resolved);
+  REQUIRE(resolved.error().code ==
+          runtime::ToolProfileErrorCode::duplicate_tool);
+
+  selection.desired_tool_names = std::nullopt;
+  selection.model_maximum_profile_id = profile_id("unknown");
+  resolved = runtime::resolve_tool_profile(*snapshot, selection, *policy);
+  REQUIRE_FALSE(resolved);
+  REQUIRE(resolved.error().code ==
+          runtime::ToolProfileErrorCode::unknown_profile);
+}
+
+TEST_CASE("launch policy and explicit model support complete the intersection",
+          "[tool-profile][narrowing][policy]") {
+  runtime::ToolRegistry registry;
+  static_cast<void>(register_tool(registry, "read_repository_file", true));
+  static_cast<void>(register_tool(registry, "propose_memory"));
+  static_cast<void>(register_tool(registry, "ask_user"));
+  const auto snapshot = registry.snapshot();
+  REQUIRE(snapshot);
+  auto selection =
+      runtime::ToolProfileSelection{profile_id("repository-read"), std::nullopt,
+                                    std::nullopt, std::nullopt, true};
+
+  const auto high = launch_policy(*snapshot, runtime::RestrictionLevel::high);
+  auto resolved = runtime::resolve_tool_profile(*snapshot, selection, *high);
+  REQUIRE(resolved);
+  REQUIRE(resolved->effective_tools.size() == 2);
+  REQUIRE(resolved->effective_tools.find("read_repository_file") == nullptr);
+  REQUIRE(resolved->tool_availability.back().reason ==
+          runtime::ToolProfileAvailabilityReason::launch_policy_denied);
+
+  const auto medium = launch_policy(*snapshot);
+  resolved = runtime::resolve_tool_profile(*snapshot, selection, *medium);
+  REQUIRE(resolved);
+  REQUIRE(resolved->effective_tools.size() == 3);
+
+  const auto automatic =
+      launch_policy(*snapshot, runtime::RestrictionLevel::medium,
+                    runtime::ApprovalMode::automatic, {"ask_user"});
+  resolved = runtime::resolve_tool_profile(*snapshot, selection, *automatic);
+  REQUIRE(resolved);
+  REQUIRE(resolved->effective_tools.size() == 2);
+  REQUIRE(resolved->effective_tools.find("read_repository_file") == nullptr);
+
+  const auto fallback = runtime::default_tool_policy();
+  resolved = runtime::resolve_tool_profile(*snapshot, selection, *fallback);
+  REQUIRE(resolved);
+  REQUIRE(resolved->effective_tools.size() == 2);
+  REQUIRE(resolved->effective_tools.find("read_repository_file") == nullptr);
+
+  selection.model_tool_calling_support = false;
+  resolved = runtime::resolve_tool_profile(*snapshot, selection, *medium);
+  REQUIRE(resolved);
+  REQUIRE(resolved->effective_tools.empty());
+  REQUIRE(std::ranges::all_of(
+      resolved->tool_availability, [](const auto& availability) {
+        return availability.reason == runtime::ToolProfileAvailabilityReason::
+                                          model_tool_calling_unsupported;
+      }));
 }

@@ -5,10 +5,15 @@
 #include <unordered_set>
 #include <utility>
 
+#include <aiforge/detail/utf8_text.hpp>
+#include <aiforge/runtime/tool_registry.hpp>
+
 namespace aiforge::surfaces {
 namespace {
 
 constexpr std::size_t maximum_registered_name_bytes = 64U;
+constexpr std::size_t maximum_tool_profile_id_bytes = 64U;
+constexpr std::size_t maximum_tool_name_bytes = 128U;
 
 [[nodiscard]] auto registry_error(const SlashCommandRegistryErrorCode code,
                                   std::string message,
@@ -34,6 +39,26 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
     return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' ||
            ch == '_' || (allow_dot && ch == '.');
   });
+}
+
+[[nodiscard]] auto valid_bounded_identifier(const std::string_view value,
+                                            const std::size_t maximum_bytes)
+    -> bool {
+  return value.size() <= maximum_bytes && valid_identifier(value, false);
+}
+
+[[nodiscard]] auto valid_tool_profile_id(const std::string_view value) -> bool {
+  return valid_bounded_identifier(value, maximum_tool_profile_id_bytes);
+}
+
+[[nodiscard]] auto valid_tool_category(const std::string_view value) -> bool {
+  return runtime::tool_category_from_name(value).has_value();
+}
+
+[[nodiscard]] auto valid_tool_name(const std::string_view value) -> bool {
+  return value.size() <= maximum_tool_name_bytes &&
+         detail::is_safe_utf8_text(value) &&
+         value.find_first_of(" \t\r\n*?[]{}") == std::string_view::npos;
 }
 
 [[nodiscard]] auto valid_utf8_text(const std::string_view value,
@@ -141,6 +166,60 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
   if (first == std::string_view::npos) return {};
   const auto last = value.find_last_not_of(" \t");
   return value.substr(first, last - first + 1);
+}
+
+[[nodiscard]] auto take_argument(std::string_view& arguments)
+    -> std::string_view {
+  arguments = trim_arguments(arguments);
+  const auto separator = arguments.find_first_of(" \t");
+  if (separator == std::string_view::npos) {
+    return std::exchange(arguments, {});
+  }
+  const auto result = arguments.substr(0, separator);
+  arguments = trim_arguments(arguments.substr(separator));
+  return result;
+}
+
+[[nodiscard]] auto profile_selection_result(std::string_view arguments)
+    -> std::optional<SlashCommandResult> {
+  const auto profile_id = take_argument(arguments);
+  if (!arguments.empty() || !valid_tool_profile_id(profile_id)) {
+    return std::nullopt;
+  }
+  return SlashCommandResult{SlashCommandAction::select_tool_profile,
+                            std::string{profile_id}};
+}
+
+using ToolTargetValidator = auto (*)(std::string_view) -> bool;
+
+[[nodiscard]] auto toggle_result(std::string_view arguments,
+                                 const SlashCommandAction enable_action,
+                                 const SlashCommandAction disable_action,
+                                 const ToolTargetValidator valid_target)
+    -> std::optional<SlashCommandResult> {
+  const auto target = take_argument(arguments);
+  const auto state = take_argument(arguments);
+  if (!arguments.empty() || !valid_target(target)) return std::nullopt;
+  if (state == "on") {
+    return SlashCommandResult{enable_action, std::string{target}};
+  }
+  if (state == "off") {
+    return SlashCommandResult{disable_action, std::string{target}};
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] auto maximum_profile_result(
+    std::string_view arguments, const SlashCommandAction set_action,
+    const SlashCommandAction inherit_action)
+    -> std::optional<SlashCommandResult> {
+  const auto profile_id = take_argument(arguments);
+  if (!arguments.empty()) return std::nullopt;
+  if (profile_id == "inherit") {
+    return SlashCommandResult{inherit_action, std::nullopt};
+  }
+  if (!valid_tool_profile_id(profile_id)) return std::nullopt;
+  return SlashCommandResult{set_action, std::string{profile_id}};
 }
 
 [[nodiscard]] auto session_handler(std::string_view arguments,
@@ -254,20 +333,52 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
     return SlashCommandResult{SlashCommandAction::manage_tool_profile,
                               std::nullopt};
   }
-  if (arguments == "off") {
+  const auto operation = take_argument(arguments);
+  if (operation == "off" && arguments.empty()) {
     return SlashCommandResult{SlashCommandAction::disable_tools, std::nullopt};
   }
-  constexpr std::string_view profile{"profile"};
-  if (arguments.starts_with(profile) && arguments.size() > profile.size() &&
-      (arguments[profile.size()] == ' ' || arguments[profile.size()] == '\t')) {
-    const auto profile_id = trim_arguments(arguments.substr(profile.size()));
-    if (valid_identifier(profile_id, false)) {
-      return SlashCommandResult{SlashCommandAction::select_tool_profile,
-                                std::string{profile_id}};
+  if (operation == "reset" && arguments.empty()) {
+    return SlashCommandResult{SlashCommandAction::reset_tool_narrowing,
+                              std::nullopt};
+  }
+
+  if (operation == "profile") {
+    if (auto result = profile_selection_result(arguments)) return *result;
+  }
+
+  if (operation == "category") {
+    if (auto result = toggle_result(
+            arguments, SlashCommandAction::enable_tool_category,
+            SlashCommandAction::disable_tool_category, valid_tool_category))
+      return *result;
+  }
+
+  if (operation == "tool") {
+    if (auto result =
+            toggle_result(arguments, SlashCommandAction::enable_tool,
+                          SlashCommandAction::disable_tool, valid_tool_name))
+      return *result;
+  }
+
+  if (operation == "model-max") {
+    if (auto result = maximum_profile_result(
+            arguments, SlashCommandAction::set_model_tool_profile_maximum,
+            SlashCommandAction::inherit_model_tool_profile_maximum)) {
+      return std::move(*result);
     }
   }
+  if (operation == "persona-max") {
+    if (auto result = maximum_profile_result(
+            arguments, SlashCommandAction::set_persona_tool_profile_maximum,
+            SlashCommandAction::inherit_persona_tool_profile_maximum)) {
+      return std::move(*result);
+    }
+  }
+
   return command_error(SlashCommandErrorCode::invalid_arguments,
-                       "tools accepts profile <name> or off");
+                       "tools accepts profile <id>, off, reset, category "
+                       "<id> <on|off>, tool <name> <on|off>, model-max "
+                       "<id>|inherit, or persona-max <id>|inherit");
 }
 
 [[nodiscard]] auto reasoning_handler(std::string_view arguments,
@@ -327,8 +438,11 @@ constexpr std::size_t maximum_registered_name_bytes = 64U;
       {"settings", "settings", "",
        "Inspect or change request settings for future runs.", idle_available,
        settings_handler},
-      {"tools", "tools", "[profile <name> | off]",
-       "Inspect or select the Chat tool profile for future runs.",
+      {"tools", "tools",
+       "[profile <id> | off | reset | category <id> <on|off> | tool <name> "
+       "<on|off> | model-max <id>|inherit | persona-max <id>|inherit]",
+       "Inspect or narrow Chat tools and named maximum profiles for future "
+       "runs.",
        idle_available, tools_handler},
       {"reasoning", "reasoning", "<show | hide>",
        "Show or hide retained reasoning text.", idle_available,

@@ -241,7 +241,8 @@ auto run_provenance() -> domain::RunProvenance {
   result.tool_profile = domain::ToolProfileProvenance{
       make_id<domain::ToolProfileId>("essentials"),
       make_id<domain::ToolProfileId>("model-safe"),
-      make_id<domain::ToolProfileId>("persona-safe")};
+      make_id<domain::ToolProfileId>("persona-safe"),
+      std::vector<std::string>{"read"}};
   result.tool_policy = domain::ToolPolicyProvenance{
       "aiforge.tool-launch-policy.v1",
       make_id<domain::PermissionProfileId>("tools-medium-auto-v1"),
@@ -1201,6 +1202,45 @@ TEST_CASE("tool profile provenance round-trips strictly and reads legacy "
       std::get_if<domain::RunProvenanceRecorded>(&replayed->at(1).payload);
   REQUIRE(recorded != nullptr);
   REQUIRE(recorded->provenance.tool_profile == run_provenance().tool_profile);
+  store.reset();
+
+  execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                    "'$.provenance.tool_profile.desired_tool_names',"
+                    "json_array()) WHERE event_id='profile'");
+  store = open_store(path);
+  const auto contradictory = store->replay_events(session);
+  REQUIRE_FALSE(contradictory);
+  REQUIRE(contradictory.error().code ==
+          storage::SessionStoreErrorCode::corrupt);
+  store.reset();
+  execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                    "'$.provenance.tool_profile.desired_tool_names',"
+                    "json_array('read')) WHERE event_id='profile'");
+
+  execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                    "'$.provenance.tool_profile.desired_tool_names',"
+                    "json_array('read*')) WHERE event_id='profile'");
+  store = open_store(path);
+  const auto wildcard = store->replay_events(session);
+  REQUIRE_FALSE(wildcard);
+  REQUIRE(wildcard.error().code == storage::SessionStoreErrorCode::corrupt);
+  store.reset();
+  execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                    "'$.provenance.tool_profile.desired_tool_names',"
+                    "json_array('read')) WHERE event_id='profile'");
+
+  execute_sql(path, "UPDATE events SET payload_json=json_remove(payload_json,"
+                    "'$.provenance.tool_profile.desired_tool_names') "
+                    "WHERE event_id='profile'");
+  store = open_store(path);
+  const auto pre_narrowing = store->replay_events(session);
+  REQUIRE(pre_narrowing);
+  const auto* pre_narrowing_recorded =
+      std::get_if<domain::RunProvenanceRecorded>(&pre_narrowing->at(1).payload);
+  REQUIRE(pre_narrowing_recorded != nullptr);
+  REQUIRE(pre_narrowing_recorded->provenance.tool_profile);
+  REQUIRE_FALSE(
+      pre_narrowing_recorded->provenance.tool_profile->desired_tool_names);
   store.reset();
 
   execute_sql(path, "UPDATE events SET payload_json=json_remove(payload_json,"

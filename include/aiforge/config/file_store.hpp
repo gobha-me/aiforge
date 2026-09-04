@@ -29,6 +29,7 @@ struct ConfigFileError {
   ConfigFileErrorCode code{ConfigFileErrorCode::read_failed};
   std::filesystem::path path;
   std::string message;
+  bool effect_may_have_applied{};
 };
 
 struct ConfigPathEnvironment {
@@ -51,6 +52,10 @@ class ConfigFileStore {
   [[nodiscard]] virtual auto unset(const ConfigRegistry& registry,
                                    std::string_view key)
       -> std::expected<void, ConfigFileError> = 0;
+  [[nodiscard]] virtual auto update_text_map_entry(
+      const ConfigRegistry& registry, std::string_view key,
+      std::string map_entry_key, std::optional<std::string> value)
+      -> std::expected<void, ConfigFileError> = 0;
 };
 
 class JsonConfigFileStore final : public ConfigFileStore {
@@ -64,6 +69,11 @@ class JsonConfigFileStore final : public ConfigFileStore {
                          const ConfigValue& value)
       -> std::expected<void, ConfigFileError> override;
   [[nodiscard]] auto unset(const ConfigRegistry& registry, std::string_view key)
+      -> std::expected<void, ConfigFileError> override;
+  [[nodiscard]] auto update_text_map_entry(const ConfigRegistry& registry,
+                                           std::string_view key,
+                                           std::string map_entry_key,
+                                           std::optional<std::string> value)
       -> std::expected<void, ConfigFileError> override;
 
  private:

@@ -141,6 +141,11 @@ auto write_file(const std::filesystem::path& path, const std::string_view value)
   return result;
 }
 
+template <typename Id>
+[[nodiscard]] auto id(const std::string_view value) -> Id {
+  return *Id::from(std::string{value});
+}
+
 } // namespace
 
 TEST_CASE("configuration registries reject ambiguous or unsafe schemas",
@@ -554,6 +559,77 @@ TEST_CASE("concurrent writers serialize read-modify-write updates",
   REQUIRE(std::get<bool>(*resolved->find("enabled")->value) == false);
 }
 
+TEST_CASE("first write creates and syncs a private directory chain",
+          "[config][file][durability]") {
+  TemporaryDirectory temporary;
+  const auto base = temporary.path() / "missing" / "xdg";
+  const auto app = base / "aiforge";
+  const auto path = app / "config.json";
+  REQUIRE_FALSE(std::filesystem::exists(base));
+
+  JsonConfigFileStore store{path};
+  REQUIRE(store.update_text_map_entry(builtin_config_registry(),
+                                      model_maximum_tool_profiles_key, "model",
+                                      "off"));
+  REQUIRE(std::filesystem::is_directory(base));
+  REQUIRE(std::filesystem::is_directory(app));
+
+  struct stat info{};
+  REQUIRE(::stat(base.c_str(), &info) == 0);
+  REQUIRE((info.st_mode & 0077) == 0);
+  REQUIRE(::stat(app.c_str(), &info) == 0);
+  REQUIRE((info.st_mode & 0077) == 0);
+  const auto loaded = store.load(builtin_config_registry());
+  REQUIRE(loaded);
+  const std::array layers{*loaded};
+  const auto resolved = resolve_config(builtin_config_registry(), layers);
+  REQUIRE(resolved);
+  const auto mappings = resolve_tool_profile_maximum_mappings(*resolved);
+  REQUIRE(mappings);
+  REQUIRE(mappings->models.at(id<aiforge::domain::ModelId>("model")) ==
+          id<aiforge::domain::ToolProfileId>("off"));
+}
+
+TEST_CASE("concurrent writers merge entries in the same text map",
+          "[config][file][concurrency][tools]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "config.json";
+  std::optional<ConfigFileError> first_error;
+  std::optional<ConfigFileError> second_error;
+  std::barrier start{3};
+  std::jthread first{[&] {
+    start.arrive_and_wait();
+    auto result = JsonConfigFileStore{path}.update_text_map_entry(
+        builtin_config_registry(), model_maximum_tool_profiles_key, "model-a",
+        "off");
+    if (!result) first_error = result.error();
+  }};
+  std::jthread second{[&] {
+    start.arrive_and_wait();
+    auto result = JsonConfigFileStore{path}.update_text_map_entry(
+        builtin_config_registry(), model_maximum_tool_profiles_key, "model-b",
+        "essentials");
+    if (!result) second_error = result.error();
+  }};
+  start.arrive_and_wait();
+  first.join();
+  second.join();
+  REQUIRE_FALSE(first_error);
+  REQUIRE_FALSE(second_error);
+
+  const auto loaded = JsonConfigFileStore{path}.load(builtin_config_registry());
+  REQUIRE(loaded);
+  const std::array layers{*loaded};
+  const auto resolved = resolve_config(builtin_config_registry(), layers);
+  REQUIRE(resolved);
+  const auto mappings = resolve_tool_profile_maximum_mappings(*resolved);
+  REQUIRE(mappings);
+  REQUIRE(mappings->models.at(id<aiforge::domain::ModelId>("model-a")) ==
+          id<aiforge::domain::ToolProfileId>("off"));
+  REQUIRE(mappings->models.at(id<aiforge::domain::ModelId>("model-b")) ==
+          id<aiforge::domain::ToolProfileId>("essentials"));
+}
+
 TEST_CASE("Venice system-prompt config preserves absence and explicit false",
           "[config][venice][failure]") {
   TemporaryDirectory temporary;
@@ -634,6 +710,193 @@ TEST_CASE("malformed persisted Venice request settings fail closed",
   REQUIRE(*invalid_web == "sometimes");
 }
 
+TEST_CASE("tool profile maximum mappings are typed bounded JSON objects",
+          "[config][tools][file]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "config.json";
+  JsonConfigFileStore store{path};
+
+  const ConfigTextMap models{{"z-model", "repository-read"},
+                             {"a-model", "off"}};
+  const ConfigTextMap personas{{"reviewer", "essentials"}};
+  REQUIRE(store.set(builtin_config_registry(), model_maximum_tool_profiles_key,
+                    ConfigValue{models}));
+  REQUIRE(store.set(builtin_config_registry(),
+                    persona_maximum_tool_profiles_key, ConfigValue{personas}));
+
+  const auto file = store.load(builtin_config_registry());
+  REQUIRE(file);
+  const std::array layers{*file};
+  const auto resolved = resolve_config(builtin_config_registry(), layers);
+  REQUIRE(resolved);
+  const auto mappings = resolve_tool_profile_maximum_mappings(*resolved);
+  REQUIRE(mappings);
+  REQUIRE(mappings->models.size() == 2);
+  REQUIRE(mappings->models.at(id<aiforge::domain::ModelId>("a-model")) ==
+          id<aiforge::domain::ToolProfileId>("off"));
+  REQUIRE(mappings->models.at(id<aiforge::domain::ModelId>("z-model")) ==
+          id<aiforge::domain::ToolProfileId>("repository-read"));
+  REQUIRE(mappings->personas.at(id<aiforge::domain::PersonaId>("reviewer")) ==
+          id<aiforge::domain::ToolProfileId>("essentials"));
+
+  const auto provenance = configuration_provenance(*resolved);
+  const auto model_provenance =
+      std::ranges::find(provenance, model_maximum_tool_profiles_key,
+                        &aiforge::domain::ConfigurationProvenanceEntry::key);
+  REQUIRE(model_provenance != provenance.end());
+  REQUIRE(model_provenance->value_present);
+  REQUIRE_FALSE(model_provenance->value);
+
+  const auto contents = read_file(path);
+  REQUIRE(contents.find(R"("maximum_profiles": {)") != std::string::npos);
+
+  const auto empty = resolve_config(builtin_config_registry(), {});
+  REQUIRE(empty);
+  const auto no_mappings = resolve_tool_profile_maximum_mappings(*empty);
+  REQUIRE(no_mappings);
+  REQUIRE(no_mappings->models.empty());
+  REQUIRE(no_mappings->personas.empty());
+}
+
+TEST_CASE("malformed tool profile maximum mappings fail closed",
+          "[config][tools][file][failure]") {
+  TemporaryDirectory temporary;
+  const auto app = temporary.path() / "aiforge";
+  REQUIRE(std::filesystem::create_directories(app));
+  REQUIRE(::chmod(app.c_str(), 0700) == 0);
+  const auto path = app / "config.json";
+
+  const auto resolve_file = [&]() {
+    auto file = JsonConfigFileStore{path}.load(builtin_config_registry());
+    REQUIRE(file);
+    const std::array layers{*file};
+    auto resolved = resolve_config(builtin_config_registry(), layers);
+    REQUIRE(resolved);
+    return resolve_tool_profile_maximum_mappings(*resolved);
+  };
+
+  write_file(path, R"({"tools":{"models":{"maximum_profiles":[]}}})");
+  REQUIRE(::chmod(path.c_str(), 0600) == 0);
+  REQUIRE_FALSE(resolve_file());
+
+  write_file(path,
+             R"({"tools":{"models":{"maximum_profile":{"model":"off"}}}})");
+  REQUIRE(::chmod(path.c_str(), 0600) == 0);
+  REQUIRE_FALSE(resolve_file());
+
+  write_file(path,
+             R"({"tools":{"models":{"maximum_profiles":{"model":"custom"}}}})");
+  REQUIRE(::chmod(path.c_str(), 0600) == 0);
+  auto result = resolve_file();
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == ConfigDiagnosticCode::invalid_value);
+
+  write_file(path, R"({"tools":{"models":{"maximum_profiles":{"":"off"}}}})");
+  REQUIRE(::chmod(path.c_str(), 0600) == 0);
+  REQUIRE_FALSE(resolve_file());
+
+  write_file(
+      path,
+      R"({"tools":{"personas":{"maximum_profiles":{"bad\u0001id":"off"}}}})");
+  REQUIRE(::chmod(path.c_str(), 0600) == 0);
+  REQUIRE_FALSE(resolve_file());
+
+  write_file(
+      path,
+      R"({"tools":{"models":{"maximum_profiles":{"model":"off","model":"essentials"}}}})");
+  REQUIRE(::chmod(path.c_str(), 0600) == 0);
+  const auto duplicate =
+      JsonConfigFileStore{path}.load(builtin_config_registry());
+  REQUIRE_FALSE(duplicate);
+  REQUIRE(duplicate.error().code == ConfigFileErrorCode::duplicate_key);
+}
+
+TEST_CASE("tool profile maximum mapping writes reject unsafe sizes atomically",
+          "[config][tools][file][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "config.json";
+  JsonConfigFileStore store{path};
+  REQUIRE(store.set(builtin_config_registry(), model_maximum_tool_profiles_key,
+                    ConfigValue{ConfigTextMap{{"safe", "off"}}}));
+  const auto original = read_file(path);
+
+  ConfigTextMap excessive;
+  for (std::size_t index = 0; index < 257; ++index) {
+    excessive.push_back({"model-" + std::to_string(index), "off"});
+  }
+  auto changed =
+      store.set(builtin_config_registry(), model_maximum_tool_profiles_key,
+                ConfigValue{std::move(excessive)});
+  REQUIRE_FALSE(changed);
+  REQUIRE(changed.error().code == ConfigFileErrorCode::malformed);
+  REQUIRE(read_file(path) == original);
+
+  changed =
+      store.set(builtin_config_registry(), model_maximum_tool_profiles_key,
+                ConfigValue{ConfigTextMap{{std::string(129, 'm'), "off"}}});
+  REQUIRE_FALSE(changed);
+  REQUIRE(changed.error().code == ConfigFileErrorCode::malformed);
+  REQUIRE(read_file(path) == original);
+
+  changed =
+      store.set(builtin_config_registry(), model_maximum_tool_profiles_key,
+                ConfigValue{ConfigTextMap{{"duplicate", "off"},
+                                          {"duplicate", "essentials"}}});
+  REQUIRE_FALSE(changed);
+  REQUIRE(changed.error().code == ConfigFileErrorCode::malformed);
+  REQUIRE(read_file(path) == original);
+
+  const auto& registry = builtin_config_registry();
+  const auto spec = std::ranges::find(
+      registry.keys, model_maximum_tool_profiles_key, &ConfigKeySpec::id);
+  REQUIRE(spec != registry.keys.end());
+  const std::array textual{std::string_view{"model=off"}};
+  REQUIRE_FALSE(parse_config_value(*spec, textual, ConfigSource::environment));
+  REQUIRE_FALSE(spec->environment_name);
+
+  const ConfigLayer command_line{
+      ConfigSource::command_line,
+      {{std::string{model_maximum_tool_profiles_key},
+        ConfigValue{ConfigTextMap{{"model", "off"}}}, std::nullopt}},
+      {}};
+  const std::array command_layers{command_line};
+  REQUIRE_FALSE(resolve_config(builtin_config_registry(), command_layers));
+}
+
+TEST_CASE("maximum-size tool mappings keep bounded run provenance",
+          "[config][tools][provenance]") {
+  ConfigTextMap mappings;
+  mappings.reserve(256);
+  for (std::size_t index = 0; index < 256; ++index) {
+    mappings.push_back({"model-" + std::to_string(index), "off"});
+  }
+  const ConfigLayer file{ConfigSource::file,
+                         {{std::string{model_maximum_tool_profiles_key},
+                           ConfigValue{std::move(mappings)}, std::nullopt}},
+                         {}};
+  const std::array layers{file};
+  const auto resolved = resolve_config(builtin_config_registry(), layers);
+  REQUIRE(resolved);
+  const auto configuration = configuration_provenance(*resolved);
+  const auto model_entry =
+      std::ranges::find(configuration, model_maximum_tool_profiles_key,
+                        &aiforge::domain::ConfigurationProvenanceEntry::key);
+  REQUIRE(model_entry != configuration.end());
+  REQUIRE(model_entry->value_present);
+  REQUIRE_FALSE(model_entry->value);
+
+  const aiforge::domain::RunProvenance provenance{
+      "test-version",
+      "test-backend",
+      std::nullopt,
+      id<aiforge::domain::ModelId>("model"),
+      std::nullopt,
+      configuration,
+      {},
+      {}};
+  REQUIRE(aiforge::domain::validate_run_provenance(provenance));
+}
+
 TEST_CASE("config CLI keeps content and diagnostics on their streams",
           "[config][commands]") {
   TemporaryDirectory temporary;
@@ -660,7 +923,9 @@ TEST_CASE("config CLI keeps content and diagnostics on their streams",
                     "venice.include_system_prompt\t<unset>\tunset\n"
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
-                    "memory.context.max_tokens\t2048\tdefault\n");
+                    "memory.context.max_tokens\t2048\tdefault\n"
+                    "tools.models.maximum_profiles\t<unset>\tunset\n"
+                    "tools.personas.maximum_profiles\t<unset>\tunset\n");
   REQUIRE(error.empty());
 
   REQUIRE(run_cli({"config", "set", "model", "test-model"}, output, error) ==
@@ -705,7 +970,9 @@ TEST_CASE("malformed files are diagnostic for reads but never overwritten",
                     "venice.include_system_prompt\t<unset>\tunset\n"
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
-                    "memory.context.max_tokens\t2048\tdefault\n");
+                    "memory.context.max_tokens\t2048\tdefault\n"
+                    "tools.models.maximum_profiles\t<unset>\tunset\n"
+                    "tools.personas.maximum_profiles\t<unset>\tunset\n");
   REQUIRE(error.find("warning") != std::string::npos);
 
   REQUIRE(run_cli({"config", "set", "model", "replacement"}, output, error) ==
@@ -732,7 +999,9 @@ TEST_CASE("read-only resolution survives an unavailable config home",
                     "venice.include_system_prompt\t<unset>\tunset\n"
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
-                    "memory.context.max_tokens\t2048\tdefault\n");
+                    "memory.context.max_tokens\t2048\tdefault\n"
+                    "tools.models.maximum_profiles\t<unset>\tunset\n"
+                    "tools.personas.maximum_profiles\t<unset>\tunset\n");
   REQUIRE(error.find("warning") != std::string::npos);
   REQUIRE(error.find("environment-model") == std::string::npos);
 }
