@@ -34,6 +34,7 @@ context.
 - CMake 3.28 or newer
 - GCC 13+ or Clang 17+ with a C++23 standard library
 - Git when CMake must fetch dependencies
+- ALSA development headers on Linux for the default local-audio build
 
 AIForge uses CMake only for dependencies. A configured package is preferred,
 then a sibling checkout, with `FetchContent` as the fallback. Adapter builds use
@@ -47,6 +48,9 @@ redirect, header-injection, multipart-metadata, and receive-time response-size
 guards. RasterForge v0.5.0 supplies
 bounded static PNG, JPEG, and WebP validation for generated-image artifacts. It
 is active with the process adapters through `${PROJECT_NAME}_DEPS`.
+Top-level Linux builds also enable the private RtAudio 6.0.1 ALSA playback
+adapter by default. Set `aiforge_AUDIO_PLAYBACK=OFF` for a device-free build;
+core and consumed subdirectory builds remain device-dependency free by default.
 
 Durable session storage uses SQLite 3 behind a neutral storage port. CMake
 prefers an installed SQLite 3.45.1 or newer and otherwise builds the pinned
@@ -107,6 +111,8 @@ export VENICE_API_KEY=your-key      # takes precedence over the stored key
 ./build/src/bin/aiforge audio transcribe --model asr-model recording.wav
 ./build/src/bin/aiforge audio export --session audio-session-id \
   --artifact audio-artifact-id --output copy.wav
+./build/src/bin/aiforge audio play --session audio-session-id \
+  --artifact audio-artifact-id
 ./build/src/bin/aiforge                 # interactive Chat
 ./build/src/bin/aiforge --continue      # interactive latest session
 printf '%s\n' '{"schema_version":1,"request_id":"inspect-1","operation":"inspect"}' \
@@ -135,6 +141,15 @@ decoded-RGBA degradation; nonterminal invocations print the same control-free
 artifact metadata. `--output` exports with exclusive creation and never
 overwrites an existing file. See
 [`ADR 0010`](docs/adr/0010-content-addressed-image-artifacts.md).
+
+Local playback is an explicit Linux-only command over an already durable
+PCM16 WAV artifact. It opens session and artifact storage read-only, verifies
+the exact artifact metadata and digest, and reports the bounded open/start/
+stream/stop/close lifecycle on stderr without exposing device identity. It is
+never model-callable, and session replay never opens an audio device. Missing
+hardware, permission failure, or unsupported audio leaves the durable artifact
+available for export. See
+[`ADR 0014`](docs/adr/0014-bounded-pcm-audio-device-boundary.md).
 
 ## Run kernel
 

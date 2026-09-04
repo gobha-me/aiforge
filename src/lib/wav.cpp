@@ -1,6 +1,7 @@
 #include <aiforge/audio/wav.hpp>
 
 #include <array>
+#include <bit>
 #include <limits>
 #include <optional>
 #include <string_view>
@@ -51,11 +52,16 @@ namespace {
   return true;
 }
 
-} // namespace
+struct ParsedPcmWav {
+  PcmWavInfo info;
+  std::size_t data_offset{};
+  std::size_t data_size{};
+};
 
-auto validate_pcm_wav(const std::span<const std::byte> encoded,
-                      const PcmWavLimits limits)
-    -> std::expected<PcmWavInfo, PcmWavError> {
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- RIFF parsing.
+[[nodiscard]] auto parse_pcm_wav(const std::span<const std::byte> encoded,
+                                 const PcmWavLimits limits)
+    -> std::expected<ParsedPcmWav, PcmWavError> {
   try {
     if (limits.maximum_bytes < 12 || limits.maximum_chunks == 0 ||
         limits.maximum_channels == 0 || limits.minimum_sample_rate == 0 ||
@@ -82,6 +88,7 @@ auto validate_pcm_wav(const std::span<const std::byte> encoded,
     std::optional<PcmWavInfo> format;
     std::optional<std::uint32_t> block_align;
     std::optional<std::uint64_t> data_bytes;
+    std::optional<std::size_t> data_offset;
     std::size_t offset{12};
     std::size_t chunks{};
     while (offset < encoded.size()) {
@@ -133,6 +140,7 @@ auto validate_pcm_wav(const std::span<const std::byte> encoded,
                          "PCM WAV data chunk is invalid");
         }
         data_bytes = size;
+        data_offset = payload;
       }
       const auto padded = size + (size & 1U);
       if (padded > encoded.size() - payload) {
@@ -141,16 +149,53 @@ auto validate_pcm_wav(const std::span<const std::byte> encoded,
       }
       offset = payload + padded;
     }
-    if (!format || !data_bytes || !block_align ||
+    if (!format || !data_bytes || !data_offset || !block_align ||
         *data_bytes % *block_align != 0) {
       return failure(PcmWavErrorCode::malformed,
                      "PCM WAV format and sample data do not agree");
     }
     format->frames = *data_bytes / *block_align;
-    return *format;
+    return ParsedPcmWav{*format, *data_offset,
+                        static_cast<std::size_t>(*data_bytes)};
   } catch (...) {
     return failure(PcmWavErrorCode::malformed,
                    "PCM WAV validation failed internally");
+  }
+}
+
+} // namespace
+
+auto validate_pcm_wav(const std::span<const std::byte> encoded,
+                      const PcmWavLimits limits)
+    -> std::expected<PcmWavInfo, PcmWavError> {
+  auto parsed = parse_pcm_wav(encoded, limits);
+  if (!parsed) return std::unexpected(std::move(parsed.error()));
+  return parsed->info;
+}
+
+auto decode_pcm16_wav(const std::span<const std::byte> encoded,
+                      const PcmWavLimits limits)
+    -> std::expected<Signed16Buffer, PcmWavError> {
+  try {
+    auto parsed = parse_pcm_wav(encoded, limits);
+    if (!parsed) return std::unexpected(std::move(parsed.error()));
+    if (parsed->info.bits_per_sample != 16 ||
+        (parsed->info.channels != 1 && parsed->info.channels != 2)) {
+      return failure(PcmWavErrorCode::unsupported,
+                     "PCM WAV playback requires signed-16 mono or stereo");
+    }
+
+    std::vector<std::int16_t> samples;
+    samples.reserve(parsed->data_size / sizeof(std::int16_t));
+    for (std::size_t index{}; index < parsed->data_size; index += 2) {
+      samples.push_back(std::bit_cast<std::int16_t>(
+          u16(encoded, parsed->data_offset + index)));
+    }
+    return Signed16Buffer{{parsed->info.sample_rate, parsed->info.channels},
+                          std::move(samples)};
+  } catch (...) {
+    return failure(PcmWavErrorCode::malformed,
+                   "PCM WAV decoding failed internally");
   }
 }
 

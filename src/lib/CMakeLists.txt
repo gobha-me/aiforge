@@ -57,6 +57,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   scripted_provider_character_catalog_source.cpp
   scripted_persona_editor.cpp
   scripted_persona_source.cpp
+  scripted_playback_port.cpp
   scripted_project_instruction_source.cpp
   scripted_repository_snapshot_source.cpp
   scripted_session_store.cpp

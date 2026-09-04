@@ -457,4 +457,3 @@ src/lib/verification_evidence.cpp	readability-function-cognitive-complexity	3f9b
 src/lib/verification_evidence.cpp	readability-function-cognitive-complexity	6e35cfdbcca7b491896e	function 'validate_impl' has cognitive complexity of 38 (threshold 20)
 src/lib/verification_evidence.cpp	readability-function-cognitive-complexity	78a03f55652885c89aa4	function 'valid_utf8_text' has cognitive complexity of 29 (threshold 20)
 src/lib/verification_evidence.cpp	readability-function-cognitive-complexity	c30cb36006c449aae501	function 'assess_verification_evidence' has cognitive complexity of 25 (threshold 20)
-src/lib/wav.cpp	readability-function-cognitive-complexity	0ac57f57f48375e7e474	function 'validate_pcm_wav' has cognitive complexity of 41 (threshold 20)

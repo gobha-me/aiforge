@@ -154,9 +154,17 @@ class FakeAudio final : public AudioCommand {
     return {};
   }
 
+  auto play(PlayRequest request, CommandEnvironment&, std::ostream& output,
+            std::ostream&) -> std::expected<void, CommandFailure> override {
+    played = std::move(request);
+    output << "played\n";
+    return {};
+  }
+
   std::optional<SynthesizeRequest> synthesized;
   std::optional<TranscribeRequest> transcribed;
   std::optional<ExportRequest> exported;
+  std::optional<PlayRequest> played;
 };
 
 class FakeLogin final : public LoginCommand {
@@ -380,7 +388,7 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
   const auto audio =
       std::ranges::find(schema->root.subcommands, "audio", &CommandSchema::id);
   REQUIRE(audio != schema->root.subcommands.end());
-  REQUIRE(audio->subcommands.size() == 3);
+  REQUIRE(audio->subcommands.size() == 4);
 
   const auto root_help =
       render_help(registry, std::vector<std::string>{"root"});
@@ -829,11 +837,24 @@ TEST_CASE("audio subcommands parse bounded artifact-only contracts",
         aiforge::domain::ArtifactId::from("audio-artifact-1").value());
   CHECK(audio.exported->output_path == "copy.wav");
 
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"audio", "play", "--session",
+                                            "audio-session-1", "--artifact",
+                                            "audio-artifact-1"},
+              environment, output, error) == 0);
+  REQUIRE(audio.played);
+  CHECK(audio.played->session_id ==
+        aiforge::domain::SessionId::from("audio-session-1").value());
+  CHECK(audio.played->artifact_id ==
+        aiforge::domain::ArtifactId::from("audio-artifact-1").value());
+
   for (const auto& arguments :
        {std::vector<std::string_view>{"audio", "synthesize", "--model", "m",
                                       "missing voice"},
         std::vector<std::string_view>{"audio", "transcribe", "input.wav"},
-        std::vector<std::string_view>{"audio", "export", "--session", "s"}}) {
+        std::vector<std::string_view>{"audio", "export", "--session", "s"},
+        std::vector<std::string_view>{"audio", "play"}}) {
     CHECK(CommandDispatcher{}.dispatch(registry, arguments, environment, output,
                                        error) == 2);
   }

@@ -1,13 +1,17 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -22,12 +26,14 @@
 
 #include <aiforge/adapters/audio_backend.hpp>
 #include <aiforge/adapters/filesystem_artifact_store.hpp>
+#include <aiforge/adapters/process_audio.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/venice_audio_service.hpp>
 #include <aiforge/audio/wav.hpp>
 #include <aiforge/surfaces/audio.hpp>
 #include <aiforge/testing/scripted_artifact_store.hpp>
 #include <aiforge/testing/scripted_audio_service.hpp>
+#include <aiforge/testing/scripted_playback_port.hpp>
 #include <httplib.h>
 
 namespace {
@@ -148,6 +154,52 @@ class TemporaryDirectory final {
   std::filesystem::path m_path;
 };
 
+#ifndef _WIN32
+class EnvironmentGuard final {
+ public:
+  EnvironmentGuard(std::string name, std::string value)
+      : m_name{std::move(name)} {
+    if (const auto* existing = std::getenv(m_name.c_str())) m_prior = existing;
+    REQUIRE(::setenv(m_name.c_str(), value.c_str(), 1) == 0);
+  }
+  ~EnvironmentGuard() {
+    if (m_prior)
+      static_cast<void>(::setenv(m_name.c_str(), m_prior->c_str(), 1));
+    else
+      static_cast<void>(::unsetenv(m_name.c_str()));
+  }
+
+ private:
+  std::string m_name;
+  std::optional<std::string> m_prior;
+};
+#endif
+
+using FileSnapshot =
+    std::map<std::filesystem::path,
+             std::pair<std::uintmax_t, std::filesystem::file_time_type>>;
+
+[[nodiscard]] auto file_snapshot(const std::filesystem::path& root)
+    -> FileSnapshot {
+  FileSnapshot result;
+  for (const auto& entry :
+       std::filesystem::recursive_directory_iterator{root}) {
+    if (entry.is_regular_file())
+      result.emplace(entry.path().lexically_relative(root),
+                     std::pair{entry.file_size(), entry.last_write_time()});
+  }
+  return result;
+}
+
+[[nodiscard]] auto artifact_event(const domain::ArtifactMetadata& artifact)
+    -> domain::RunEvent {
+  return {{make_id<domain::EventId>("playback-artifact-event"),
+           make_id<domain::RunId>("playback-run"), 1, 1,
+           domain::EventTimestamp{std::chrono::milliseconds{1}}, std::nullopt,
+           std::nullopt, std::nullopt},
+          domain::ArtifactCreated{artifact}};
+}
+
 class AudioServer final {
  public:
   AudioServer() {
@@ -255,6 +307,54 @@ TEST_CASE("PCM WAV validator fails closed before its smoke case") {
   CHECK(parsed->sample_rate == 8000);
   CHECK(parsed->bits_per_sample == 16);
   CHECK(parsed->frames == 2);
+}
+
+TEST_CASE("PCM16 WAV decode shares validation and preserves endian bounds") {
+  auto encoded = pcm_wav();
+  encoded[44] = std::byte{0x00};
+  encoded[45] = std::byte{0x80};
+  encoded[46] = std::byte{0xff};
+  encoded[47] = std::byte{0x7f};
+
+  std::vector<std::byte> unaligned(encoded.size() + 2, std::byte{0x5a});
+  std::ranges::copy(encoded, unaligned.begin() + 1);
+  auto decoded = audio::decode_pcm16_wav(
+      std::span<const std::byte>{unaligned}.subspan(1, encoded.size()));
+  REQUIRE(decoded);
+  CHECK(decoded->format == audio::Signed16Format{8000, 1});
+  CHECK(decoded->interleaved_samples ==
+        std::vector<std::int16_t>{-32768, 32767});
+  CHECK(unaligned.front() == std::byte{0x5a});
+  CHECK(unaligned.back() == std::byte{0x5a});
+
+  auto data_before_format = encoded;
+  std::ranges::copy(encoded.begin() + 36, encoded.end(),
+                    data_before_format.begin() + 12);
+  std::ranges::copy(encoded.begin() + 12, encoded.begin() + 36,
+                    data_before_format.begin() + 24);
+  auto reordered = audio::decode_pcm16_wav(data_before_format);
+  REQUIRE(reordered);
+  CHECK(reordered->interleaved_samples == decoded->interleaved_samples);
+
+  auto odd_chunk = encoded;
+  odd_chunk[4] = std::byte{50};
+  odd_chunk.insert(odd_chunk.begin() + 12,
+                   {std::byte{'J'}, std::byte{'U'}, std::byte{'N'},
+                    std::byte{'K'}, std::byte{1}, std::byte{}, std::byte{},
+                    std::byte{}, std::byte{0x7f}, std::byte{}});
+  auto odd = audio::decode_pcm16_wav(odd_chunk);
+  REQUIRE(odd);
+  CHECK(odd->interleaved_samples == decoded->interleaved_samples);
+
+  auto eight_bit = encoded;
+  eight_bit[28] = std::byte{0x40};
+  eight_bit[29] = std::byte{0x1f};
+  eight_bit[32] = std::byte{1};
+  eight_bit[34] = std::byte{8};
+  REQUIRE(audio::validate_pcm_wav(eight_bit));
+  auto unsupported = audio::decode_pcm16_wav(eight_bit);
+  REQUIRE_FALSE(unsupported);
+  CHECK(unsupported.error().code == audio::PcmWavErrorCode::unsupported);
 }
 
 TEST_CASE("speech backend validates WAV before publishing one artifact") {
@@ -441,5 +541,120 @@ TEST_CASE("Venice audio adapter uses WAV and a fixed upload filename") {
   CHECK(server.transcription_content().size() == pcm_wav().size());
   CHECK(server.transcription_content().find(api_key) == std::string::npos);
 }
+
+#ifndef _WIN32
+TEST_CASE("process playback reads an exact durable artifact without mutation") {
+  TemporaryDirectory temporary;
+  EnvironmentGuard xdg{"XDG_STATE_HOME", temporary.path().string()};
+  const auto state_root = temporary.path() / "aiforge";
+  const auto session_path = state_root / "sessions.sqlite3";
+  auto sessions = adapters::SqliteSessionStore::open(session_path);
+  REQUIRE(sessions);
+  const auto session = make_id<domain::SessionId>("playback-session");
+  REQUIRE((*sessions)->create_session(
+      {session, domain::EventTimestamp{std::chrono::milliseconds{1}}}));
+  auto artifacts = adapters::FilesystemArtifactStore::open(
+      state_root / "artifacts", {32U * 1024U * 1024U});
+  REQUIRE(artifacts);
+  auto wav = pcm_wav();
+  wav[44] = std::byte{1};
+  wav[46] = std::byte{2};
+  auto stored = (*artifacts)
+                    ->put({make_id<domain::ArtifactId>("playback-artifact"),
+                           "audio/wav", std::nullopt},
+                          wav);
+  REQUIRE(stored);
+  const auto event = artifact_event(*stored);
+  REQUIRE((*sessions)->append_events(session, std::span{&event, 1}));
+  artifacts->reset();
+  sessions->reset();
+
+  const auto before = file_snapshot(state_root);
+  auto expected = audio::decode_pcm16_wav(wav);
+  REQUIRE(expected);
+  auto fake = std::make_shared<testing::ScriptedPlaybackPort>(
+      std::vector<testing::ScriptedPlaybackExchange>{
+          {*expected, audio::PlaybackStats{1, 2, 0, 0}}});
+  int factory_calls{};
+  adapters::ProcessAudioCommand command{
+      [&]() -> std::expected<std::shared_ptr<audio::PlaybackPort>,
+                             cli::CommandFailure> {
+        ++factory_calls;
+        return fake;
+      }};
+  std::istringstream input;
+  cli::CommandEnvironment environment{input, false, false, false, {}};
+  std::ostringstream output;
+  std::ostringstream error;
+  auto result =
+      command.play({session, stored->artifact_id}, environment, output, error);
+  REQUIRE(result);
+  CHECK(factory_calls == 1);
+  CHECK(fake->remaining_exchanges() == 0);
+  CHECK(output.str().find("frames=2 artifact=playback-artifact") !=
+        std::string::npos);
+  CHECK(error.str() == "aiforge: playback=opening\n");
+  CHECK(file_snapshot(state_root) == before);
+}
+
+TEST_CASE(
+    "process playback rejects lookup and integrity failures before factory") {
+  TemporaryDirectory temporary;
+  EnvironmentGuard xdg{"XDG_STATE_HOME", temporary.path().string()};
+  const auto state_root = temporary.path() / "aiforge";
+  auto sessions =
+      adapters::SqliteSessionStore::open(state_root / "sessions.sqlite3");
+  REQUIRE(sessions);
+  const auto session = make_id<domain::SessionId>("invalid-playback-session");
+  REQUIRE((*sessions)->create_session(
+      {session, domain::EventTimestamp{std::chrono::milliseconds{1}}}));
+  auto metadata = domain::ArtifactMetadata{
+      make_id<domain::ArtifactId>("missing-playback-artifact"),
+      "audio/wav",
+      48,
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt};
+  const auto event = artifact_event(metadata);
+  REQUIRE((*sessions)->append_events(session, std::span{&event, 1}));
+  sessions->reset();
+  REQUIRE(adapters::FilesystemArtifactStore::open(state_root / "artifacts"));
+
+  int factory_calls{};
+  adapters::ProcessAudioCommand command{
+      [&]() -> std::expected<std::shared_ptr<audio::PlaybackPort>,
+                             cli::CommandFailure> {
+        ++factory_calls;
+        return std::unexpected(cli::CommandFailure{
+            cli::CommandFailureKind::runtime, "must not be called"});
+      }};
+  std::istringstream input;
+  cli::CommandEnvironment environment{input, false, false, false, {}};
+  std::ostringstream output;
+  std::ostringstream error;
+  auto result =
+      command.play({session, metadata.artifact_id}, environment, output, error);
+  REQUIRE_FALSE(result);
+  CHECK(result.error().message.find("artifact") != std::string::npos);
+  CHECK(factory_calls == 0);
+
+  auto missing = command.play(
+      {make_id<domain::SessionId>("no-such-session"), std::nullopt},
+      environment, output, error);
+  REQUIRE_FALSE(missing);
+  CHECK(missing.error().message == "audio session was not found");
+  CHECK(factory_calls == 0);
+
+  auto exported = command.export_artifact(
+      {make_id<domain::SessionId>("no-such-session"), std::nullopt,
+       (temporary.path() / "must-not-exist.wav").string()},
+      environment, output, error);
+  REQUIRE_FALSE(exported);
+  CHECK(factory_calls == 0);
+  CHECK_FALSE(std::filesystem::exists(temporary.path() / "must-not-exist.wav"));
+}
+#endif
 
 } // namespace

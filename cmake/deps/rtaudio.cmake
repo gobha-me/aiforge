@@ -1,4 +1,4 @@
-# RtAudio: evaluation-only device I/O candidate for the Linux PCM WAV seam.
+# RtAudio: private production/evaluation device I/O for the Linux PCM WAV seam.
 # Prefer an exact installed package, then the immutable 6.0.1 release source.
 if (TARGET RtAudio::rtaudio OR TARGET rtaudio)
   message(FATAL_ERROR
@@ -34,7 +34,7 @@ if (NOT TARGET RtAudio::rtaudio)
   set(RTAUDIO_API_ASIO OFF CACHE BOOL "Build the RtAudio ASIO API" FORCE)
   set(RTAUDIO_API_WASAPI OFF CACHE BOOL "Build the RtAudio WASAPI API" FORCE)
 
-  # RtAudio 6.0.1 calls export(PACKAGE). Do not let an evaluation dependency
+# RtAudio 6.0.1 calls export(PACKAGE). Do not let an embedded dependency
   # mutate the user's CMake package registry during an AIForge configure.
   if (DEFINED CMAKE_EXPORT_NO_PACKAGE_REGISTRY)
     set(_aiforge_rtaudio_had_package_registry_setting ON)
@@ -61,13 +61,19 @@ if (NOT TARGET RtAudio::rtaudio)
     target_compile_options(rtaudio PRIVATE -Wno-vla)
   endif ()
   if (TARGET rtaudio)
-    # RtAudio otherwise compiles its inert dummy implementation only when no
-    # production API is enabled. Keep ALSA available for comparison while
-    # giving the evaluator an explicitly selectable hardware-free backend.
-    target_compile_definitions(rtaudio PRIVATE __RTAUDIO_DUMMY__)
+    if (${PROJECT_NAME}_AUDIO_DEVICE_EVALUATION)
+      # The evaluator explicitly selects this hardware-free backend. The
+      # production adapter always constructs LINUX_ALSA and rejects fallback.
+      target_compile_definitions(rtaudio PRIVATE __RTAUDIO_DUMMY__)
+      set(_aiforge_rtaudio_profile
+        "rtaudio-6.0.1-alsa-dummy-static-v1")
+    else ()
+      set(_aiforge_rtaudio_profile "rtaudio-6.0.1-alsa-static-v1")
+    endif ()
     set_property(TARGET rtaudio PROPERTY
       AIFORGE_AUDIO_DEVICE_EVIDENCE_PROFILE
-      "rtaudio-6.0.1-alsa-dummy-static-v1")
+      "${_aiforge_rtaudio_profile}")
+    unset(_aiforge_rtaudio_profile)
   endif ()
 
   if (_aiforge_rtaudio_had_package_registry_setting)
@@ -100,16 +106,23 @@ get_target_property(_aiforge_rtaudio_type ${_aiforge_rtaudio_target} TYPE)
 if (NOT _aiforge_rtaudio_type STREQUAL "STATIC_LIBRARY")
   message(FATAL_ERROR "RtAudio evidence requires static library linkage")
 endif ()
+if (${PROJECT_NAME}_AUDIO_DEVICE_EVALUATION)
+  set(_aiforge_required_rtaudio_profile
+    "rtaudio-6.0.1-alsa-dummy-static-v1")
+else ()
+  set(_aiforge_required_rtaudio_profile "rtaudio-6.0.1-alsa-static-v1")
+endif ()
 get_target_property(_aiforge_rtaudio_profile ${_aiforge_rtaudio_target}
   AIFORGE_AUDIO_DEVICE_EVIDENCE_PROFILE)
 if (NOT _aiforge_rtaudio_profile STREQUAL
-    "rtaudio-6.0.1-alsa-dummy-static-v1")
+    "${_aiforge_required_rtaudio_profile}")
   message(FATAL_ERROR
-    "Installed RtAudio does not prove the required ALSA and dummy evidence profile; disable package discovery to use the controlled fallback")
+    "Installed RtAudio does not prove the required AIForge ALSA profile; disable package discovery to use the controlled fallback")
 endif ()
 target_compile_definitions(${_aiforge_rtaudio_target} INTERFACE
   AIFORGE_RTAUDIO_DEPENDENCY_SOURCE="${_aiforge_rtaudio_dependency_source}")
 unset(_aiforge_rtaudio_target)
 unset(_aiforge_rtaudio_type)
 unset(_aiforge_rtaudio_profile)
+unset(_aiforge_required_rtaudio_profile)
 unset(_aiforge_rtaudio_dependency_source)

@@ -28,6 +28,15 @@ option(${PROJECT_NAME}_PROCESS_ISOLATION_EVALUATION
   "Build the noninstalled Linux process-isolation evidence evaluator" OFF)
 option(${PROJECT_NAME}_AUDIO_DEVICE_EVALUATION
   "Build the noninstalled Linux audio-device evidence evaluator" OFF)
+set(_aiforge_audio_playback_default OFF)
+if (PROJECT_IS_TOP_LEVEL AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+    ${PROJECT_NAME}_BUILD_ADAPTERS)
+  set(_aiforge_audio_playback_default ON)
+endif ()
+option(${PROJECT_NAME}_AUDIO_PLAYBACK
+  "Build the production Linux ALSA PCM playback adapter"
+  ${_aiforge_audio_playback_default})
+unset(_aiforge_audio_playback_default)
 
 if (${PROJECT_NAME}_DRAWFORGE_EVALUATION AND NOT ${PROJECT_NAME}_BUILD_ADAPTERS)
   message(FATAL_ERROR "aiforge_DRAWFORGE_EVALUATION requires aiforge_BUILD_ADAPTERS")
@@ -45,6 +54,13 @@ if (${PROJECT_NAME}_AUDIO_DEVICE_EVALUATION AND
     "aiforge_AUDIO_DEVICE_EVALUATION is supported only on Linux")
 endif ()
 
+if (${PROJECT_NAME}_AUDIO_PLAYBACK AND NOT ${PROJECT_NAME}_BUILD_ADAPTERS)
+  message(FATAL_ERROR "aiforge_AUDIO_PLAYBACK requires aiforge_BUILD_ADAPTERS")
+endif ()
+if (${PROJECT_NAME}_AUDIO_PLAYBACK AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  message(FATAL_ERROR "aiforge_AUDIO_PLAYBACK is supported only on Linux")
+endif ()
+
 # This is the dependency activation point. Recipes not named here are inert.
 set(${PROJECT_NAME}_DEPS
   catch2
@@ -60,6 +76,10 @@ endif ()
 if (${PROJECT_NAME}_AUDIO_DEVICE_EVALUATION)
   list(APPEND ${PROJECT_NAME}_DEPS miniaudio rtaudio)
 endif ()
+if (${PROJECT_NAME}_AUDIO_PLAYBACK)
+  list(APPEND ${PROJECT_NAME}_DEPS rtaudio)
+endif ()
+list(REMOVE_DUPLICATES ${PROJECT_NAME}_DEPS)
 
 if (NOT ${PROJECT_NAME}_TESTS)
   list(REMOVE_ITEM ${PROJECT_NAME}_DEPS catch2)

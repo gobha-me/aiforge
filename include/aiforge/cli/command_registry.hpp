@@ -144,6 +144,11 @@ class AudioCommand {
     std::string output_path;
   };
 
+  struct PlayRequest {
+    domain::SessionId session_id;
+    std::optional<domain::ArtifactId> artifact_id;
+  };
+
   [[nodiscard]] virtual auto synthesize(SynthesizeRequest request,
                                         CommandEnvironment& environment,
                                         std::ostream& output,
@@ -158,6 +163,10 @@ class AudioCommand {
                                              CommandEnvironment& environment,
                                              std::ostream& output,
                                              std::ostream& error)
+      -> std::expected<void, CommandFailure> = 0;
+  [[nodiscard]] virtual auto play(PlayRequest request,
+                                  CommandEnvironment& environment,
+                                  std::ostream& output, std::ostream& error)
       -> std::expected<void, CommandFailure> = 0;
 };
 
