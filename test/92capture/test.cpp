@@ -53,11 +53,20 @@ struct DevicePlan {
   bool callback_during_close{};
   bool continue_after_terminal{};
   bool malformed_span{};
+  bool return_while_callback_in_flight{};
+  adapters::CaptureCallbackTestFence* callback_fence{};
 };
 
 class ScriptedDevice final : public adapters::BufferedCaptureDevice {
  public:
   explicit ScriptedDevice(DevicePlan plan = {}) : m_plan{std::move(plan)} {}
+  ~ScriptedDevice() override {
+    if (m_plan.callback_fence != nullptr) {
+      m_plan.callback_fence->release.store(true, std::memory_order_release);
+      m_plan.callback_fence->release.notify_all();
+    }
+    join_worker();
+  }
 
   auto open(const adapters::CaptureDeviceOpenRequest& request,
             adapters::CaptureDeviceCallback& callback) noexcept
@@ -77,16 +86,18 @@ class ScriptedDevice final : public adapters::BufferedCaptureDevice {
     auto result = stage(CaptureStage::stream);
     if (!result) return result;
     try {
-      for (const auto& step : m_plan.callbacks) {
-        auto samples = step.samples;
-        if (m_plan.malformed_span && !samples.empty()) samples.pop_back();
-        const auto decision =
-            m_callback->process(samples, step.frames, step.status);
-        m_decisions.push_back(decision);
-        if (decision != CaptureCallbackDecision::continue_operation &&
-            !m_plan.continue_after_terminal)
-          break;
+      if (m_plan.return_while_callback_in_flight) {
+        m_worker = std::thread{[this] { callbacks(); }};
+        if (m_plan.callback_fence != nullptr) {
+          while (
+              !m_plan.callback_fence->entered.load(std::memory_order_acquire)) {
+            m_plan.callback_fence->entered.wait(false,
+                                                std::memory_order_relaxed);
+          }
+        }
+        return {};
       }
+      callbacks();
       return {};
     } catch (...) {
       return std::unexpected(
@@ -105,6 +116,17 @@ class ScriptedDevice final : public adapters::BufferedCaptureDevice {
     }
     if (result) m_callback = nullptr;
     return result;
+  }
+
+  auto join_worker() noexcept -> void {
+    try {
+      if (m_worker.joinable()) m_worker.join();
+    } catch (...) {
+    }
+  }
+
+  [[nodiscard]] auto decisions() const -> std::vector<CaptureCallbackDecision> {
+    return m_decisions;
   }
 
   auto wait_until_blocked(CaptureStage expected) -> void {
@@ -131,6 +153,19 @@ class ScriptedDevice final : public adapters::BufferedCaptureDevice {
   }
 
  private:
+  auto callbacks() -> void {
+    for (const auto& step : m_plan.callbacks) {
+      auto samples = step.samples;
+      if (m_plan.malformed_span && !samples.empty()) samples.pop_back();
+      const auto decision =
+          m_callback->process(samples, step.frames, step.status);
+      m_decisions.push_back(decision);
+      if (decision != CaptureCallbackDecision::continue_operation &&
+          !m_plan.continue_after_terminal)
+        break;
+    }
+  }
+
   auto stage(CaptureStage current) noexcept
       -> std::expected<void, CaptureDeviceFailure> {
     try {
@@ -161,6 +196,7 @@ class ScriptedDevice final : public adapters::BufferedCaptureDevice {
   std::optional<adapters::CaptureDeviceOpenRequest> m_request;
   adapters::CaptureDeviceCallback* m_callback{};
   std::vector<CaptureCallbackDecision> m_decisions;
+  std::thread m_worker;
   bool m_barrier_reached{};
   bool m_barrier_released{};
 };
@@ -281,6 +317,50 @@ TEST_CASE("capture device failures clean up and close failure dominates") {
   CHECK(gate.quarantined());
 }
 
+TEST_CASE("capture cancellation cannot mask indeterminate cleanup") {
+  struct CleanupCase {
+    CaptureStage failed_stage;
+    bool gate_is_quarantined;
+  };
+  const std::array cases{
+      CleanupCase{CaptureStage::stop, false},
+      CleanupCase{CaptureStage::close, true},
+  };
+
+  for (const auto cleanup_case : cases) {
+    CAPTURE(cleanup_case.failed_stage);
+    DevicePlan plan;
+    plan.barrier = CaptureStage::stream;
+    plan.failures = {{cleanup_case.failed_stage,
+                      CaptureDeviceFailureCode::internal_failure}};
+    ScriptedDevice device{std::move(plan)};
+    adapters::AudioDeviceGate gate;
+    adapters::CaptureController controller{gate, device};
+    std::stop_source cancellation;
+    auto active = std::async(std::launch::async, [&] {
+      return controller.capture(request(), cancellation.get_token());
+    });
+    device.wait_until_blocked(CaptureStage::stream);
+    cancellation.request_stop();
+    device.release_barrier();
+
+    const auto captured = active.get();
+    REQUIRE_FALSE(captured.has_value());
+    CHECK(captured.error().code == CaptureErrorCode::cleanup_failed);
+    CHECK(captured.error().stage == cleanup_case.failed_stage);
+    CHECK(gate.quarantined() == cleanup_case.gate_is_quarantined);
+    CHECK_FALSE(gate.active());
+    const auto begin_result = gate.begin();
+    CHECK(begin_result ==
+          (cleanup_case.gate_is_quarantined
+               ? adapters::AudioDeviceGate::BeginResult::quarantined
+               : adapters::AudioDeviceGate::BeginResult::acquired));
+    if (!cleanup_case.gate_is_quarantined) {
+      gate.release();
+    }
+  }
+}
+
 TEST_CASE("late capture callbacks fail and quarantine the shared gate") {
   DevicePlan plan;
   plan.callback_during_close = true;
@@ -289,6 +369,32 @@ TEST_CASE("late capture callbacks fail and quarantine the shared gate") {
   adapters::CaptureController controller{gate, device};
   require_error(controller.capture(request()), CaptureErrorCode::late_callback);
   CHECK(gate.quarantined());
+}
+
+TEST_CASE("callback straddling capture teardown publishes no buffer") {
+  adapters::CaptureCallbackTestFence fence;
+  DevicePlan plan;
+  plan.return_while_callback_in_flight = true;
+  plan.callback_fence = &fence;
+  ScriptedDevice device{std::move(plan)};
+  adapters::AudioDeviceGate gate;
+  adapters::CaptureController controller{
+      gate,
+      device,
+      {.maximum_buffer_bytes = adapters::maximum_capture_bytes,
+       .maximum_buffer_frames = adapters::maximum_capture_frames,
+       .callback_test_fence = &fence}};
+
+  const auto captured = controller.capture(request());
+  REQUIRE_FALSE(captured.has_value());
+  CHECK(captured.error().code == CaptureErrorCode::late_callback);
+  CHECK(captured.error().stage == CaptureStage::close);
+  CHECK(gate.quarantined());
+  fence.release.store(true, std::memory_order_release);
+  fence.release.notify_all();
+  device.join_worker();
+  REQUIRE(device.decisions().size() == 1);
+  CHECK(device.decisions().front() == CaptureCallbackDecision::abort);
 }
 
 TEST_CASE("one gate rejects concurrent capture device access") {
