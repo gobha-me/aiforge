@@ -587,6 +587,9 @@ auto builtin_config_registry() -> const ConfigRegistry& {
       {std::string{persona_maximum_tool_profiles_key},
        ConfigValueKind::text_map, std::nullopt, std::nullopt, false, true,
        domain::PersonaId::max_size, 256},
+      {std::string{image_tool_model_key}, ConfigValueKind::text,
+       std::string{"AIFORGE_TOOLS_IMAGE_MODEL"}, std::nullopt, false, true,
+       domain::ModelId::max_size, 1},
   }};
   return registry;
 }
@@ -714,6 +717,40 @@ auto resolve_user_global_instructions_enabled(const ResolvedConfig& resolved)
         "the user-global instruction enable setting has the wrong type"));
   }
   return *enabled;
+}
+
+auto resolve_image_tool_model(const ResolvedConfig& resolved)
+    -> std::expected<std::optional<domain::ModelId>, ConfigDiagnostic> {
+  for (const auto& issue : resolved.diagnostics) {
+    if (issue.key == image_tool_model_key || issue.key == "tools" ||
+        issue.key == "tools.image" || issue.key.starts_with("tools.image.")) {
+      return std::unexpected(issue);
+    }
+  }
+  const auto* entry = resolved.find(image_tool_model_key);
+  if (entry == nullptr) {
+    return std::unexpected(diagnostic(
+        ConfigDiagnosticCode::invalid_registry, ConfigSource::compiled_default,
+        std::string{image_tool_model_key},
+        "the image tool model configuration key is missing"));
+  }
+  if (!entry->value) return std::nullopt;
+  const auto source = entry->source.value_or(ConfigSource::file);
+  const auto* text = std::get_if<std::string>(&*entry->value);
+  if (text == nullptr) {
+    return std::unexpected(
+        diagnostic(ConfigDiagnosticCode::invalid_value, source,
+                   std::string{image_tool_model_key},
+                   "the image tool model setting has the wrong type"));
+  }
+  auto model_id = domain::ModelId::from(*text);
+  if (!model_id) {
+    return std::unexpected(
+        diagnostic(ConfigDiagnosticCode::invalid_value, source,
+                   std::string{image_tool_model_key},
+                   "the image tool model setting is invalid"));
+  }
+  return std::optional<domain::ModelId>{std::move(*model_id)};
 }
 
 } // namespace aiforge::config

@@ -550,6 +550,23 @@ regular UTF-8 file from the repository root selected at launch. Repository metad
 ignored and untracked files, traversal, symbolic links, stale snapshots, and
 changing files fail closed.
 
+Interactive Chat can separately opt into the `media` profile with
+`/tools profile media`. Its `generate_image` tool is registered only when
+`tools.image.model` names one exact online image model in a fresh catalog and
+that record contains a positive USD generation price. The setting has no
+default, and missing, stale, unsupported, unpriced, or disappeared models never
+fall back to another model or produce suggestions.
+
+Each image call injects the configured model into normalized runtime-owned
+arguments, requests exact artifact-root, Venice-host, and USD-spend scopes, and
+requires the active launch policy and runtime approval. The catalog estimate is
+reserved before provider transport and retains that estimate label through
+finalization; an uncertain provider outcome requires reconciliation. Successful
+bytes pass through the same bounded decode and content-addressed artifact store
+as `aiforge image generate`. Replay reads the recorded tool, spend, and artifact
+facts without contacting Venice or generating media again. Ephemeral and
+one-shot sessions do not advertise this approval- and artifact-bearing tool.
+
 Authority is fixed for the application lifetime with
 `--tool-restriction <none|low|medium|high>` and
 `--tool-approval <prompt|auto|allow-all>`. Defaults are `high` and `prompt`;
@@ -585,6 +602,8 @@ AIForge resolves registered settings in command-line, environment, file, then
 compiled-default order and retains the winning source. Registered application
 settings include the optional `model` value, bound to `AIFORGE_MODEL`, and the
 optional `venice.web_search` value, bound to `AIFORGE_VENICE_WEB_SEARCH`.
+The optional `tools.image.model`, bound to `AIFORGE_TOOLS_IMAGE_MODEL`, selects
+the exact paid image-tool model; it intentionally has no compiled default.
 `venice.include_system_prompt`, bound to
 `AIFORGE_VENICE_INCLUDE_SYSTEM_PROMPT`, is an optional boolean; absence
 preserves Venice's default and explicit `false` remains distinct from absence.

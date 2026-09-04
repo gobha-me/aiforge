@@ -35,6 +35,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   venice_audio_service.cpp
   venice_image_generator.cpp
   image_backend.cpp
+  image_tool.cpp
   venice_model_catalog_source.cpp
 )
 add_library(${PROJECT_NAME}::adapters ALIAS ${PROJECT_NAME}_adapters)

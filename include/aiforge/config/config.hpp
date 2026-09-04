@@ -154,6 +154,7 @@ inline constexpr std::string_view model_maximum_tool_profiles_key{
     "tools.models.maximum_profiles"};
 inline constexpr std::string_view persona_maximum_tool_profiles_key{
     "tools.personas.maximum_profiles"};
+inline constexpr std::string_view image_tool_model_key{"tools.image.model"};
 inline constexpr std::string_view user_global_instructions_enabled_key{
     "instructions.global.enabled"};
 
@@ -170,5 +171,10 @@ struct ToolProfileMaximumMappings {
 
 [[nodiscard]] auto resolve_user_global_instructions_enabled(
     const ResolvedConfig& resolved) -> std::expected<bool, ConfigDiagnostic>;
+
+// Absence disables the paid image tool. A present value is one exact model ID;
+// model catalog capability and pricing checks remain a runtime concern.
+[[nodiscard]] auto resolve_image_tool_model(const ResolvedConfig& resolved)
+    -> std::expected<std::optional<domain::ModelId>, ConfigDiagnostic>;
 
 } // namespace aiforge::config

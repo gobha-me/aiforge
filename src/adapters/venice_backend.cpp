@@ -1,6 +1,8 @@
 #include <aiforge/adapters/venice_backend.hpp>
 #include <aiforge/adapters/venice_generation_options.hpp>
 
+#include "venice_image_request.hpp"
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -996,6 +998,22 @@ auto VeniceBackend::start(backend::BackendRequest request,
     return std::unexpected(adapter_error(backend::BackendErrorKind::unavailable,
                                          "Venice stream could not start"));
   }
+}
+
+auto VeniceBackend::generate(backend::ImageGenerationRequest request,
+                             const std::stop_token stop_token)
+    -> std::expected<backend::GeneratedImage, backend::ImageGenerationError> {
+  if (m_impl == nullptr) {
+    return std::unexpected(backend::ImageGenerationError{
+        backend::ImageGenerationErrorCode::internal_failure,
+        "Venice backend is not initialized", false, std::nullopt});
+  }
+  return detail::generate_venice_image(
+      m_impl->client, std::move(request),
+      {m_impl->options.connect_timeout, m_impl->options.read_timeout,
+       m_impl->options.write_timeout,
+       m_impl->options.maximum_image_response_bytes},
+      stop_token);
 }
 
 auto VeniceBackend::lookup(const domain::ModelId& model_id,

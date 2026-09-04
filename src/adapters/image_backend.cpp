@@ -117,6 +117,122 @@ class ImageStream final : public backend::BackendStream {
 
 } // namespace
 
+auto generate_image_artifact(backend::ImageGenerator& generator,
+                             storage::ArtifactStore& artifact_store,
+                             ImageArtifactRequest request,
+                             const ImageBackendOptions& options,
+                             const std::stop_token stop_token)
+    -> std::expected<domain::ArtifactMetadata, ImageArtifactFailure> {
+  auto transport_state = ImageArtifactTransportState::not_started;
+  const auto fail = [](backend::BackendError error,
+                       const ImageArtifactTransportState state) {
+    return std::unexpected(ImageArtifactFailure{std::move(error), state});
+  };
+  try {
+    if (stop_token.stop_requested()) {
+      return fail(backend_failure(backend::BackendErrorKind::cancelled,
+                                  "image request cancelled")
+                      .error(),
+                  ImageArtifactTransportState::not_started);
+    }
+    if (request.prompt.empty() ||
+        request.prompt.size() > options.maximum_prompt_bytes ||
+        options.maximum_encoded_bytes == 0 || options.maximum_pixels == 0 ||
+        options.maximum_decoded_bytes == 0 ||
+        options.maximum_temporary_bytes == 0 ||
+        options.maximum_dimension == 0 ||
+        request.producing_invocation_id.has_value() ==
+            request.producing_inference_id.has_value()) {
+      return fail(backend_failure(backend::BackendErrorKind::request_rejected,
+                                  "image request is invalid")
+                      .error(),
+                  ImageArtifactTransportState::not_started);
+    }
+    backend::ImageGenerationRequest generation_request{
+        request.model_id, std::move(request.prompt),
+        request.requested_media_type};
+    transport_state = ImageArtifactTransportState::outcome_unknown;
+    auto generated =
+        generator.generate(std::move(generation_request), stop_token);
+    if (!generated) {
+      return fail(mapped_error(generated.error()).error(),
+                  ImageArtifactTransportState::outcome_unknown);
+    }
+    constexpr auto received = ImageArtifactTransportState::response_received;
+    transport_state = received;
+    if (generated->encoded.empty() ||
+        generated->encoded.size() > options.maximum_encoded_bytes ||
+        (request.requested_media_type &&
+         generated->media_type != *request.requested_media_type)) {
+      return fail(backend_failure(backend::BackendErrorKind::protocol,
+                                  "generated image media is invalid")
+                      .error(),
+                  received);
+    }
+    if (stop_token.stop_requested()) {
+      return fail(backend_failure(backend::BackendErrorKind::cancelled,
+                                  "image request cancelled")
+                      .error(),
+                  received);
+    }
+    rasterforge::DecodeOptions decode_options;
+    decode_options.limits.max_input_bytes = options.maximum_encoded_bytes;
+    decode_options.limits.max_pixels = options.maximum_pixels;
+    decode_options.limits.max_output_bytes = options.maximum_decoded_bytes;
+    decode_options.limits.max_temporary_bytes = options.maximum_temporary_bytes;
+    decode_options.limits.max_dimension = options.maximum_dimension;
+    auto decoded = rasterforge::decode(generated->encoded, decode_options);
+    if (!decoded || media_type(decoded->format()) != generated->media_type) {
+      return fail(backend_failure(backend::BackendErrorKind::protocol,
+                                  "generated image failed bounded validation")
+                      .error(),
+                  received);
+    }
+    if (stop_token.stop_requested()) {
+      return fail(backend_failure(backend::BackendErrorKind::cancelled,
+                                  "image request cancelled")
+                      .error(),
+                  received);
+    }
+    const auto extent = decoded->output_extent();
+    const auto expected_artifact_id = request.artifact_id;
+    auto stored = artifact_store.put(
+        {std::move(request.artifact_id), generated->media_type,
+         request.producing_invocation_id, request.producing_inference_id,
+         extent.width, extent.height},
+        generated->encoded, stop_token);
+    if (!stored) {
+      const auto kind =
+          stored.error().code == storage::ArtifactStoreErrorCode::cancelled
+              ? backend::BackendErrorKind::cancelled
+              : backend::BackendErrorKind::unavailable;
+      return fail(backend_failure(kind, "generated image could not be stored",
+                                  stored.error().retryable)
+                      .error(),
+                  received);
+    }
+    if (stored->artifact_id != expected_artifact_id ||
+        stored->media_type != generated->media_type ||
+        stored->byte_size != generated->encoded.size() ||
+        !valid_sha256_digest(stored->digest) ||
+        stored->producing_invocation_id != request.producing_invocation_id ||
+        stored->producing_inference_id != request.producing_inference_id ||
+        stored->width != extent.width || stored->height != extent.height) {
+      return fail(
+          backend_failure(backend::BackendErrorKind::protocol,
+                          "artifact store returned invalid image metadata")
+              .error(),
+          received);
+    }
+    return std::move(*stored);
+  } catch (...) {
+    return fail(backend_failure(backend::BackendErrorKind::unavailable,
+                                "image backend failed internally")
+                    .error(),
+                transport_state);
+  }
+}
+
 ImageBackend::ImageBackend(backend::ImageGenerator& generator,
                            storage::ArtifactStore& artifact_store,
                            ImageBackendOptions options)
@@ -129,79 +245,23 @@ auto ImageBackend::start(backend::BackendRequest request,
     -> std::expected<std::unique_ptr<backend::BackendStream>,
                      backend::BackendError> {
   try {
-    if (stop_token.stop_requested())
-      return backend_failure(backend::BackendErrorKind::cancelled,
-                             "image request cancelled");
     auto prompt = prompt_from(request);
-    if (!prompt || prompt->empty() ||
-        prompt->size() > m_options.maximum_prompt_bytes ||
-        m_options.maximum_encoded_bytes == 0 || m_options.maximum_pixels == 0 ||
-        m_options.maximum_decoded_bytes == 0 ||
-        m_options.maximum_temporary_bytes == 0 ||
-        m_options.maximum_dimension == 0) {
+    if (!prompt) {
       return backend_failure(backend::BackendErrorKind::request_rejected,
                              "image request is invalid");
     }
-    auto generated = m_generator.generate(
-        {request.model_id, std::move(*prompt), m_options.requested_media_type},
-        stop_token);
-    if (!generated) return mapped_error(generated.error());
-    if (generated->encoded.empty() ||
-        generated->encoded.size() > m_options.maximum_encoded_bytes ||
-        (m_options.requested_media_type &&
-         generated->media_type != *m_options.requested_media_type)) {
-      return backend_failure(backend::BackendErrorKind::protocol,
-                             "generated image media is invalid");
-    }
-    if (stop_token.stop_requested()) {
-      return backend_failure(backend::BackendErrorKind::cancelled,
-                             "image request cancelled");
-    }
-    rasterforge::DecodeOptions decode_options;
-    decode_options.limits.max_input_bytes = m_options.maximum_encoded_bytes;
-    decode_options.limits.max_pixels = m_options.maximum_pixels;
-    decode_options.limits.max_output_bytes = m_options.maximum_decoded_bytes;
-    decode_options.limits.max_temporary_bytes =
-        m_options.maximum_temporary_bytes;
-    decode_options.limits.max_dimension = m_options.maximum_dimension;
-    auto decoded = rasterforge::decode(generated->encoded, decode_options);
-    if (!decoded || media_type(decoded->format()) != generated->media_type) {
-      return backend_failure(backend::BackendErrorKind::protocol,
-                             "generated image failed bounded validation");
-    }
-    if (stop_token.stop_requested())
-      return backend_failure(backend::BackendErrorKind::cancelled,
-                             "image request cancelled");
-    const auto extent = decoded->output_extent();
     auto artifact_id = domain::ArtifactId::from(
         "image-" + std::string{request.inference_id.value()});
     if (!artifact_id) {
       return backend_failure(backend::BackendErrorKind::protocol,
                              "generated image identity is invalid");
     }
-    const auto expected_artifact_id = *artifact_id;
-    auto stored = m_artifact_store.put(
-        {std::move(*artifact_id), generated->media_type, std::nullopt,
-         request.inference_id, extent.width, extent.height},
-        generated->encoded, stop_token);
-    if (!stored) {
-      const auto kind =
-          stored.error().code == storage::ArtifactStoreErrorCode::cancelled
-              ? backend::BackendErrorKind::cancelled
-              : backend::BackendErrorKind::unavailable;
-      return backend_failure(kind, "generated image could not be stored",
-                             stored.error().retryable);
-    }
-    if (stored->artifact_id != expected_artifact_id ||
-        stored->media_type != generated->media_type ||
-        stored->byte_size != generated->encoded.size() ||
-        !valid_sha256_digest(stored->digest) ||
-        stored->producing_invocation_id ||
-        stored->producing_inference_id != request.inference_id ||
-        stored->width != extent.width || stored->height != extent.height) {
-      return backend_failure(backend::BackendErrorKind::protocol,
-                             "artifact store returned invalid image metadata");
-    }
+    auto stored = generate_image_artifact(
+        m_generator, m_artifact_store,
+        {request.model_id, std::move(*prompt), m_options.requested_media_type,
+         std::move(*artifact_id), std::nullopt, request.inference_id},
+        m_options, stop_token);
+    if (!stored) return std::unexpected(std::move(stored.error().error));
     std::vector<backend::BackendEvent> events;
     events.emplace_back(backend::ResponseStarted{
         "image:" + std::string{request.inference_id.value()}});

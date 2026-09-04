@@ -1,7 +1,9 @@
 #include <aiforge/adapters/ask_user_dialog.hpp>
+#include <aiforge/adapters/filesystem_artifact_store.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
 #include <aiforge/adapters/filesystem_user_global_instruction_source.hpp>
 #include <aiforge/adapters/git_exact_source_editor.hpp>
+#include <aiforge/adapters/image_tool.hpp>
 #include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
 #include <aiforge/adapters/persona_editor_dialog.hpp>
@@ -39,6 +41,7 @@
 #include <chrono>
 #include <concepts>
 #include <cstdlib>
+#include <filesystem>
 #include <format>
 #include <functional>
 #include <iterator>
@@ -79,6 +82,7 @@ class CredentialUnavailableBackend final : public backend::Backend {
 };
 
 constexpr std::size_t interactive_session_list_limit = 100U;
+constexpr std::size_t maximum_image_artifact_bytes = 32U * 1024U * 1024U;
 
 [[nodiscard]] auto web_search_setting_name(const VeniceWebSearchSetting setting)
     -> std::string_view {
@@ -4540,6 +4544,11 @@ auto ProcessInteractiveCommand::execute(Request request,
       return failure(cli::CommandFailureKind::runtime,
                      tool_profile_maximums.error().message);
     }
+    auto image_tool_model = config::resolve_image_tool_model(*resolved);
+    if (!image_tool_model) {
+      return failure(cli::CommandFailureKind::runtime,
+                     image_tool_model.error().message);
+    }
     auto generation_options = venice_generation_options(*resolved);
     if (!generation_options) {
       return failure(request.web_search ? cli::CommandFailureKind::usage
@@ -4577,12 +4586,17 @@ auto ProcessInteractiveCommand::execute(Request request,
     if (!credential) return std::unexpected(std::move(credential.error()));
     std::optional<domain::CredentialSourceReference> credential_source;
     std::unique_ptr<backend::Backend> backend;
+    backend::ImageGenerator* image_generator{};
     backend::ProviderCharacterCatalogSource* provider_character_catalog{};
     if (credential->credential) {
       auto resolved_credential = std::move(*credential->credential);
       credential_source = resolved_credential.source;
+      VeniceBackendOptions backend_options;
+      backend_options.maximum_image_response_bytes =
+          maximum_image_artifact_bytes;
       auto venice_backend = std::make_unique<VeniceBackend>(
-          std::move(resolved_credential.secret));
+          std::move(resolved_credential.secret), std::move(backend_options));
+      if (*image_tool_model) image_generator = venice_backend.get();
       provider_character_catalog = venice_backend.get();
       backend = std::move(venice_backend);
     } else {
@@ -4647,6 +4661,8 @@ auto ProcessInteractiveCommand::execute(Request request,
                                    std::move(*generation_options)};
 
     std::unique_ptr<SqliteSessionStore> store;
+    std::unique_ptr<FilesystemArtifactStore> artifact_store;
+    std::optional<std::filesystem::path> artifact_root;
     if (mode != surfaces::ChatSessionOpen::Mode::ephemeral) {
       auto path = process_session_store_path();
       if (!path) {
@@ -4659,6 +4675,16 @@ auto ProcessInteractiveCommand::execute(Request request,
                        "session storage could not be opened");
       }
       store = std::move(*opened);
+      if (*image_tool_model && image_generator != nullptr) {
+        artifact_root = path->parent_path() / "artifacts";
+        auto opened_artifacts = FilesystemArtifactStore::open(
+            *artifact_root, {maximum_image_artifact_bytes});
+        if (!opened_artifacts) {
+          return failure(cli::CommandFailureKind::runtime,
+                         "image artifact storage could not be opened");
+        }
+        artifact_store = std::move(*opened_artifacts);
+      }
     }
 
     auto memory_settings = runtime::resolve_memory_settings(*resolved);
@@ -4733,6 +4759,32 @@ auto ProcessInteractiveCommand::execute(Request request,
           return failure(cli::CommandFailureKind::runtime,
                          registered.error().message);
         }
+      }
+    }
+    if (*image_tool_model && image_generator != nullptr && artifact_store &&
+        artifact_root) {
+      auto snapshot = (*catalog)->service().snapshot(environment.stop_token);
+      if (!snapshot) {
+        return failure(snapshot.error().code ==
+                               model::CatalogErrorCode::cancelled
+                           ? cli::CommandFailureKind::cancelled
+                           : cli::CommandFailureKind::runtime,
+                       snapshot.error().message);
+      }
+      auto configuration = resolve_image_tool_configuration(
+          snapshot->get(), **image_tool_model,
+          artifact_root->lexically_normal().generic_string(), "api.venice.ai",
+          current_timestamp());
+      if (!configuration) {
+        return failure(cli::CommandFailureKind::runtime,
+                       configuration.error().message);
+      }
+      if (auto registered =
+              register_image_tool(tool_registry, *image_generator,
+                                  *artifact_store, std::move(*configuration));
+          !registered) {
+        return failure(cli::CommandFailureKind::runtime,
+                       registered.error().message);
       }
     }
     auto tool_snapshot = tool_registry.snapshot();

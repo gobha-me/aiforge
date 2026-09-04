@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -25,8 +26,10 @@
 
 #include <aiforge/adapters/filesystem_artifact_store.hpp>
 #include <aiforge/adapters/image_backend.hpp>
+#include <aiforge/adapters/image_tool.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/termforge_image_renderer.hpp>
+#include <aiforge/adapters/venice_backend.hpp>
 #include <aiforge/adapters/venice_image_generator.hpp>
 #include <aiforge/surfaces/image.hpp>
 #include <aiforge/testing/scripted_artifact_store.hpp>
@@ -192,18 +195,21 @@ class TemporaryDirectory final {
 
 class ImageServer final {
  public:
-  ImageServer() {
-    m_server.Post("/api/v1/image/generate", [this](
-                                                const httplib::Request& request,
-                                                httplib::Response& response) {
-      {
-        std::lock_guard lock(m_mutex);
-        m_authorization = request.get_header_value("Authorization");
-        m_request_body = request.body;
-      }
-      response.set_content(R"({"id":"unexpected-json","images":["remote"]})",
-                           "application/json");
-    });
+  explicit ImageServer(const std::size_t response_bytes = 0) {
+    if (response_bytes != 0) {
+      m_response_content.assign(response_bytes, 'x');
+      m_response_media_type = "image/png";
+    }
+    m_server.Post(
+        "/api/v1/image/generate",
+        [this](const httplib::Request& request, httplib::Response& response) {
+          {
+            std::lock_guard lock(m_mutex);
+            m_authorization = request.get_header_value("Authorization");
+            m_request_body = request.body;
+          }
+          response.set_content(m_response_content, m_response_media_type);
+        });
     m_port = m_server.bind_to_any_port("127.0.0.1");
     REQUIRE(m_port > 0);
     m_thread = std::jthread([this] { m_server.listen_after_bind(); });
@@ -235,6 +241,9 @@ class ImageServer final {
   std::mutex m_mutex;
   std::string m_authorization;
   std::string m_request_body;
+  std::string m_response_content{
+      R"({"id":"unexpected-json","images":["remote"]})"};
+  std::string m_response_media_type{"application/json"};
 };
 
 class CancellingImageGenerator final : public backend::ImageGenerator {
@@ -254,6 +263,523 @@ class CancellingImageGenerator final : public backend::ImageGenerator {
   std::stop_source& m_cancellation;
   std::vector<std::byte> m_encoded;
 };
+
+class ThrowingImageGenerator final : public backend::ImageGenerator {
+ public:
+  auto generate(backend::ImageGenerationRequest, std::stop_token)
+      -> std::expected<backend::GeneratedImage,
+                       backend::ImageGenerationError> override {
+    throw std::runtime_error{"provider adapter failure"};
+  }
+};
+
+class ThrowingArtifactStore final : public storage::ArtifactStore {
+ public:
+  auto put(storage::ArtifactWrite, std::span<const std::byte>, std::stop_token)
+      -> std::expected<domain::ArtifactMetadata,
+                       storage::ArtifactStoreError> override {
+    ++calls;
+    throw std::runtime_error{"artifact adapter failure"};
+  }
+
+  std::size_t calls{};
+};
+
+auto image_catalog(
+    const model::CatalogOrigin origin = model::CatalogOrigin::live,
+    const std::string& price = "0.25") -> model::CatalogSnapshot {
+  model::CatalogEntry image{make_id<domain::ModelId>("configured-image"),
+                            "image"};
+  model::Pricing pricing;
+  pricing.generation =
+      model::Price{domain::DecimalAmount::from(price).value(), std::nullopt};
+  image.pricing = std::move(pricing);
+  model::CatalogSnapshot result{
+      domain::EventTimestamp{std::chrono::milliseconds{1000}},
+      {std::move(image)}};
+  result.origin = origin;
+  result.source_id = "test.image-models";
+  result.source_revision = "revision-1";
+  return result;
+}
+
+auto image_tool_configuration(
+    const model::CatalogSnapshot& catalog = image_catalog())
+    -> adapters::ImageToolConfiguration {
+  auto result = adapters::resolve_image_tool_configuration(
+      catalog, make_id<domain::ModelId>("configured-image"),
+      "/state/aiforge/artifacts", "api.example.test",
+      domain::EventTimestamp{std::chrono::milliseconds{2000}});
+  REQUIRE(result);
+  result->image_options.maximum_encoded_bytes = 1024;
+  return std::move(*result);
+}
+
+class RecordingArtifactStore final : public storage::ArtifactStore {
+ public:
+  auto put(storage::ArtifactWrite write, std::span<const std::byte> content,
+           std::stop_token stop_token)
+      -> std::expected<domain::ArtifactMetadata,
+                       storage::ArtifactStoreError> override {
+    if (stop_token.stop_requested()) {
+      return std::unexpected(storage::ArtifactStoreError{
+          storage::ArtifactStoreErrorCode::cancelled,
+          "artifact write cancelled", false});
+    }
+    calls.push_back({write, {content.begin(), content.end()}});
+    return domain::ArtifactMetadata{
+        write.artifact_id,
+        write.media_type,
+        static_cast<std::uint64_t>(content.size()),
+        "sha256:"
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        write.producing_invocation_id,
+        write.width,
+        write.height,
+        write.producing_inference_id};
+  }
+
+  std::vector<testing::ArtifactStoreCall> calls;
+};
+
+auto registered_image_tool(
+    testing::ScriptedImageGenerator& generator, storage::ArtifactStore& store,
+    adapters::ImageToolConfiguration configuration = image_tool_configuration())
+    -> runtime::RegisteredTool {
+  runtime::ToolRegistry registry;
+  REQUIRE(adapters::register_image_tool(registry, generator, store,
+                                        std::move(configuration)));
+  auto snapshot = registry.snapshot();
+  REQUIRE(snapshot);
+  const auto* registered = snapshot->find("generate_image");
+  REQUIRE(registered != nullptr);
+  return *registered;
+}
+
+TEST_CASE("image tool catalog gate requires exact fresh capable USD model",
+          "[image][tool][catalog][failure]") {
+  const auto model_id = make_id<domain::ModelId>("configured-image");
+  const auto now = domain::EventTimestamp{std::chrono::milliseconds{2000}};
+  const auto resolve = [&](const model::CatalogSnapshot& catalog) {
+    return adapters::resolve_image_tool_configuration(
+        catalog, model_id, "/state/aiforge/artifacts", "api.example.test", now);
+  };
+
+  auto stale = image_catalog(model::CatalogOrigin::stale_cache);
+  REQUIRE_FALSE(resolve(stale));
+
+  auto invalid_origin = image_catalog();
+  invalid_origin.origin = static_cast<model::CatalogOrigin>(100);
+  REQUIRE_FALSE(resolve(invalid_origin));
+
+  auto expired = image_catalog();
+  expired.fetched_at = now - std::chrono::hours{24};
+  REQUIRE_FALSE(resolve(expired));
+
+  auto future = image_catalog();
+  future.fetched_at = now + std::chrono::milliseconds{1};
+  REQUIRE_FALSE(resolve(future));
+
+  auto missing_source = image_catalog();
+  missing_source.source_id.clear();
+  REQUIRE_FALSE(resolve(missing_source));
+
+  auto unsafe_revision = image_catalog();
+  unsafe_revision.source_revision = "revision\x1b";
+  REQUIRE_FALSE(resolve(unsafe_revision));
+
+  auto missing = image_catalog();
+  missing.entries.front().id = make_id<domain::ModelId>("other-image");
+  REQUIRE_FALSE(resolve(missing));
+
+  auto wrong_type = image_catalog();
+  wrong_type.entries.front().type = "text";
+  REQUIRE_FALSE(resolve(wrong_type));
+
+  auto offline = image_catalog();
+  offline.entries.front().offline = true;
+  REQUIRE_FALSE(resolve(offline));
+
+  auto no_usd = image_catalog();
+  no_usd.entries.front().pricing->generation->usd.reset();
+  no_usd.entries.front().pricing->generation->diem =
+      domain::DecimalAmount::from("2").value();
+  REQUIRE_FALSE(resolve(no_usd));
+
+  REQUIRE_FALSE(resolve(image_catalog(model::CatalogOrigin::live, "0")));
+  REQUIRE_FALSE(
+      resolve(image_catalog(model::CatalogOrigin::live, "0.0000001")));
+
+  auto no_pricing = image_catalog();
+  no_pricing.entries.front().pricing.reset();
+  REQUIRE_FALSE(resolve(no_pricing));
+
+  auto no_generation_price = image_catalog();
+  no_generation_price.entries.front().pricing->generation.reset();
+  REQUIRE_FALSE(resolve(no_generation_price));
+
+  const auto accepted = resolve(image_catalog());
+  REQUIRE(accepted);
+  CHECK(accepted->model_id == model_id);
+  CHECK(accepted->spend_quote.maximum.unit() == "USD");
+  CHECK(accepted->spend_quote.maximum.amount().to_string() == "0.25");
+  CHECK(accepted->spend_quote.basis ==
+        domain::ToolSpendEstimateBasis::catalog_estimate);
+  CHECK(accepted->spend_quote.valid_until ==
+        domain::EventTimestamp{std::chrono::milliseconds{1000}} +
+            std::chrono::hours{24});
+  CHECK(resolve(image_catalog(model::CatalogOrigin::fresh_cache)));
+}
+
+TEST_CASE("image tool quote survives live catalog restart as fresh cache",
+          "[image][tool][catalog][resume]") {
+  const auto model_id = make_id<domain::ModelId>("configured-image");
+  const auto now = domain::EventTimestamp{std::chrono::milliseconds{2000}};
+  auto live = image_catalog(model::CatalogOrigin::live);
+  auto cached = live;
+  cached.origin = model::CatalogOrigin::fresh_cache;
+
+  const auto resolve = [&](const model::CatalogSnapshot& catalog) {
+    return adapters::resolve_image_tool_configuration(
+        catalog, model_id, "/state/aiforge/artifacts", "api.example.test", now);
+  };
+  const auto before_restart = resolve(live);
+  const auto after_restart = resolve(cached);
+  REQUIRE(before_restart);
+  REQUIRE(after_restart);
+  CHECK(after_restart->spend_quote == before_restart->spend_quote);
+}
+
+TEST_CASE(
+    "image tool declaration is exact and model arguments are runtime-owned",
+    "[image][tool][policy][failure]") {
+  testing::ScriptedImageGenerator generator;
+  RecordingArtifactStore artifacts;
+  const auto tool = registered_image_tool(generator, artifacts);
+
+  CHECK(tool.category == runtime::ToolCategory::media);
+  CHECK(tool.declaration.effects ==
+        (std::vector{domain::Effect::write, domain::Effect::network,
+                     domain::Effect::spend}));
+  REQUIRE(tool.declaration.capability_scopes.size() == 3);
+  CHECK(tool.declaration.capability_scopes[0] ==
+        (domain::CapabilityScope{domain::Effect::write, "filesystem.root",
+                                 "/state/aiforge/artifacts"}));
+  CHECK(tool.declaration.capability_scopes[1] ==
+        (domain::CapabilityScope{domain::Effect::network, "network.host",
+                                 "api.example.test"}));
+  CHECK(tool.declaration.capability_scopes[2] ==
+        (domain::CapabilityScope{domain::Effect::spend, "spend.microunits",
+                                 "250000"}));
+  CHECK(tool.declaration.input_schema.data.find("model") == std::string::npos);
+  CHECK(tool.declaration.input_schema.data.find("\"maxLength\":1048576") !=
+        std::string::npos);
+
+  for (const auto* forged :
+       {R"({"prompt":"blue","model":"attacker-model"})",
+        R"({"prompt":"blue","unknown":true})",
+        R"({"prompt":"blue","prompt":"red"})", R"({"prompt":""})",
+        R"({"prompt":"blue","format":"gif"})", "{"}) {
+    CAPTURE(forged);
+    const auto rejected =
+        tool.executor->validate({"application/json", std::string{forged}});
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code ==
+          runtime::ToolExecutionErrorCode::invalid_arguments);
+  }
+  CHECK_FALSE(
+      tool.executor->validate({"application/cbor", R"({"prompt":"blue"})"}));
+  const auto default_maximum_prompt =
+      image_tool_configuration().image_options.maximum_prompt_bytes;
+  const auto boundary_prompt = std::string{R"({"prompt":")"} +
+                               std::string(default_maximum_prompt, 'x') +
+                               R"("})";
+  CHECK(tool.executor->validate({"application/json", boundary_prompt}));
+  std::string escaped_boundary_prompt{R"({"prompt":")"};
+  escaped_boundary_prompt.reserve(default_maximum_prompt * 2U + 16U);
+  for (std::size_t index{}; index < default_maximum_prompt; ++index)
+    escaped_boundary_prompt += R"(\")";
+  escaped_boundary_prompt += R"("})";
+  CHECK(tool.executor->validate({"application/json", escaped_boundary_prompt}));
+  const auto oversized_prompt = std::string{R"({"prompt":")"} +
+                                std::string(default_maximum_prompt + 1U, 'x') +
+                                R"("})";
+  CHECK_FALSE(tool.executor->validate({"application/json", oversized_prompt}));
+
+  const auto validated = tool.executor->validate(
+      {"application/json", R"({"prompt":"blue","format":"png"})"});
+  REQUIRE(validated);
+  CHECK(validated->value.data ==
+        R"({"format":"png","model":"configured-image","prompt":"blue"})");
+  CHECK(validated->required_scopes == tool.declaration.capability_scopes);
+  CHECK(validated->spend_quote == image_tool_configuration().spend_quote);
+
+  auto invalid_root = image_tool_configuration();
+  invalid_root.artifact_root = "/state/../artifacts";
+  CHECK_FALSE(adapters::image_tool_declaration(invalid_root));
+  auto fixed_media = image_tool_configuration();
+  fixed_media.image_options.requested_media_type = "image/png";
+  CHECK_FALSE(adapters::image_tool_declaration(fixed_media));
+  auto inconsistent_arguments = image_tool_configuration();
+  inconsistent_arguments.maximum_argument_bytes = 64U * 1024U;
+  CHECK_FALSE(adapters::image_tool_declaration(inconsistent_arguments));
+  auto mislabeled_quote = image_tool_configuration();
+  mislabeled_quote.spend_quote.basis =
+      domain::ToolSpendEstimateBasis::policy_upper_bound;
+  CHECK_FALSE(adapters::image_tool_declaration(mislabeled_quote));
+}
+
+TEST_CASE("image tool owns artifact and catalog-estimate spend lifecycle",
+          "[image][tool][artifact][spend]") {
+  const auto encoded = bytes(png_bytes);
+  testing::ScriptedImageGenerator generator{{
+      {{make_id<domain::ModelId>("configured-image"), "blue", "image/png"},
+       backend::GeneratedImage{encoded, "image/png"}},
+  }};
+  RecordingArtifactStore artifacts;
+  const auto tool = registered_image_tool(generator, artifacts);
+  const auto validated = tool.executor->validate(
+      {"application/json", R"({"prompt":"blue","format":"png"})"});
+  REQUIRE(validated);
+  const auto invocation = make_id<domain::InvocationId>("image-call");
+  auto stream = tool.executor->start({invocation, std::nullopt,
+                                      "generate_image", *validated,
+                                      validated->required_scopes, tool.limits},
+                                     {});
+  REQUIRE(stream);
+  auto event = (*stream)->next({});
+  REQUIRE(event);
+  REQUIRE(*event);
+  const auto* result = std::get_if<runtime::ToolResult>(&**event);
+  REQUIRE(result != nullptr);
+  REQUIRE(result->created_artifacts.size() == 1);
+  const auto& artifact = result->created_artifacts.front();
+  CHECK(artifact.producing_invocation_id == invocation);
+  CHECK_FALSE(artifact.producing_inference_id);
+  CHECK(artifact.media_type == "image/png");
+  REQUIRE(result->spend_disposition);
+  const auto* finalized =
+      std::get_if<domain::ToolSpendFinalized>(&*result->spend_disposition);
+  REQUIRE(finalized != nullptr);
+  CHECK(finalized->finalization.invocation_id == invocation);
+  CHECK(finalized->finalization.basis ==
+        domain::ToolSpendFinalizationBasis::catalog_estimate);
+  CHECK(finalized->finalization.amount.amount().to_string() == "0.25");
+  CHECK(generator.remaining_exchanges() == 0);
+  REQUIRE(artifacts.calls.size() == 1);
+  CHECK(artifacts.calls.front().write.producing_invocation_id == invocation);
+}
+
+TEST_CASE("image tool distinguishes pre-transport and uncertain failures",
+          "[image][tool][spend][failure][cancel]") {
+  const auto invocation = make_id<domain::InvocationId>("image-call");
+
+  SECTION("forged normalized model releases before provider transport") {
+    testing::ScriptedImageGenerator generator;
+    RecordingArtifactStore artifacts;
+    const auto tool = registered_image_tool(generator, artifacts);
+    auto validated =
+        tool.executor->validate({"application/json", R"({"prompt":"blue"})"});
+    REQUIRE(validated);
+    validated->value.data =
+        R"({"format":"auto","model":"forged-image","prompt":"blue"})";
+    const auto started = tool.executor->start(
+        {invocation, std::nullopt, "generate_image", *validated,
+         validated->required_scopes, tool.limits},
+        {});
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().spend_disposition);
+    CHECK(std::holds_alternative<domain::ToolSpendReleased>(
+        *started.error().spend_disposition));
+    CHECK(generator.recorded_requests().empty());
+    CHECK(artifacts.calls.empty());
+  }
+
+  SECTION("missing exact scope releases before provider transport") {
+    testing::ScriptedImageGenerator generator;
+    RecordingArtifactStore artifacts;
+    const auto tool = registered_image_tool(generator, artifacts);
+    const auto validated =
+        tool.executor->validate({"application/json", R"({"prompt":"blue"})"});
+    REQUIRE(validated);
+    auto incomplete_scopes = validated->required_scopes;
+    incomplete_scopes.pop_back();
+    const auto started = tool.executor->start(
+        {invocation, std::nullopt, "generate_image", *validated,
+         std::move(incomplete_scopes), tool.limits},
+        {});
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().spend_disposition);
+    CHECK(std::holds_alternative<domain::ToolSpendReleased>(
+        *started.error().spend_disposition));
+    CHECK(generator.recorded_requests().empty());
+    CHECK(artifacts.calls.empty());
+  }
+
+  SECTION("durable quote drift releases before provider transport") {
+    for (const std::string_view drift :
+         {"missing", "amount", "evidence", "expiry"}) {
+      CAPTURE(drift);
+      testing::ScriptedImageGenerator generator;
+      RecordingArtifactStore artifacts;
+      const auto tool = registered_image_tool(generator, artifacts);
+      auto validated =
+          tool.executor->validate({"application/json", R"({"prompt":"blue"})"});
+      REQUIRE(validated);
+      REQUIRE(validated->spend_quote);
+      if (drift == std::string_view{"missing"}) {
+        validated->spend_quote.reset();
+      } else if (drift == std::string_view{"amount"}) {
+        validated->spend_quote->maximum =
+            domain::MonetaryAmount::create(
+                "USD", domain::DecimalAmount::from("0.3").value())
+                .value();
+      } else if (drift == std::string_view{"evidence"}) {
+        validated->spend_quote->evidence_digest.value.front() = 'f';
+      } else {
+        validated->spend_quote->valid_until += std::chrono::milliseconds{1};
+      }
+      const auto started = tool.executor->start(
+          {invocation, std::nullopt, "generate_image", *validated,
+           validated->required_scopes, tool.limits},
+          {});
+      REQUIRE_FALSE(started);
+      REQUIRE(started.error().spend_disposition);
+      CHECK(std::holds_alternative<domain::ToolSpendReleased>(
+          *started.error().spend_disposition));
+      CHECK(generator.recorded_requests().empty());
+      CHECK(artifacts.calls.empty());
+    }
+  }
+
+  SECTION("cancellation before provider transport releases the reservation") {
+    testing::ScriptedImageGenerator generator;
+    RecordingArtifactStore artifacts;
+    const auto tool = registered_image_tool(generator, artifacts);
+    const auto validated =
+        tool.executor->validate({"application/json", R"({"prompt":"blue"})"});
+    REQUIRE(validated);
+    std::stop_source stop;
+    stop.request_stop();
+    const auto started = tool.executor->start(
+        {invocation, std::nullopt, "generate_image", *validated,
+         validated->required_scopes, tool.limits},
+        stop.get_token());
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().spend_disposition);
+    CHECK(std::holds_alternative<domain::ToolSpendReleased>(
+        *started.error().spend_disposition));
+    CHECK(generator.recorded_requests().empty());
+    CHECK(artifacts.calls.empty());
+  }
+
+  SECTION("provider rejection retains the reservation for reconciliation") {
+    testing::ScriptedImageGenerator generator{{
+        {{make_id<domain::ModelId>("configured-image"), "blue", std::nullopt},
+         backend::ImageGenerationError{
+             backend::ImageGenerationErrorCode::rate_limited,
+             "image provider rejected the request", true, 429}},
+    }};
+    RecordingArtifactStore artifacts;
+    const auto tool = registered_image_tool(generator, artifacts);
+    const auto validated =
+        tool.executor->validate({"application/json", R"({"prompt":"blue"})"});
+    REQUIRE(validated);
+    const auto started = tool.executor->start(
+        {invocation, std::nullopt, "generate_image", *validated,
+         validated->required_scopes, tool.limits},
+        {});
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().spend_disposition);
+    const auto* reconciliation =
+        std::get_if<domain::ToolSpendReconciliationRequired>(
+            &*started.error().spend_disposition);
+    REQUIRE(reconciliation != nullptr);
+    CHECK(reconciliation->reason ==
+          domain::ToolSpendReconciliationReason::transport_outcome_unknown);
+    CHECK(artifacts.calls.empty());
+  }
+
+  SECTION("throwing provider retains the reservation for reconciliation") {
+    ThrowingImageGenerator generator;
+    RecordingArtifactStore artifacts;
+    runtime::ToolRegistry registry;
+    REQUIRE(adapters::register_image_tool(registry, generator, artifacts,
+                                          image_tool_configuration()));
+    const auto snapshot = registry.snapshot();
+    REQUIRE(snapshot);
+    const auto* tool = snapshot->find("generate_image");
+    REQUIRE(tool != nullptr);
+    const auto validated =
+        tool->executor->validate({"application/json", R"({"prompt":"blue"})"});
+    REQUIRE(validated);
+    const auto started = tool->executor->start(
+        {invocation, std::nullopt, "generate_image", *validated,
+         validated->required_scopes, tool->limits},
+        {});
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().spend_disposition);
+    CHECK(std::holds_alternative<domain::ToolSpendReconciliationRequired>(
+        *started.error().spend_disposition));
+    CHECK(artifacts.calls.empty());
+  }
+
+  SECTION("invalid returned media retains its catalog estimate basis") {
+    std::vector<std::byte> truncated(16, std::byte{0});
+    testing::ScriptedImageGenerator generator{{
+        {{make_id<domain::ModelId>("configured-image"), "blue", std::nullopt},
+         backend::GeneratedImage{truncated, "image/png"}},
+    }};
+    RecordingArtifactStore artifacts;
+    const auto tool = registered_image_tool(generator, artifacts);
+    const auto validated =
+        tool.executor->validate({"application/json", R"({"prompt":"blue"})"});
+    REQUIRE(validated);
+    const auto started = tool.executor->start(
+        {invocation, std::nullopt, "generate_image", *validated,
+         validated->required_scopes, tool.limits},
+        {});
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().spend_disposition);
+    const auto* finalized = std::get_if<domain::ToolSpendFinalized>(
+        &*started.error().spend_disposition);
+    REQUIRE(finalized != nullptr);
+    CHECK(finalized->finalization.basis ==
+          domain::ToolSpendFinalizationBasis::catalog_estimate);
+    CHECK(artifacts.calls.empty());
+  }
+
+  SECTION("artifact adapter exception retains its catalog estimate basis") {
+    const auto encoded = bytes(png_bytes);
+    testing::ScriptedImageGenerator generator{{
+        {{make_id<domain::ModelId>("configured-image"), "blue", std::nullopt},
+         backend::GeneratedImage{encoded, "image/png"}},
+    }};
+    ThrowingArtifactStore artifacts;
+    runtime::ToolRegistry registry;
+    REQUIRE(adapters::register_image_tool(registry, generator, artifacts,
+                                          image_tool_configuration()));
+    const auto snapshot = registry.snapshot();
+    REQUIRE(snapshot);
+    const auto* tool = snapshot->find("generate_image");
+    REQUIRE(tool != nullptr);
+    const auto validated =
+        tool->executor->validate({"application/json", R"({"prompt":"blue"})"});
+    REQUIRE(validated);
+    const auto started = tool->executor->start(
+        {invocation, std::nullopt, "generate_image", *validated,
+         validated->required_scopes, tool->limits},
+        {});
+    REQUIRE_FALSE(started);
+    REQUIRE(started.error().spend_disposition);
+    const auto* finalized = std::get_if<domain::ToolSpendFinalized>(
+        &*started.error().spend_disposition);
+    REQUIRE(finalized != nullptr);
+    CHECK(finalized->finalization.basis ==
+          domain::ToolSpendFinalizationBasis::catalog_estimate);
+    CHECK(artifacts.calls == 1);
+  }
+}
 
 TEST_CASE("image backend validates and stores original PNG bytes") {
   const auto encoded = bytes(png_bytes);
@@ -397,6 +923,50 @@ TEST_CASE("Venice image adapter rejects JSON where owned binary was required") {
   CHECK(generated.error().code == backend::ImageGenerationErrorCode::protocol);
   CHECK(generated.error().redacted_message.find(api_key) == std::string::npos);
   CHECK(server.authorization() == "Bearer " + std::string{api_key});
+  CHECK(server.request_body().find("\"return_binary\":true") !=
+        std::string::npos);
+}
+
+TEST_CASE("shared Venice backend exposes the same bounded image boundary") {
+  ImageServer server;
+  constexpr std::string_view api_key = "test-shared-backend-secret";
+  auto secret = credentials::make_secret(std::string{api_key});
+  REQUIRE(secret);
+  adapters::VeniceBackend shared_backend{
+      std::move(*secret),
+      {server.base_url(), std::chrono::seconds{1}, std::chrono::seconds{1},
+       std::chrono::seconds{1}, 16}};
+
+  auto generated =
+      shared_backend.generate({make_id<domain::ModelId>("configured-image"),
+                               "blue square", "image/png"});
+  REQUIRE_FALSE(generated);
+  CHECK(generated.error().code == backend::ImageGenerationErrorCode::protocol);
+  CHECK(generated.error().redacted_message.find(api_key) == std::string::npos);
+  CHECK(server.authorization() == "Bearer " + std::string{api_key});
+  CHECK(server.request_body().find("\"model\":\"configured-image\"") !=
+        std::string::npos);
+  CHECK(server.request_body().find("\"return_binary\":true") !=
+        std::string::npos);
+}
+
+TEST_CASE("Venice image transport bounds response bytes before buffering") {
+  ImageServer server{33};
+  auto secret = credentials::make_secret("test-response-limit-secret");
+  REQUIRE(secret);
+  adapters::VeniceBackendOptions options;
+  options.base_url = server.base_url();
+  options.connect_timeout = std::chrono::seconds{1};
+  options.read_timeout = std::chrono::seconds{1};
+  options.write_timeout = std::chrono::seconds{1};
+  options.maximum_image_response_bytes = 32;
+  adapters::VeniceBackend shared_backend{std::move(*secret), options};
+
+  const auto generated =
+      shared_backend.generate({make_id<domain::ModelId>("configured-image"),
+                               "blue square", "image/png"});
+  REQUIRE_FALSE(generated);
+  CHECK(generated.error().code == backend::ImageGenerationErrorCode::protocol);
   CHECK(server.request_body().find("\"return_binary\":true") !=
         std::string::npos);
 }

@@ -434,7 +434,10 @@ auto ProcessImageCommand::generate(GenerateRequest request,
     if (!stores) return std::unexpected(std::move(stores.error()));
     auto resolved_credential = std::move(*credential->credential);
     const auto credential_source = resolved_credential.source;
-    VeniceImageGenerator generator{std::move(resolved_credential.secret)};
+    VeniceImageGeneratorOptions generator_options;
+    generator_options.maximum_response_bytes = maximum_artifact_bytes;
+    VeniceImageGenerator generator{std::move(resolved_credential.secret),
+                                   std::move(generator_options)};
     ImageBackend backend{generator,
                          *stores->artifacts,
                          {requested_media_type(request.format), 1024U * 1024U,

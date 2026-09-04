@@ -72,7 +72,7 @@ TEST_CASE("built-in tool profiles have explicit bounded membership",
           "[tool-profile]") {
   const auto profiles = runtime::builtin_tool_profiles();
   REQUIRE(runtime::validate_tool_profiles(profiles));
-  REQUIRE(profiles.size() == 3);
+  REQUIRE(profiles.size() == 4);
   REQUIRE(profiles[0].profile_id == profile_id("essentials"));
   REQUIRE(profiles[0].name == "Essentials");
   REQUIRE(profiles[0].tool_names ==
@@ -82,9 +82,14 @@ TEST_CASE("built-in tool profiles have explicit bounded membership",
   REQUIRE(profiles[1].tool_names ==
           std::vector<std::string>{"ask_user", "propose_memory",
                                    "read_repository_file"});
-  REQUIRE(profiles[2].profile_id == profile_id("off"));
-  REQUIRE(profiles[2].name == "Off");
-  REQUIRE(profiles[2].tool_names.empty());
+  REQUIRE(profiles[2].profile_id == profile_id("media"));
+  REQUIRE(profiles[2].name == "Media");
+  REQUIRE(profiles[2].tool_names == std::vector<std::string>{"ask_user",
+                                                             "propose_memory",
+                                                             "generate_image"});
+  REQUIRE(profiles[3].profile_id == profile_id("off"));
+  REQUIRE(profiles[3].name == "Off");
+  REQUIRE(profiles[3].tool_names.empty());
   REQUIRE(runtime::tool_profile_availability_reason_text(
               runtime::ToolProfileAvailabilityReason::tool_not_registered) ==
           "tool is not registered in this runtime");
@@ -416,4 +421,61 @@ TEST_CASE("launch policy and explicit model support complete the intersection",
         return availability.reason == runtime::ToolProfileAvailabilityReason::
                                           model_tool_calling_unsupported;
       }));
+}
+
+TEST_CASE("paid image tool requires media selection and complete authority",
+          "[tool-profile][media][narrowing][policy][failure]") {
+  runtime::ToolRegistry registry;
+  static_cast<void>(register_tool(registry, "ask_user"));
+  static_cast<void>(register_tool(registry, "propose_memory"));
+  auto image_executor = std::make_shared<testing::ScriptedToolExecutor>(
+      std::vector<testing::ScriptedToolExchange>{});
+  const backend::ToolDeclaration image{
+      "generate_image",
+      "Generate one image",
+      {"application/schema+json", R"({"type":"object"})"},
+      {domain::Effect::write, domain::Effect::network, domain::Effect::spend},
+      {{domain::Effect::write, "filesystem.root", "/state/artifacts"},
+       {domain::Effect::network, "network.host", "api.example.test"},
+       {domain::Effect::spend, "spend.microunits", "250000"}}};
+  REQUIRE(registry.register_tool(image, image_executor, {}, std::nullopt,
+                                 runtime::ToolCategory::media));
+  const auto snapshot = registry.snapshot();
+  REQUIRE(snapshot);
+
+  const auto low = launch_policy(*snapshot, runtime::RestrictionLevel::low);
+  auto selection = runtime::ToolProfileSelection{
+      profile_id("essentials"), std::nullopt, std::nullopt, std::nullopt, true};
+  auto resolved = runtime::resolve_tool_profile(*snapshot, selection, *low);
+  REQUIRE(resolved);
+  CHECK(resolved->effective_tools.find("generate_image") == nullptr);
+
+  selection.selected_profile_id = profile_id("media");
+  const auto medium = launch_policy(*snapshot);
+  resolved = runtime::resolve_tool_profile(*snapshot, selection, *medium);
+  REQUIRE(resolved);
+  CHECK(resolved->effective_tools.find("generate_image") == nullptr);
+  REQUIRE(resolved->tool_availability.size() == 3);
+  CHECK(resolved->tool_availability.back().reason ==
+        runtime::ToolProfileAvailabilityReason::launch_policy_denied);
+
+  resolved = runtime::resolve_tool_profile(*snapshot, selection, *low);
+  REQUIRE(resolved);
+  REQUIRE(resolved->effective_tools.find("generate_image") != nullptr);
+  CHECK(resolved->effective_tools.find("generate_image")->executor ==
+        image_executor);
+
+  selection.desired_tool_names =
+      std::vector<std::string>{"ask_user", "propose_memory"};
+  resolved = runtime::resolve_tool_profile(*snapshot, selection, *low);
+  REQUIRE(resolved);
+  CHECK(resolved->effective_tools.find("generate_image") == nullptr);
+
+  selection.desired_tool_names = std::nullopt;
+  selection.model_maximum_profile_id = profile_id("essentials");
+  resolved = runtime::resolve_tool_profile(*snapshot, selection, *low);
+  REQUIRE(resolved);
+  CHECK(resolved->effective_tools.find("generate_image") == nullptr);
+  CHECK(resolved->tool_availability.back().reason ==
+        runtime::ToolProfileAvailabilityReason::model_profile_limit);
 }

@@ -176,6 +176,37 @@ TEST_CASE("configuration registries reject ambiguous or unsafe schemas",
   REQUIRE(result.error().code == ConfigDiagnosticCode::invalid_registry);
 }
 
+TEST_CASE("paid image tool model is explicit optional configuration",
+          "[config][image-tool][failure]") {
+  const auto unresolved = resolve_config(builtin_config_registry(), {});
+  REQUIRE(unresolved);
+  const auto absent = resolve_image_tool_model(*unresolved);
+  REQUIRE(absent);
+  REQUIRE_FALSE(*absent);
+
+  const ConfigLayer configured{ConfigSource::file,
+                               {candidate(std::string{image_tool_model_key},
+                                          std::string{"exact-image-model"})},
+                               {}};
+  const auto resolved =
+      resolve_config(builtin_config_registry(), {&configured, 1});
+  REQUIRE(resolved);
+  const auto selected = resolve_image_tool_model(*resolved);
+  REQUIRE(selected);
+  REQUIRE(*selected == id<aiforge::domain::ModelId>("exact-image-model"));
+
+  const ConfigLayer invalid{
+      ConfigSource::file,
+      {candidate(std::string{image_tool_model_key}, std::string{})},
+      {}};
+  const auto rejected =
+      resolve_config(builtin_config_registry(), {&invalid, 1});
+  REQUIRE(rejected);
+  const auto invalid_model = resolve_image_tool_model(*rejected);
+  REQUIRE_FALSE(invalid_model);
+  REQUIRE(invalid_model.error().code == ConfigDiagnosticCode::invalid_value);
+}
+
 TEST_CASE("all present-layer permutations resolve by fixed precedence",
           "[config][precedence]") {
   const auto registry = test_registry();
@@ -941,6 +972,7 @@ TEST_CASE("config CLI keeps content and diagnostics on their streams",
   EnvironmentGuard web_search{"AIFORGE_VENICE_WEB_SEARCH", std::nullopt};
   EnvironmentGuard system_prompt{"AIFORGE_VENICE_INCLUDE_SYSTEM_PROMPT",
                                  std::nullopt};
+  EnvironmentGuard image_model{"AIFORGE_TOOLS_IMAGE_MODEL", std::nullopt};
   std::string output;
   std::string error;
 
@@ -962,7 +994,8 @@ TEST_CASE("config CLI keeps content and diagnostics on their streams",
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n"
                     "tools.models.maximum_profiles\t<unset>\tunset\n"
-                    "tools.personas.maximum_profiles\t<unset>\tunset\n");
+                    "tools.personas.maximum_profiles\t<unset>\tunset\n"
+                    "tools.image.model\t<unset>\tunset\n");
   REQUIRE(error.empty());
 
   REQUIRE(run_cli({"config", "set", "model", "test-model"}, output, error) ==
@@ -992,6 +1025,7 @@ TEST_CASE("malformed files are diagnostic for reads but never overwritten",
   EnvironmentGuard web_search{"AIFORGE_VENICE_WEB_SEARCH", std::nullopt};
   EnvironmentGuard system_prompt{"AIFORGE_VENICE_INCLUDE_SYSTEM_PROMPT",
                                  std::nullopt};
+  EnvironmentGuard image_model{"AIFORGE_TOOLS_IMAGE_MODEL", std::nullopt};
   const auto app = temporary.path() / "aiforge";
   REQUIRE(std::filesystem::create_directory(app));
   REQUIRE(::chmod(app.c_str(), 0700) == 0);
@@ -1010,7 +1044,8 @@ TEST_CASE("malformed files are diagnostic for reads but never overwritten",
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n"
                     "tools.models.maximum_profiles\t<unset>\tunset\n"
-                    "tools.personas.maximum_profiles\t<unset>\tunset\n");
+                    "tools.personas.maximum_profiles\t<unset>\tunset\n"
+                    "tools.image.model\t<unset>\tunset\n");
   REQUIRE(error.find("warning") != std::string::npos);
 
   REQUIRE(run_cli({"config", "set", "model", "replacement"}, output, error) ==
@@ -1028,6 +1063,7 @@ TEST_CASE("read-only resolution survives an unavailable config home",
   EnvironmentGuard web_search{"AIFORGE_VENICE_WEB_SEARCH", std::nullopt};
   EnvironmentGuard system_prompt{"AIFORGE_VENICE_INCLUDE_SYSTEM_PROMPT",
                                  std::nullopt};
+  EnvironmentGuard image_model{"AIFORGE_TOOLS_IMAGE_MODEL", std::nullopt};
   std::string output;
   std::string error;
 
@@ -1040,7 +1076,8 @@ TEST_CASE("read-only resolution survives an unavailable config home",
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n"
                     "tools.models.maximum_profiles\t<unset>\tunset\n"
-                    "tools.personas.maximum_profiles\t<unset>\tunset\n");
+                    "tools.personas.maximum_profiles\t<unset>\tunset\n"
+                    "tools.image.model\t<unset>\tunset\n");
   REQUIRE(error.find("warning") != std::string::npos);
   REQUIRE(error.find("environment-model") == std::string::npos);
 }
