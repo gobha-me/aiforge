@@ -183,6 +183,7 @@ cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-fetched" \
   "${COMMON_CMAKE_ARGS[@]}" \
   -Daiforge_BUILD_BIN=OFF -Daiforge_TESTS=OFF \
   -Daiforge_AUDIO_PLAYBACK=OFF \
+  -Daiforge_AUDIO_CAPTURE=OFF \
   -DCMAKE_DISABLE_FIND_PACKAGE_termforge=TRUE \
   -DCMAKE_DISABLE_FIND_PACKAGE_venice-cpp=TRUE \
   -DCMAKE_DISABLE_FIND_PACKAGE_rasterforge=TRUE
@@ -203,7 +204,8 @@ cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-installed" \
   "${COMMON_CMAKE_ARGS[@]}" \
   -DCMAKE_PREFIX_PATH="${PREFIX}" \
   -Daiforge_BUILD_BIN=OFF -Daiforge_TESTS=OFF \
-  -Daiforge_AUDIO_PLAYBACK=OFF
+  -Daiforge_AUDIO_PLAYBACK=OFF \
+  -Daiforge_AUDIO_CAPTURE=OFF
 
 for dependency in termforge venice-cpp rasterforge; do
   if [[ -d "${WORK_DIR}/aiforge-installed/_deps/${dependency}-src" ]]; then
@@ -231,6 +233,11 @@ if ! grep -Fxq "aiforge_AUDIO_PLAYBACK:BOOL=OFF" \
   echo "Top-level adapter-free configure unexpectedly enabled playback" >&2
   exit 1
 fi
+if ! grep -Fxq "aiforge_AUDIO_CAPTURE:BOOL=OFF" \
+  "${WORK_DIR}/aiforge-core/CMakeCache.txt"; then
+  echo "Top-level adapter-free configure unexpectedly enabled capture" >&2
+  exit 1
+fi
 
 for dependency in termforge venice-cpp rasterforge; do
   if [[ -d "${WORK_DIR}/aiforge-core/_deps/${dependency}-src" ]]; then
@@ -250,6 +257,7 @@ cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-audio-device-evaluation" \
   "${COMMON_CMAKE_ARGS[@]}" \
   -Daiforge_AUDIO_DEVICE_EVALUATION=ON \
   -Daiforge_AUDIO_PLAYBACK=OFF \
+  -Daiforge_AUDIO_CAPTURE=OFF \
   -Daiforge_BUILD_ADAPTERS=OFF -Daiforge_BUILD_BIN=OFF -Daiforge_TESTS=OFF \
   -DCMAKE_DISABLE_FIND_PACKAGE_miniaudio=TRUE \
   -DCMAKE_DISABLE_FIND_PACKAGE_RtAudio=TRUE
@@ -285,6 +293,7 @@ cmake --build "${WORK_DIR}/aiforge-audio-device-evaluation" \
 cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-audio-playback" \
   "${COMMON_CMAKE_ARGS[@]}" \
   -Daiforge_AUDIO_PLAYBACK=ON \
+  -Daiforge_AUDIO_CAPTURE=OFF \
   -Daiforge_AUDIO_DEVICE_EVALUATION=OFF \
   -Daiforge_BUILD_BIN=OFF -Daiforge_TESTS=OFF \
   -DCMAKE_DISABLE_FIND_PACKAGE_RtAudio=TRUE
@@ -307,9 +316,36 @@ fi
 cmake --build "${WORK_DIR}/aiforge-audio-playback" \
   --target aiforge_adapters --parallel 2
 
+cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-audio-capture" \
+  "${COMMON_CMAKE_ARGS[@]}" \
+  -Daiforge_AUDIO_PLAYBACK=OFF \
+  -Daiforge_AUDIO_CAPTURE=ON \
+  -Daiforge_AUDIO_DEVICE_EVALUATION=OFF \
+  -Daiforge_BUILD_BIN=OFF -Daiforge_TESTS=OFF \
+  -DCMAKE_DISABLE_FIND_PACKAGE_RtAudio=TRUE
+
+CAPTURE_CACHE="${WORK_DIR}/aiforge-audio-capture/CMakeCache.txt"
+for expected in \
+  "AIFORGE_RTAUDIO_DEPENDENCY_SOURCE:INTERNAL=controlled_source_fallback" \
+  "RTAUDIO_API_ALSA:BOOL=ON" \
+  "RTAUDIO_API_JACK:BOOL=OFF" \
+  "RTAUDIO_API_PULSE:BOOL=OFF"; do
+  if ! grep -Fxq "${expected}" "${CAPTURE_CACHE}"; then
+    echo "Production audio-capture dependency contract drifted: ${expected}" >&2
+    exit 1
+  fi
+done
+if [[ -d "${WORK_DIR}/aiforge-audio-capture/_deps/miniaudio-src" ]]; then
+  echo "Production audio capture unexpectedly activated miniaudio" >&2
+  exit 1
+fi
+cmake --build "${WORK_DIR}/aiforge-audio-capture" \
+  --target aiforge_adapters --parallel 2
+
 cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-audio-both" \
   "${COMMON_CMAKE_ARGS[@]}" \
   -Daiforge_AUDIO_PLAYBACK=ON \
+  -Daiforge_AUDIO_CAPTURE=ON \
   -Daiforge_AUDIO_DEVICE_EVALUATION=ON \
   -Daiforge_BUILD_BIN=OFF -Daiforge_TESTS=OFF \
   -DCMAKE_DISABLE_FIND_PACKAGE_miniaudio=TRUE \

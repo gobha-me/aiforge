@@ -161,10 +161,19 @@ class FakeAudio final : public AudioCommand {
     return {};
   }
 
+  auto capture(CaptureRequest request, CommandEnvironment&,
+               std::ostream& output, std::ostream&)
+      -> std::expected<void, CommandFailure> override {
+    captured = std::move(request);
+    output << "captured\n";
+    return {};
+  }
+
   std::optional<SynthesizeRequest> synthesized;
   std::optional<TranscribeRequest> transcribed;
   std::optional<ExportRequest> exported;
   std::optional<PlayRequest> played;
+  std::optional<CaptureRequest> captured;
 };
 
 class FakeLogin final : public LoginCommand {
@@ -388,7 +397,7 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
   const auto audio =
       std::ranges::find(schema->root.subcommands, "audio", &CommandSchema::id);
   REQUIRE(audio != schema->root.subcommands.end());
-  REQUIRE(audio->subcommands.size() == 4);
+  REQUIRE(audio->subcommands.size() == 5);
 
   const auto root_help =
       render_help(registry, std::vector<std::string>{"root"});
@@ -791,7 +800,7 @@ TEST_CASE("image subcommands parse explicit generation and replay contracts",
   }
 }
 
-TEST_CASE("audio subcommands parse bounded artifact-only contracts",
+TEST_CASE("audio subcommands parse bounded explicit contracts",
           "[commands][audio]") {
   const auto& registry = builtin_command_registry();
   FakeAudio audio;
@@ -849,12 +858,43 @@ TEST_CASE("audio subcommands parse bounded artifact-only contracts",
   CHECK(audio.played->artifact_id ==
         aiforge::domain::ArtifactId::from("audio-artifact-1").value());
 
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{
+                  "audio", "capture", "--sample-rate", "48000", "--channels",
+                  "2", "--frames", "96000", "--output", "capture.wav"},
+              environment, output, error) == 0);
+  REQUIRE(audio.captured);
+  CHECK(audio.captured->sample_rate == 48000);
+  CHECK(audio.captured->channels == 2);
+  CHECK(audio.captured->frames == 96000);
+  CHECK(audio.captured->output_path == "capture.wav");
+
   for (const auto& arguments :
        {std::vector<std::string_view>{"audio", "synthesize", "--model", "m",
                                       "missing voice"},
         std::vector<std::string_view>{"audio", "transcribe", "input.wav"},
         std::vector<std::string_view>{"audio", "export", "--session", "s"},
-        std::vector<std::string_view>{"audio", "play"}}) {
+        std::vector<std::string_view>{"audio", "play"},
+        std::vector<std::string_view>{"audio", "capture", "--sample-rate",
+                                      "48000", "--channels", "1"},
+        std::vector<std::string_view>{"audio", "capture", "--sample-rate", "-1",
+                                      "--channels", "1", "--frames", "10"},
+        std::vector<std::string_view>{"audio", "capture", "--sample-rate",
+                                      "4294967296", "--channels", "1",
+                                      "--frames", "10"},
+        std::vector<std::string_view>{"audio", "capture", "--sample-rate",
+                                      "48000", "--channels", "65536",
+                                      "--frames", "10"},
+        std::vector<std::string_view>{"audio", "capture", "--sample-rate",
+                                      "7999", "--channels", "1", "--frames",
+                                      "10"},
+        std::vector<std::string_view>{"audio", "capture", "--sample-rate",
+                                      "48000", "--channels", "3", "--frames",
+                                      "10"},
+        std::vector<std::string_view>{"audio", "capture", "--sample-rate",
+                                      "48000", "--channels", "1", "--frames",
+                                      "0"}}) {
     CHECK(CommandDispatcher{}.dispatch(registry, arguments, environment, output,
                                        error) == 2);
   }

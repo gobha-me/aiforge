@@ -39,6 +39,26 @@ namespace {
              << 24U;
 }
 
+auto append_u16(std::vector<std::byte>& bytes, const std::uint16_t value)
+    -> void {
+  bytes.push_back(static_cast<std::byte>(value & 0xffU));
+  bytes.push_back(static_cast<std::byte>((value >> 8U) & 0xffU));
+}
+
+auto append_u32(std::vector<std::byte>& bytes, const std::uint32_t value)
+    -> void {
+  bytes.push_back(static_cast<std::byte>(value & 0xffU));
+  bytes.push_back(static_cast<std::byte>((value >> 8U) & 0xffU));
+  bytes.push_back(static_cast<std::byte>((value >> 16U) & 0xffU));
+  bytes.push_back(static_cast<std::byte>((value >> 24U) & 0xffU));
+}
+
+auto append_tag(std::vector<std::byte>& bytes, const std::string_view value)
+    -> void {
+  for (const auto character : value)
+    bytes.push_back(static_cast<std::byte>(character));
+}
+
 [[nodiscard]] auto matches(const std::span<const std::byte> bytes,
                            const std::size_t offset,
                            const std::string_view expected) -> bool {
@@ -196,6 +216,69 @@ auto decode_pcm16_wav(const std::span<const std::byte> encoded,
   } catch (...) {
     return failure(PcmWavErrorCode::malformed,
                    "PCM WAV decoding failed internally");
+  }
+}
+
+auto encode_pcm16_wav(const Signed16Buffer& buffer, const PcmWavLimits limits)
+    -> std::expected<std::vector<std::byte>, PcmWavError> {
+  try {
+    constexpr std::size_t header_bytes = 44;
+    if (limits.maximum_bytes < header_bytes || limits.maximum_chunks == 0 ||
+        limits.maximum_channels == 0 || limits.minimum_sample_rate == 0 ||
+        limits.minimum_sample_rate > limits.maximum_sample_rate)
+      return failure(PcmWavErrorCode::invalid_limits,
+                     "PCM WAV limits are invalid");
+    const auto channels = buffer.format.channels;
+    if ((channels != 1 && channels != 2) ||
+        channels > limits.maximum_channels ||
+        buffer.format.sample_rate < limits.minimum_sample_rate ||
+        buffer.format.sample_rate > limits.maximum_sample_rate)
+      return failure(PcmWavErrorCode::unsupported,
+                     "PCM WAV format is outside supported bounds");
+    if (buffer.interleaved_samples.empty() ||
+        buffer.interleaved_samples.size() % channels != 0)
+      return failure(PcmWavErrorCode::malformed,
+                     "PCM WAV sample data has incomplete frames");
+    if (buffer.interleaved_samples.size() >
+        (limits.maximum_bytes - header_bytes) / sizeof(std::int16_t))
+      return failure(PcmWavErrorCode::too_large,
+                     "PCM WAV output exceeds its byte limit");
+    const auto data_bytes =
+        buffer.interleaved_samples.size() * sizeof(std::int16_t);
+    const auto total_bytes = header_bytes + data_bytes;
+    if (data_bytes > std::numeric_limits<std::uint32_t>::max() ||
+        total_bytes - 8U > std::numeric_limits<std::uint32_t>::max())
+      return failure(PcmWavErrorCode::too_large,
+                     "PCM WAV output exceeds RIFF limits");
+    const auto block_align =
+        static_cast<std::uint16_t>(channels * sizeof(std::int16_t));
+    const auto byte_rate =
+        static_cast<std::uint64_t>(buffer.format.sample_rate) * block_align;
+    if (byte_rate > std::numeric_limits<std::uint32_t>::max())
+      return failure(PcmWavErrorCode::too_large,
+                     "PCM WAV rate metadata exceeds RIFF limits");
+
+    std::vector<std::byte> encoded;
+    encoded.reserve(total_bytes);
+    append_tag(encoded, "RIFF");
+    append_u32(encoded, static_cast<std::uint32_t>(total_bytes - 8U));
+    append_tag(encoded, "WAVEfmt ");
+    append_u32(encoded, 16);
+    append_u16(encoded, 1);
+    append_u16(encoded, channels);
+    append_u32(encoded, buffer.format.sample_rate);
+    append_u32(encoded, static_cast<std::uint32_t>(byte_rate));
+    append_u16(encoded, block_align);
+    append_u16(encoded, 16);
+    append_tag(encoded, "data");
+    append_u32(encoded, static_cast<std::uint32_t>(data_bytes));
+    for (const auto sample : buffer.interleaved_samples) {
+      append_u16(encoded, std::bit_cast<std::uint16_t>(sample));
+    }
+    return encoded;
+  } catch (...) {
+    return failure(PcmWavErrorCode::malformed,
+                   "PCM WAV encoding failed internally");
   }
 }
 

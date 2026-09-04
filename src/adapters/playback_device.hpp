@@ -10,6 +10,8 @@
 
 #include <aiforge/audio/playback.hpp>
 
+#include "audio_device_gate.hpp"
+
 namespace aiforge::adapters {
 
 inline constexpr std::size_t maximum_playback_bytes =
@@ -61,25 +63,6 @@ class BufferedPlaybackDevice {
       -> std::expected<void, PlaybackDeviceFailure> = 0;
   [[nodiscard]] virtual auto close() noexcept
       -> std::expected<void, PlaybackDeviceFailure> = 0;
-};
-
-class AudioDeviceGate final {
- public:
-  enum class BeginResult { acquired, operation_in_progress, quarantined };
-
-  [[nodiscard]] auto begin() noexcept -> BeginResult;
-  auto release() noexcept -> void;
-  auto quarantine(
-      std::shared_ptr<PlaybackDeviceCallback> callback = {}) noexcept -> void;
-  [[nodiscard]] auto active() const noexcept -> bool;
-  [[nodiscard]] auto quarantined() const noexcept -> bool;
-
- private:
-  enum class State { idle, active, quarantined };
-  std::atomic<State> m_state{State::idle};
-  // A quarantined callback must remain alive until the owning native device is
-  // destroyed and can no longer invoke the retained address.
-  std::shared_ptr<PlaybackDeviceCallback> m_quarantined_callback;
 };
 
 struct PlaybackCallbackTestFence {

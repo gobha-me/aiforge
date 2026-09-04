@@ -116,7 +116,6 @@ src/adapters/json_model_catalog_cache.cpp	modernize-use-integer-sign-comparison	
 src/adapters/json_model_catalog_cache.cpp	performance-move-const-arg	a0ed7c86d02b02946859	std::move of the variable 'parsed' of the trivially-copyable type 'model::Pricing' has no effect; remove std::move()
 src/adapters/json_model_catalog_cache.cpp	readability-function-cognitive-complexity	ecd84bb0055d51e05d6b	function 'store' has cognitive complexity of 25 (threshold 20)
 src/adapters/process_audio.cpp	bugprone-implicit-widening-of-multiplication-result	924fb9e17768357f6740	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
-src/adapters/process_audio.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	0c97dc3a21776e8739cf	do not use pointer arithmetic
 src/adapters/process_audio.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	68809ec42b060f1088a5	do not use pointer arithmetic
 src/adapters/process_audio.cpp	cppcoreguidelines-pro-type-vararg	97451ad82c8fb3255a8c	do not call c-style vararg functions
 src/adapters/process_audio.cpp	cppcoreguidelines-pro-type-vararg	af1400161a9fb75a0ded	do not call c-style vararg functions

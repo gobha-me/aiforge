@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -33,6 +36,7 @@
 #include <aiforge/surfaces/audio.hpp>
 #include <aiforge/testing/scripted_artifact_store.hpp>
 #include <aiforge/testing/scripted_audio_service.hpp>
+#include <aiforge/testing/scripted_capture_port.hpp>
 #include <aiforge/testing/scripted_playback_port.hpp>
 #include <httplib.h>
 
@@ -357,6 +361,36 @@ TEST_CASE("PCM16 WAV decode shares validation and preserves endian bounds") {
   CHECK(unsupported.error().code == audio::PcmWavErrorCode::unsupported);
 }
 
+TEST_CASE("PCM16 WAV encoding is canonical little endian and bounded") {
+  const audio::Signed16Buffer source{{44100, 2},
+                                     {std::int16_t{-32768}, std::int16_t{32767},
+                                      std::int16_t{0x1234}, std::int16_t{-2}}};
+  auto encoded = audio::encode_pcm16_wav(source);
+  REQUIRE(encoded);
+  REQUIRE(encoded->size() == 52);
+  CHECK(std::to_integer<unsigned char>((*encoded)[22]) == 2);
+  CHECK(std::to_integer<unsigned char>((*encoded)[24]) == 0x44);
+  CHECK(std::to_integer<unsigned char>((*encoded)[25]) == 0xac);
+  CHECK(std::to_integer<unsigned char>((*encoded)[44]) == 0x00);
+  CHECK(std::to_integer<unsigned char>((*encoded)[45]) == 0x80);
+  CHECK(std::to_integer<unsigned char>((*encoded)[46]) == 0xff);
+  CHECK(std::to_integer<unsigned char>((*encoded)[47]) == 0x7f);
+  CHECK(std::to_integer<unsigned char>((*encoded)[48]) == 0x34);
+  CHECK(std::to_integer<unsigned char>((*encoded)[49]) == 0x12);
+  CHECK(std::to_integer<unsigned char>((*encoded)[50]) == 0xfe);
+  CHECK(std::to_integer<unsigned char>((*encoded)[51]) == 0xff);
+  auto decoded = audio::decode_pcm16_wav(*encoded);
+  REQUIRE(decoded);
+  CHECK(*decoded == source);
+
+  CHECK_FALSE(audio::encode_pcm16_wav({{48000, 1}, {}}));
+  CHECK_FALSE(audio::encode_pcm16_wav({{48000, 2}, {1}}));
+  auto too_small =
+      audio::encode_pcm16_wav({{48000, 1}, {1}}, {.maximum_bytes = 45});
+  REQUIRE_FALSE(too_small);
+  CHECK(too_small.error().code == audio::PcmWavErrorCode::too_large);
+}
+
 TEST_CASE("speech backend validates WAV before publishing one artifact") {
   const auto wav = pcm_wav();
   const auto stored = metadata("audio-inference", wav.size(),
@@ -543,6 +577,146 @@ TEST_CASE("Venice audio adapter uses WAV and a fixed upload filename") {
 }
 
 #ifndef _WIN32
+TEST_CASE("process capture discards samples after reporting bounded stats") {
+  TemporaryDirectory temporary;
+  EnvironmentGuard xdg{"XDG_STATE_HOME", temporary.path().string()};
+  const auto state_root = temporary.path() / "aiforge";
+  REQUIRE_FALSE(std::filesystem::exists(state_root));
+  const audio::CaptureRequest expected{{48000, 1}, 3};
+  auto fake = std::make_shared<testing::ScriptedCapturePort>(
+      std::vector<testing::ScriptedCaptureExchange>{
+          {expected,
+           audio::CaptureResult{{expected.format, {1, 2, 3}}, {2, 3, 0, 0}}}});
+  int factory_calls{};
+  adapters::ProcessAudioCommand command{
+      {},
+      [&]() -> std::expected<std::shared_ptr<audio::CapturePort>,
+                             cli::CommandFailure> {
+        ++factory_calls;
+        return fake;
+      }};
+  std::istringstream input;
+  cli::CommandEnvironment environment{input, false, false, false, {}};
+  std::ostringstream output;
+  std::ostringstream error;
+  auto result =
+      command.capture({48000, 1, 3, std::nullopt}, environment, output, error);
+  REQUIRE(result);
+  CHECK(factory_calls == 1);
+  CHECK(fake->remaining_exchanges() == 0);
+  CHECK(output.str() == "frames=3 callbacks=2 overruns=0\n");
+  CHECK(error.str() == "aiforge: capture=opening\n");
+  CHECK_FALSE(std::filesystem::exists(state_root));
+}
+
+TEST_CASE("process capture exclusively creates an exact PCM16 WAV") {
+  TemporaryDirectory temporary;
+  const auto output_path = temporary.path() / "captured.wav";
+  const audio::CaptureRequest expected{{8000, 2}, 2};
+  const audio::Signed16Buffer samples{expected.format, {-32768, 32767, 1, -2}};
+  auto fake = std::make_shared<testing::ScriptedCapturePort>(
+      std::vector<testing::ScriptedCaptureExchange>{
+          {expected, audio::CaptureResult{samples, {1, 2, 0, 0}}},
+          {expected, audio::CaptureResult{samples, {1, 2, 0, 0}}}});
+  adapters::ProcessAudioCommand command{
+      {},
+      [fake]() -> std::expected<std::shared_ptr<audio::CapturePort>,
+                                cli::CommandFailure> { return fake; }};
+  std::istringstream input;
+  cli::CommandEnvironment environment{input, false, false, false, {}};
+  std::ostringstream output;
+  std::ostringstream error;
+  REQUIRE(command.capture({8000, 2, 2, output_path.string()}, environment,
+                          output, error));
+
+  std::ifstream stream{output_path, std::ios::binary};
+  const std::vector<char> raw{std::istreambuf_iterator<char>{stream},
+                              std::istreambuf_iterator<char>{}};
+  std::vector<std::byte> encoded;
+  encoded.reserve(raw.size());
+  for (const auto value : raw)
+    encoded.push_back(
+        static_cast<std::byte>(static_cast<unsigned char>(value)));
+  auto decoded = audio::decode_pcm16_wav(encoded);
+  REQUIRE(decoded);
+  CHECK(*decoded == samples);
+  const auto permissions = std::filesystem::status(output_path).permissions();
+  CHECK((permissions & std::filesystem::perms::group_all) ==
+        std::filesystem::perms::none);
+  CHECK((permissions & std::filesystem::perms::others_all) ==
+        std::filesystem::perms::none);
+
+  auto second = command.capture({8000, 2, 2, output_path.string()}, environment,
+                                output, error);
+  REQUIRE_FALSE(second);
+  CHECK(second.error().kind == cli::CommandFailureKind::usage);
+  CHECK(second.error().message == "output path already exists");
+  CHECK(fake->remaining_exchanges() == 0);
+  std::ifstream unchanged_stream{output_path, std::ios::binary};
+  const std::vector<char> unchanged{
+      std::istreambuf_iterator<char>{unchanged_stream},
+      std::istreambuf_iterator<char>{}};
+  CHECK(unchanged == raw);
+}
+
+TEST_CASE("process capture rejects invalid bounds before factory access") {
+  int factory_calls{};
+  adapters::ProcessAudioCommand command{
+      {},
+      [&]() -> std::expected<std::shared_ptr<audio::CapturePort>,
+                             cli::CommandFailure> {
+        ++factory_calls;
+        return std::unexpected(cli::CommandFailure{
+            cli::CommandFailureKind::runtime, "must not be called"});
+      }};
+  std::istringstream input;
+  cli::CommandEnvironment environment{input, false, false, false, {}};
+  std::ostringstream output;
+  std::ostringstream error;
+  for (const auto& request : {
+           cli::AudioCommand::CaptureRequest{7999, 1, 1, std::nullopt},
+           cli::AudioCommand::CaptureRequest{48000, 3, 1, std::nullopt},
+           cli::AudioCommand::CaptureRequest{48000, 1, 0, std::nullopt},
+           cli::AudioCommand::CaptureRequest{
+               48000, 2, std::numeric_limits<std::size_t>::max(), std::nullopt},
+       }) {
+    CHECK_FALSE(command.capture(request, environment, output, error));
+  }
+  CHECK(factory_calls == 0);
+}
+
+TEST_CASE("process capture rejects inconsistent successful port results") {
+  TemporaryDirectory temporary;
+  const audio::CaptureRequest expected{{48000, 1}, 2};
+  for (auto result : {
+           audio::CaptureResult{{{44100, 1}, {1, 2}}, {1, 2, 0, 0}},
+           audio::CaptureResult{{expected.format, {1}}, {1, 2, 0, 0}},
+           audio::CaptureResult{{expected.format, {1, 2}}, {1, 1, 0, 0}},
+           audio::CaptureResult{{expected.format, {1, 2}}, {0, 2, 0, 0}},
+           audio::CaptureResult{{expected.format, {1, 2}}, {1, 2, 1, 0}},
+           audio::CaptureResult{{expected.format, {1, 2}}, {1, 2, 0, 1}},
+       }) {
+    auto fake = std::make_shared<testing::ScriptedCapturePort>(
+        std::vector<testing::ScriptedCaptureExchange>{
+            {expected, std::move(result)}});
+    adapters::ProcessAudioCommand command{
+        {},
+        [fake]() -> std::expected<std::shared_ptr<audio::CapturePort>,
+                                  cli::CommandFailure> { return fake; }};
+    std::istringstream input;
+    cli::CommandEnvironment environment{input, false, false, false, {}};
+    std::ostringstream output;
+    std::ostringstream error;
+    const auto output_path = temporary.path() / "must-not-exist.wav";
+    auto captured = command.capture({48000, 1, 2, output_path.string()},
+                                    environment, output, error);
+    REQUIRE_FALSE(captured);
+    CHECK(captured.error().message ==
+          "audio capture returned an invalid result");
+    CHECK_FALSE(std::filesystem::exists(output_path));
+  }
+}
+
 TEST_CASE("process playback reads an exact durable artifact without mutation") {
   TemporaryDirectory temporary;
   EnvironmentGuard xdg{"XDG_STATE_HOME", temporary.path().string()};
