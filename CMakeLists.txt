@@ -24,9 +24,17 @@ option(${PROJECT_NAME}_TESTS "Build the AIForge test suite" ${PROJECT_IS_TOP_LEV
 option(${PROJECT_NAME}_BUILD_ADAPTERS "Build TermForge and Venice adapters" ${PROJECT_IS_TOP_LEVEL})
 option(${PROJECT_NAME}_DRAWFORGE_EVALUATION
   "Build the noninstalled DrawForge evaluation consumer" OFF)
+option(${PROJECT_NAME}_PROCESS_ISOLATION_EVALUATION
+  "Build the noninstalled Linux process-isolation evidence evaluator" OFF)
 
 if (${PROJECT_NAME}_DRAWFORGE_EVALUATION AND NOT ${PROJECT_NAME}_BUILD_ADAPTERS)
   message(FATAL_ERROR "aiforge_DRAWFORGE_EVALUATION requires aiforge_BUILD_ADAPTERS")
+endif ()
+
+if (${PROJECT_NAME}_PROCESS_ISOLATION_EVALUATION AND
+    NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  message(FATAL_ERROR
+    "aiforge_PROCESS_ISOLATION_EVALUATION is supported only on Linux")
 endif ()
 
 # This is the dependency activation point. Recipes not named here are inert.
@@ -65,4 +73,8 @@ endif ()
 
 if (${PROJECT_NAME}_DRAWFORGE_EVALUATION)
   add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/evaluation/drawforge)
+endif ()
+
+if (${PROJECT_NAME}_PROCESS_ISOLATION_EVALUATION)
+  add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/evaluation/process_isolation)
 endif ()

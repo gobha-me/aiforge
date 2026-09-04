@@ -48,7 +48,8 @@ cmake -S . -B "$build_dir" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   -Daiforge_TESTS=OFF \
-  -Daiforge_DRAWFORGE_EVALUATION=OFF
+  -Daiforge_DRAWFORGE_EVALUATION=OFF \
+  -Daiforge_PROCESS_ISOLATION_EVALUATION=ON
 
 output=$(mktemp)
 trap 'rm -f "$output"' EXIT
@@ -59,10 +60,10 @@ set +e
   -j "$jobs" \
   -clang-tidy-binary "$tidy" \
   -config-file "$repo_root/.clang-tidy" \
-  -header-filter='^.*/(include/aiforge|src/(lib|adapters|bin))/' \
+  -header-filter='^.*/(include/aiforge|src/(lib|adapters|bin)|evaluation/process_isolation)/' \
   -exclude-header-filter='^.*/(build[^/]*/|_deps/)/' \
   -quiet \
-  "^${repo_root}/src/(lib|adapters|bin)/.*[.]cpp$" >"$output" 2>&1
+  "^${repo_root}/(src/(lib|adapters|bin)|evaluation/process_isolation)/.*[.]cpp$" >"$output" 2>&1
 status=$?
 set -e
 
