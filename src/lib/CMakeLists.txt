@@ -25,6 +25,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   memory_projection.cpp
   memory_tool.cpp
   money.cpp
+  mp4.cpp
   one_shot.cpp
   plan.cpp
   plan_task_controller.cpp
@@ -73,6 +74,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   user_global_instruction.cpp
   user_global_instructions.cpp
   verification_evidence.cpp
+  video_artifacts.cpp
   wav.cpp
 )
 add_library(${PROJECT_NAME}::lib ALIAS ${PROJECT_NAME}_lib)
