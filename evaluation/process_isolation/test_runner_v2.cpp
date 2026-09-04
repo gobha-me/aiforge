@@ -3,10 +3,13 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <expected>
 #include <filesystem>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -52,16 +55,6 @@ class TemporaryDirectory final {
   return options;
 }
 
-auto require_closed(const v2::EvidenceReport& report,
-                    const v2::ReasonCode reason) -> void {
-  REQUIRE(report.probes.size() == v2::required_probe_ids().size());
-  for (std::size_t index{}; index < report.probes.size(); ++index) {
-    CHECK(report.probes[index].probe_id == v2::required_probe_ids()[index]);
-    CHECK(report.probes[index].state == isolation::ProbeState::probe_error);
-    CHECK(report.probes[index].reason == reason);
-  }
-}
-
 auto require_non_cgroup_closed(const v2::EvidenceReport& report,
                                const v2::ReasonCode reason) -> void {
   REQUIRE(report.probes.size() == v2::required_probe_ids().size());
@@ -74,6 +67,20 @@ auto require_non_cgroup_closed(const v2::EvidenceReport& report,
                                   : isolation::ProbeState::probe_error));
     CHECK(record.reason ==
           (cgroup ? v2::ReasonCode::missing_delegation : reason));
+  }
+}
+
+auto require_post_start_cancelled(const v2::EvidenceReport& report) -> void {
+  REQUIRE(report.probes.size() == v2::required_probe_ids().size());
+  for (const auto& record : report.probes) {
+    const bool skipped_before_start =
+        v2::probe_id_name(record.probe_id).starts_with("cgroup_");
+    CHECK(record.state == (skipped_before_start
+                               ? isolation::ProbeState::unavailable
+                               : isolation::ProbeState::probe_error));
+    CHECK(record.reason == (skipped_before_start
+                                ? v2::ReasonCode::missing_delegation
+                                : v2::ReasonCode::cancelled));
   }
 }
 
@@ -176,20 +183,60 @@ TEST_CASE("evidence v2 runner maps hostile child outcomes closed and cleans",
 TEST_CASE("evidence v2 runner bounds timeout and cancellation",
           "[process-isolation][evidence-v2][failure]") {
   TemporaryDirectory temporary;
-  auto options = shell_options(temporary, "exec /bin/sleep 10");
+  auto options = shell_options(
+      temporary,
+      "/bin/sleep 10 & printf R > \"$1/../../timeout-started\"; wait");
   options.child_timeout = std::chrono::milliseconds{30};
   const auto timed_out = v2::run_evaluation(std::string(40, 'a'), options);
   REQUIRE(timed_out);
   require_non_cgroup_closed(*timed_out, v2::ReasonCode::timeout);
+  CHECK(std::filesystem::is_regular_file(temporary.path() / "timeout-started"));
 
   std::stop_source cancelled;
+  options = shell_options(
+      temporary,
+      "/bin/sleep 10 & printf R > \"$1/../../cancel-started\"; wait");
+  std::optional<std::expected<v2::EvidenceReport, v2::RunnerError>> stopped;
+  std::jthread evaluation{[&] {
+    stopped = v2::run_evaluation(std::string(40, 'a'), options,
+                                 cancelled.get_token());
+  }};
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds{2};
+  while (!std::filesystem::exists(temporary.path() / "cancel-started") &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds{5});
+  }
+  REQUIRE(
+      std::filesystem::is_regular_file(temporary.path() / "cancel-started"));
   cancelled.request_stop();
-  options = shell_options(temporary, "exit 70");
-  const auto stopped =
-      v2::run_evaluation(std::string(40, 'a'), options, cancelled.get_token());
+  evaluation.join();
   REQUIRE(stopped);
-  require_closed(*stopped, v2::ReasonCode::cancelled);
-  CHECK(std::filesystem::is_empty(temporary.path()));
+  REQUIRE(*stopped);
+  require_post_start_cancelled(**stopped);
+}
+
+TEST_CASE("cgroup cleanup dominates interrupted probe outcomes",
+          "[process-isolation][evidence-v2][failure]") {
+  for (const auto reason :
+       {v2::ReasonCode::cancelled, v2::ReasonCode::timeout}) {
+    const v2::ProbeRecord interrupted{
+        v2::ProbeId::cgroup_kill, isolation::ProbeState::probe_error, reason};
+    CHECK(v2::test_support::cleanup_outcome(interrupted, true) == interrupted);
+    const auto failed = v2::test_support::cleanup_outcome(interrupted, false);
+    CHECK(failed.state == isolation::ProbeState::probe_error);
+    CHECK(failed.reason == v2::ReasonCode::cleanup_failed);
+  }
+
+  CHECK(v2::test_support::owns_task_cgroup(123, "aiforge-evidence-v2-123"));
+  CHECK(v2::test_support::owns_task_cgroup(123,
+                                           "aiforge-evidence-v2-123-sibling"));
+  CHECK_FALSE(
+      v2::test_support::owns_task_cgroup(123, "aiforge-evidence-v2-12"));
+  CHECK_FALSE(
+      v2::test_support::owns_task_cgroup(123, "aiforge-evidence-v2-1234"));
+  CHECK_FALSE(v2::test_support::owns_task_cgroup(
+      123, "aiforge-evidence-v2-supervisor-123"));
 }
 
 TEST_CASE("evidence v2 runner accepts only the matching typed row",

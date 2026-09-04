@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace aiforge::evaluation::process_isolation::v2 {
@@ -60,6 +61,9 @@ enum class BootstrapFailurePhase {
 [[nodiscard]] auto bootstrap_failure_outcome(BootstrapFailurePhase phase,
                                              bool rollback_complete)
     -> ProbeRecord;
+[[nodiscard]] auto cleanup_outcome(ProbeRecord record, bool cleanup_complete)
+    -> ProbeRecord;
+[[nodiscard]] auto owns_task_cgroup(int process, std::string_view name) -> bool;
 
 } // namespace test_support
 #endif

@@ -101,6 +101,27 @@ TEST_CASE("limit and execute evidence require causal observations",
         isolation::ProbeState::enforced);
 }
 
+TEST_CASE("mount propagation requires an isolated child mount observation",
+          "[process-isolation][evidence-v2][failure]") {
+  const auto absent =
+      v2::test_support::mount_propagation_outcome(false, false, true);
+  CHECK(absent.state == isolation::ProbeState::unavailable);
+  CHECK(absent.reason == v2::ReasonCode::enforcement_failed);
+
+  const auto leaked =
+      v2::test_support::mount_propagation_outcome(true, true, true);
+  CHECK(leaked.state == isolation::ProbeState::unavailable);
+  CHECK(leaked.reason == v2::ReasonCode::enforcement_failed);
+
+  const auto uncertain_cleanup =
+      v2::test_support::mount_propagation_outcome(true, false, false);
+  CHECK(uncertain_cleanup.state == isolation::ProbeState::probe_error);
+  CHECK(uncertain_cleanup.reason == v2::ReasonCode::cleanup_failed);
+
+  CHECK(v2::test_support::mount_propagation_outcome(true, false, true).state ==
+        isolation::ProbeState::enforced);
+}
+
 TEST_CASE("combined setup never reports partial setup as enforcement",
           "[process-isolation][evidence-v2][failure]") {
   for (const auto& input : {

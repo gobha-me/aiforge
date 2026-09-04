@@ -26,6 +26,10 @@ namespace test_support {
 [[nodiscard]] auto execute_confinement_outcome(bool local_executed,
                                                bool outside_denied)
     -> ProbeRecord;
+[[nodiscard]] auto mount_propagation_outcome(bool child_mount_established,
+                                             bool visible_in_parent,
+                                             bool cleanup_complete)
+    -> ProbeRecord;
 [[nodiscard]] auto pid_identity_outcome(bool pidfd_opened, bool identity_stable)
     -> ProbeRecord;
 [[nodiscard]] auto setup_order_outcome(bool placed, bool filesystem_applied,

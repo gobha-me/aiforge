@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <linux/magic.h>
 #include <poll.h>
@@ -38,6 +39,9 @@ namespace aiforge::evaluation::process_isolation::v2 {
 namespace {
 
 constexpr auto maximum_probe_timeout = std::chrono::seconds{60};
+constexpr auto task_cgroup_prefix = std::string_view{"aiforge-evidence-v2-"};
+constexpr std::size_t maximum_cgroup_children{64};
+constexpr std::size_t maximum_cgroup_depth{8};
 
 [[nodiscard]] auto runner_error(const RunnerErrorCode code, std::string message)
     -> std::unexpected<RunnerError> {
@@ -52,6 +56,13 @@ constexpr auto maximum_probe_timeout = std::chrono::seconds{60};
 [[nodiscard]] auto unavailable_record(const ProbeId id, const ReasonCode reason)
     -> ProbeRecord {
   return {id, ProbeState::unavailable, reason};
+}
+
+[[nodiscard]] auto cleanup_outcome(ProbeRecord record,
+                                   const bool cleanup_complete) -> ProbeRecord {
+  return cleanup_complete
+             ? record
+             : closed_record(record.probe_id, ReasonCode::cleanup_failed);
 }
 
 [[nodiscard]] auto requires_delegated_cgroup(const ProbeId id) -> bool {
@@ -156,6 +167,109 @@ class Descriptor {
       return std::nullopt;
     result.append(buffer.data(), static_cast<std::size_t>(count));
   }
+}
+
+[[nodiscard]] auto cgroup_directories(const int directory)
+    -> std::optional<std::vector<std::string>> {
+  const auto duplicated = ::fcntl(directory, F_DUPFD_CLOEXEC, 5);
+  if (duplicated < 0) return std::nullopt;
+  auto* stream = ::fdopendir(duplicated);
+  if (stream == nullptr) {
+    static_cast<void>(::close(duplicated));
+    return std::nullopt;
+  }
+  std::vector<std::string> result;
+  bool valid{true};
+  errno = 0;
+  while (const auto* entry = ::readdir(stream)) {
+    const std::string_view name{entry->d_name};
+    if (name == "." || name == "..") continue;
+    struct stat attributes{};
+    if (::fstatat(directory, entry->d_name, &attributes, AT_SYMLINK_NOFOLLOW) !=
+        0) {
+      valid = false;
+      break;
+    }
+    if (!S_ISDIR(attributes.st_mode)) continue;
+    if (name.empty() || name.size() > 255 ||
+        !std::ranges::all_of(name,
+                             [](const unsigned char character) {
+                               return (character >= 'a' && character <= 'z') ||
+                                      (character >= 'A' && character <= 'Z') ||
+                                      (character >= '0' && character <= '9') ||
+                                      character == '-' || character == '_';
+                             }) ||
+        result.size() == maximum_cgroup_children) {
+      valid = false;
+      break;
+    }
+    result.emplace_back(name);
+  }
+  if (errno != 0) valid = false;
+  if (::closedir(stream) != 0) valid = false;
+  if (!valid) return std::nullopt;
+  std::ranges::sort(result);
+  return result;
+}
+
+[[nodiscard]] auto task_cgroup_owned_by(const pid_t process,
+                                        const std::string_view name) -> bool {
+  if (process <= 0) return false;
+  const auto base = std::string{task_cgroup_prefix} + std::to_string(process);
+  return name == base || (name.starts_with(base) && name.size() > base.size() &&
+                          name[base.size()] == '-');
+}
+
+[[nodiscard]] auto await_cgroup_empty(const int directory) -> bool {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds{2};
+  do {
+    const auto events = read_control(directory, "cgroup.events");
+    if (events && events->find("populated 0") != std::string::npos) return true;
+    static_cast<void>(::poll(nullptr, 0, 5));
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
+}
+
+[[nodiscard]] auto cleanup_cgroup_tree(const int parent,
+                                       const std::string& name,
+                                       const std::size_t depth,
+                                       std::size_t& remaining) -> bool {
+  if (depth > maximum_cgroup_depth || remaining == 0) return false;
+  --remaining;
+  Descriptor child{::openat(parent, name.c_str(),
+                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
+  if (child.get() < 0) return errno == ENOENT;
+  bool complete = write_control(child.get(), "cgroup.kill", "1") &&
+                  await_cgroup_empty(child.get());
+  const auto descendants = cgroup_directories(child.get());
+  if (!descendants) {
+    complete = false;
+  } else {
+    for (const auto& descendant : *descendants) {
+      if (!cleanup_cgroup_tree(child.get(), descendant, depth + 1, remaining))
+        complete = false;
+    }
+  }
+  child.reset();
+  if (::unlinkat(parent, name.c_str(), AT_REMOVEDIR) != 0 && errno != ENOENT)
+    complete = false;
+  return complete;
+}
+
+[[nodiscard]] auto cleanup_task_cgroups(const int root, const pid_t owner)
+    -> bool {
+  const auto children = cgroup_directories(root);
+  if (!children) return false;
+  bool complete{true};
+  std::size_t remaining{maximum_cgroup_children};
+  for (const auto& child : *children) {
+    if (task_cgroup_owned_by(owner, child) &&
+        !cleanup_cgroup_tree(root, child, 1, remaining)) {
+      complete = false;
+    }
+  }
+  return complete;
 }
 
 [[nodiscard]] auto parse_tokens(const std::string_view document)
@@ -272,6 +386,10 @@ class CgroupBootstrap final {
     if (!processes) return ReasonCode::internal_error;
     if (processes->size() != 1 || processes->front() != ::getpid())
       return ReasonCode::missing_delegation;
+    const auto children = cgroup_directories(m_root.get());
+    if (!children || !children->empty())
+      return children ? ReasonCode::missing_delegation
+                      : ReasonCode::internal_error;
     m_supervisor_name =
         "aiforge-evidence-v2-supervisor-" + std::to_string(::getpid());
     if (::mkdirat(m_root.get(), m_supervisor_name.c_str(), S_IRWXU) != 0)
@@ -335,11 +453,23 @@ class CgroupBootstrap final {
     return m_ready ? m_root.get() : -1;
   }
 
+  auto remember_task_owner(const pid_t process) -> void {
+    if (process > 0) m_task_owners.push_back(process);
+  }
+
+  [[nodiscard]] auto cleanup_task_owner(const pid_t process) -> bool {
+    return m_root.get() >= 0 && cleanup_task_cgroups(m_root.get(), process);
+  }
+
   [[nodiscard]] auto cleanup() noexcept -> bool {
     if (m_cleaned) return m_cleanup_okay;
     try {
       bool okay{true};
       m_ready = false;
+      for (const auto process : m_task_owners) {
+        if (!cleanup_task_owner(process)) okay = false;
+      }
+      m_task_owners.clear();
       if (m_enabled && !write_control(m_root.get(), "cgroup.subtree_control",
                                       "-cpu -memory -pids"))
         okay = false;
@@ -391,6 +521,7 @@ class CgroupBootstrap final {
   bool m_ready{};
   bool m_cleaned{};
   bool m_cleanup_okay{true};
+  std::vector<pid_t> m_task_owners;
 };
 
 class SubreaperGuard {
@@ -602,9 +733,11 @@ auto terminate_child(const pid_t child, const int pidfd) noexcept -> void {
                                 const std::filesystem::path& state_directory,
                                 const RunnerOptions& options,
                                 const int executable_descriptor,
-                                const int delegated_root_descriptor,
+                                CgroupBootstrap* cgroup_bootstrap,
                                 const std::stop_token stop_token)
     -> ProbeRecord {
+  const auto delegated_root_descriptor =
+      cgroup_bootstrap != nullptr ? cgroup_bootstrap->descriptor() : -1;
   int output_pipe[2]{};
   if (::pipe2(output_pipe, O_CLOEXEC | O_NONBLOCK) != 0)
     return closed_record(probe_id, ReasonCode::internal_error);
@@ -663,6 +796,7 @@ auto terminate_child(const pid_t child, const int pidfd) noexcept -> void {
   }
 
   static_cast<void>(::setpgid(child, child));
+  if (cgroup_bootstrap != nullptr) cgroup_bootstrap->remember_task_owner(child);
   static_cast<void>(::close(output_pipe[1]));
 #if defined(SYS_pidfd_open)
   const Descriptor child_pidfd{
@@ -739,14 +873,23 @@ auto terminate_child(const pid_t child, const int pidfd) noexcept -> void {
     if (waited != child) wait_failed = true;
   }
   const auto cleanup = cleanup_descendants();
-  if (!cleanup.complete || !cleanup.pidfd_verified || cleanup.observed != 0)
+  const auto cgroup_cleanup = cgroup_bootstrap == nullptr ||
+                              cgroup_bootstrap->cleanup_task_owner(child);
+  const bool interrupted = cancelled || timed_out;
+  if (interrupted) {
+    const auto reason = cancelled ? ReasonCode::cancelled : ReasonCode::timeout;
+    return cleanup_outcome(closed_record(probe_id, reason),
+                           cleanup.complete && cleanup.pidfd_verified &&
+                               cgroup_cleanup && !wait_failed &&
+                               child_pidfd.get() >= 0);
+  }
+  if (!cleanup.complete || !cleanup.pidfd_verified || !cgroup_cleanup ||
+      cleanup.observed != 0)
     return closed_record(probe_id, ReasonCode::cleanup_failed);
   if (wait_failed || child_pidfd.get() < 0)
     return closed_record(probe_id, ReasonCode::pid_reuse);
   if (output_exceeded) return closed_record(probe_id, ReasonCode::output_limit);
   if (read_failed) return closed_record(probe_id, ReasonCode::internal_error);
-  if (cancelled) return closed_record(probe_id, ReasonCode::cancelled);
-  if (timed_out) return closed_record(probe_id, ReasonCode::timeout);
   if (WIFSIGNALED(status)) return closed_record(probe_id, ReasonCode::signaled);
   if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
     return closed_record(probe_id, ReasonCode::nonzero_exit);
@@ -845,8 +988,7 @@ auto run_evaluation(std::string source_sha, const RunnerOptions& options,
                  ::chmod(state.c_str(), S_IRWXU) == 0) {
         record = launch_probe(
             probe_id, state, options, executable_descriptor.get(),
-            requires_delegated_cgroup(probe_id) ? cgroup_bootstrap.descriptor()
-                                                : -1,
+            requires_delegated_cgroup(probe_id) ? &cgroup_bootstrap : nullptr,
             stop_token);
       }
       std::error_code cleanup_error;
@@ -904,6 +1046,16 @@ auto bootstrap_failure_outcome(const BootstrapFailurePhase phase,
   }
   return closed_record(ProbeId::cgroup_v2_delegation,
                        ReasonCode::internal_error);
+}
+
+auto cleanup_outcome(ProbeRecord record, const bool cleanup_complete)
+    -> ProbeRecord {
+  return ::aiforge::evaluation::process_isolation::v2::cleanup_outcome(
+      std::move(record), cleanup_complete);
+}
+
+auto owns_task_cgroup(const int process, const std::string_view name) -> bool {
+  return task_cgroup_owned_by(static_cast<pid_t>(process), name);
 }
 
 } // namespace test_support

@@ -128,6 +128,18 @@ constexpr std::size_t maximum_control_bytes = 64U * 1024U;
                            ReasonCode::enforcement_failed);
 }
 
+[[nodiscard]] auto mount_propagation_observation(
+    const bool child_mount_established, const bool visible_in_parent,
+    const bool cleanup_complete) -> ProbeRecord {
+  if (!cleanup_complete)
+    return probe_error(ProbeId::private_mount_propagation,
+                       ReasonCode::cleanup_failed);
+  return child_mount_established && !visible_in_parent
+             ? enforced(ProbeId::private_mount_propagation)
+             : unavailable(ProbeId::private_mount_propagation,
+                           ReasonCode::enforcement_failed);
+}
+
 [[nodiscard]] auto unavailable_from_errno(const ProbeId id,
                                           const int error_number)
     -> ProbeRecord {
@@ -1364,20 +1376,83 @@ enum class TreeShape {
   });
 }
 
-[[nodiscard]] auto mount_propagation_probe(const ProbeId id) -> ProbeRecord {
-  return isolated_assertion(id, [] {
-    struct stat before{};
-    struct stat after{};
-    if (::stat("/proc/self/ns/mnt", &before) != 0)
-      return assertion_internal_error;
+[[nodiscard]] auto mount_propagation_probe(const ProbeId id,
+                                           const std::filesystem::path& state)
+    -> ProbeRecord {
+  const auto target = state / "propagation-target";
+  const auto marker = target / "child-mount";
+  struct stat before{};
+  if (::mkdir(target.c_str(), S_IRWXU) != 0 ||
+      ::lstat(target.c_str(), &before) != 0)
+    return probe_error(id, ReasonCode::internal_error);
+
+  int readiness[2]{};
+  if (::pipe2(readiness, O_CLOEXEC) != 0) {
+    static_cast<void>(::rmdir(target.c_str()));
+    return probe_error(id, ReasonCode::internal_error);
+  }
+  const auto child = ::fork();
+  if (child < 0) {
+    static_cast<void>(::close(readiness[0]));
+    static_cast<void>(::close(readiness[1]));
+    static_cast<void>(::rmdir(target.c_str()));
+    return probe_error(id, ReasonCode::internal_error);
+  }
+  if (child == 0) {
+    static_cast<void>(::close(readiness[0]));
     const auto setup = establish_private_mount_namespace();
-    if (setup != assertion_enforced) return setup;
-    if (::stat("/proc/self/ns/mnt", &after) != 0)
-      return assertion_internal_error;
-    return before.st_dev != after.st_dev || before.st_ino != after.st_ino
-               ? assertion_enforced
-               : assertion_failed;
-  });
+    if (setup != assertion_enforced) ::_exit(setup);
+    if (::mount("tmpfs", target.c_str(), "tmpfs", MS_NODEV | MS_NOSUID,
+                "size=1048576,mode=0700") != 0)
+      ::_exit(assertion_exit_for_errno(errno));
+    const Descriptor mounted_marker{
+        ::open(marker.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+               S_IRUSR | S_IWUSR)};
+    if (mounted_marker.get() < 0 || !write_all(readiness[1], "R"))
+      ::_exit(assertion_internal_error);
+    static_cast<void>(::close(readiness[1]));
+    for (;;)
+      ::pause();
+  }
+
+  static_cast<void>(::close(readiness[1]));
+  const Descriptor ready{readiness[0]};
+  const bool child_mounted = wait_for_byte(ready.get());
+  const bool termination_sent = ::kill(child, SIGKILL) == 0;
+  int status{};
+  pid_t waited{};
+  do {
+    waited = ::waitpid(child, &status, 0);
+  } while (waited < 0 && errno == EINTR);
+
+  struct stat after{};
+  errno = 0;
+  const bool marker_visible = ::lstat(marker.c_str(), &after) == 0;
+  const auto marker_error = errno;
+  const bool target_observed = ::lstat(target.c_str(), &after) == 0;
+  const bool target_changed =
+      target_observed &&
+      (before.st_dev != after.st_dev || before.st_ino != after.st_ino);
+  const bool visible_in_parent = marker_visible || target_changed;
+  bool cleanup_complete{true};
+  if (visible_in_parent && ::umount2(target.c_str(), MNT_DETACH) != 0)
+    cleanup_complete = false;
+  if (::rmdir(target.c_str()) != 0) cleanup_complete = false;
+  if (waited != child || (!marker_visible && marker_error != ENOENT) ||
+      !target_observed)
+    cleanup_complete = false;
+  if (!child_mounted) {
+    if (!cleanup_complete) return probe_error(id, ReasonCode::cleanup_failed);
+    if (WIFEXITED(status)) return assertion_result(id, WEXITSTATUS(status));
+    return termination_sent ? probe_error(id, ReasonCode::timeout)
+                            : probe_error(id, ReasonCode::signaled);
+  }
+  if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL)
+    cleanup_complete = false;
+  auto result = mount_propagation_observation(child_mounted, visible_in_parent,
+                                              cleanup_complete);
+  result.probe_id = id;
+  return result;
 }
 
 [[nodiscard]] auto staged_output_probe(const ProbeId id,
@@ -1535,7 +1610,7 @@ auto run_probe(const ProbeId probe_id,
       case ProbeId::private_root_construction:
         return private_root_probe(probe_id, state_directory);
       case ProbeId::private_mount_propagation:
-        return mount_propagation_probe(probe_id);
+        return mount_propagation_probe(probe_id, state_directory);
       case ProbeId::descriptor_relative_launch:
         return map_v1_record(
             probe_id,
@@ -1594,6 +1669,13 @@ auto pids_limit_outcome(const bool exhausted, const bool tree_complete,
 auto execute_confinement_outcome(const bool local_executed,
                                  const bool outside_denied) -> ProbeRecord {
   return execute_confinement_observation(local_executed, outside_denied);
+}
+
+auto mount_propagation_outcome(const bool child_mount_established,
+                               const bool visible_in_parent,
+                               const bool cleanup_complete) -> ProbeRecord {
+  return mount_propagation_observation(child_mount_established,
+                                       visible_in_parent, cleanup_complete);
 }
 
 auto pid_identity_outcome(const bool pidfd_opened, const bool identity_stable)
