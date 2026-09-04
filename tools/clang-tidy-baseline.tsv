@@ -147,10 +147,8 @@ src/adapters/process_image.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	0
 src/adapters/process_image.cpp	cppcoreguidelines-pro-type-vararg	66fa5e306b6f18c6c343	do not call c-style vararg functions
 src/adapters/process_image.cpp	cppcoreguidelines-pro-type-vararg	97451ad82c8fb3255a8c	do not call c-style vararg functions
 src/adapters/process_image.cpp	readability-function-cognitive-complexity	2218539b52118fae2370	function 'render_terminal_viewer' has cognitive complexity of 31 (threshold 20)
-src/adapters/process_interactive.cpp	bugprone-unchecked-optional-access	ffe86d08b2431fa6d267	unchecked access to optional value
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	17175cd81b663ee15bc7	function 'show_plan' has cognitive complexity of 29 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	1cae3bdecf86de8b0b0d	function 'manage_memory' has cognitive complexity of 84 (threshold 20)
-src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	36028207f0f5b9ba595e	function 'switch_session' has cognitive complexity of 23 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	39b0e565bfcd66520988	function 'request_close' has cognitive complexity of 50 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	7c3209940c7bc6a277b6	function 'on_render' has cognitive complexity of 27 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	c8e01de8f7f20ca090b4	function 'ensure_plan_review' has cognitive complexity of 64 (threshold 20)
@@ -219,7 +217,6 @@ src/lib/ask_user_tool.cpp	readability-function-cognitive-complexity	52c8f2142ac2
 src/lib/audio.cpp	bugprone-implicit-widening-of-multiplication-result	7f547056314198b60a88	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
 src/lib/audio.cpp	readability-function-cognitive-complexity	1bd75b322e3c80fbb842	function 'safe_text' has cognitive complexity of 29 (threshold 20)
 src/lib/audio.cpp	readability-function-cognitive-complexity	52574834ef08acc90990	function 'run_audio' has cognitive complexity of 34 (threshold 20)
-src/lib/chat_session.cpp	bugprone-unchecked-optional-access	a49a1bd5858647682b73	unchecked access to optional value
 src/lib/chat_session.cpp	readability-function-cognitive-complexity	5a91a13d2f8e47a8bf57	function 'resolve_persona' has cognitive complexity of 25 (threshold 20)
 src/lib/chat_session.cpp	readability-function-cognitive-complexity	9bf2f4958c19db25569c	function 'valid_text' has cognitive complexity of 27 (threshold 20)
 src/lib/child_run.cpp	bugprone-implicit-widening-of-multiplication-result	3d926d461e3e723d7de6	performing an implicit widening conversion to type 'const std::uint64_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
@@ -378,7 +375,6 @@ src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	114fc9f74795b162f6cf	u
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	176b2a751d312a83aa0c	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	24ec2b907f43a62f6fe2	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	32617c11277852bad032	unchecked access to optional value
-src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	3f871eb05294d5a3bd3b	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	470b4433e97e717784fd	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	475c9e097fd6d114affc	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	476b058506525184a3ee	unchecked access to optional value
@@ -390,27 +386,21 @@ src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	75d754ebea4decf8f016	u
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8634384da1ead018866e	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8c1e43403bdfb3c78a3f	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8cb7b6e09ef257c1d98d	unchecked access to optional value
-src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	9b64dc8caddb8bd6794c	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	9e223020278128058925	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	a47dbca187f3538f1e84	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	a8129e93eb3f9ce2ef2b	unchecked access to optional value
-src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	b4bbbf2ec2699970c988	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	b702b0c05829d63be9c1	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	ce9c89ed860e186c67dd	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	e021583cbbc0440fa6af	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	e4b4b04f33e6da6e68ad	unchecked access to optional value
-src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	ee8352bb50a34163f7a4	unchecked access to optional value
 src/lib/run_kernel.cpp	modernize-make-unique	3827400b29caa0bfd14d	use std::make_unique instead
 src/lib/run_kernel.cpp	performance-move-const-arg	2e39eadd6d726edeadbb	std::move of the expression of the trivially-copyable type 'domain::SessionSpendCeiling' has no effect; remove std::move()
 src/lib/run_kernel.cpp	performance-move-const-arg	d7d200ab6d2e3e5f3206	std::move of the variable 'consumption' of the trivially-copyable type 'domain::ChildRunConsumption' has no effect; remove std::move()
 src/lib/run_kernel.cpp	performance-unnecessary-copy-initialization	ea1fd8518f768802cccf	the const qualified variable 'selected_task' is copy-constructed from a const reference; consider making it a const reference
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	03b69a2d9ed28ddd33a4	function 'valid_question_definitions' has cognitive complexity of 30 (threshold 20)
-src/lib/run_kernel.cpp	readability-function-cognitive-complexity	14848f7bc8598abd459e	function 'process_tool_update' has cognitive complexity of 65 (threshold 20)
-src/lib/run_kernel.cpp	readability-function-cognitive-complexity	1e14684fe20b926fc8d6	lambda has cognitive complexity of 45 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	36081bf7427e30fbfcd3	function 'dispatch_child' has cognitive complexity of 78 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	3a7e9f2435eb44b651ab	function 'record_child_terminal' has cognitive complexity of 25 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	3d85f609b90077c24657	function 'cancel_run' has cognitive complexity of 49 (threshold 20)
-src/lib/run_kernel.cpp	readability-function-cognitive-complexity	48605afeb0e02c0af334	function 'launch_next_tool' has cognitive complexity of 24 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	87a60ae0ea874695253e	function 'valid_question_answers' has cognitive complexity of 27 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	8bcc548cf36e891cfb4b	function 'process_child_result' has cognitive complexity of 25 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	9783d0140f61cd2e8374	function 'decide_approval' has cognitive complexity of 35 (threshold 20)
@@ -435,9 +425,7 @@ src/lib/sqlite_session_store.cpp	performance-move-const-arg	5a4a5a76e765d2f9a6fb
 src/lib/sqlite_session_store.cpp	performance-move-const-arg	9ed619b4d0dec50b3202	std::move of the expression of the trivially-copyable type 'aiforge::domain::SessionSpendCeiling' has no effect; remove std::move()
 src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	46cb989175705abfa405	function 'append_events' has cognitive complexity of 59 (threshold 20)
 src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	56504b750c7c85a1938c	function 'replay_events' has cognitive complexity of 59 (threshold 20)
-src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	69be260cea8712ba6ce8	function 'parse_payload' has cognitive complexity of 100 (threshold 20)
 src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	6ce7e0c9dfab2a23e300	function 'open' has cognitive complexity of 28 (threshold 20)
-src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	87e5b2b5523c1d0e4306	function 'payload_json' has cognitive complexity of 25 (threshold 20)
 src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	8db47d5d78a5c044f99d	function 'open_or_create_memory_journal' has cognitive complexity of 40 (threshold 20)
 src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	9fe5e262b39b7ebf1411	function 'replay_project_backlog' has cognitive complexity of 22 (threshold 20)
 src/lib/sqlite_session_store.cpp	readability-use-anyofallof	574d8db7bbf43f36c9a2	replace loop by 'std::ranges::any_of()'

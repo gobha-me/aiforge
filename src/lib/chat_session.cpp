@@ -1,4 +1,5 @@
 #include <aiforge/detail/sha256.hpp>
+#include <aiforge/domain/tool_spend.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/runtime/context_builder.hpp>
 #include <aiforge/runtime/persona.hpp>
@@ -99,6 +100,7 @@ template <typename IdType>
 
 struct SpendState {
   domain::UsageLedgerProjection ledger;
+  domain::ToolSpendLedgerProjection tools;
   domain::SessionSpendCeilingProjection ceiling;
 };
 
@@ -118,7 +120,8 @@ struct SpendState {
     -> std::expected<SpendState, ChatSessionError> {
   SpendState state;
   for (const auto& event : log.events()) {
-    if (!state.ledger.apply(event) || !state.ceiling.apply(event)) {
+    if (!state.ledger.apply(event) || !state.tools.apply(event) ||
+        !state.ceiling.apply(event)) {
       return error(ChatSessionErrorCode::session_failed,
                    "session spend history is invalid");
     }
@@ -918,23 +921,24 @@ auto ChatSession::submit(std::string prompt)
     }
     auto ceiling = rebuild_spend_ceiling(m_impl->kernel->event_log());
     if (!ceiling) return std::unexpected(std::move(ceiling.error()));
-    if (ceiling->ceiling()) {
+    const auto session_ceiling = ceiling->ceiling();
+    if (session_ceiling) {
       auto spend_state = rebuild_spend_state(m_impl->kernel->event_log());
       if (!spend_state) {
         return std::unexpected(std::move(spend_state.error()));
       }
-      const auto spend = domain::summarize_session_spend(
-          spend_state->ledger.records(), *spend_state->ceiling.ceiling());
-      if (!spend.accounted) {
+      const auto spend = domain::summarize_combined_session_spend(
+          spend_state->ledger.records(), spend_state->tools, *session_ceiling);
+      if (!spend || !spend->accounted) {
         return error(ChatSessionErrorCode::spend_accounting_unavailable,
                      "session spend accounting is unavailable; refusing "
                      "another inference");
       }
-      if (spend.reached) {
+      if (spend->reached) {
         return error(ChatSessionErrorCode::spend_ceiling_reached,
                      "session spend ceiling reached (USD " +
-                         spend.accounted->amount().to_string() + " of " +
-                         spend.ceiling.amount().to_string() + ")");
+                         spend->accounted->amount().to_string() + " of " +
+                         spend->ceiling.amount().to_string() + ")");
       }
     }
     if (m_impl->persona_document) {

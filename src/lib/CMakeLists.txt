@@ -71,6 +71,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   tool_policy.cpp
   tool_profiles.cpp
   tool_registry.cpp
+  tool_spend.cpp
   usage_ledger.cpp
   user_global_instruction.cpp
   user_global_instructions.cpp

@@ -35,6 +35,13 @@ namespace {
 
 constexpr std::size_t maximum_reasoning_bytes = std::size_t{1024} * 1024U;
 
+[[nodiscard]] auto valid_normalized_tool_arguments(
+    const domain::StructuredDataBlock& arguments,
+    const std::size_t maximum_bytes) noexcept -> bool {
+  return arguments.media_type == "application/json" &&
+         !arguments.data.empty() && arguments.data.size() <= maximum_bytes;
+}
+
 [[nodiscard]] auto effect_name(const domain::Effect effect) noexcept
     -> std::string_view {
   switch (effect) {
@@ -245,6 +252,11 @@ using WorkerUpdate =
          std::ranges::all_of(requested, [&](const auto effect) {
            return std::ranges::find(declared, effect) != declared.end();
          });
+}
+
+[[nodiscard]] auto includes_spend(const std::vector<domain::Effect>& effects)
+    -> bool {
+  return std::ranges::find(effects, domain::Effect::spend) != effects.end();
 }
 
 [[nodiscard]] auto backend_domain_error(const backend::BackendError& error)
@@ -714,7 +726,12 @@ using WorkerUpdate =
     -> std::optional<domain::InvocationId> {
   return std::visit(
       [](const auto& value) -> std::optional<domain::InvocationId> {
-        if constexpr (requires { value.invocation_id; }) {
+        using Value = std::remove_cvref_t<decltype(value)>;
+        if constexpr (std::same_as<Value, domain::ToolSpendReserved>) {
+          return value.reservation.invocation_id;
+        } else if constexpr (std::same_as<Value, domain::ToolSpendFinalized>) {
+          return value.finalization.invocation_id;
+        } else if constexpr (requires { value.invocation_id; }) {
           return value.invocation_id;
         }
         return std::nullopt;
@@ -810,6 +827,8 @@ struct RunKernel::Impl {
     std::size_t progress_events{};
     bool terminal_event_seen{};
     std::vector<domain::QuestionDefinition> questions;
+    bool spend_reserved{};
+    bool spend_terminal{};
   };
 
   struct ActiveRun {
@@ -904,6 +923,15 @@ struct RunKernel::Impl {
            limits.task_scheduling.maximum_attempts <= 8;
   }
 
+  auto adopt(Transaction transaction) -> void {
+    event_log = std::move(transaction.event_log);
+    projections = std::move(transaction.projections);
+    plan_projections = std::move(transaction.plan_projections);
+    used_invocation_ids = std::move(transaction.used_invocation_ids);
+    active = std::move(transaction.active);
+    active_children = std::move(transaction.active_children);
+  }
+
   auto stop_workers() -> void {
     backend_worker.request_stop();
     if (operation_stop) operation_stop->request_stop();
@@ -917,32 +945,182 @@ struct RunKernel::Impl {
     }
   }
 
+  [[nodiscard]] auto persistence_failure(std::string message,
+                                         const bool retryable)
+      -> std::unexpected<RunKernelError> {
+    {
+      std::lock_guard lock(queue_mutex);
+      queue_closed = true;
+    }
+    queue_space.notify_all();
+    stop_workers();
+    active.reset();
+    active_children.clear();
+    unusable = true;
+    return std::unexpected(kernel_error(RunKernelErrorCode::storage_failure,
+                                        std::move(message), retryable));
+  }
+
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Paid recovery.
+  [[nodiscard]] auto recover_paid_terminal_persistence(
+      Transaction transaction, const storage::SessionStoreError& append_error)
+      -> std::expected<void, RunKernelError> {
+    std::optional<std::pair<domain::RunId, domain::InvocationId>> target;
+    bool attempted_finalization{};
+    for (const auto& event : transaction.events) {
+      const auto* invocation_id = std::visit(
+          [](const auto& payload) -> const domain::InvocationId* {
+            using Payload = std::remove_cvref_t<decltype(payload)>;
+            if constexpr (std::same_as<Payload, domain::ToolSpendFinalized>) {
+              return &payload.finalization.invocation_id;
+            } else if constexpr (std::same_as<Payload,
+                                              domain::ToolSpendReleased> ||
+                                 std::same_as<
+                                     Payload,
+                                     domain::ToolSpendReconciliationRequired>) {
+              return &payload.invocation_id;
+            } else {
+              return nullptr;
+            }
+          },
+          event.payload);
+      if (invocation_id == nullptr) continue;
+      const auto candidate = std::pair{event.metadata.run_id, *invocation_id};
+      if (target && *target != candidate) {
+        return persistence_failure(
+            "paid tool terminal persistence has multiple targets",
+            append_error.retryable);
+      }
+      target = candidate;
+      attempted_finalization =
+          attempted_finalization ||
+          std::holds_alternative<domain::ToolSpendFinalized>(event.payload);
+    }
+    if (!target) {
+      return persistence_failure(
+          "paid tool terminal persistence lacks a target",
+          append_error.retryable);
+    }
+    auto replayed = session_store->replay_events(event_log.session_id());
+    if (replayed && *replayed == transaction.event_log.events()) {
+      adopt(std::move(transaction));
+      return {};
+    }
+    if (!replayed || *replayed != event_log.events()) {
+      return persistence_failure(
+          "paid tool terminal persistence could not be reconciled",
+          append_error.retryable);
+    }
+
+    if (!attempted_finalization) {
+      auto recovered = session_store->append_events(
+          transaction.event_log.session_id(), transaction.events);
+      if (!recovered) {
+        auto verified = session_store->replay_events(event_log.session_id());
+        if (!verified || *verified != transaction.event_log.events()) {
+          return persistence_failure(
+              "paid tool terminal persistence could not be recovered",
+              recovered.error().retryable);
+        }
+      }
+      adopt(std::move(transaction));
+      return {};
+    }
+
+    auto recovery = this->transaction();
+    if (!recovery.active || recovery.active->run_id != target->first) {
+      return persistence_failure(
+          "paid tool terminal persistence lacks its active run",
+          append_error.retryable);
+    }
+    const auto invocation_entry =
+        recovery.active->invocations.find(target->second);
+    if (invocation_entry == recovery.active->invocations.end() ||
+        !invocation_entry->second.spend_reserved ||
+        invocation_entry->second.spend_terminal) {
+      return persistence_failure(
+          "paid tool terminal persistence lacks its reserved invocation",
+          append_error.retryable);
+    }
+    auto& invocation = invocation_entry->second;
+    const auto& run_id = target->first;
+    if (auto spent =
+            record_spend_disposition(recovery, invocation,
+                                     domain::ToolSpendReconciliationRequired{
+                                         invocation.invocation_id,
+                                         domain::ToolSpendReconciliationReason::
+                                             finalization_persistence_unknown});
+        !spent) {
+      return persistence_failure(
+          "paid tool terminal persistence recovery was rejected",
+          append_error.retryable);
+    }
+    if (auto errored = record_tool_error(
+            recovery, invocation,
+            {domain::ErrorCode::invalid_state,
+             "paid tool finalization durability is unknown", false});
+        !errored) {
+      return persistence_failure(
+          "paid tool terminal persistence recovery was rejected",
+          append_error.retryable);
+    }
+    if (auto failed =
+            record(run_id,
+                   domain::RunFailed{{domain::ErrorCode::invalid_state,
+                                      "run stopped after uncertain paid tool "
+                                      "finalization persistence",
+                                      false}},
+                   recovery);
+        !failed) {
+      return persistence_failure(
+          "paid tool terminal persistence recovery was rejected",
+          append_error.retryable);
+    }
+    recovery.active->backend_terminal_seen = true;
+    recovery.active->cancellation_ack_expected = true;
+    recovery.active->run_terminal = true;
+
+    auto recovered = session_store->append_events(
+        recovery.event_log.session_id(), recovery.events);
+    if (!recovered) {
+      auto verified = session_store->replay_events(event_log.session_id());
+      if (!verified || *verified != recovery.event_log.events()) {
+        return persistence_failure(
+            "paid tool terminal persistence recovery could not be persisted",
+            recovered.error().retryable);
+      }
+    }
+    adopt(std::move(recovery));
+    return persistence_failure(
+        "paid tool finalization persistence failed; reconciliation is required",
+        append_error.retryable);
+  }
+
   [[nodiscard]] auto commit(Transaction transaction)
       -> std::expected<void, RunKernelError> {
     if (session_store != nullptr && !transaction.events.empty()) {
       auto appended = session_store->append_events(
           transaction.event_log.session_id(), transaction.events);
       if (!appended) {
-        {
-          std::lock_guard lock(queue_mutex);
-          queue_closed = true;
+        const bool paid_terminal =
+            std::ranges::any_of(transaction.events, [](const auto& event) {
+              return std::holds_alternative<domain::ToolSpendReleased>(
+                         event.payload) ||
+                     std::holds_alternative<domain::ToolSpendFinalized>(
+                         event.payload) ||
+                     std::holds_alternative<
+                         domain::ToolSpendReconciliationRequired>(
+                         event.payload);
+            });
+        if (paid_terminal) {
+          return recover_paid_terminal_persistence(std::move(transaction),
+                                                   appended.error());
         }
-        queue_space.notify_all();
-        stop_workers();
-        active.reset();
-        active_children.clear();
-        unusable = true;
-        return std::unexpected(kernel_error(RunKernelErrorCode::storage_failure,
-                                            "session event persistence failed",
-                                            appended.error().retryable));
+        return persistence_failure("session event persistence failed",
+                                   appended.error().retryable);
       }
     }
-    event_log = std::move(transaction.event_log);
-    projections = std::move(transaction.projections);
-    plan_projections = std::move(transaction.plan_projections);
-    used_invocation_ids = std::move(transaction.used_invocation_ids);
-    active = std::move(transaction.active);
-    active_children = std::move(transaction.active_children);
+    adopt(std::move(transaction));
     return {};
   }
 
@@ -1109,12 +1287,16 @@ struct RunKernel::Impl {
         std::holds_alternative<domain::ChildRunCreated>(payload) &&
         std::get<domain::ChildRunCreated>(payload).descriptor.has_value();
     const auto* child_payload = std::get_if<domain::ChildRunCreated>(&payload);
+    const auto* proposed_tool = std::get_if<domain::ToolProposed>(&payload);
     const std::uint32_t schema_version =
         enriched_child
             ? (child_payload->descriptor->review_receipt_id ? 4U : 3U)
-            : (std::holds_alternative<domain::PlanRevisionProposed>(payload)
+            : (proposed_tool != nullptr && proposed_tool->spend_quote
                    ? 2U
-                   : 1U);
+                   : (std::holds_alternative<domain::PlanRevisionProposed>(
+                          payload)
+                          ? 2U
+                          : 1U));
     std::optional<domain::RunId> parent_run_id;
     const auto child = transaction.active_children.find(run_id);
     if (child != transaction.active_children.end() && child->second.child_run) {
@@ -1163,6 +1345,19 @@ struct RunKernel::Impl {
           kernel_error(RunKernelErrorCode::projection_rejected,
                        "run projection rejected a generated event"));
     }
+    domain::ToolSpendLedgerProjection spend_candidate;
+    for (const auto& prior : transaction.event_log.events()) {
+      if (!spend_candidate.apply(prior)) {
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::projection_rejected,
+                         "tool spend history rejected a generated event"));
+      }
+    }
+    if (!spend_candidate.apply(*event)) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::projection_rejected,
+                       "tool spend projection rejected a generated event"));
+    }
     if (const auto* plan_id = plan_id_from(event->payload)) {
       auto plan_candidate = transaction.plan_projections.contains(*plan_id)
                                 ? transaction.plan_projections.at(*plan_id)
@@ -1209,6 +1404,23 @@ struct RunKernel::Impl {
         return result;
       }
     }
+    if (transaction.active->active_tool_id) {
+      auto& invocation = transaction.active->invocations.at(
+          *transaction.active->active_tool_id);
+      if (includes_spend(invocation.requested_effects) &&
+          invocation.spend_reserved && !invocation.spend_terminal) {
+        if (auto result = record(run_id,
+                                 domain::ToolSpendReconciliationRequired{
+                                     invocation.invocation_id,
+                                     domain::ToolSpendReconciliationReason::
+                                         transport_outcome_unknown},
+                                 transaction, invocation.invocation_id);
+            !result) {
+          return result;
+        }
+        invocation.spend_terminal = true;
+      }
+    }
     if (auto result =
             record(run_id, domain::RunFailed{std::move(error)}, transaction);
         !result) {
@@ -1227,14 +1439,87 @@ struct RunKernel::Impl {
     return {};
   }
 
+  [[nodiscard]] auto record_spend_disposition(
+      Transaction& transaction, PendingInvocation& invocation,
+      std::optional<ToolSpendDisposition> disposition = std::nullopt)
+      -> std::expected<void, RunKernelError> {
+    const bool paid = includes_spend(invocation.requested_effects);
+    if (!paid) {
+      if (disposition) {
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::invalid_tool_state,
+                         "non-paid tool returned spend accounting"));
+      }
+      return {};
+    }
+    if (!invocation.spend_reserved || invocation.spend_terminal ||
+        !invocation.arguments.spend_quote) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "paid tool spend lifecycle is invalid"));
+    }
+    if (!disposition) {
+      disposition = domain::ToolSpendReconciliationRequired{
+          invocation.invocation_id,
+          domain::ToolSpendReconciliationReason::transport_outcome_unknown};
+    }
+    const auto reservation = domain::ToolSpendReservation{
+        invocation.invocation_id, invocation.arguments.spend_quote->maximum,
+        invocation.arguments.spend_quote->basis,
+        invocation.arguments.spend_quote->evidence_digest,
+        invocation.arguments.spend_quote->valid_until};
+    const auto valid = std::visit(
+        [&](const auto& value) {
+          using Value = std::remove_cvref_t<decltype(value)>;
+          if constexpr (std::same_as<Value, domain::ToolSpendReleased>) {
+            return value.invocation_id == invocation.invocation_id;
+          } else if constexpr (std::same_as<Value,
+                                            domain::ToolSpendFinalized>) {
+            return domain::valid_tool_spend_finalization(value.finalization,
+                                                         reservation);
+          } else {
+            return value.invocation_id == invocation.invocation_id &&
+                   domain::valid_tool_spend_reconciliation_reason(value.reason);
+          }
+        },
+        *disposition);
+    if (!valid) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "paid tool returned invalid spend accounting"));
+    }
+    auto recorded = std::visit(
+        [&](auto value) {
+          return record(transaction.active->run_id,
+                        domain::RunEventPayload{std::move(value)}, transaction,
+                        invocation.invocation_id);
+        },
+        std::move(*disposition));
+    if (recorded) invocation.spend_terminal = true;
+    return recorded;
+  }
+
   [[nodiscard]] auto record_tool_error(Transaction& transaction,
                                        PendingInvocation& invocation,
                                        domain::DomainError error)
       -> std::expected<void, RunKernelError> {
+    if (!transaction.active) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "tool error requires an active run"));
+    }
     if (invocation.terminal_event_seen) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_tool_state,
                        "tool invocation is already terminal"));
+    }
+    if (includes_spend(invocation.requested_effects) &&
+        invocation.spend_reserved && !invocation.spend_terminal) {
+      if (auto reconciled =
+              record_spend_disposition(transaction, invocation, std::nullopt);
+          !reconciled) {
+        return reconciled;
+      }
     }
     if (auto result = record(transaction.active->run_id,
                              domain::ToolErrored{invocation.invocation_id,
@@ -1247,6 +1532,75 @@ struct RunKernel::Impl {
     invocation.state = InvocationState::terminal;
     invocation.terminal_event_seen = true;
     return {};
+  }
+
+  [[nodiscard]] auto reserve_tool_spend(Transaction& transaction,
+                                        PendingInvocation& invocation)
+      -> std::expected<bool, RunKernelError> {
+    if (!transaction.active) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "paid tool reservation requires an active run"));
+    }
+    if (!includes_spend(invocation.requested_effects)) return true;
+    if (invocation.spend_reserved || invocation.spend_terminal ||
+        !invocation.arguments.spend_quote ||
+        !domain::valid_tool_spend_quote(*invocation.arguments.spend_quote)) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "paid tool reservation is invalid"));
+    }
+
+    domain::UsageLedgerProjection usage;
+    domain::SessionSpendCeilingProjection ceiling;
+    domain::ToolSpendLedgerProjection tools;
+    for (const auto& event : transaction.event_log.events()) {
+      if (!usage.apply(event) || !ceiling.apply(event) || !tools.apply(event)) {
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::projection_rejected,
+                         "session spend history is invalid"));
+      }
+    }
+    const auto reject =
+        [&](std::string message) -> std::expected<bool, RunKernelError> {
+      auto recorded = record_tool_error(
+          transaction, invocation,
+          {domain::ErrorCode::policy, std::move(message), false});
+      if (!recorded) return std::unexpected(std::move(recorded.error()));
+      return false;
+    };
+    if (!ceiling.ceiling())
+      return reject("paid tool requires a session spend ceiling");
+    if (timestamp() >= invocation.arguments.spend_quote->valid_until)
+      return reject("paid tool price quote expired before launch");
+    const auto inference =
+        domain::summarize_session_spend(usage.records(), *ceiling.ceiling());
+    const auto tool = domain::summarize_tool_spend(tools, *ceiling.ceiling());
+    if (!inference.accounted || !tool)
+      return reject("session spend accounting is unavailable");
+    auto total =
+        domain::add(inference.accounted->amount(), tool->accounted.amount());
+    if (total) {
+      total = domain::add(*total,
+                          invocation.arguments.spend_quote->maximum.amount());
+    }
+    if (!total || domain::compare(*total, ceiling.ceiling()->amount()) ==
+                      std::strong_ordering::greater) {
+      return reject("session spend ceiling would be exceeded");
+    }
+
+    const auto& quote = *invocation.arguments.spend_quote;
+    if (auto recorded =
+            record(transaction.active->run_id,
+                   domain::ToolSpendReserved{domain::ToolSpendReservation{
+                       invocation.invocation_id, quote.maximum, quote.basis,
+                       quote.evidence_digest, quote.valid_until}},
+                   transaction, invocation.invocation_id);
+        !recorded) {
+      return std::unexpected(std::move(recorded.error()));
+    }
+    invocation.spend_reserved = true;
+    return true;
   }
 
   // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Event routing
@@ -1442,10 +1796,8 @@ struct RunKernel::Impl {
                 } catch (...) {
                 }
                 if (validated &&
-                    (validated->value.media_type != "application/json" ||
-                     validated->value.data.empty() ||
-                     validated->value.data.size() >
-                         limits.tool_argument_bytes ||
+                    (!valid_normalized_tool_arguments(
+                         validated->value, limits.tool_argument_bytes) ||
                      (!validated->required_effects.empty() &&
                       !effects_are_declared(
                           validated->required_effects,
@@ -1476,6 +1828,22 @@ struct RunKernel::Impl {
                       "tool validator returned invalid normalized arguments",
                       false});
                 }
+                if (validated) {
+                  const auto& effective_effects =
+                      validated->required_effects.empty()
+                          ? registration->declaration.effects
+                          : validated->required_effects;
+                  const bool paid = includes_spend(effective_effects);
+                  if (paid != validated->spend_quote.has_value() ||
+                      (validated->spend_quote &&
+                       !domain::valid_tool_spend_quote(
+                           *validated->spend_quote))) {
+                    validated = std::unexpected(ToolExecutionError{
+                        ToolExecutionErrorCode::protocol_failure,
+                        "tool validator returned invalid spend accounting",
+                        false});
+                  }
+                }
                 auto required_scopes =
                     validated
                         ? (validated->required_scopes.empty()
@@ -1494,7 +1862,13 @@ struct RunKernel::Impl {
                             validated && validated->value == raw_arguments,
                             validated ? validated->required_scopes
                                       : std::vector<domain::CapabilityScope>{},
-                            required_scopes, *message_id},
+                            required_scopes, *message_id,
+                            validated ? validated->spend_quote : std::nullopt,
+                            validated
+                                ? std::optional<
+                                      domain::StructuredDataBlock>{validated
+                                                                       ->value}
+                                : std::nullopt},
                         invocation_id);
                     !result) {
                   return result;
@@ -1661,6 +2035,7 @@ struct RunKernel::Impl {
     return {};
   }
 
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Tool reducer.
   [[nodiscard]] auto process_tool_update(ToolUpdate update,
                                          Transaction& transaction)
       -> std::expected<void, RunKernelError> {
@@ -1680,7 +2055,10 @@ struct RunKernel::Impl {
                             "tool executor protocol failure", false});
     }
     return std::visit(
+        // clang-format off
+        // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Tool update variants.
         [&](auto&& event) -> std::expected<void, RunKernelError> {
+          // clang-format on
           using Event = std::remove_cvref_t<decltype(event)>;
           if constexpr (std::same_as<Event, ToolInputRequested>) {
             if (invocation.state != InvocationState::running ||
@@ -1750,6 +2128,38 @@ struct RunKernel::Impl {
                         "tool executor returned invalid artifact metadata",
                         false}));
               }
+              auto spend_disposition = std::move(event.spend_disposition);
+              if (includes_spend(invocation.requested_effects) &&
+                  !spend_disposition) {
+                spend_disposition = domain::ToolSpendReconciliationRequired{
+                    invocation.invocation_id,
+                    domain::ToolSpendReconciliationReason::
+                        provider_cost_unavailable};
+              }
+              if (auto spent = record_spend_disposition(
+                      transaction, invocation, std::move(spend_disposition));
+                  !spent) {
+                if (includes_spend(invocation.requested_effects)) {
+                  if (auto reconciled = record_spend_disposition(
+                          transaction, invocation,
+                          domain::ToolSpendReconciliationRequired{
+                              invocation.invocation_id,
+                              domain::ToolSpendReconciliationReason::
+                                  provider_cost_mismatch});
+                      !reconciled) {
+                    return reconciled;
+                  }
+                }
+                const auto accounting_error = domain::DomainError{
+                    domain::ErrorCode::invalid_state,
+                    "tool executor spend accounting is invalid", false};
+                if (auto errored = record_tool_error(transaction, invocation,
+                                                     accounting_error);
+                    !errored) {
+                  return errored;
+                }
+                return fail_live_run(transaction, accounting_error);
+              }
               for (auto& artifact : event.created_artifacts) {
                 const auto artifact_id = artifact.artifact_id;
                 if (auto created =
@@ -1795,6 +2205,33 @@ struct RunKernel::Impl {
     }
     auto& invocation = active->invocations.at(failure.invocation_id);
     if (invocation.terminal_event_seen) return {};
+    if (failure.error.spend_disposition) {
+      if (auto spent = record_spend_disposition(
+              transaction, invocation,
+              std::move(failure.error.spend_disposition));
+          !spent) {
+        if (includes_spend(invocation.requested_effects)) {
+          if (auto reconciled = record_spend_disposition(
+                  transaction, invocation,
+                  domain::ToolSpendReconciliationRequired{
+                      invocation.invocation_id,
+                      domain::ToolSpendReconciliationReason::
+                          provider_cost_mismatch});
+              !reconciled) {
+            return reconciled;
+          }
+        }
+        const auto accounting_error = domain::DomainError{
+            domain::ErrorCode::invalid_state,
+            "tool executor spend accounting is invalid", false};
+        if (auto errored =
+                record_tool_error(transaction, invocation, accounting_error);
+            !errored) {
+          return errored;
+        }
+        return fail_live_run(transaction, accounting_error);
+      }
+    }
     return record_tool_error(transaction, invocation,
                              tool_domain_error(failure.error));
   }
@@ -1944,6 +2381,7 @@ struct RunKernel::Impl {
     return {};
   }
 
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Tool startup.
   [[nodiscard]] auto launch_next_tool() -> std::expected<void, RunKernelError> {
     if (!active || active->run_terminal || active->inference_id ||
         active->active_tool_id) {
@@ -1961,7 +2399,15 @@ struct RunKernel::Impl {
     if (ready == active->invocation_order.end()) return {};
 
     auto transaction = this->transaction();
+    if (!transaction.active) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "tool launch requires an active run"));
+    }
     auto& invocation = transaction.active->invocations.at(*ready);
+    auto admitted = reserve_tool_spend(transaction, invocation);
+    if (!admitted) return std::unexpected(std::move(admitted.error()));
+    if (!*admitted) return commit(std::move(transaction));
     if (auto result = record(transaction.active->run_id,
                              domain::ToolStarted{invocation.invocation_id},
                              transaction, invocation.invocation_id);
@@ -2018,6 +2464,14 @@ struct RunKernel::Impl {
       auto& failed =
           failure.active->invocations.at(invocation_copy.invocation_id);
       failure.active->active_tool_id.reset();
+      if (failed.spend_reserved && !failed.spend_terminal) {
+        if (auto spent = record_spend_disposition(
+                failure, failed,
+                domain::ToolSpendReleased{failed.invocation_id});
+            !spent) {
+          return spent;
+        }
+      }
       if (auto result =
               record_tool_error(failure, failed,
                                 tool_domain_error(ToolExecutionError{
@@ -2408,11 +2862,13 @@ auto RunKernel::open_durable(DurableSessionOpen session,
       std::map<domain::RunId, domain::RunProjection> projections;
       std::map<domain::PlanId, domain::PlanGraphProjection> plan_projections;
       std::set<domain::InvocationId> invocation_ids;
+      domain::ToolSpendLedgerProjection tool_spend;
       for (const auto& event : *events) {
         auto projection = projections.contains(event.metadata.run_id)
                               ? projections.at(event.metadata.run_id)
                               : domain::RunProjection{};
-        if (!projection.apply(event) || !event_log.append(event)) {
+        if (!projection.apply(event) || !tool_spend.apply(event) ||
+            !event_log.append(event)) {
           return std::unexpected(kernel_error(
               RunKernelErrorCode::replay_rejected,
               "durable session events could not rebuild projections"));
@@ -2439,11 +2895,21 @@ auto RunKernel::open_durable(DurableSessionOpen session,
         }
         if (const auto* proposed =
                 std::get_if<domain::ToolProposed>(&event.payload);
-            proposed != nullptr &&
-            !invocation_ids.insert(proposed->invocation_id).second) {
-          return std::unexpected(kernel_error(
-              RunKernelErrorCode::replay_rejected,
-              "durable session contains invalid invocation identity"));
+            proposed != nullptr) {
+          if (!invocation_ids.insert(proposed->invocation_id).second) {
+            return std::unexpected(kernel_error(
+                RunKernelErrorCode::replay_rejected,
+                "durable session contains invalid invocation identity"));
+          }
+          if ((proposed->validated_arguments &&
+               !valid_normalized_tool_arguments(
+                   *proposed->validated_arguments,
+                   kernel->m_impl->limits.tool_argument_bytes)) ||
+              (proposed->spend_quote && !proposed->validated_arguments)) {
+            return std::unexpected(
+                kernel_error(RunKernelErrorCode::replay_rejected,
+                             "tool proposal has invalid normalized arguments"));
+          }
         }
         projections.insert_or_assign(event.metadata.run_id,
                                      std::move(projection));
@@ -2452,6 +2918,120 @@ auto RunKernel::open_durable(DurableSessionOpen session,
         return std::unexpected(kernel_error(
             RunKernelErrorCode::replay_rejected,
             "durable session catalog disagrees with replayed history"));
+      }
+
+      std::vector<domain::ToolSpendRecord> interrupted_paid_tools;
+      for (const auto& record : tool_spend.records()) {
+        if (record.status == domain::ToolSpendStatus::reserved)
+          interrupted_paid_tools.push_back(record);
+      }
+      if (!interrupted_paid_tools.empty()) {
+        std::map<domain::InvocationId, std::optional<domain::MessageId>>
+            result_message_ids;
+        for (const auto& event : *events) {
+          if (const auto* proposed =
+                  std::get_if<domain::ToolProposed>(&event.payload)) {
+            result_message_ids.insert_or_assign(proposed->invocation_id,
+                                                proposed->result_message_id);
+          }
+        }
+        std::vector<domain::RunEvent> recovery;
+        std::set<domain::RunId> interrupted_runs;
+        const auto append_recovery =
+            [&](const domain::RunId& run_id, domain::RunEventPayload payload,
+                std::optional<domain::InvocationId> invocation_id)
+            -> std::expected<void, RunKernelError> {
+          if (event_log.last_sequence() ==
+              std::numeric_limits<std::uint64_t>::max()) {
+            return std::unexpected(
+                kernel_error(RunKernelErrorCode::event_sequence_overflow,
+                             "paid tool recovery sequence overflowed"));
+          }
+          const auto sequence = event_log.last_sequence() + 1;
+          auto event_id =
+              domain::EventId::from("event-" + std::to_string(sequence));
+          if (!event_id) {
+            return std::unexpected(
+                kernel_error(RunKernelErrorCode::replay_rejected,
+                             "paid tool recovery identity is invalid"));
+          }
+          domain::RunEvent event{{std::move(*event_id), run_id, sequence, 1,
+                                  kernel->m_impl->timestamp(), std::nullopt,
+                                  std::nullopt, std::move(invocation_id)},
+                                 std::move(payload)};
+          auto projection = projections.contains(run_id)
+                                ? projections.at(run_id)
+                                : domain::RunProjection{};
+          if (!projection.apply(event) || !tool_spend.apply(event) ||
+              !event_log.append(event)) {
+            return std::unexpected(
+                kernel_error(RunKernelErrorCode::replay_rejected,
+                             "interrupted paid tool recovery was rejected"));
+          }
+          projections.insert_or_assign(run_id, std::move(projection));
+          recovery.push_back(std::move(event));
+          return {};
+        };
+        for (const auto& interrupted : interrupted_paid_tools) {
+          const auto invocation_id = interrupted.reservation.invocation_id;
+          domain::RunEventPayload spend_terminal =
+              interrupted.tool_started
+                  ? domain::
+                        RunEventPayload{domain::ToolSpendReconciliationRequired{
+                            invocation_id,
+                            domain::ToolSpendReconciliationReason::
+                                transport_outcome_unknown}}
+                  : domain::RunEventPayload{
+                        domain::ToolSpendReleased{invocation_id}};
+          if (auto recovered = append_recovery(
+                  interrupted.run_id, std::move(spend_terminal), invocation_id);
+              !recovered) {
+            return std::unexpected(std::move(recovered.error()));
+          }
+          const auto result_id = result_message_ids.find(invocation_id);
+          const auto interruption_message =
+              interrupted.tool_started
+                  ? "paid tool outcome requires reconciliation after restart"
+                  : "paid tool was interrupted before execution started";
+          if (auto recovered = append_recovery(
+                  interrupted.run_id,
+                  domain::ToolErrored{invocation_id,
+                                      {domain::ErrorCode::invalid_state,
+                                       interruption_message, false},
+                                      result_id == result_message_ids.end()
+                                          ? std::nullopt
+                                          : result_id->second},
+                  invocation_id);
+              !recovered) {
+            return std::unexpected(std::move(recovered.error()));
+          }
+          interrupted_runs.insert(interrupted.run_id);
+        }
+        for (const auto& run_id : interrupted_runs) {
+          const auto status = projections.at(run_id).status();
+          if (status == domain::RunStatus::completed ||
+              status == domain::RunStatus::failed ||
+              status == domain::RunStatus::cancelled) {
+            continue;
+          }
+          if (auto recovered = append_recovery(
+                  run_id,
+                  domain::RunFailed{
+                      {domain::ErrorCode::invalid_state,
+                       "run stopped with an interrupted paid tool", false}},
+                  std::nullopt);
+              !recovered) {
+            return std::unexpected(std::move(recovered.error()));
+          }
+        }
+        auto persisted = store.append_events(session.session_id, recovery);
+        if (!persisted) {
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::storage_failure,
+              "interrupted paid tool recovery could not be persisted",
+              persisted.error().retryable));
+        }
+        events->insert(events->end(), recovery.begin(), recovery.end());
       }
 
       std::optional<domain::RunId> awaiting_run;
@@ -2891,6 +3471,7 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                 "queued tool history lacks a result message identity"));
           }
           if (state != Impl::InvocationState::terminal &&
+              !proposed->second.validated_arguments &&
               !proposed->second.arguments_replayable) {
             return std::unexpected(
                 kernel_error(RunKernelErrorCode::replay_rejected,
@@ -2900,15 +3481,16 @@ auto RunKernel::open_durable(DurableSessionOpen session,
               questions.contains(current_id)
                   ? questions.at(current_id)
                   : std::vector<domain::QuestionDefinition>{};
+          ValidatedToolArguments replayed_arguments{
+              proposed->second.validated_arguments.value_or(
+                  proposed->second.arguments),
+              proposed->second.validated_required_scopes,
+              proposed->second.declared_effects, proposed->second.spend_quote};
           invocations.emplace(
               current_id,
               Impl::PendingInvocation{
                   current_id, proposed->second.parent_invocation_id,
-                  registration->declaration,
-                  ValidatedToolArguments{
-                      proposed->second.arguments,
-                      proposed->second.validated_required_scopes,
-                      proposed->second.declared_effects},
+                  registration->declaration, std::move(replayed_arguments),
                   registration->limits, registration->executor,
                   *result_message_id, proposed->second.declared_effects,
                   proposed->second.requested_scopes, std::move(granted_scopes),

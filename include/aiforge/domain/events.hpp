@@ -2,6 +2,7 @@
 
 #include <aiforge/domain/child_run.hpp>
 #include <aiforge/domain/content.hpp>
+#include <aiforge/domain/events_fwd.hpp>
 #include <aiforge/domain/memory.hpp>
 #include <aiforge/domain/money.hpp>
 #include <aiforge/domain/persona.hpp>
@@ -10,8 +11,8 @@
 #include <aiforge/domain/project_backlog.hpp>
 #include <aiforge/domain/provenance.hpp>
 #include <aiforge/domain/review_receipt.hpp>
+#include <aiforge/domain/tool_spend.hpp>
 #include <aiforge/domain/verification_evidence.hpp>
-#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -22,8 +23,6 @@
 namespace aiforge::domain {
 
 using Metadata = std::vector<std::pair<std::string, std::string>>;
-using EventTimestamp = std::chrono::sys_time<std::chrono::milliseconds>;
-
 struct RunStarted {
   SurfaceId surface_id;
   WorkspaceId workspace_id;
@@ -174,6 +173,12 @@ struct ToolProposed {
   std::vector<CapabilityScope> validated_required_scopes{};
   std::vector<CapabilityScope> requested_scopes{};
   std::optional<MessageId> result_message_id{};
+  // Paid invocations persist the exact validated quote before approval so a
+  // resumed invocation cannot silently adopt changed pricing provenance.
+  std::optional<ToolSpendQuote> spend_quote{};
+  // Schema-v2 paid proposals retain the normalized launch value separately
+  // from the raw provider arguments used to reconstruct assistant history.
+  std::optional<StructuredDataBlock> validated_arguments{};
   auto operator==(const ToolProposed&) const -> bool = default;
 };
 
@@ -236,6 +241,29 @@ struct ToolPolicyFailed {
 struct ToolStarted {
   InvocationId invocation_id;
   auto operator==(const ToolStarted&) const -> bool = default;
+};
+
+struct ToolSpendReserved {
+  ToolSpendReservation reservation;
+  auto operator==(const ToolSpendReserved&) const -> bool = default;
+};
+
+struct ToolSpendReleased {
+  InvocationId invocation_id;
+  auto operator==(const ToolSpendReleased&) const -> bool = default;
+};
+
+struct ToolSpendFinalized {
+  ToolSpendFinalization finalization;
+  auto operator==(const ToolSpendFinalized&) const -> bool = default;
+};
+
+struct ToolSpendReconciliationRequired {
+  InvocationId invocation_id;
+  ToolSpendReconciliationReason reason{
+      ToolSpendReconciliationReason::transport_outcome_unknown};
+  auto operator==(const ToolSpendReconciliationRequired&) const
+      -> bool = default;
 };
 
 struct ToolProgressed {
@@ -474,18 +502,20 @@ using RunEventPayload = std::variant<
     InferencePricingObserved, ReasoningMetadataAdded, UsageRecorded,
     InferenceCostRecorded, InferenceFinished, InferenceFailed,
     InferenceCancelled, ToolProposed, ToolPolicyDecided, ToolApprovalRequested,
-    ToolApprovalDecided, ToolPolicyFailed, ToolStarted, ToolProgressed,
-    ToolResultRecorded, ToolErrored, QuestionRequested, QuestionAnswered,
-    QuestionCancelled, ArtifactCreated, ArtifactReferenced, ArtifactDisplayed,
-    ArtifactRemovedFromView, VerificationEvidenceRecorded, ReviewReceiptDrafted,
-    ReviewRequested, ReviewFindingOpened, ReviewFindingResolved,
-    ReviewVerdictRecorded, ReviewVerdictRevoked, ReviewOverrideRecorded,
-    ReviewOverrideRevoked, PlanRevisionProposed, PlanRevisionDecisionRecorded,
-    PlanRevisionInvalidated, SessionTasksMaterialized, ChildRunCreated,
-    SessionTaskResultRecorded, ProjectBacklogItemPromoted,
-    ProjectBacklogItemStatusChanged, MemoryProposed, MemoryPolicyDecided,
-    MemoryAccepted, MemoryEditedAndAccepted, MemoryRejected, MemorySuperseded,
-    MemoryExpired, InterRunMessageSent, UnknownEvent>;
+    ToolApprovalDecided, ToolPolicyFailed, ToolSpendReserved, ToolStarted,
+    ToolProgressed, ToolSpendReleased, ToolSpendFinalized,
+    ToolSpendReconciliationRequired, ToolResultRecorded, ToolErrored,
+    QuestionRequested, QuestionAnswered, QuestionCancelled, ArtifactCreated,
+    ArtifactReferenced, ArtifactDisplayed, ArtifactRemovedFromView,
+    VerificationEvidenceRecorded, ReviewReceiptDrafted, ReviewRequested,
+    ReviewFindingOpened, ReviewFindingResolved, ReviewVerdictRecorded,
+    ReviewVerdictRevoked, ReviewOverrideRecorded, ReviewOverrideRevoked,
+    PlanRevisionProposed, PlanRevisionDecisionRecorded, PlanRevisionInvalidated,
+    SessionTasksMaterialized, ChildRunCreated, SessionTaskResultRecorded,
+    ProjectBacklogItemPromoted, ProjectBacklogItemStatusChanged, MemoryProposed,
+    MemoryPolicyDecided, MemoryAccepted, MemoryEditedAndAccepted,
+    MemoryRejected, MemorySuperseded, MemoryExpired, InterRunMessageSent,
+    UnknownEvent>;
 
 struct EventMetadata {
   EventId event_id;

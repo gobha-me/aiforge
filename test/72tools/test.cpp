@@ -10,6 +10,7 @@
 #include <span>
 #include <stop_token>
 #include <string>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -120,6 +121,20 @@ auto pricing_observation() -> domain::PricingObservation {
       .value();
 }
 
+auto spend_digest(const char fill = 'a') -> domain::ContentDigest {
+  return {"sha256", std::string(64, fill), 32};
+}
+
+auto spend_expiry() -> domain::EventTimestamp {
+  return domain::EventTimestamp::max();
+}
+
+auto usd(const std::string& value) -> domain::MonetaryAmount {
+  return domain::MonetaryAmount::create(
+             "USD", domain::DecimalAmount::from(value).value())
+      .value();
+}
+
 auto step(backend::BackendEvent event) -> testing::ScriptedStep {
   return testing::ScriptedStep{std::move(event)};
 }
@@ -160,7 +175,11 @@ auto drain_to_inference_boundary(runtime::RunKernel& kernel, WakeCounter& wake)
   std::size_t observed{};
   for (int attempt = 0; attempt < 100 && kernel.active_inference_id();
        ++attempt) {
-    REQUIRE(kernel.drain());
+    const auto drained = kernel.drain();
+    std::string failure_message;
+    if (!drained) failure_message = drained.error().message;
+    INFO(failure_message);
+    REQUIRE(drained);
     if (kernel.active_inference_id()) wake.wait_for_change(observed);
     observed = wake.count();
   }
@@ -226,6 +245,28 @@ class BlockingExecutor final : public runtime::ToolExecutor {
   }
 };
 
+class PaidBlockingExecutor final : public runtime::ToolExecutor {
+ public:
+  explicit PaidBlockingExecutor(domain::ToolSpendQuote quote)
+      : m_quote(std::move(quote)) {}
+
+  auto validate(const domain::StructuredDataBlock& arguments) const
+      -> std::expected<runtime::ValidatedToolArguments,
+                       runtime::ToolExecutionError> override {
+    return runtime::ValidatedToolArguments{
+        arguments, {}, {domain::Effect::spend}, m_quote};
+  }
+
+  auto start(runtime::ToolInvocation, std::stop_token)
+      -> std::expected<std::unique_ptr<runtime::ToolExecutionStream>,
+                       runtime::ToolExecutionError> override {
+    return std::make_unique<BlockingStream>();
+  }
+
+ private:
+  domain::ToolSpendQuote m_quote;
+};
+
 class CountingExecutor final : public runtime::ToolExecutor {
  public:
   auto validate(const domain::StructuredDataBlock& arguments) const
@@ -252,6 +293,9 @@ class MemoryStore final : public storage::SessionStore {
   domain::SessionId session_id{make_id<domain::SessionId>("session")};
   domain::EventTimestamp created{std::chrono::milliseconds{1}};
   std::vector<domain::RunEvent> events;
+  bool fail_next_paid_terminal_append{};
+  bool commit_failed_paid_terminal_append{};
+  std::size_t paid_terminal_failures{};
 
   auto create_session(storage::SessionCreate session, std::stop_token)
       -> std::expected<void, storage::SessionStoreError> override {
@@ -287,6 +331,24 @@ class MemoryStore final : public storage::SessionStore {
     if (requested != session_id) {
       return std::unexpected(storage::SessionStoreError{
           storage::SessionStoreErrorCode::not_found, "missing", false});
+    }
+    const bool paid_terminal = std::ranges::any_of(additions, [](const auto&
+                                                                     event) {
+      return std::holds_alternative<domain::ToolSpendReleased>(event.payload) ||
+             std::holds_alternative<domain::ToolSpendFinalized>(
+                 event.payload) ||
+             std::holds_alternative<domain::ToolSpendReconciliationRequired>(
+                 event.payload);
+    });
+    if (fail_next_paid_terminal_append && paid_terminal &&
+        paid_terminal_failures == 0) {
+      ++paid_terminal_failures;
+      if (commit_failed_paid_terminal_append) {
+        events.insert(events.end(), additions.begin(), additions.end());
+      }
+      return std::unexpected(storage::SessionStoreError{
+          storage::SessionStoreErrorCode::io_failure,
+          "simulated paid terminal append failure", true});
     }
     events.insert(events.end(), additions.begin(), additions.end());
     return {};
@@ -355,6 +417,43 @@ class ImmediateExecutor final : public runtime::ToolExecutor {
   std::vector<runtime::ToolInvocation> m_invocations;
 };
 
+class PaidExecutor final : public runtime::ToolExecutor {
+ public:
+  PaidExecutor(domain::ToolSpendQuote quote, runtime::ToolResult result,
+               std::optional<domain::StructuredDataBlock> normalized_arguments =
+                   std::nullopt)
+      : m_quote(std::move(quote)), m_result(std::move(result)),
+        m_normalized_arguments(std::move(normalized_arguments)) {}
+
+  auto validate(const domain::StructuredDataBlock& arguments) const
+      -> std::expected<runtime::ValidatedToolArguments,
+                       runtime::ToolExecutionError> override {
+    ++validations;
+    return runtime::ValidatedToolArguments{
+        m_normalized_arguments.value_or(arguments),
+        {},
+        {domain::Effect::spend},
+        m_quote};
+  }
+
+  auto start(runtime::ToolInvocation invocation, std::stop_token)
+      -> std::expected<std::unique_ptr<runtime::ToolExecutionStream>,
+                       runtime::ToolExecutionError> override {
+    ++starts;
+    invocations.push_back(std::move(invocation));
+    return std::make_unique<ImmediateStream>(m_result);
+  }
+
+  mutable std::size_t validations{};
+  std::size_t starts{};
+  std::vector<runtime::ToolInvocation> invocations;
+
+ private:
+  domain::ToolSpendQuote m_quote;
+  runtime::ToolResult m_result;
+  std::optional<domain::StructuredDataBlock> m_normalized_arguments;
+};
+
 class RecordingPolicy final : public runtime::ToolPolicy {
  public:
   auto evaluate(const runtime::ToolPolicyRequest& request)
@@ -388,11 +487,12 @@ auto persisted_event(const std::uint64_t sequence, Payload payload,
           std::move(payload)};
 }
 
-auto tool_call_script(const domain::InvocationId& invocation)
+auto tool_call_script(const domain::InvocationId& invocation,
+                      std::string tool_name = "lookup")
     -> testing::StreamScript {
   return testing::StreamScript{{
       step(backend::ResponseStarted{"response"}),
-      step(backend::ToolCallDelta{invocation, "lookup", "{}"}),
+      step(backend::ToolCallDelta{invocation, std::move(tool_name), "{}"}),
       step(backend::ResponseFinished{domain::FinishReason::tool_call}),
       testing::EndOfStream{},
   }};
@@ -425,6 +525,47 @@ auto approval_policy() -> std::shared_ptr<runtime::ToolPolicy> {
       {},
       {domain::Effect::read},
       {scope()}});
+}
+
+auto paid_declaration() -> backend::ToolDeclaration {
+  return {"generate_image",
+          "Generate a bounded image",
+          {"application/schema+json", R"({"type":"object"})"},
+          {domain::Effect::spend},
+          {{domain::Effect::spend, "spend.microunits", "1000000"}}};
+}
+
+auto paid_scope() -> domain::CapabilityScope {
+  return {domain::Effect::spend, "spend.microunits", "1000000"};
+}
+
+auto paid_policy() -> std::shared_ptr<runtime::ToolPolicy> {
+  return std::make_shared<runtime::CapabilityPolicy>(runtime::PermissionProfile{
+      make_id<domain::PermissionProfileId>("observe"),
+      {domain::Effect::spend},
+      {paid_scope()},
+      {},
+      {}});
+}
+
+auto paid_approval_policy() -> std::shared_ptr<runtime::ToolPolicy> {
+  return std::make_shared<runtime::CapabilityPolicy>(runtime::PermissionProfile{
+      make_id<domain::PermissionProfileId>("observe"),
+      {},
+      {},
+      {domain::Effect::spend},
+      {paid_scope()}});
+}
+
+auto set_spend_ceiling(runtime::RunKernel& kernel, const std::string& value)
+    -> void {
+  REQUIRE(kernel.record_session_spend_ceiling(
+      {make_id<domain::RunId>("spend-policy"),
+       {make_id<domain::SurfaceId>("session-policy"),
+        make_id<domain::WorkspaceId>("chat"),
+        make_id<domain::PermissionProfileId>("observe"), std::nullopt},
+       domain::SessionSpendCeiling::from(value).value(),
+       domain::SessionSpendCeilingSource::command_line}));
 }
 
 class OrderedPolicy final : public runtime::ToolPolicy {
@@ -800,6 +941,534 @@ TEST_CASE("allowed tool results continue the same run in registry order",
           domain::RunStatus::completed);
 }
 
+TEST_CASE("paid tools reserve before start and finalize before result",
+          "[tools][runtime][spend]") {
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  const auto quote = domain::ToolSpendQuote{
+      usd("0.3"), domain::ToolSpendEstimateBasis::catalog_estimate,
+      spend_digest(), spend_expiry()};
+  auto executor = std::make_shared<PaidExecutor>(
+      quote, runtime::ToolResult{
+                 {domain::TextBlock{"generated"}},
+                 {},
+                 domain::ToolSpendFinalized{domain::ToolSpendFinalization{
+                     invocation, usd("0.2"),
+                     domain::ToolSpendFinalizationBasis::catalog_estimate,
+                     std::nullopt}}});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(paid_declaration(), executor));
+  const auto snapshot = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
+  testing::ScriptedBackend backend{{
+      {initial,
+       testing::StreamScript{{
+           step(backend::ResponseStarted{"response"}),
+           step(backend::UsageObserved{{0, 0, 0, 0}}),
+           step(backend::ToolCallDelta{invocation, "generate_image", "{}"}),
+           step(backend::ResponseFinished{domain::FinishReason::tool_call}),
+           testing::EndOfStream{},
+       }}},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            snapshot,
+                            paid_policy()};
+  set_spend_ceiling(kernel, "1");
+  auto start = run_start(initial);
+  start.pricing_observation = pricing_observation();
+  REQUIRE(kernel.start(std::move(start)));
+  drain_to_inference_boundary(kernel, wake);
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    REQUIRE(kernel.drain());
+    if (std::ranges::any_of(kernel.event_log().events(), [](const auto& value) {
+          return std::holds_alternative<domain::ToolResultRecorded>(
+              value.payload);
+        })) {
+      break;
+    }
+    wake.wait_for_change(wake.count());
+  }
+
+  CHECK(executor->starts == 1);
+  const auto& events = kernel.event_log().events();
+  const auto reserved = std::ranges::find_if(events, [](const auto& value) {
+    return std::holds_alternative<domain::ToolSpendReserved>(value.payload);
+  });
+  const auto started_event =
+      std::ranges::find_if(events, [](const auto& value) {
+        return std::holds_alternative<domain::ToolStarted>(value.payload);
+      });
+  const auto finalized = std::ranges::find_if(events, [](const auto& value) {
+    return std::holds_alternative<domain::ToolSpendFinalized>(value.payload);
+  });
+  const auto result = std::ranges::find_if(events, [](const auto& value) {
+    return std::holds_alternative<domain::ToolResultRecorded>(value.payload);
+  });
+  REQUIRE(reserved != events.end());
+  REQUIRE(started_event != events.end());
+  REQUIRE(finalized != events.end());
+  REQUIRE(result != events.end());
+  CHECK(reserved < started_event);
+  CHECK(started_event < finalized);
+  CHECK(finalized < result);
+  CHECK(std::get<domain::ToolSpendReserved>(reserved->payload)
+            .reservation.maximum.amount()
+            .to_string() == "0.3");
+  REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
+}
+
+TEST_CASE("invalid paid finalization requires provider-cost reconciliation",
+          "[tools][runtime][spend][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  const auto quote = domain::ToolSpendQuote{
+      usd("0.3"), domain::ToolSpendEstimateBasis::catalog_estimate,
+      spend_digest(), spend_expiry()};
+  auto executor = std::make_shared<PaidExecutor>(
+      quote, runtime::ToolResult{
+                 {domain::TextBlock{"generated"}},
+                 {},
+                 domain::ToolSpendFinalized{domain::ToolSpendFinalization{
+                     invocation, usd("0.4"),
+                     domain::ToolSpendFinalizationBasis::catalog_estimate,
+                     std::nullopt}}});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(paid_declaration(), executor));
+  const auto tools = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1", tools.declarations());
+  testing::ScriptedBackend backend{{
+      {initial,
+       testing::StreamScript{{
+           step(backend::ResponseStarted{"response"}),
+           step(backend::UsageObserved{{0, 0, 0, 0}}),
+           step(backend::ToolCallDelta{invocation, "generate_image", "{}"}),
+           step(backend::ResponseFinished{domain::FinishReason::tool_call}),
+           testing::EndOfStream{},
+       }}},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            tools,
+                            paid_policy()};
+  set_spend_ceiling(kernel, "1");
+  auto start = run_start(initial);
+  start.pricing_observation = pricing_observation();
+  REQUIRE(kernel.start(std::move(start)));
+  drain_to_run_end(kernel, wake);
+
+  CHECK(executor->starts == 1);
+  CHECK(
+      std::ranges::none_of(kernel.event_log().events(), [](const auto& event) {
+        return std::holds_alternative<domain::ToolSpendFinalized>(
+            event.payload);
+      }));
+  CHECK(
+      std::ranges::count_if(kernel.event_log().events(), [](const auto& event) {
+        const auto* reconciliation =
+            std::get_if<domain::ToolSpendReconciliationRequired>(
+                &event.payload);
+        return reconciliation != nullptr &&
+               reconciliation->reason == domain::ToolSpendReconciliationReason::
+                                             provider_cost_mismatch;
+      }) == 1);
+  const auto& events = kernel.event_log().events();
+  const auto reconciled = std::ranges::find_if(events, [](const auto& event) {
+    return std::holds_alternative<domain::ToolSpendReconciliationRequired>(
+        event.payload);
+  });
+  const auto errored = std::ranges::find_if(events, [](const auto& event) {
+    return std::holds_alternative<domain::ToolErrored>(event.payload);
+  });
+  const auto failed = std::ranges::find_if(events, [](const auto& event) {
+    return std::holds_alternative<domain::RunFailed>(event.payload);
+  });
+  REQUIRE(reconciled != events.end());
+  REQUIRE(errored != events.end());
+  REQUIRE(failed != events.end());
+  CHECK(reconciled < errored);
+  CHECK(errored < failed);
+}
+
+TEST_CASE("paid terminal append failure is reconciled without re-execution",
+          "[tools][runtime][storage][spend][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  const auto quote = domain::ToolSpendQuote{
+      usd("0.3"), domain::ToolSpendEstimateBasis::catalog_estimate,
+      spend_digest(), spend_expiry()};
+  auto executor = std::make_shared<PaidExecutor>(
+      quote, runtime::ToolResult{
+                 {domain::TextBlock{"generated"}},
+                 {},
+                 domain::ToolSpendFinalized{domain::ToolSpendFinalization{
+                     invocation, usd("0.2"),
+                     domain::ToolSpendFinalizationBasis::catalog_estimate,
+                     std::nullopt}}});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      paid_declaration(), executor, {},
+      runtime::ToolExecutorContract{"test.generate-image", "1"}));
+  const auto tools = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1", tools.declarations());
+  testing::ScriptedBackend backend{{
+      {initial,
+       testing::StreamScript{{
+           step(backend::ResponseStarted{"response"}),
+           step(backend::UsageObserved{{0, 0, 0, 0}}),
+           step(backend::ToolCallDelta{invocation, "generate_image", "{}"}),
+           step(backend::ResponseFinished{domain::FinishReason::tool_call}),
+           testing::EndOfStream{},
+       }}},
+  }};
+  MemoryStore store;
+  bool commit_before_failure{};
+  SECTION("failed append did not commit") {
+  }
+  SECTION("failed append committed atomically") {
+    commit_before_failure = true;
+    store.commit_failed_paid_terminal_append = true;
+  }
+  WakeCounter wake;
+  auto kernel = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::create, store.created},
+      store, backend, &wake, {}, {}, tools, paid_policy());
+  REQUIRE(kernel);
+  set_spend_ceiling(**kernel, "1");
+  store.fail_next_paid_terminal_append = true;
+  auto start = run_start(initial);
+  start.pricing_observation = pricing_observation();
+  start.provenance = provenance();
+  const auto started = (*kernel)->start(std::move(start));
+  std::string start_failure;
+  if (!started) start_failure = started.error().message;
+  INFO(start_failure);
+  REQUIRE(started);
+  drain_to_inference_boundary(**kernel, wake);
+
+  std::optional<runtime::RunKernelError> persistence_error;
+  for (int attempt = 0;
+       attempt < 100 && !persistence_error && store.paid_terminal_failures == 0;
+       ++attempt) {
+    auto drained = (*kernel)->drain();
+    if (!drained) {
+      persistence_error = std::move(drained.error());
+      break;
+    }
+    std::this_thread::sleep_for(10ms);
+  }
+  REQUIRE(store.paid_terminal_failures == 1);
+  CHECK(executor->starts == 1);
+  if (commit_before_failure) {
+    CHECK_FALSE(persistence_error);
+    CHECK(std::ranges::count_if(store.events, [](const auto& event) {
+            return std::holds_alternative<domain::ToolSpendFinalized>(
+                event.payload);
+          }) == 1);
+    CHECK(std::ranges::none_of(store.events, [](const auto& event) {
+      return std::holds_alternative<domain::ToolSpendReconciliationRequired>(
+          event.payload);
+    }));
+    return;
+  }
+  REQUIRE(persistence_error);
+  CHECK(persistence_error->code ==
+        runtime::RunKernelErrorCode::storage_failure);
+  CHECK(std::ranges::count_if(store.events, [](const auto& event) {
+          return std::holds_alternative<domain::ToolSpendFinalized>(
+              event.payload);
+        }) == 0);
+  CHECK(std::ranges::count_if(store.events, [](const auto& event) {
+          const auto* reconciliation =
+              std::get_if<domain::ToolSpendReconciliationRequired>(
+                  &event.payload);
+          return reconciliation != nullptr &&
+                 reconciliation->reason ==
+                     domain::ToolSpendReconciliationReason::
+                         finalization_persistence_unknown;
+        }) == 1);
+  CHECK(std::ranges::count_if(store.events, [](const auto& event) {
+          return std::holds_alternative<domain::ToolErrored>(event.payload);
+        }) == 1);
+  CHECK(std::ranges::count_if(store.events, [](const auto& event) {
+          return std::holds_alternative<domain::RunFailed>(event.payload);
+        }) == 1);
+  kernel->reset();
+
+  testing::ScriptedBackend replay_backend{{}};
+  auto reopened = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::resume, store.created},
+      store, replay_backend, nullptr, {}, {}, tools, paid_policy());
+  REQUIRE(reopened);
+  CHECK(executor->starts == 1);
+  CHECK(
+      std::ranges::count_if(store.events, [](const auto& event) {
+        return std::holds_alternative<domain::ToolSpendReconciliationRequired>(
+            event.payload);
+      }) == 1);
+}
+
+TEST_CASE("release and reconciliation append retries preserve durable truth",
+          "[tools][runtime][storage][spend][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  std::optional<runtime::ToolSpendDisposition> disposition;
+  std::optional<domain::ToolSpendReconciliationReason> expected_reason;
+  SECTION("release") {
+    disposition = domain::ToolSpendReleased{invocation};
+  }
+  SECTION("reconciliation") {
+    expected_reason =
+        domain::ToolSpendReconciliationReason::provider_cost_unavailable;
+  }
+  const auto quote = domain::ToolSpendQuote{
+      usd("0.3"), domain::ToolSpendEstimateBasis::catalog_estimate,
+      spend_digest(), spend_expiry()};
+  auto executor = std::make_shared<PaidExecutor>(
+      quote,
+      runtime::ToolResult{{domain::TextBlock{"generated"}}, {}, disposition});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      paid_declaration(), executor, {},
+      runtime::ToolExecutorContract{"test.generate-image", "1"}));
+  const auto tools = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1", tools.declarations());
+  testing::ScriptedBackend backend{{
+      {initial,
+       testing::StreamScript{{
+           step(backend::ResponseStarted{"response"}),
+           step(backend::UsageObserved{{0, 0, 0, 0}}),
+           step(backend::ToolCallDelta{invocation, "generate_image", "{}"}),
+           step(backend::ResponseFinished{domain::FinishReason::tool_call}),
+           testing::EndOfStream{},
+       }}},
+  }};
+  MemoryStore store;
+  WakeCounter wake;
+  auto kernel = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::create, store.created},
+      store, backend, &wake, {}, {}, tools, paid_policy());
+  REQUIRE(kernel);
+  set_spend_ceiling(**kernel, "1");
+  store.fail_next_paid_terminal_append = true;
+  auto start = run_start(initial);
+  start.pricing_observation = pricing_observation();
+  start.provenance = provenance();
+  REQUIRE((*kernel)->start(std::move(start)));
+  drain_to_inference_boundary(**kernel, wake);
+
+  for (int attempt = 0; attempt < 100 && store.paid_terminal_failures == 0;
+       ++attempt) {
+    REQUIRE((*kernel)->drain());
+    std::this_thread::sleep_for(10ms);
+  }
+  REQUIRE(store.paid_terminal_failures == 1);
+  CHECK(executor->starts == 1);
+  if (expected_reason) {
+    CHECK(std::ranges::count_if(store.events, [&](const auto& event) {
+            const auto* reconciliation =
+                std::get_if<domain::ToolSpendReconciliationRequired>(
+                    &event.payload);
+            return reconciliation != nullptr &&
+                   reconciliation->reason == *expected_reason;
+          }) == 1);
+  } else {
+    CHECK(std::ranges::count_if(store.events, [](const auto& event) {
+            return std::holds_alternative<domain::ToolSpendReleased>(
+                event.payload);
+          }) == 1);
+  }
+  CHECK(std::ranges::none_of(store.events, [](const auto& event) {
+    const auto* reconciliation =
+        std::get_if<domain::ToolSpendReconciliationRequired>(&event.payload);
+    return reconciliation != nullptr &&
+           reconciliation->reason == domain::ToolSpendReconciliationReason::
+                                         finalization_persistence_unknown;
+  }));
+}
+
+TEST_CASE("paid tools fail closed before transport without bounded accounting",
+          "[tools][runtime][spend][failure]") {
+  const auto run_case = [](const std::optional<std::string>& ceiling,
+                           domain::ToolSpendQuote quote,
+                           const bool report_usage) {
+    const auto invocation = make_id<domain::InvocationId>("paid-call");
+    auto executor = std::make_shared<PaidExecutor>(
+        std::move(quote), runtime::ToolResult{{domain::TextBlock{"unused"}}});
+    runtime::ToolRegistry registry;
+    REQUIRE(registry.register_tool(paid_declaration(), executor));
+    const auto snapshot = snapshot_of(registry);
+    auto initial =
+        request("inference-1", "assistant-1", snapshot.declarations());
+    std::vector<testing::ScriptedStep> steps{
+        step(backend::ResponseStarted{"response"})};
+    if (report_usage)
+      steps.push_back(step(backend::UsageObserved{{0, 0, 0, 0}}));
+    steps.push_back(
+        step(backend::ToolCallDelta{invocation, "generate_image", "{}"}));
+    steps.push_back(
+        step(backend::ResponseFinished{domain::FinishReason::tool_call}));
+    steps.push_back(testing::EndOfStream{});
+    testing::ScriptedBackend backend{{
+        {initial, testing::StreamScript{std::move(steps)}},
+    }};
+    WakeCounter wake;
+    runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                              backend,
+                              &wake,
+                              {},
+                              {},
+                              snapshot,
+                              paid_policy()};
+    if (ceiling) set_spend_ceiling(kernel, *ceiling);
+    auto start = run_start(initial);
+    start.pricing_observation = pricing_observation();
+    REQUIRE(kernel.start(std::move(start)));
+    drain_to_inference_boundary(kernel, wake);
+    REQUIRE(kernel.drain());
+    CHECK(executor->starts == 0);
+    CHECK(std::ranges::none_of(
+        kernel.event_log().events(), [](const auto& value) {
+          return std::holds_alternative<domain::ToolStarted>(value.payload) ||
+                 std::holds_alternative<domain::ToolSpendReserved>(
+                     value.payload);
+        }));
+    CHECK(
+        std::ranges::any_of(kernel.event_log().events(), [](const auto& value) {
+          return std::holds_alternative<domain::ToolErrored>(value.payload);
+        }));
+  };
+
+  run_case(std::nullopt,
+           {usd("0.1"), domain::ToolSpendEstimateBasis::catalog_estimate,
+            spend_digest(), spend_expiry()},
+           true);
+  run_case("0.1",
+           {usd("0.2"), domain::ToolSpendEstimateBasis::policy_upper_bound,
+            spend_digest(), spend_expiry()},
+           true);
+  run_case("1",
+           {usd("0.2"), domain::ToolSpendEstimateBasis::catalog_estimate,
+            spend_digest(), spend_expiry()},
+           false);
+}
+
+TEST_CASE("paid tool approval rejects its quote at the exact expiry boundary",
+          "[tools][runtime][spend][approval][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  auto now = domain::EventTimestamp{1ms};
+  auto executor = std::make_shared<PaidExecutor>(
+      domain::ToolSpendQuote{usd("0.4"),
+                             domain::ToolSpendEstimateBasis::catalog_estimate,
+                             spend_digest(), domain::EventTimestamp{10ms}},
+      runtime::ToolResult{{domain::TextBlock{"unused"}}});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(paid_declaration(), executor));
+  const auto snapshot = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
+  testing::ScriptedBackend backend{{
+      {initial,
+       testing::StreamScript{{
+           step(backend::ResponseStarted{"response"}),
+           step(backend::UsageObserved{{0, 0, 0, 0}}),
+           step(backend::ToolCallDelta{invocation, "generate_image", "{}"}),
+           step(backend::ResponseFinished{domain::FinishReason::tool_call}),
+           testing::EndOfStream{},
+       }}},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            [&now] { return now; },
+                            {},
+                            snapshot,
+                            paid_approval_policy()};
+  set_spend_ceiling(kernel, "1");
+  auto start = run_start(initial);
+  start.pricing_observation = pricing_observation();
+  REQUIRE(kernel.start(std::move(start)));
+  drain_to_inference_boundary(kernel, wake);
+
+  now = domain::EventTimestamp{10ms};
+  REQUIRE(kernel.decide_approval(make_id<domain::RunId>("run"), invocation,
+                                 {domain::ApprovalDecision::approved,
+                                  {paid_scope()},
+                                  domain::ApprovalGrantLifetime::invocation}));
+
+  CHECK(executor->starts == 0);
+  CHECK(
+      std::ranges::none_of(kernel.event_log().events(), [](const auto& value) {
+        return std::holds_alternative<domain::ToolSpendReserved>(
+                   value.payload) ||
+               std::holds_alternative<domain::ToolStarted>(value.payload);
+      }));
+  CHECK(std::ranges::any_of(kernel.event_log().events(), [](const auto& value) {
+    const auto* failed = std::get_if<domain::ToolErrored>(&value.payload);
+    return failed != nullptr &&
+           failed->error.message ==
+               "paid tool price quote expired before launch";
+  }));
+  REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
+}
+
+TEST_CASE("successful paid result without cost evidence remains reserved",
+          "[tools][runtime][spend][reconcile]") {
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  auto executor = std::make_shared<PaidExecutor>(
+      domain::ToolSpendQuote{usd("0.4"),
+                             domain::ToolSpendEstimateBasis::policy_upper_bound,
+                             spend_digest(), spend_expiry()},
+      runtime::ToolResult{{domain::TextBlock{"done"}}});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(paid_declaration(), executor));
+  const auto snapshot = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
+  testing::ScriptedBackend backend{{
+      {initial,
+       testing::StreamScript{{
+           step(backend::ResponseStarted{"response"}),
+           step(backend::UsageObserved{{0, 0, 0, 0}}),
+           step(backend::ToolCallDelta{invocation, "generate_image", "{}"}),
+           step(backend::ResponseFinished{domain::FinishReason::tool_call}),
+           testing::EndOfStream{},
+       }}},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            snapshot,
+                            paid_policy()};
+  set_spend_ceiling(kernel, "1");
+  auto start = run_start(initial);
+  start.pricing_observation = pricing_observation();
+  REQUIRE(kernel.start(std::move(start)));
+  drain_to_inference_boundary(kernel, wake);
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    REQUIRE(kernel.drain());
+    if (std::ranges::any_of(kernel.event_log().events(), [](const auto& value) {
+          return std::holds_alternative<
+              domain::ToolSpendReconciliationRequired>(value.payload);
+        })) {
+      break;
+    }
+    wake.wait_for_change(wake.count());
+  }
+  CHECK(
+      std::ranges::count_if(kernel.event_log().events(), [](const auto& value) {
+        return std::holds_alternative<domain::ToolSpendReconciliationRequired>(
+            value.payload);
+      }) == 1);
+  REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
+}
+
 TEST_CASE("continuation projection withholds incomplete assistant tool turns",
           "[tools][runtime][failure]") {
   const auto invocation = make_id<domain::InvocationId>("blocking-call");
@@ -964,6 +1633,259 @@ TEST_CASE("durable pending approval is reconstructed without execution",
   REQUIRE_FALSE((*replayed)->pending_tool_approval());
   REQUIRE(executor->starts == 0);
   REQUIRE((*replayed)->cancel_run(make_id<domain::RunId>("run"), "cleanup"));
+}
+
+TEST_CASE("durable paid approval replay invokes no executor methods",
+          "[tools][policy][storage][replay][spend][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  const auto profile =
+      make_id<domain::PermissionProfileId>("tools-low-prompt-v1");
+  const auto quote = domain::ToolSpendQuote{
+      usd("0.4"), domain::ToolSpendEstimateBasis::catalog_estimate,
+      spend_digest(), domain::EventTimestamp::max()};
+  auto executor = std::make_shared<PaidExecutor>(
+      quote, runtime::ToolResult{{domain::TextBlock{"unused"}}});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      paid_declaration(), executor, {},
+      runtime::ToolExecutorContract{"test.generate-image", "1"}));
+  const auto tools = snapshot_of(registry);
+  const auto make_policy = [&] {
+    return runtime::make_tool_launch_policy(tools,
+                                            {profile,
+                                             runtime::RestrictionLevel::low,
+                                             runtime::ApprovalMode::prompt,
+                                             {}});
+  };
+  auto policy = make_policy();
+  REQUIRE(policy);
+  auto initial = request("inference-1", "assistant-1", tools.declarations());
+  testing::ScriptedBackend backend{{
+      {initial,
+       testing::StreamScript{{
+           step(backend::ResponseStarted{"response"}),
+           step(backend::UsageObserved{{0, 0, 0, 0}}),
+           step(backend::ToolCallDelta{invocation, "generate_image", "{}"}),
+           step(backend::ResponseFinished{domain::FinishReason::tool_call}),
+           testing::EndOfStream{},
+       }}},
+  }};
+  MemoryStore store;
+  WakeCounter wake;
+  auto kernel = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::create, store.created},
+      store, backend, &wake, {}, {}, tools, *policy);
+  REQUIRE(kernel);
+  set_spend_ceiling(**kernel, "1");
+  auto start = run_start(initial);
+  start.attributes.permission_profile_id = profile;
+  start.provenance = provenance();
+  REQUIRE((*kernel)->start(std::move(start)));
+  drain_to_inference_boundary(**kernel, wake);
+  REQUIRE((*kernel)->pending_tool_approval());
+  REQUIRE(executor->validations == 1);
+  REQUIRE(executor->starts == 0);
+  kernel->reset();
+
+  auto replay_policy = make_policy();
+  REQUIRE(replay_policy);
+  testing::ScriptedBackend replay_backend{{}};
+  auto replayed = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::resume, store.created},
+      store, replay_backend, nullptr, {}, {}, tools, *replay_policy);
+  REQUIRE(replayed);
+  REQUIRE((*replayed)->pending_tool_approval());
+  CHECK((*replayed)->pending_tool_approval()->invocation_id == invocation);
+  CHECK(executor->validations == 1);
+  CHECK(executor->starts == 0);
+  REQUIRE((*replayed)->decide_approval(make_id<domain::RunId>("run"),
+                                       invocation,
+                                       {domain::ApprovalDecision::denied, {}}));
+  CHECK(executor->validations == 1);
+  CHECK(executor->starts == 0);
+  REQUIRE((*replayed)->cancel_run(make_id<domain::RunId>("run"), "cleanup"));
+}
+
+TEST_CASE("durable paid approval reuses normalized arguments and raw history",
+          "[tools][policy][storage][replay][spend]") {
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  const auto profile =
+      make_id<domain::PermissionProfileId>("tools-low-prompt-v1");
+  const auto quote = domain::ToolSpendQuote{
+      usd("0.4"), domain::ToolSpendEstimateBasis::catalog_estimate,
+      spend_digest(), domain::EventTimestamp::max()};
+  const auto raw =
+      domain::StructuredDataBlock{"application/json", R"({"count":"1"})"};
+  const auto normalized =
+      domain::StructuredDataBlock{"application/json", R"({"count":1})"};
+  auto executor = std::make_shared<PaidExecutor>(
+      quote,
+      runtime::ToolResult{{domain::TextBlock{"done"}},
+                          {},
+                          domain::ToolSpendReleased{invocation}},
+      normalized);
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      paid_declaration(), executor, {},
+      runtime::ToolExecutorContract{"test.generate-image", "1"}));
+  const auto tools = snapshot_of(registry);
+  const auto make_policy = [&] {
+    return runtime::make_tool_launch_policy(tools,
+                                            {profile,
+                                             runtime::RestrictionLevel::low,
+                                             runtime::ApprovalMode::prompt,
+                                             {}});
+  };
+  auto policy = make_policy();
+  REQUIRE(policy);
+  auto initial = request("inference-1", "assistant-1", tools.declarations());
+  testing::ScriptedBackend backend{{
+      {initial,
+       testing::StreamScript{{
+           step(backend::ResponseStarted{"response"}),
+           step(backend::UsageObserved{{0, 0, 0, 0}}),
+           step(backend::ToolCallDelta{invocation, "generate_image", raw.data}),
+           step(backend::ResponseFinished{domain::FinishReason::tool_call}),
+           testing::EndOfStream{},
+       }}},
+  }};
+  MemoryStore store;
+  WakeCounter wake;
+  auto kernel = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::create, store.created},
+      store, backend, &wake, {}, {}, tools, *policy);
+  REQUIRE(kernel);
+  set_spend_ceiling(**kernel, "1");
+  auto start = run_start(initial);
+  start.attributes.permission_profile_id = profile;
+  start.provenance = provenance();
+  start.pricing_observation = pricing_observation();
+  REQUIRE((*kernel)->start(std::move(start)));
+  drain_to_inference_boundary(**kernel, wake);
+  REQUIRE((*kernel)->pending_tool_approval());
+  const auto proposed =
+      std::ranges::find_if(store.events, [](const auto& event) {
+        return std::holds_alternative<domain::ToolProposed>(event.payload);
+      });
+  REQUIRE(proposed != store.events.end());
+  CHECK(std::get<domain::ToolProposed>(proposed->payload).arguments == raw);
+  CHECK(std::get<domain::ToolProposed>(proposed->payload).validated_arguments ==
+        normalized);
+  CHECK(executor->validations == 1);
+  kernel->reset();
+
+  auto replay_policy = make_policy();
+  REQUIRE(replay_policy);
+  testing::ScriptedBackend replay_backend{{}};
+  WakeCounter replay_wake;
+  auto replayed = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::resume, store.created},
+      store, replay_backend, &replay_wake, {}, {}, tools, *replay_policy);
+  REQUIRE(replayed);
+  CHECK(executor->validations == 1);
+  REQUIRE((*replayed)->decide_approval(
+      make_id<domain::RunId>("run"), invocation,
+      {domain::ApprovalDecision::approved,
+       {paid_scope()},
+       domain::ApprovalGrantLifetime::invocation}));
+  const auto has_result = [&] {
+    return std::ranges::any_of(
+        (*replayed)->event_log().events(), [](const auto& event) {
+          return std::holds_alternative<domain::ToolResultRecorded>(
+              event.payload);
+        });
+  };
+  for (int attempt = 0; attempt < 100 && !has_result(); ++attempt) {
+    REQUIRE((*replayed)->drain());
+    if (!has_result()) std::this_thread::sleep_for(10ms);
+  }
+  REQUIRE(has_result());
+  REQUIRE(executor->starts == 1);
+  REQUIRE(executor->invocations.size() == 1);
+  CHECK(executor->invocations.front().arguments.value == normalized);
+  const auto continuation =
+      runtime::tool_continuation_messages((*replayed)->event_log().events());
+  REQUIRE(continuation);
+  REQUIRE_FALSE(continuation->empty());
+  REQUIRE(continuation->front().tool_calls.size() == 1);
+  CHECK(continuation->front().tool_calls.front().arguments == raw);
+  REQUIRE((*replayed)->cancel_run(make_id<domain::RunId>("run"), "cleanup"));
+}
+
+TEST_CASE("durable paid replay rejects malformed normalized arguments",
+          "[tools][policy][storage][replay][spend][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  const auto profile =
+      make_id<domain::PermissionProfileId>("tools-low-prompt-v1");
+  const auto quote = domain::ToolSpendQuote{
+      usd("0.4"), domain::ToolSpendEstimateBasis::catalog_estimate,
+      spend_digest(), domain::EventTimestamp::max()};
+  auto executor = std::make_shared<PaidExecutor>(
+      quote, runtime::ToolResult{{domain::TextBlock{"unused"}}});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      paid_declaration(), executor, {},
+      runtime::ToolExecutorContract{"test.generate-image", "1"}));
+  const auto tools = snapshot_of(registry);
+  const auto make_policy = [&] {
+    return runtime::make_tool_launch_policy(tools,
+                                            {profile,
+                                             runtime::RestrictionLevel::low,
+                                             runtime::ApprovalMode::prompt,
+                                             {}});
+  };
+  auto policy = make_policy();
+  REQUIRE(policy);
+  auto initial = request("inference-1", "assistant-1", tools.declarations());
+  testing::ScriptedBackend backend{{
+      {initial, tool_call_script(invocation, "generate_image")},
+  }};
+  MemoryStore store;
+  WakeCounter wake;
+  runtime::RunKernelLimits limits;
+  limits.tool_argument_bytes = 64;
+  auto kernel = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::create, store.created},
+      store, backend, &wake, {}, limits, tools, *policy);
+  REQUIRE(kernel);
+  set_spend_ceiling(**kernel, "1");
+  auto start = run_start(initial);
+  start.attributes.permission_profile_id = profile;
+  start.provenance = provenance();
+  start.pricing_observation = pricing_observation();
+  REQUIRE((*kernel)->start(std::move(start)));
+  drain_to_inference_boundary(**kernel, wake);
+  REQUIRE((*kernel)->pending_tool_approval());
+  kernel->reset();
+
+  auto proposed_event =
+      std::ranges::find_if(store.events, [](const auto& event) {
+        return std::holds_alternative<domain::ToolProposed>(event.payload);
+      });
+  REQUIRE(proposed_event != store.events.end());
+  auto& proposed = std::get<domain::ToolProposed>(proposed_event->payload);
+  REQUIRE(proposed.validated_arguments);
+  SECTION("wrong media type") {
+    proposed.validated_arguments->media_type = "text/plain";
+  }
+  SECTION("empty payload") {
+    proposed.validated_arguments->data.clear();
+  }
+  SECTION("oversized payload") {
+    proposed.validated_arguments->data.assign(limits.tool_argument_bytes + 1U,
+                                              'x');
+  }
+
+  auto replay_policy = make_policy();
+  REQUIRE(replay_policy);
+  testing::ScriptedBackend replay_backend{{}};
+  auto replayed = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::resume, store.created},
+      store, replay_backend, nullptr, {}, limits, tools, *replay_policy);
+  REQUIRE_FALSE(replayed);
+  CHECK(replayed.error().code == runtime::RunKernelErrorCode::replay_rejected);
+  CHECK(executor->validations == 1);
+  CHECK(executor->starts == 0);
 }
 
 TEST_CASE("invalid arguments fail before policy without leaking validator text",
@@ -1214,6 +2136,113 @@ TEST_CASE("tool output and deadline limits become one bounded terminal error",
   }
 }
 
+TEST_CASE("paid tool cancellation and timeout reconcile started transport",
+          "[tools][spend][cancellation][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  const auto quote = domain::ToolSpendQuote{
+      usd("0.4"), domain::ToolSpendEstimateBasis::catalog_estimate,
+      spend_digest(), domain::EventTimestamp::max()};
+  auto timeout = 1000ms;
+  bool cancel{};
+  SECTION("deadline") {
+    timeout = 20ms;
+  }
+  SECTION("cancellation") {
+    cancel = true;
+  }
+
+  const runtime::ToolExecutionLimits limits{128, 2, timeout};
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(paid_declaration(),
+                                 std::make_shared<PaidBlockingExecutor>(quote),
+                                 limits));
+  const auto tools = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1", tools.declarations());
+  testing::ScriptedBackend backend{{
+      {initial,
+       testing::StreamScript{{
+           step(backend::ResponseStarted{"response"}),
+           step(backend::UsageObserved{{0, 0, 0, 0}}),
+           step(backend::ToolCallDelta{invocation, "generate_image", "{}"}),
+           step(backend::ResponseFinished{domain::FinishReason::tool_call}),
+           testing::EndOfStream{},
+       }}},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            tools,
+                            paid_policy()};
+  set_spend_ceiling(kernel, "1");
+  auto start = run_start(initial);
+  start.pricing_observation = pricing_observation();
+  REQUIRE(kernel.start(std::move(start)));
+  drain_to_inference_boundary(kernel, wake);
+
+  const auto has_event = [&](const auto predicate) {
+    return std::ranges::any_of(kernel.event_log().events(), predicate);
+  };
+  for (int attempt = 0;
+       attempt < 100 && !has_event([](const auto& event) {
+         return std::holds_alternative<domain::ToolStarted>(event.payload);
+       });
+       ++attempt) {
+    REQUIRE(kernel.drain());
+    std::this_thread::sleep_for(10ms);
+  }
+  REQUIRE(has_event([](const auto& event) {
+    return std::holds_alternative<domain::ToolStarted>(event.payload);
+  }));
+
+  if (cancel) {
+    REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "user cancelled"));
+  } else {
+    for (int attempt = 0;
+         attempt < 100 && !has_event([](const auto& event) {
+           return std::holds_alternative<domain::ToolErrored>(event.payload);
+         });
+         ++attempt) {
+      REQUIRE(kernel.drain());
+      std::this_thread::sleep_for(10ms);
+    }
+  }
+
+  const auto& events = kernel.event_log().events();
+  const auto reserved = std::ranges::find_if(events, [](const auto& event) {
+    return std::holds_alternative<domain::ToolSpendReserved>(event.payload);
+  });
+  const auto started = std::ranges::find_if(events, [](const auto& event) {
+    return std::holds_alternative<domain::ToolStarted>(event.payload);
+  });
+  const auto reconciled = std::ranges::find_if(events, [](const auto& event) {
+    const auto* value =
+        std::get_if<domain::ToolSpendReconciliationRequired>(&event.payload);
+    return value != nullptr &&
+           value->reason ==
+               domain::ToolSpendReconciliationReason::transport_outcome_unknown;
+  });
+  const auto errored = std::ranges::find_if(events, [](const auto& event) {
+    return std::holds_alternative<domain::ToolErrored>(event.payload);
+  });
+  REQUIRE(reserved != events.end());
+  REQUIRE(started != events.end());
+  REQUIRE(reconciled != events.end());
+  REQUIRE(errored != events.end());
+  CHECK(reserved < started);
+  CHECK(started < reconciled);
+  CHECK(reconciled < errored);
+  CHECK(std::ranges::none_of(events, [](const auto& event) {
+    return std::holds_alternative<domain::ToolSpendReleased>(event.payload) ||
+           std::holds_alternative<domain::ToolSpendFinalized>(event.payload);
+  }));
+  if (!cancel) {
+    REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
+  }
+}
+
 TEST_CASE("durable replay rebuilds tool state without validation or execution",
           "[tools][replay][failure]") {
   const auto session = make_id<domain::SessionId>("session");
@@ -1287,6 +2316,164 @@ TEST_CASE("durable replay rebuilds tool state without validation or execution",
   REQUIRE((*kernel)->projection(run)->status() == domain::RunStatus::running);
   REQUIRE_FALSE((*kernel)->active_run_id());
   REQUIRE(store.remaining_exchanges() == 0);
+}
+
+TEST_CASE(
+    "durable replay reconciles an interrupted paid tool without execution",
+    "[tools][replay][spend][failure]") {
+  const auto session = make_id<domain::SessionId>("paid-session");
+  const auto run = make_id<domain::RunId>("run");
+  const auto inference = make_id<domain::InferenceId>("inference");
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  const auto assistant = make_id<domain::MessageId>("assistant");
+  const auto result_message = make_id<domain::MessageId>("tool-message");
+  const auto quote = domain::ToolSpendQuote{
+      usd("0.4"), domain::ToolSpendEstimateBasis::catalog_estimate,
+      spend_digest(), domain::EventTimestamp{1000ms}};
+  MemoryStore store;
+  store.session_id = session;
+  store.events = {
+      persisted_event(
+          1, domain::RunStarted{make_id<domain::SurfaceId>("test"),
+                                make_id<domain::WorkspaceId>("chat"),
+                                make_id<domain::PermissionProfileId>("observe"),
+                                std::nullopt}),
+      persisted_event(2, domain::UserContentAdded{domain::Message{
+                             make_id<domain::MessageId>("user"),
+                             domain::Role::user,
+                             {domain::TextBlock{"hello"}},
+                             std::nullopt}}),
+      persisted_event(3, domain::RunCompletionRequested{}),
+      persisted_event(
+          4, domain::InferenceStarted{inference,
+                                      make_id<domain::ModelId>("model")}),
+      persisted_event(5, domain::AssistantContentStarted{assistant, inference}),
+      persisted_event(6,
+                      domain::ToolProposed{invocation,
+                                           "generate_image",
+                                           {"application/json", "{}"},
+                                           {domain::Effect::spend},
+                                           std::nullopt,
+                                           true,
+                                           {},
+                                           {},
+                                           result_message,
+                                           quote,
+                                           domain::StructuredDataBlock{
+                                               "application/json", "{}"}},
+                      invocation),
+      persisted_event(7,
+                      domain::AssistantContentFinished{assistant, inference}),
+      persisted_event(
+          8, domain::InferenceFinished{inference,
+                                       domain::FinishReason::tool_call}),
+      persisted_event(
+          9,
+          domain::ToolPolicyDecided{
+              invocation, domain::PolicyDecision::allow, {}, std::nullopt},
+          invocation),
+      persisted_event(10,
+                      domain::ToolSpendReserved{domain::ToolSpendReservation{
+                          invocation, quote.maximum, quote.basis,
+                          quote.evidence_digest, quote.valid_until}},
+                      invocation),
+      persisted_event(11, domain::ToolStarted{invocation}, invocation),
+  };
+  store.events[5].metadata.schema_version = 2;
+  testing::ScriptedBackend backend{{}};
+
+  auto kernel = runtime::RunKernel::open_durable(
+      {session, runtime::DurableSessionMode::resume,
+       domain::EventTimestamp{1ms}},
+      store, backend, nullptr, [] { return domain::EventTimestamp{100ms}; });
+
+  REQUIRE(kernel);
+  REQUIRE(store.events.size() == 14);
+  CHECK(std::holds_alternative<domain::ToolSpendReconciliationRequired>(
+      store.events[11].payload));
+  CHECK(std::holds_alternative<domain::ToolErrored>(store.events[12].payload));
+  CHECK(std::holds_alternative<domain::RunFailed>(store.events[13].payload));
+  REQUIRE((*kernel)->projection(run) != nullptr);
+  CHECK((*kernel)->projection(run)->status() == domain::RunStatus::failed);
+  CHECK_FALSE((*kernel)->active_run_id());
+}
+
+TEST_CASE("durable replay releases a paid reservation before tool start",
+          "[tools][replay][spend][failure]") {
+  const auto session = make_id<domain::SessionId>("paid-session");
+  const auto run = make_id<domain::RunId>("run");
+  const auto inference = make_id<domain::InferenceId>("inference");
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  const auto assistant = make_id<domain::MessageId>("assistant");
+  const auto result_message = make_id<domain::MessageId>("tool-message");
+  const auto quote = domain::ToolSpendQuote{
+      usd("0.4"), domain::ToolSpendEstimateBasis::catalog_estimate,
+      spend_digest(), domain::EventTimestamp{1000ms}};
+  MemoryStore store;
+  store.session_id = session;
+  store.events = {
+      persisted_event(
+          1, domain::RunStarted{make_id<domain::SurfaceId>("test"),
+                                make_id<domain::WorkspaceId>("chat"),
+                                make_id<domain::PermissionProfileId>("observe"),
+                                std::nullopt}),
+      persisted_event(2, domain::UserContentAdded{domain::Message{
+                             make_id<domain::MessageId>("user"),
+                             domain::Role::user,
+                             {domain::TextBlock{"hello"}},
+                             std::nullopt}}),
+      persisted_event(3, domain::RunCompletionRequested{}),
+      persisted_event(
+          4, domain::InferenceStarted{inference,
+                                      make_id<domain::ModelId>("model")}),
+      persisted_event(5, domain::AssistantContentStarted{assistant, inference}),
+      persisted_event(6,
+                      domain::ToolProposed{invocation,
+                                           "generate_image",
+                                           {"application/json", "{}"},
+                                           {domain::Effect::spend},
+                                           std::nullopt,
+                                           true,
+                                           {},
+                                           {},
+                                           result_message,
+                                           quote,
+                                           domain::StructuredDataBlock{
+                                               "application/json", "{}"}},
+                      invocation),
+      persisted_event(7,
+                      domain::AssistantContentFinished{assistant, inference}),
+      persisted_event(
+          8, domain::InferenceFinished{inference,
+                                       domain::FinishReason::tool_call}),
+      persisted_event(
+          9,
+          domain::ToolPolicyDecided{
+              invocation, domain::PolicyDecision::allow, {}, std::nullopt},
+          invocation),
+      persisted_event(10,
+                      domain::ToolSpendReserved{domain::ToolSpendReservation{
+                          invocation, quote.maximum, quote.basis,
+                          quote.evidence_digest, quote.valid_until}},
+                      invocation),
+  };
+  store.events[5].metadata.schema_version = 2;
+  testing::ScriptedBackend backend{{}};
+
+  auto kernel = runtime::RunKernel::open_durable(
+      {session, runtime::DurableSessionMode::resume,
+       domain::EventTimestamp{1ms}},
+      store, backend, nullptr, [] { return domain::EventTimestamp{100ms}; });
+
+  REQUIRE(kernel);
+  REQUIRE(store.events.size() == 13);
+  CHECK(std::holds_alternative<domain::ToolSpendReleased>(
+      store.events[10].payload));
+  CHECK(std::holds_alternative<domain::ToolErrored>(store.events[11].payload));
+  CHECK(std::holds_alternative<domain::RunFailed>(store.events[12].payload));
+  REQUIRE((*kernel)->projection(run) != nullptr);
+  CHECK((*kernel)->projection(run)->status() == domain::RunStatus::failed);
+  CHECK_FALSE((*kernel)->active_run_id());
 }
 
 TEST_CASE("durable replay rejects duplicate invocation identity",

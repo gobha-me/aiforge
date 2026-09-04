@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include <aiforge/domain/events.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
 
 namespace {

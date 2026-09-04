@@ -21,6 +21,7 @@
 #include <aiforge/config/config.hpp>
 #include <aiforge/config/file_store.hpp>
 #include <aiforge/config/provenance.hpp>
+#include <aiforge/domain/tool_spend.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/runtime/memory_controller.hpp>
@@ -554,6 +555,17 @@ struct VeniceConfigMutation {
   return result;
 }
 
+[[nodiscard]] auto rebuild_tool_spend_ledger(
+    const std::span<const domain::RunEvent> events)
+    -> std::expected<domain::ToolSpendLedgerProjection, std::string> {
+  domain::ToolSpendLedgerProjection result;
+  for (const auto& event : events) {
+    auto applied = result.apply(event);
+    if (!applied) return std::unexpected(applied.error().message);
+  }
+  return result;
+}
+
 [[nodiscard]] auto reported_cost_text(const domain::ReportedCost& cost)
     -> std::string {
   std::string result;
@@ -683,6 +695,7 @@ struct InferenceCounts {
 
 [[nodiscard]] auto usage_header_text(
     const domain::UsageLedgerProjection& ledger,
+    const domain::ToolSpendLedgerProjection& tool_spend,
     const domain::SessionSpendCeilingProjection& ceiling) -> std::string {
   const auto& usage = ledger.total_usage();
   auto result = std::format("usage {} in/{} out", usage.input_tokens,
@@ -710,22 +723,27 @@ struct InferenceCounts {
     if (diem.subtotal) result += " " + estimate_summary_text(diem);
   }
   if (ceiling.ceiling()) {
-    const auto spend =
-        domain::summarize_session_spend(ledger.records(), *ceiling.ceiling());
+    const auto spend = domain::summarize_combined_session_spend(
+        ledger.records(), tool_spend, *ceiling.ceiling());
     result += " | spend ";
-    if (spend.accounted) {
-      result += spend.accounted->amount().to_string() + "/" +
-                spend.ceiling.amount().to_string() + " USD";
-      if (spend.reached) result += " reached";
+    if (!spend) {
+      result +=
+          "unavailable/" + ceiling.ceiling()->amount().to_string() + " USD";
+    } else if (spend->accounted) {
+      result += spend->accounted->amount().to_string() + "/" +
+                spend->ceiling.amount().to_string() + " USD";
+      if (spend->reached) result += " reached";
     } else {
-      result += "unavailable/" + spend.ceiling.amount().to_string() + " USD";
+      result += "unavailable/" + spend->ceiling.amount().to_string() + " USD";
     }
   }
   return result;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Spend states.
 [[nodiscard]] auto usage_panel_lines(
     const domain::UsageLedgerProjection& ledger,
+    const domain::ToolSpendLedgerProjection& tool_spend,
     const domain::SessionSpendCeilingProjection& ceiling)
     -> std::vector<std::string> {
   const auto& usage = ledger.total_usage();
@@ -768,35 +786,69 @@ struct InferenceCounts {
     lines.push_back(std::move(line));
   }
   if (ceiling.ceiling()) {
-    const auto spend =
-        domain::summarize_session_spend(ledger.records(), *ceiling.ceiling());
+    const auto spend = domain::summarize_combined_session_spend(
+        ledger.records(), tool_spend, *ceiling.ceiling());
     lines.push_back("Spend ceiling (USD): " +
-                    spend.ceiling.amount().to_string());
-    if (spend.accounted) {
+                    ceiling.ceiling()->amount().to_string());
+    if (!spend) {
+      lines.push_back("Accounted spend (USD): unavailable");
+      lines.push_back("Tool spend unavailable: " + spend.error().message);
+    } else if (spend->accounted && spend->remaining) {
       lines.push_back("Accounted spend (USD): " +
-                      spend.accounted->amount().to_string());
+                      spend->accounted->amount().to_string());
       lines.push_back("Remaining spend (USD): " +
-                      spend.remaining->amount().to_string());
+                      spend->remaining->amount().to_string());
       lines.push_back(std::string{"Spend ceiling state: "} +
-                      (spend.reached ? "reached" : "open"));
+                      (spend->reached ? "reached" : "open"));
       lines.push_back(std::format("Spend coverage: {} provider-reported + {} "
                                   "catalog-derived of {} inferences",
-                                  spend.reported_inferences,
-                                  spend.estimated_inferences,
-                                  spend.total_inferences));
+                                  spend->reported_inferences,
+                                  spend->estimated_inferences,
+                                  spend->total_inferences));
     } else {
       lines.push_back("Accounted spend (USD): unavailable");
-      for (const auto& failure : spend.unavailable) {
+      for (const auto& failure : spend->unavailable) {
         lines.push_back(
             "Spend unavailable: " +
             std::string{domain::cost_estimate_reason_name(failure.reason)} +
             "=" + std::to_string(failure.count));
       }
-      if (spend.aggregation_failure) {
+      if (spend->aggregation_failure) {
         lines.push_back("Spend unavailable: " +
                         std::string{domain::cost_estimate_reason_name(
-                            *spend.aggregation_failure)});
+                            *spend->aggregation_failure)});
       }
+    }
+    if (spend) {
+      const auto amount_text = [](const auto& amount) {
+        return amount ? amount->amount().to_string()
+                      : std::string{"unavailable"};
+      };
+      lines.push_back("Inference accounted spend (USD): " +
+                      amount_text(spend->inference_accounted));
+      lines.push_back("Tool accounted spend (USD): " +
+                      amount_text(spend->tool_accounted));
+      lines.push_back(std::format("Tool reserved maximum (USD): {} ({} active)",
+                                  amount_text(spend->tool_reserved_maximum),
+                                  spend->tool_reserved));
+      lines.push_back(
+          std::format("Tool reconciliation maximum (USD): {} ({} unresolved)",
+                      amount_text(spend->tool_reconciliation_maximum),
+                      spend->tool_reconciliation_required));
+      lines.push_back(
+          std::format("Tool released reservations: {}", spend->tool_released));
+      lines.push_back(std::format(
+          "Tool finalized provider-reported (USD): {} ({} finalized)",
+          amount_text(spend->tool_provider_reported_amount),
+          spend->tool_provider_reported));
+      lines.push_back(std::format(
+          "Tool finalized catalog-estimate (USD): {} ({} finalized)",
+          amount_text(spend->tool_catalog_estimate_amount),
+          spend->tool_catalog_estimate));
+      lines.push_back(std::format(
+          "Tool finalized policy-upper-bound (USD): {} ({} finalized)",
+          amount_text(spend->tool_policy_upper_bound_amount),
+          spend->tool_policy_upper_bound));
     }
   } else {
     lines.push_back("Spend ceiling: not set");
@@ -864,6 +916,16 @@ class ChatAppImpl final : public InteractiveChatApp {
       return;
     }
     m_usage_ledger = std::move(*usage);
+    auto tool_spend =
+        rebuild_tool_spend_ledger(m_session->event_log().events());
+    if (!tool_spend) {
+      m_setup_error = cli::CommandFailure{
+          cli::CommandFailureKind::runtime,
+          "interactive tool spend replay failed: " + tool_spend.error()};
+      m_session.reset();
+      return;
+    }
+    m_tool_spend_ledger = std::move(*tool_spend);
     auto ceiling = rebuild_spend_ceiling(m_session->event_log().events());
     if (!ceiling) {
       m_setup_error = cli::CommandFailure{
@@ -1155,7 +1217,8 @@ class ChatAppImpl final : public InteractiveChatApp {
     } else if (persona.selected) {
       header += " | persona " + persona.selected->name;
     }
-    header += " | " + usage_header_text(m_usage_ledger, m_spend_ceiling);
+    header += " | " + usage_header_text(m_usage_ledger, m_tool_spend_ledger,
+                                        m_spend_ceiling);
     screen.write_text(0, 0,
                       termforge::detail::truncate_to_width(header, columns),
                       termforge::theme::kFg, termforge::Rgb{0x20, 0x20, 0x40});
@@ -1528,9 +1591,10 @@ class ChatAppImpl final : public InteractiveChatApp {
   }
 
   auto show_usage() -> bool {
-    show_panel("Session usage, cost, and spend ceiling",
-               usage_panel_lines(m_usage_ledger, m_spend_ceiling),
-               "Usage summary is derived from session events");
+    show_panel(
+        "Session usage, cost, and spend ceiling",
+        usage_panel_lines(m_usage_ledger, m_tool_spend_ledger, m_spend_ceiling),
+        "Usage summary is derived from session events");
     return true;
   }
 
@@ -1951,6 +2015,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Session flow.
   auto switch_session(const surfaces::ChatSessionOpen::Mode mode,
                       std::optional<domain::SessionId> session_id) -> bool {
     if (m_session->active()) {
@@ -1964,7 +2029,7 @@ class ChatAppImpl final : public InteractiveChatApp {
                        : "A session ID is required";
         return false;
       }
-      if (*session_id == m_session->session_id()) {
+      if (session_id == m_session->session_id()) {
         m_help_visible = false;
         m_status = "Session is already current";
         return true;
@@ -2015,6 +2080,13 @@ class ChatAppImpl final : public InteractiveChatApp {
                  candidate_ceiling.error();
       return false;
     }
+    auto candidate_tool_spend =
+        rebuild_tool_spend_ledger((*candidate)->event_log().events());
+    if (!candidate_tool_spend) {
+      m_status = "Interactive tool spend replay failed: " +
+                 candidate_tool_spend.error();
+      return false;
+    }
     auto rebuilt = m_transcript.rebuild((*candidate)->event_log().events());
     if (!rebuilt) {
       m_status = "Interactive transcript replay failed";
@@ -2025,6 +2097,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     m_request_setting_overrides = {};
     m_usage_ledger = std::move(*candidate_usage);
     m_spend_ceiling = std::move(*candidate_ceiling);
+    m_tool_spend_ledger = std::move(*candidate_tool_spend);
     m_help_visible = false;
     m_history_cutoff = 0;
     sync_history();
@@ -4214,6 +4287,13 @@ class ChatAppImpl final : public InteractiveChatApp {
                   ceiling.error().message});
         return false;
       }
+      auto tool_spend = m_tool_spend_ledger.apply(event);
+      if (!tool_spend) {
+        fail({cli::CommandFailureKind::runtime,
+              "interactive tool spend update failed: " +
+                  tool_spend.error().message});
+        return false;
+      }
       auto applied = m_transcript.apply(event);
       if (!applied) {
         fail({cli::CommandFailureKind::runtime,
@@ -4264,6 +4344,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   bool m_poll_worker_updates{true};
   domain::UsageLedgerProjection m_usage_ledger;
   domain::SessionSpendCeilingProjection m_spend_ceiling;
+  domain::ToolSpendLedgerProjection m_tool_spend_ledger;
   TranscriptView m_transcript;
   termforge::TextBox m_help;
   termforge::Composer m_composer;

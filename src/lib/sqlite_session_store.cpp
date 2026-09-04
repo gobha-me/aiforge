@@ -284,6 +284,82 @@ template <typename Enum>
       {{"command_line", domain::SessionSpendCeilingSource::command_line}});
 }
 
+[[nodiscard]] auto tool_spend_estimate_basis_name(
+    const domain::ToolSpendEstimateBasis value) -> std::string_view {
+  switch (value) {
+    case domain::ToolSpendEstimateBasis::catalog_estimate:
+      return "catalog_estimate";
+    case domain::ToolSpendEstimateBasis::policy_upper_bound:
+      return "policy_upper_bound";
+  }
+  throw CodecFailure{"invalid tool spend estimate basis"};
+}
+
+[[nodiscard]] auto parse_tool_spend_estimate_basis(const Json& value)
+    -> domain::ToolSpendEstimateBasis {
+  return enum_value<domain::ToolSpendEstimateBasis>(
+      value.get<std::string>(),
+      {{"catalog_estimate", domain::ToolSpendEstimateBasis::catalog_estimate},
+       {"policy_upper_bound",
+        domain::ToolSpendEstimateBasis::policy_upper_bound}});
+}
+
+[[nodiscard]] auto tool_spend_finalization_basis_name(
+    const domain::ToolSpendFinalizationBasis value) -> std::string_view {
+  switch (value) {
+    case domain::ToolSpendFinalizationBasis::provider_reported:
+      return "provider_reported";
+    case domain::ToolSpendFinalizationBasis::catalog_estimate:
+      return "catalog_estimate";
+    case domain::ToolSpendFinalizationBasis::policy_upper_bound:
+      return "policy_upper_bound";
+  }
+  throw CodecFailure{"invalid tool spend finalization basis"};
+}
+
+[[nodiscard]] auto parse_tool_spend_finalization_basis(const Json& value)
+    -> domain::ToolSpendFinalizationBasis {
+  return enum_value<domain::ToolSpendFinalizationBasis>(
+      value.get<std::string>(),
+      {{"provider_reported",
+        domain::ToolSpendFinalizationBasis::provider_reported},
+       {"catalog_estimate",
+        domain::ToolSpendFinalizationBasis::catalog_estimate},
+       {"policy_upper_bound",
+        domain::ToolSpendFinalizationBasis::policy_upper_bound}});
+}
+
+[[nodiscard]] auto tool_spend_reconciliation_reason_name(
+    const domain::ToolSpendReconciliationReason value) -> std::string_view {
+  switch (value) {
+    case domain::ToolSpendReconciliationReason::transport_outcome_unknown:
+      return "transport_outcome_unknown";
+    case domain::ToolSpendReconciliationReason::provider_cost_unavailable:
+      return "provider_cost_unavailable";
+    case domain::ToolSpendReconciliationReason::provider_cost_mismatch:
+      return "provider_cost_mismatch";
+    case domain::ToolSpendReconciliationReason::
+        finalization_persistence_unknown:
+      return "finalization_persistence_unknown";
+  }
+  throw CodecFailure{"invalid tool spend reconciliation reason"};
+}
+
+[[nodiscard]] auto parse_tool_spend_reconciliation_reason(const Json& value)
+    -> domain::ToolSpendReconciliationReason {
+  return enum_value<domain::ToolSpendReconciliationReason>(
+      value.get<std::string>(),
+      {{"transport_outcome_unknown",
+        domain::ToolSpendReconciliationReason::transport_outcome_unknown},
+       {"provider_cost_unavailable",
+        domain::ToolSpendReconciliationReason::provider_cost_unavailable},
+       {"provider_cost_mismatch",
+        domain::ToolSpendReconciliationReason::provider_cost_mismatch},
+       {"finalization_persistence_unknown",
+        domain::ToolSpendReconciliationReason::
+            finalization_persistence_unknown}});
+}
+
 [[nodiscard]] auto approval_name(const domain::ApprovalDecision value)
     -> std::string_view {
   switch (value) {
@@ -734,6 +810,100 @@ template <typename Enum>
   return {value.at("algorithm").get<std::string>(),
           value.at("value").get<std::string>(),
           value.at("byte_size").get<std::uint64_t>()};
+}
+
+[[nodiscard]] auto monetary_amount_json(const domain::MonetaryAmount& amount)
+    -> Json {
+  return {{"unit", std::string{amount.unit()}},
+          {"amount", amount.amount().to_string()}};
+}
+
+[[nodiscard]] auto parse_monetary_amount(const Json& value)
+    -> domain::MonetaryAmount {
+  auto decimal =
+      domain::DecimalAmount::from(value.at("amount").get<std::string>());
+  if (!decimal) throw CodecFailure{"monetary amount is invalid"};
+  auto amount = domain::MonetaryAmount::create(
+      value.at("unit").get<std::string>(), *decimal);
+  if (!amount) throw CodecFailure{"monetary unit is invalid"};
+  return std::move(*amount);
+}
+
+[[nodiscard]] auto tool_spend_reservation_json(
+    const domain::ToolSpendReservation& reservation) -> Json {
+  if (!domain::valid_tool_spend_reservation(reservation))
+    throw CodecFailure{"tool spend reservation is invalid"};
+  return {
+      {"invocation_id", id_text(reservation.invocation_id)},
+      {"maximum", monetary_amount_json(reservation.maximum)},
+      {"basis", tool_spend_estimate_basis_name(reservation.basis)},
+      {"evidence_digest", digest_json(reservation.evidence_digest)},
+      {"valid_until_ms", reservation.valid_until.time_since_epoch().count()}};
+}
+
+[[nodiscard]] auto parse_tool_spend_reservation(const Json& value)
+    -> domain::ToolSpendReservation {
+  domain::ToolSpendReservation reservation{
+      parse_id<domain::InvocationId>(value.at("invocation_id")),
+      parse_monetary_amount(value.at("maximum")),
+      parse_tool_spend_estimate_basis(value.at("basis")),
+      parse_digest(value.at("evidence_digest")),
+      domain::EventTimestamp{std::chrono::milliseconds{
+          value.at("valid_until_ms").get<std::int64_t>()}}};
+  if (!domain::valid_tool_spend_reservation(reservation))
+    throw CodecFailure{"tool spend reservation is invalid"};
+  return reservation;
+}
+
+[[nodiscard]] auto tool_spend_quote_json(const domain::ToolSpendQuote& quote)
+    -> Json {
+  if (!domain::valid_tool_spend_quote(quote))
+    throw CodecFailure{"tool spend quote is invalid"};
+  return {{"maximum", monetary_amount_json(quote.maximum)},
+          {"basis", tool_spend_estimate_basis_name(quote.basis)},
+          {"evidence_digest", digest_json(quote.evidence_digest)},
+          {"valid_until_ms", quote.valid_until.time_since_epoch().count()}};
+}
+
+[[nodiscard]] auto parse_tool_spend_quote(const Json& value)
+    -> domain::ToolSpendQuote {
+  domain::ToolSpendQuote quote{
+      parse_monetary_amount(value.at("maximum")),
+      parse_tool_spend_estimate_basis(value.at("basis")),
+      parse_digest(value.at("evidence_digest")),
+      domain::EventTimestamp{std::chrono::milliseconds{
+          value.at("valid_until_ms").get<std::int64_t>()}}};
+  if (!domain::valid_tool_spend_quote(quote))
+    throw CodecFailure{"tool spend quote is invalid"};
+  return quote;
+}
+
+[[nodiscard]] auto tool_spend_finalization_json(
+    const domain::ToolSpendFinalization& finalization) -> Json {
+  if (!domain::valid_tool_spend_finalization_shape(finalization))
+    throw CodecFailure{"tool spend finalization is invalid"};
+  return {{"invocation_id", id_text(finalization.invocation_id)},
+          {"amount", monetary_amount_json(finalization.amount)},
+          {"basis", tool_spend_finalization_basis_name(finalization.basis)},
+          {"provider_evidence_digest",
+           finalization.provider_evidence_digest
+               ? digest_json(*finalization.provider_evidence_digest)
+               : Json(nullptr)}};
+}
+
+[[nodiscard]] auto parse_tool_spend_finalization(const Json& value)
+    -> domain::ToolSpendFinalization {
+  std::optional<domain::ContentDigest> evidence;
+  if (!value.at("provider_evidence_digest").is_null())
+    evidence = parse_digest(value.at("provider_evidence_digest"));
+  domain::ToolSpendFinalization finalization{
+      parse_id<domain::InvocationId>(value.at("invocation_id")),
+      parse_monetary_amount(value.at("amount")),
+      parse_tool_spend_finalization_basis(value.at("basis")),
+      std::move(evidence)};
+  if (!domain::valid_tool_spend_finalization_shape(finalization))
+    throw CodecFailure{"tool spend finalization is invalid"};
+  return finalization;
 }
 
 [[nodiscard]] auto optional_decimal_json(
@@ -2804,11 +2974,23 @@ template <typename IdType>
           [](const domain::ToolPolicyFailed&) {
             return std::string{"tool.policy_failed"};
           },
+          [](const domain::ToolSpendReserved&) {
+            return std::string{"tool.spend_reserved"};
+          },
           [](const domain::ToolStarted&) {
             return std::string{"tool.started"};
           },
           [](const domain::ToolProgressed&) {
             return std::string{"tool.progressed"};
+          },
+          [](const domain::ToolSpendReleased&) {
+            return std::string{"tool.spend_released"};
+          },
+          [](const domain::ToolSpendFinalized&) {
+            return std::string{"tool.spend_finalized"};
+          },
+          [](const domain::ToolSpendReconciliationRequired&) {
+            return std::string{"tool.spend_reconciliation_required"};
           },
           [](const domain::ToolResultRecorded&) {
             return std::string{"tool.result_recorded"};
@@ -2919,7 +3101,7 @@ template <typename IdType>
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 65,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 69,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started",
@@ -2950,8 +3132,12 @@ template <typename IdType>
       "tool.approval_requested",
       "tool.approval_decided",
       "tool.policy_failed",
+      "tool.spend_reserved",
       "tool.started",
       "tool.progressed",
+      "tool.spend_released",
+      "tool.spend_finalized",
+      "tool.spend_reconciliation_required",
       "tool.result_recorded",
       "tool.errored",
       "question.requested",
@@ -2994,11 +3180,13 @@ template <typename IdType>
     -> bool {
   return (schema_version == 1 && known_payload_type(type)) ||
          (schema_version == 2 &&
-          (type == "plan.revision_proposed" || type == "run.child_created")) ||
+          (type == "plan.revision_proposed" || type == "run.child_created" ||
+           type == "tool.proposed")) ||
          ((schema_version == 3 || schema_version == 4) &&
           type == "run.child_created");
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Event encoder.
 [[nodiscard]] auto payload_json(const domain::RunEventPayload& payload,
                                 const std::uint32_t schema_version = 1)
     -> Json {
@@ -3090,19 +3278,30 @@ template <typename IdType>
             return {{"inference_id", id_text(value.inference_id)},
                     {"reason", optional_string_json(value.reason)}};
           },
-          [](const domain::ToolProposed& value) -> Json {
-            return {{"invocation_id", id_text(value.invocation_id)},
-                    {"tool_name", value.tool_name},
-                    {"arguments", structured_json(value.arguments)},
-                    {"declared_effects", effects_json(value.declared_effects)},
-                    {"parent_invocation_id",
-                     optional_id_json(value.parent_invocation_id)},
-                    {"arguments_replayable", value.arguments_replayable},
-                    {"validated_required_scopes",
-                     scopes_json(value.validated_required_scopes)},
-                    {"requested_scopes", scopes_json(value.requested_scopes)},
-                    {"result_message_id",
-                     optional_id_json(value.result_message_id)}};
+          [schema_version](const domain::ToolProposed& value) -> Json {
+            Json result{
+                {"invocation_id", id_text(value.invocation_id)},
+                {"tool_name", value.tool_name},
+                {"arguments", structured_json(value.arguments)},
+                {"declared_effects", effects_json(value.declared_effects)},
+                {"parent_invocation_id",
+                 optional_id_json(value.parent_invocation_id)},
+                {"arguments_replayable", value.arguments_replayable},
+                {"validated_required_scopes",
+                 scopes_json(value.validated_required_scopes)},
+                {"requested_scopes", scopes_json(value.requested_scopes)},
+                {"result_message_id",
+                 optional_id_json(value.result_message_id)}};
+            if (schema_version >= 2) {
+              result["spend_quote"] =
+                  value.spend_quote ? tool_spend_quote_json(*value.spend_quote)
+                                    : Json(nullptr);
+              result["validated_arguments"] =
+                  value.validated_arguments
+                      ? structured_json(*value.validated_arguments)
+                      : Json(nullptr);
+            }
+            return result;
           },
           [](const domain::ToolPolicyDecided& value) -> Json {
             return {{"invocation_id", id_text(value.invocation_id)},
@@ -3126,12 +3325,28 @@ template <typename IdType>
             return {{"invocation_id", id_text(value.invocation_id)},
                     {"error", domain_error_json(value.error)}};
           },
+          [](const domain::ToolSpendReserved& value) -> Json {
+            return {{"reservation",
+                     tool_spend_reservation_json(value.reservation)}};
+          },
           [](const domain::ToolStarted& value) -> Json {
             return {{"invocation_id", id_text(value.invocation_id)}};
           },
           [](const domain::ToolProgressed& value) -> Json {
             return {{"invocation_id", id_text(value.invocation_id)},
                     {"content", content_list_json(value.content)}};
+          },
+          [](const domain::ToolSpendReleased& value) -> Json {
+            return {{"invocation_id", id_text(value.invocation_id)}};
+          },
+          [](const domain::ToolSpendFinalized& value) -> Json {
+            return {{"finalization",
+                     tool_spend_finalization_json(value.finalization)}};
+          },
+          [](const domain::ToolSpendReconciliationRequired& value) -> Json {
+            return {{"invocation_id", id_text(value.invocation_id)},
+                    {"reason",
+                     tool_spend_reconciliation_reason_name(value.reason)}};
           },
           [](const domain::ToolResultRecorded& value) -> Json {
             return {{"invocation_id", id_text(value.invocation_id)},
@@ -3346,6 +3561,7 @@ template <typename IdType>
       payload);
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Event decoder.
 [[nodiscard]] auto parse_payload(const std::string_view type, const Json& value,
                                  const std::uint32_t schema_version)
     -> domain::RunEventPayload {
@@ -3452,6 +3668,12 @@ template <typename IdType>
         parse_optional_string(value.at("reason"))};
   }
   if (type == "tool.proposed") {
+    if (schema_version >= 2 &&
+        (!value.contains("spend_quote") || value.at("spend_quote").is_null() ||
+         !value.contains("validated_arguments") ||
+         value.at("validated_arguments").is_null())) {
+      throw CodecFailure{"paid tool proposal approval offer is incomplete"};
+    }
     return domain::ToolProposed{
         parse_id<domain::InvocationId>(value.at("invocation_id")),
         value.at("tool_name").get<std::string>(),
@@ -3471,6 +3693,14 @@ template <typename IdType>
         value.contains("result_message_id")
             ? parse_optional_id<domain::MessageId>(
                   value.at("result_message_id"))
+            : std::nullopt,
+        schema_version >= 2
+            ? std::optional<domain::ToolSpendQuote>{parse_tool_spend_quote(
+                  value.at("spend_quote"))}
+            : std::nullopt,
+        schema_version >= 2
+            ? std::optional<domain::StructuredDataBlock>{parse_structured(
+                  value.at("validated_arguments"))}
             : std::nullopt};
   }
   if (type == "tool.policy_decided") {
@@ -3502,6 +3732,10 @@ template <typename IdType>
         parse_id<domain::InvocationId>(value.at("invocation_id")),
         parse_domain_error(value.at("error"))};
   }
+  if (type == "tool.spend_reserved") {
+    return domain::ToolSpendReserved{
+        parse_tool_spend_reservation(value.at("reservation"))};
+  }
   if (type == "tool.started") {
     return domain::ToolStarted{
         parse_id<domain::InvocationId>(value.at("invocation_id"))};
@@ -3510,6 +3744,19 @@ template <typename IdType>
     return domain::ToolProgressed{
         parse_id<domain::InvocationId>(value.at("invocation_id")),
         parse_content_list(value.at("content"))};
+  }
+  if (type == "tool.spend_released") {
+    return domain::ToolSpendReleased{
+        parse_id<domain::InvocationId>(value.at("invocation_id"))};
+  }
+  if (type == "tool.spend_finalized") {
+    return domain::ToolSpendFinalized{
+        parse_tool_spend_finalization(value.at("finalization"))};
+  }
+  if (type == "tool.spend_reconciliation_required") {
+    return domain::ToolSpendReconciliationRequired{
+        parse_id<domain::InvocationId>(value.at("invocation_id")),
+        parse_tool_spend_reconciliation_reason(value.at("reason"))};
   }
   if (type == "tool.result_recorded") {
     return domain::ToolResultRecorded{
@@ -3757,6 +4004,17 @@ struct EncodedPayload {
   std::string document;
 };
 
+auto validate_payload_schema_for_encoding(const domain::RunEvent& event)
+    -> void {
+  if (event.metadata.schema_version < 2) return;
+  const auto* proposed = std::get_if<domain::ToolProposed>(&event.payload);
+  if (proposed == nullptr) return;
+  if (!proposed->spend_quote || !proposed->validated_arguments) {
+    throw CodecFailure{
+        "tool proposal schema version 2 requires a complete durable offer"};
+  }
+}
+
 [[nodiscard]] auto encode_payload(const domain::RunEvent& event)
     -> std::expected<EncodedPayload, SessionStoreError> {
   try {
@@ -3778,7 +4036,15 @@ struct EncodedPayload {
           store_error(SessionStoreErrorCode::invalid_argument,
                       "known event schema cannot carry an opaque payload"));
     }
+    validate_payload_schema_for_encoding(event);
     if (event.metadata.schema_version == 1) {
+      if (const auto* proposed =
+              std::get_if<domain::ToolProposed>(&event.payload);
+          proposed != nullptr && proposed->spend_quote) {
+        return std::unexpected(store_error(
+            SessionStoreErrorCode::invalid_argument,
+            "paid tool quote requires proposal event schema version 2"));
+      }
       if (const auto* proposed =
               std::get_if<domain::PlanRevisionProposed>(&event.payload);
           proposed != nullptr && !proposed->revision.evidence.empty()) {

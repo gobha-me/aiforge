@@ -16,6 +16,10 @@
 
 namespace aiforge::runtime {
 
+using ToolSpendDisposition =
+    std::variant<domain::ToolSpendReleased, domain::ToolSpendFinalized,
+                 domain::ToolSpendReconciliationRequired>;
+
 enum class ToolRegistryErrorCode {
   invalid_declaration,
   duplicate_name,
@@ -44,6 +48,12 @@ struct ToolExecutionError {
   ToolExecutionErrorCode code;
   std::string message;
   bool retryable{};
+  // Paid executors return a terminal disposition only when they have durable
+  // evidence bound to this invocation. A release requires proof that provider
+  // transport did not start; provider-reported finalization carries the
+  // correlated provider evidence digest. The runtime validates the neutral
+  // reservation contract but does not interpret provider-specific evidence.
+  std::optional<ToolSpendDisposition> spend_disposition{};
   auto operator==(const ToolExecutionError&) const -> bool = default;
 };
 
@@ -53,6 +63,9 @@ struct ValidatedToolArguments {
   // Empty retains the declaration's complete effect set. A validator may
   // return a nonempty subset when arguments narrow a tool's effects.
   std::vector<domain::Effect> required_effects{};
+  // Required exactly when the effective effects include spend. The runtime
+  // records this maximum after policy approval and before ToolStarted.
+  std::optional<domain::ToolSpendQuote> spend_quote{};
   auto operator==(const ValidatedToolArguments&) const -> bool = default;
 };
 
@@ -107,6 +120,10 @@ struct ToolProgress {
 struct ToolResult {
   std::vector<domain::ContentBlock> content;
   std::vector<domain::ArtifactMetadata> created_artifacts{};
+  // Paid executors must report the terminal spend outcome using evidence bound
+  // to this invocation. Provider success without usable cost evidence leaves
+  // the reservation in reconciliation rather than assuming a zero cost.
+  std::optional<ToolSpendDisposition> spend_disposition{};
   auto operator==(const ToolResult&) const -> bool = default;
 };
 
