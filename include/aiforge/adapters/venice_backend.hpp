@@ -7,6 +7,7 @@
 #include <string>
 
 #include <aiforge/backend/backend.hpp>
+#include <aiforge/backend/image_generator.hpp>
 #include <aiforge/backend/provider_character_catalog.hpp>
 #include <aiforge/credentials/credential.hpp>
 
@@ -26,9 +27,11 @@ struct VeniceBackendOptions {
   std::optional<std::chrono::milliseconds> read_timeout;
   std::optional<std::chrono::milliseconds> write_timeout;
   std::size_t pending_events{256};
+  std::size_t maximum_image_response_bytes{32U * 1024U * 1024U};
 };
 
 class VeniceBackend final : public backend::Backend,
+                            public backend::ImageGenerator,
                             public backend::ModelContextProvider,
                             public backend::ProviderCharacterCatalogSource {
  public:
@@ -45,6 +48,10 @@ class VeniceBackend final : public backend::Backend,
                            std::stop_token stop_token)
       -> std::expected<std::unique_ptr<backend::BackendStream>,
                        backend::BackendError> override;
+  [[nodiscard]] auto generate(backend::ImageGenerationRequest request,
+                              std::stop_token stop_token = {})
+      -> std::expected<backend::GeneratedImage,
+                       backend::ImageGenerationError> override;
   [[nodiscard]] auto lookup(const domain::ModelId& model_id,
                             std::stop_token stop_token)
       -> std::expected<backend::ModelContextInfo,

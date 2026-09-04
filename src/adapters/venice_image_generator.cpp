@@ -1,5 +1,7 @@
 #include <aiforge/adapters/venice_image_generator.hpp>
 
+#include "venice_image_request.hpp"
+
 #include <cstddef>
 #include <stop_token>
 #include <string>
@@ -80,13 +82,15 @@ VeniceImageGenerator::VeniceImageGenerator(VeniceImageGenerator&&) noexcept =
 auto VeniceImageGenerator::operator=(VeniceImageGenerator&&) noexcept
     -> VeniceImageGenerator& = default;
 
-auto VeniceImageGenerator::generate(backend::ImageGenerationRequest request,
-                                    const std::stop_token stop_token)
+auto detail::generate_venice_image(venice::Client& client,
+                                   backend::ImageGenerationRequest request,
+                                   detail::VeniceImageRequestOptions options,
+                                   const std::stop_token stop_token)
     -> std::expected<backend::GeneratedImage, backend::ImageGenerationError> {
   try {
     using Code = backend::ImageGenerationErrorCode;
-    if (m_impl == nullptr || request.prompt.empty() ||
-        request.prompt.size() > 1024U * 1024U) {
+    if (request.prompt.empty() || request.prompt.size() > 1024U * 1024U ||
+        options.maximum_response_bytes == 0) {
       return std::unexpected(backend::ImageGenerationError{
           Code::invalid_request, "image generation request is invalid", false,
           std::nullopt});
@@ -109,12 +113,13 @@ auto VeniceImageGenerator::generate(backend::ImageGenerationRequest request,
 
     venice::CancelToken cancel;
     std::stop_callback cancellation{stop_token, [&] { cancel.cancel(); }};
-    venice::RequestOptions options;
-    options.connect_timeout = m_impl->options.connect_timeout;
-    options.read_timeout = m_impl->options.read_timeout;
-    options.write_timeout = m_impl->options.write_timeout;
-    options.cancel = &cancel;
-    auto generated = m_impl->client.generate_image(adapted, options);
+    venice::RequestOptions request_options;
+    request_options.connect_timeout = options.connect_timeout;
+    request_options.read_timeout = options.read_timeout;
+    request_options.write_timeout = options.write_timeout;
+    request_options.cancel = &cancel;
+    request_options.maximum_response_bytes = options.maximum_response_bytes;
+    auto generated = client.generate_image(adapted, request_options);
     if (!generated) return std::unexpected(mapped_error(generated.error()));
     const auto* media = std::get_if<venice::GeneratedImageMedia>(&*generated);
     if (media == nullptr) {
@@ -138,6 +143,21 @@ auto VeniceImageGenerator::generate(backend::ImageGenerationRequest request,
         backend::ImageGenerationErrorCode::internal_failure,
         "Venice image generation failed internally", false, std::nullopt});
   }
+}
+
+auto VeniceImageGenerator::generate(backend::ImageGenerationRequest request,
+                                    const std::stop_token stop_token)
+    -> std::expected<backend::GeneratedImage, backend::ImageGenerationError> {
+  if (m_impl == nullptr) {
+    return std::unexpected(backend::ImageGenerationError{
+        backend::ImageGenerationErrorCode::invalid_request,
+        "image generation request is invalid", false, std::nullopt});
+  }
+  return detail::generate_venice_image(
+      m_impl->client, std::move(request),
+      {m_impl->options.connect_timeout, m_impl->options.read_timeout,
+       m_impl->options.write_timeout, m_impl->options.maximum_response_bytes},
+      stop_token);
 }
 
 } // namespace aiforge::adapters
