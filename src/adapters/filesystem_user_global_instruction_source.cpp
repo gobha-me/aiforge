@@ -189,8 +189,7 @@ struct DirectoryRoot {
   std::vector<PathIdentity> path_identities;
 };
 
-// NOLINTBEGIN(readability-function-cognitive-complexity) -- Hostile path
-// boundary.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Hostile paths.
 [[nodiscard]] auto open_directory_root(const std::filesystem::path& path,
                                        const bool create)
     -> std::expected<std::optional<DirectoryRoot>, EditorError> {
@@ -302,8 +301,6 @@ struct DirectoryRoot {
   return edit_failure(EditorCode::internal_failure,
                       "global instruction directory could not be resolved");
 }
-// NOLINTEND(readability-function-cognitive-complexity)
-
 [[nodiscard]] auto root_unchanged(
     const DirectoryRoot& root,
     const UserGlobalInstructionFilesystemCheckpoint* checkpoint = nullptr)
@@ -350,9 +347,7 @@ struct DirectoryRoot {
   return {};
 }
 
-// Stable hostile-file reads keep every identity, type, size, and text gate
-// explicit.
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Stable reads.
 [[nodiscard]] auto load_at(
     const DirectoryRoot& root, const std::string& filename,
     const instructions::UserGlobalInstructionLimits& limits,
@@ -535,9 +530,7 @@ struct DirectoryRoot {
 
 class PreparedFile final {
  public:
-  // Secure temporary publication keeps collision, file identity, write, sync,
-  // and size gates explicit.
-  // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- File workflow.
   [[nodiscard]] static auto create(const int directory,
                                    const std::string_view text,
                                    const std::stop_token stop_token)
@@ -734,8 +727,7 @@ auto FilesystemUserGlobalInstructionSource::load(
   }
 }
 
-// NOLINTBEGIN(readability-function-cognitive-complexity) -- Exact atomic
-// publication and rollback.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Exact rollback.
 auto FilesystemUserGlobalInstructionSource::write(
     instructions::UserGlobalInstructionWrite request,
     const std::stop_token stop_token)
@@ -945,6 +937,4 @@ auto FilesystemUserGlobalInstructionSource::write(
                         published);
   }
 }
-// NOLINTEND(readability-function-cognitive-complexity)
-
 } // namespace aiforge::adapters
