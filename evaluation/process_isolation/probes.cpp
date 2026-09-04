@@ -4,11 +4,14 @@
 
 #include "probes.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -107,6 +110,24 @@ constexpr int assertion_runtime_mechanism_absent = 25;
   return exit_for_errno(error_number);
 }
 
+[[nodiscard]] auto assertion_outcome(const ProbeId id, const int result)
+    -> ProbeRecord {
+  switch (result) {
+    case assertion_enforced: return enforced(id);
+    case assertion_permission_denied:
+      return unavailable(id, ReasonCode::permission_denied);
+    case assertion_mechanism_absent:
+      return unavailable(id, ReasonCode::unsupported_kernel);
+    case assertion_prerequisite_unavailable:
+      return unavailable(id, ReasonCode::prerequisite_unavailable);
+    case assertion_runtime_mechanism_absent:
+      return unavailable(id, ReasonCode::mechanism_absent);
+    case assertion_failed:
+      return unavailable(id, ReasonCode::enforcement_failed);
+    default: return probe_error(id, ReasonCode::internal_error);
+  }
+}
+
 template <typename Assertion>
 [[nodiscard]] auto isolated_assertion(const ProbeId id, Assertion assertion)
     -> ProbeRecord {
@@ -121,20 +142,7 @@ template <typename Assertion>
     if (errno != EINTR) return probe_error(id, ReasonCode::cleanup_failed);
   }
   if (!WIFEXITED(status)) return probe_error(id, ReasonCode::signaled);
-  switch (WEXITSTATUS(status)) {
-    case assertion_enforced: return enforced(id);
-    case assertion_permission_denied:
-      return unavailable(id, ReasonCode::permission_denied);
-    case assertion_mechanism_absent:
-      return unavailable(id, ReasonCode::unsupported_kernel);
-    case assertion_prerequisite_unavailable:
-      return unavailable(id, ReasonCode::prerequisite_unavailable);
-    case assertion_runtime_mechanism_absent:
-      return unavailable(id, ReasonCode::mechanism_absent);
-    case assertion_failed:
-      return unavailable(id, ReasonCode::enforcement_failed);
-    default: return probe_error(id, ReasonCode::internal_error);
-  }
+  return assertion_outcome(id, WEXITSTATUS(status));
 }
 
 [[nodiscard]] auto valid_state_directory(const std::filesystem::path& path)
@@ -178,6 +186,295 @@ template <typename Assertion>
     offset += static_cast<std::size_t>(count);
   }
   return true;
+}
+
+enum class UserNamespaceChildStatus : std::uint8_t {
+  ready = 1,
+  permission_denied = 2,
+  mechanism_absent = 3,
+  prerequisite_unavailable = 4,
+  internal_error = 5,
+};
+
+constexpr std::array<std::byte, 2> user_namespace_protocol_prefix{
+    std::byte{0x41}, std::byte{0x01}};
+constexpr std::size_t user_namespace_frame_size = 3;
+constexpr auto user_namespace_protocol_timeout = std::chrono::seconds{1};
+
+[[nodiscard]] auto user_namespace_status_for_result(const int result)
+    -> UserNamespaceChildStatus {
+  switch (result) {
+    case assertion_enforced: return UserNamespaceChildStatus::ready;
+    case assertion_permission_denied:
+      return UserNamespaceChildStatus::permission_denied;
+    case assertion_mechanism_absent:
+      return UserNamespaceChildStatus::mechanism_absent;
+    case assertion_prerequisite_unavailable:
+      return UserNamespaceChildStatus::prerequisite_unavailable;
+    default: return UserNamespaceChildStatus::internal_error;
+  }
+}
+
+[[nodiscard]] auto user_namespace_frame(const UserNamespaceChildStatus status)
+    -> std::array<std::byte, user_namespace_frame_size> {
+  return {user_namespace_protocol_prefix[0], user_namespace_protocol_prefix[1],
+          std::byte{static_cast<std::uint8_t>(status)}};
+}
+
+[[nodiscard]] auto parse_user_namespace_frame(
+    const std::span<const std::byte> frame)
+    -> std::optional<UserNamespaceChildStatus> {
+  if (frame.size() != user_namespace_frame_size ||
+      frame[0] != user_namespace_protocol_prefix[0] ||
+      frame[1] != user_namespace_protocol_prefix[1]) {
+    return std::nullopt;
+  }
+  switch (std::to_integer<std::uint8_t>(frame[2])) {
+    case static_cast<std::uint8_t>(UserNamespaceChildStatus::ready):
+      return UserNamespaceChildStatus::ready;
+    case static_cast<std::uint8_t>(UserNamespaceChildStatus::permission_denied):
+      return UserNamespaceChildStatus::permission_denied;
+    case static_cast<std::uint8_t>(UserNamespaceChildStatus::mechanism_absent):
+      return UserNamespaceChildStatus::mechanism_absent;
+    case static_cast<std::uint8_t>(
+        UserNamespaceChildStatus::prerequisite_unavailable):
+      return UserNamespaceChildStatus::prerequisite_unavailable;
+    case static_cast<std::uint8_t>(UserNamespaceChildStatus::internal_error):
+      return UserNamespaceChildStatus::internal_error;
+    default: return std::nullopt;
+  }
+}
+
+[[nodiscard]] auto user_namespace_status_outcome(
+    const UserNamespaceChildStatus status) -> ProbeRecord {
+  switch (status) {
+    case UserNamespaceChildStatus::permission_denied:
+      return unavailable(ProbeId::user_namespace,
+                         ReasonCode::permission_denied);
+    case UserNamespaceChildStatus::mechanism_absent:
+      return unavailable(ProbeId::user_namespace,
+                         ReasonCode::unsupported_kernel);
+    case UserNamespaceChildStatus::prerequisite_unavailable:
+      return unavailable(ProbeId::user_namespace,
+                         ReasonCode::prerequisite_unavailable);
+    case UserNamespaceChildStatus::ready:
+    case UserNamespaceChildStatus::internal_error:
+      return probe_error(ProbeId::user_namespace, ReasonCode::internal_error);
+  }
+  return probe_error(ProbeId::user_namespace, ReasonCode::internal_error);
+}
+
+[[nodiscard]] auto user_namespace_observation_error(const int error_number)
+    -> ProbeRecord {
+  if (error_number == EACCES || error_number == EPERM) {
+    return unavailable(ProbeId::user_namespace, ReasonCode::permission_denied);
+  }
+  return probe_error(ProbeId::user_namespace, ReasonCode::internal_error);
+}
+
+auto close_owned_descriptor(int& descriptor) noexcept -> bool {
+  if (descriptor < 0) return true;
+  const auto owned = descriptor;
+  descriptor = -1;
+  return ::close(owned) == 0;
+}
+
+struct UserNamespaceProtocolRead {
+  std::optional<UserNamespaceChildStatus> status;
+  ReasonCode error{ReasonCode::internal_error};
+};
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Protocol read.
+[[nodiscard]] auto read_user_namespace_status(const int descriptor)
+    -> UserNamespaceProtocolRead {
+  std::array<std::byte, user_namespace_frame_size + 1> bytes{};
+  std::size_t size{};
+  const auto deadline =
+      std::chrono::steady_clock::now() + user_namespace_protocol_timeout;
+  for (;;) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) return {{}, ReasonCode::timeout};
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    pollfd ready{descriptor, POLLIN | POLLHUP, 0};
+    const auto polled =
+        ::poll(&ready, 1, std::max(1, static_cast<int>(remaining.count())));
+    if (polled < 0) {
+      if (errno == EINTR) continue;
+      return {};
+    }
+    if (polled == 0) return {{}, ReasonCode::timeout};
+    if ((ready.revents & (POLLERR | POLLNVAL)) != 0) return {};
+    for (;;) {
+      if (size == bytes.size()) return {{}, ReasonCode::malformed_protocol};
+      const auto count =
+          ::read(descriptor, bytes.data() + size, bytes.size() - size);
+      if (count > 0) {
+        size += static_cast<std::size_t>(count);
+        continue;
+      }
+      if (count == 0) {
+        const auto parsed =
+            parse_user_namespace_frame(std::span{bytes}.first(size));
+        return parsed ? UserNamespaceProtocolRead{parsed, ReasonCode::none}
+                      : UserNamespaceProtocolRead{
+                            {}, ReasonCode::malformed_protocol};
+      }
+      if (errno == EINTR) continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+      return {};
+    }
+  }
+}
+
+template <typename Attempt>
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Fork protocol.
+[[nodiscard]] auto user_namespace_probe(Attempt attempt) -> ProbeRecord {
+  int original_namespace = ::open("/proc/self/ns/user", O_RDONLY | O_CLOEXEC);
+  if (original_namespace < 0) {
+    return assertion_outcome(ProbeId::user_namespace,
+                             initial_namespace_observation_exit(errno));
+  }
+  struct stat before{};
+  if (::fstat(original_namespace, &before) != 0) {
+    const auto result = assertion_outcome(
+        ProbeId::user_namespace, initial_namespace_observation_exit(errno));
+    return close_owned_descriptor(original_namespace)
+               ? result
+               : probe_error(ProbeId::user_namespace,
+                             ReasonCode::cleanup_failed);
+  }
+
+  int status_pipe[2]{-1, -1};
+  int release_pipe[2]{-1, -1};
+  if (::pipe2(status_pipe, O_CLOEXEC | O_NONBLOCK) != 0) {
+    static_cast<void>(close_owned_descriptor(original_namespace));
+    return probe_error(ProbeId::user_namespace, ReasonCode::internal_error);
+  }
+  if (::pipe2(release_pipe, O_CLOEXEC) != 0) {
+    static_cast<void>(close_owned_descriptor(status_pipe[0]));
+    static_cast<void>(close_owned_descriptor(status_pipe[1]));
+    static_cast<void>(close_owned_descriptor(original_namespace));
+    return probe_error(ProbeId::user_namespace, ReasonCode::internal_error);
+  }
+
+  const auto child = ::fork();
+  if (child < 0) {
+    static_cast<void>(close_owned_descriptor(status_pipe[0]));
+    static_cast<void>(close_owned_descriptor(status_pipe[1]));
+    static_cast<void>(close_owned_descriptor(release_pipe[0]));
+    static_cast<void>(close_owned_descriptor(release_pipe[1]));
+    static_cast<void>(close_owned_descriptor(original_namespace));
+    return probe_error(ProbeId::user_namespace, ReasonCode::internal_error);
+  }
+  if (child == 0) {
+    static_cast<void>(::close(original_namespace));
+    static_cast<void>(::close(status_pipe[0]));
+    static_cast<void>(::close(release_pipe[1]));
+    const auto error_number = attempt();
+    const auto status = error_number == 0
+                            ? UserNamespaceChildStatus::ready
+                            : user_namespace_status_for_result(
+                                  error_number > 0 ? unshare_exit(error_number)
+                                                   : assertion_internal_error);
+    const auto frame = user_namespace_frame(status);
+    const bool sent = write_all(status_pipe[1], frame);
+    static_cast<void>(::close(status_pipe[1]));
+    if (sent && status == UserNamespaceChildStatus::ready) {
+      std::byte release{};
+      while (::read(release_pipe[0], &release, 1) < 0 && errno == EINTR) {
+      }
+    }
+    static_cast<void>(::close(release_pipe[0]));
+    ::_exit(sent ? 0 : 70);
+  }
+
+  bool descriptors_closed = close_owned_descriptor(status_pipe[1]);
+  descriptors_closed =
+      close_owned_descriptor(release_pipe[0]) && descriptors_closed;
+
+  // clang-format off
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- One funnel owns every descriptor release and bounded child reap outcome.
+  auto finish = [&](ProbeRecord result) {
+    // clang-format on
+    descriptors_closed =
+        close_owned_descriptor(release_pipe[1]) && descriptors_closed;
+    descriptors_closed =
+        close_owned_descriptor(status_pipe[0]) && descriptors_closed;
+    descriptors_closed =
+        close_owned_descriptor(original_namespace) && descriptors_closed;
+
+    int child_status{};
+    bool forced_cleanup{};
+    const auto deadline =
+        std::chrono::steady_clock::now() + user_namespace_protocol_timeout;
+    for (;;) {
+      const auto waited = ::waitpid(child, &child_status, WNOHANG);
+      if (waited == child) break;
+      if (waited < 0 && errno != EINTR) {
+        return probe_error(ProbeId::user_namespace, ReasonCode::cleanup_failed);
+      }
+      if (std::chrono::steady_clock::now() >= deadline) {
+        forced_cleanup = true;
+        static_cast<void>(::kill(child, SIGKILL));
+        do {
+          errno = 0;
+        } while (::waitpid(child, &child_status, 0) < 0 && errno == EINTR);
+        if (errno != 0) {
+          return probe_error(ProbeId::user_namespace,
+                             ReasonCode::cleanup_failed);
+        }
+        break;
+      }
+      static_cast<void>(::poll(nullptr, 0, 5));
+    }
+    if (!descriptors_closed || forced_cleanup) {
+      return probe_error(ProbeId::user_namespace, ReasonCode::cleanup_failed);
+    }
+    if (!WIFEXITED(child_status)) {
+      return probe_error(ProbeId::user_namespace, ReasonCode::signaled);
+    }
+    if (WEXITSTATUS(child_status) != 0) {
+      return probe_error(ProbeId::user_namespace, ReasonCode::internal_error);
+    }
+    return result;
+  };
+
+  const auto protocol = read_user_namespace_status(status_pipe[0]);
+  if (!protocol.status) {
+    return finish(probe_error(ProbeId::user_namespace, protocol.error));
+  }
+  if (*protocol.status != UserNamespaceChildStatus::ready) {
+    return finish(user_namespace_status_outcome(*protocol.status));
+  }
+
+  std::array<char, 64> child_namespace_path{};
+  const auto path_size =
+      std::snprintf(child_namespace_path.data(), child_namespace_path.size(),
+                    "/proc/%d/ns/user", child);
+  if (path_size < 0 ||
+      static_cast<std::size_t>(path_size) >= child_namespace_path.size()) {
+    return finish(
+        probe_error(ProbeId::user_namespace, ReasonCode::internal_error));
+  }
+  int child_namespace =
+      ::open(child_namespace_path.data(), O_RDONLY | O_CLOEXEC);
+  if (child_namespace < 0) {
+    return finish(user_namespace_observation_error(errno));
+  }
+  struct stat after{};
+  if (::fstat(child_namespace, &after) != 0) {
+    const auto result = user_namespace_observation_error(errno);
+    descriptors_closed =
+        close_owned_descriptor(child_namespace) && descriptors_closed;
+    return finish(result);
+  }
+  descriptors_closed =
+      close_owned_descriptor(child_namespace) && descriptors_closed;
+  return finish(before.st_dev != after.st_dev || before.st_ino != after.st_ino
+                    ? enforced(ProbeId::user_namespace)
+                    : unavailable(ProbeId::user_namespace,
+                                  ReasonCode::enforcement_failed));
 }
 
 [[nodiscard]] auto copy_executable(const std::filesystem::path& destination)
@@ -875,8 +1172,9 @@ auto run_probe(const ProbeId probe_id,
       case ProbeId::landlock_read_confinement:
         return landlock_probe(probe_id, state_directory);
       case ProbeId::user_namespace:
-        return isolated_assertion(probe_id, [] {
-          return changed_namespace("/proc/self/ns/user", CLONE_NEWUSER);
+        return user_namespace_probe([] {
+          if (::unshare(CLONE_NEWUSER) == 0) return 0;
+          return errno;
         });
       case ProbeId::mount_namespace:
         return isolated_assertion(probe_id, [] {
@@ -922,7 +1220,7 @@ auto runtime_unshare_errno_outcome(const int error_number) -> ProbeRecord {
       static_cast<std::uint32_t>(error_number) > SECCOMP_RET_DATA) {
     return probe_error(ProbeId::user_namespace, ReasonCode::internal_error);
   }
-  return isolated_assertion(ProbeId::user_namespace, [error_number] {
+  return user_namespace_probe([error_number] {
 #if defined(__x86_64__)
     constexpr std::uint32_t audit_architecture = AUDIT_ARCH_X86_64;
 #else
@@ -944,8 +1242,9 @@ auto runtime_unshare_errno_outcome(const int error_number) -> ProbeRecord {
                        filter.data()};
     if (::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
         ::prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) != 0)
-      return assertion_internal_error;
-    return changed_namespace("/proc/self/ns/user", CLONE_NEWUSER);
+      return -1;
+    if (::unshare(CLONE_NEWUSER) == 0) return 0;
+    return errno;
   });
 #else
   return unavailable(ProbeId::user_namespace,
@@ -963,9 +1262,35 @@ auto initial_namespace_errno_outcome(const int error_number) -> ProbeRecord {
   });
 }
 
-auto post_namespace_errno_outcome() -> ProbeRecord {
-  return isolated_assertion(ProbeId::user_namespace,
-                            [] { return assertion_internal_error; });
+auto user_namespace_observation_errno_outcome(const int error_number)
+    -> ProbeRecord {
+  return user_namespace_observation_error(error_number);
+}
+
+auto user_namespace_identity_outcome(const bool identities_differ)
+    -> ProbeRecord {
+  return identities_differ ? enforced(ProbeId::user_namespace)
+                           : unavailable(ProbeId::user_namespace,
+                                         ReasonCode::enforcement_failed);
+}
+
+auto user_namespace_protocol_outcome(const std::span<const std::byte> frame)
+    -> UserNamespaceProtocolOutcome {
+  const auto parsed = parse_user_namespace_frame(frame);
+  if (!parsed) return UserNamespaceProtocolOutcome::malformed;
+  switch (*parsed) {
+    case UserNamespaceChildStatus::ready:
+      return UserNamespaceProtocolOutcome::ready;
+    case UserNamespaceChildStatus::permission_denied:
+      return UserNamespaceProtocolOutcome::permission_denied;
+    case UserNamespaceChildStatus::mechanism_absent:
+      return UserNamespaceProtocolOutcome::mechanism_absent;
+    case UserNamespaceChildStatus::prerequisite_unavailable:
+      return UserNamespaceProtocolOutcome::prerequisite_unavailable;
+    case UserNamespaceChildStatus::internal_error:
+      return UserNamespaceProtocolOutcome::internal_error;
+  }
+  return UserNamespaceProtocolOutcome::malformed;
 }
 
 auto generic_errno_outcome(const int error_number) -> ProbeRecord {

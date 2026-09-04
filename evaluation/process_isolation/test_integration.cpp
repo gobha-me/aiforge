@@ -4,7 +4,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
+#include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -175,9 +177,41 @@ TEST_CASE("namespace errno mapping remains stage specific and fail closed") {
   static_cast<void>(unshare_cases);
 #endif
 
-  const auto post = isolation::test_support::post_namespace_errno_outcome();
-  CHECK(post.state == isolation::ProbeState::probe_error);
-  CHECK(post.reason == isolation::ReasonCode::internal_error);
+  const Case observation_cases[]{
+      {EACCES, isolation::ProbeState::unavailable,
+       isolation::ReasonCode::permission_denied},
+      {ENOENT, isolation::ProbeState::probe_error,
+       isolation::ReasonCode::internal_error},
+      {ENOMEM, isolation::ProbeState::probe_error,
+       isolation::ReasonCode::internal_error},
+      {EIO, isolation::ProbeState::probe_error,
+       isolation::ReasonCode::internal_error},
+  };
+  for (const auto& test_case : observation_cases) {
+    const auto outcome =
+        isolation::test_support::user_namespace_observation_errno_outcome(
+            test_case.error_number);
+    CAPTURE(test_case.error_number);
+    CHECK(outcome.state == test_case.state);
+    CHECK(outcome.reason == test_case.reason);
+  }
+
+  const auto unchanged =
+      isolation::test_support::user_namespace_identity_outcome(false);
+  CHECK(unchanged.state == isolation::ProbeState::unavailable);
+  CHECK(unchanged.reason == isolation::ReasonCode::enforcement_failed);
+
+  using ProtocolOutcome = isolation::test_support::UserNamespaceProtocolOutcome;
+  const std::array valid_ready{std::byte{0x41}, std::byte{0x01},
+                               std::byte{0x01}};
+  CHECK(isolation::test_support::user_namespace_protocol_outcome(valid_ready) ==
+        ProtocolOutcome::ready);
+  const std::array truncated{std::byte{0x41}, std::byte{0x01}};
+  CHECK(isolation::test_support::user_namespace_protocol_outcome(truncated) ==
+        ProtocolOutcome::malformed);
+  const std::array unknown{std::byte{0x41}, std::byte{0x01}, std::byte{0x7f}};
+  CHECK(isolation::test_support::user_namespace_protocol_outcome(unknown) ==
+        ProtocolOutcome::malformed);
 
   const auto generic = isolation::test_support::generic_errno_outcome(ENOENT);
   CHECK(generic.probe_id == isolation::ProbeId::openat2_resolution);
