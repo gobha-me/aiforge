@@ -413,6 +413,7 @@ auto replay_tui_scenario(const TuiScenario& scenario,
     std::istringstream trace_input{std::string{trace}};
     auto played = target->app->play(trace_input);
     if (!played) {
+      if (state.error) return std::unexpected(std::move(*state.error));
       return failure(TuiScenarioErrorCode::trace_failure,
                      "scenario trace replay failed: " + played.error().message);
     }

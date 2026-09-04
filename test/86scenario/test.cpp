@@ -908,6 +908,7 @@ class QuestionBackendState final {
     if (m_released >= expected.size() || description != expected[m_released]) {
       return std::unexpected("question backend descriptor mismatch");
     }
+    const auto wakes_before_release = m_wakes;
     ++m_released;
     const auto released = m_released;
     m_condition.notify_all();
@@ -919,8 +920,9 @@ class QuestionBackendState final {
         })) {
       return std::unexpected("question backend did not acknowledge its step");
     }
-    if ((wait_for_wake || released == 4U) &&
-        !m_condition.wait_for(lock, 1s, [&] { return m_wakes >= released; })) {
+    if ((wait_for_wake || ended) && !m_condition.wait_for(lock, 1s, [&] {
+          return m_wakes > wakes_before_release;
+        })) {
       return std::unexpected("question backend update was not posted");
     }
     if (released == 4U) m_interrupt_wake_baseline = m_wakes;
@@ -4561,4 +4563,26 @@ TEST_CASE("TUI scenarios fail on replay divergence and frame exhaustion",
   REQUIRE_FALSE(mismatched);
   REQUIRE(mismatched.error().code ==
           testing::TuiScenarioErrorCode::target_failure);
+
+  auto replay_failure_target =
+      [mismatched_factory](const testing::TuiScenarioPass pass,
+                           termforge::ByteSink* output)
+      -> std::expected<testing::TuiScenarioTarget, testing::TuiScenarioError> {
+    auto target = mismatched_factory(pass, output);
+    if (!target) return target;
+    if (pass == testing::TuiScenarioPass::replay) {
+      target->release_backend_step =
+          [](std::string_view) -> std::expected<void, std::string> {
+        return std::unexpected("replay descriptor mismatch");
+      };
+    }
+    return target;
+  };
+  const auto replay_failure =
+      testing::run_tui_scenario(scenario(), replay_failure_target);
+  REQUIRE_FALSE(replay_failure);
+  REQUIRE(replay_failure.error().code ==
+          testing::TuiScenarioErrorCode::target_failure);
+  REQUIRE(replay_failure.error().message ==
+          "backend script release failed: replay descriptor mismatch");
 }
