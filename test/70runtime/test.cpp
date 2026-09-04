@@ -229,6 +229,67 @@ class CancelBackend final : public backend::Backend {
   }
 };
 
+struct StopAcknowledgementState {
+  std::mutex mutex;
+  std::condition_variable changed;
+  bool waiting_for_stop{};
+};
+
+class InvalidDeltaThenCancelStream final : public backend::BackendStream {
+ public:
+  InvalidDeltaThenCancelStream(domain::MessageId message_id,
+                               StopAcknowledgementState& state)
+      : m_message_id(std::move(message_id)), m_state(state) {}
+
+  auto next(std::stop_token stop_token)
+      -> std::expected<std::optional<backend::BackendEvent>,
+                       backend::BackendError> override {
+    if (!m_delta_sent) {
+      m_delta_sent = true;
+      return backend::BackendEvent{
+          backend::ContentDelta{m_message_id, domain::TextBlock{"early"}}};
+    }
+    if (m_cancelled) return std::optional<backend::BackendEvent>{};
+    {
+      std::lock_guard lock(m_state.mutex);
+      m_state.waiting_for_stop = true;
+    }
+    m_state.changed.notify_all();
+    std::mutex mutex;
+    std::unique_lock lock(mutex);
+    std::condition_variable_any changed;
+    changed.wait(lock, stop_token, [] { return false; });
+    m_cancelled = true;
+    return backend::BackendEvent{
+        backend::ResponseCancelled{"transport cancelled"}};
+  }
+
+ private:
+  domain::MessageId m_message_id;
+  StopAcknowledgementState& m_state;
+  bool m_delta_sent{};
+  bool m_cancelled{};
+};
+
+class InvalidDeltaThenCancelBackend final : public backend::Backend {
+ public:
+  auto start(backend::BackendRequest request, std::stop_token)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    return std::make_unique<InvalidDeltaThenCancelStream>(
+        request.assistant_message_id, m_state);
+  }
+
+  [[nodiscard]] auto wait_until_stop_boundary() -> bool {
+    std::unique_lock lock(m_state.mutex);
+    return m_state.changed.wait_for(lock, 1s,
+                                    [&] { return m_state.waiting_for_stop; });
+  }
+
+ private:
+  StopAcknowledgementState m_state;
+};
+
 class BetweenDeltaStream final : public backend::BackendStream {
  public:
   explicit BetweenDeltaStream(domain::MessageId message_id)
@@ -510,6 +571,25 @@ TEST_CASE("a delta before response start fails closed", "[runtime][failure]") {
   REQUIRE(projection != nullptr);
   REQUIRE(projection->status() == domain::RunStatus::failed);
   REQUIRE(projection->messages().size() == 1);
+}
+
+TEST_CASE("fail-closed stop accepts one backend cancellation acknowledgement",
+          "[runtime][failure]") {
+  InvalidDeltaThenCancelBackend fake;
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake, &wake};
+
+  REQUIRE(kernel.start(run_start()));
+  REQUIRE(fake.wait_until_stop_boundary());
+  static_cast<void>(drain_to_end(kernel, wake));
+
+  const auto* projection = kernel.projection(make_id<domain::RunId>("run"));
+  REQUIRE(projection != nullptr);
+  REQUIRE(projection->status() == domain::RunStatus::failed);
+  REQUIRE(
+      std::ranges::count_if(kernel.event_log().events(), [](const auto& event) {
+        return std::holds_alternative<domain::RunFailed>(event.payload);
+      }) == 1);
 }
 
 TEST_CASE("reasoning continuation state respects resource and text bounds",

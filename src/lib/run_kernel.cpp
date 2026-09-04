@@ -1259,11 +1259,6 @@ struct RunKernel::Impl {
           kernel_error(RunKernelErrorCode::no_active_run,
                        "backend event has no active inference"));
     }
-    if (active->run_terminal) {
-      return std::unexpected(
-          kernel_error(RunKernelErrorCode::protocol_failure,
-                       "backend event followed a terminal run event"));
-    }
     if (active->backend_terminal_seen) {
       if (active->cancellation_ack_expected &&
           std::holds_alternative<backend::ResponseCancelled>(event)) {
@@ -1271,6 +1266,11 @@ struct RunKernel::Impl {
         return {};
       }
       return fail_live_run(transaction, protocol_domain_error());
+    }
+    if (active->run_terminal) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::protocol_failure,
+                       "backend event followed a terminal run event"));
     }
 
     const auto record_or_fail =
