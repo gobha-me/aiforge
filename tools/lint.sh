@@ -49,7 +49,8 @@ cmake -S . -B "$build_dir" \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   -Daiforge_TESTS=OFF \
   -Daiforge_DRAWFORGE_EVALUATION=OFF \
-  -Daiforge_PROCESS_ISOLATION_EVALUATION=ON
+  -Daiforge_PROCESS_ISOLATION_EVALUATION=ON \
+  -Daiforge_AUDIO_DEVICE_EVALUATION=ON
 
 output=$(mktemp)
 trap 'rm -f "$output"' EXIT
@@ -85,3 +86,14 @@ tools/check-clang-tidy.py "$output" "$baseline"
   -warnings-as-errors='*' \
   -quiet \
   "^${repo_root}/evaluation/process_isolation/(?!test_).*[.]cpp$"
+
+"$runner" \
+  -p "$build_dir" \
+  -j "$jobs" \
+  -clang-tidy-binary "$tidy" \
+  -config-file "$repo_root/evaluation/audio_device/.clang-tidy" \
+  -header-filter='^.*/evaluation/audio_device/' \
+  -exclude-header-filter='^.*/(build[^/]*/|_deps/)/' \
+  -warnings-as-errors='*' \
+  -quiet \
+  "^${repo_root}/evaluation/audio_device/(?!test_).*[.]cpp$"

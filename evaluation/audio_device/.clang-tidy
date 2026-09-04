@@ -1,0 +1,16 @@
+---
+InheritParentConfig: true
+
+# Candidate adapters cross native C callback ABIs, process-control varargs, and
+# fixed sample buffers. Keep all other repository checks inherited and fatal
+# while excluding only rules incompatible with those bounded sites.
+Checks: >
+  -cppcoreguidelines-avoid-c-arrays,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-vararg,
+  -modernize-avoid-c-arrays
+
+HeaderFilterRegex: '^.*/evaluation/audio_device/'
+ExcludeHeaderFilterRegex: '^.*/(build[^/]*/|_deps/)/'

@@ -29,7 +29,8 @@ if [[ -n "${TOOLCHAIN}" ]]; then
   COMMON_CMAKE_ARGS+=("-DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN}")
 fi
 
-for dependency_source in catch2 cli11 nlohmann_json sqlite3_amalgamation; do
+for dependency_source in \
+  catch2 cli11 miniaudio nlohmann_json rtaudio sqlite3_amalgamation; do
   source_path="${SEED_BUILD}/_deps/${dependency_source}-src"
   if [[ -d "${source_path}" ]]; then
     variable_name=$(printf '%s' "${dependency_source}" | tr '[:lower:]-' '[:upper:]_')
@@ -60,6 +61,8 @@ dependency_fetch_name() {
     termforge) printf 'termforge' ;;
     venice_cpp) printf 'venice-cpp' ;;
     rasterforge) printf 'rasterforge' ;;
+    rtaudio) printf 'RtAudio' ;;
+    miniaudio) printf 'miniaudio' ;;
   esac
 }
 
@@ -188,6 +191,13 @@ if [[ ! -d "${WORK_DIR}/aiforge-fetched/_deps/rasterforge-src" ]]; then
   exit 1
 fi
 
+for dependency in miniaudio rtaudio; do
+  if [[ -d "${WORK_DIR}/aiforge-fetched/_deps/${dependency}-src" ]]; then
+    echo "Ordinary adapter build unexpectedly activated ${dependency}" >&2
+    exit 1
+  fi
+done
+
 cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-installed" \
   "${COMMON_CMAKE_ARGS[@]}" \
   -DCMAKE_PREFIX_PATH="${PREFIX}" \
@@ -196,6 +206,13 @@ cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-installed" \
 for dependency in termforge venice-cpp rasterforge; do
   if [[ -d "${WORK_DIR}/aiforge-installed/_deps/${dependency}-src" ]]; then
     echo "Installed AIForge consumer unexpectedly fetched ${dependency}" >&2
+    exit 1
+  fi
+done
+
+for dependency in miniaudio rtaudio; do
+  if [[ -d "${WORK_DIR}/aiforge-installed/_deps/${dependency}-src" ]]; then
+    echo "Installed AIForge consumer unexpectedly activated ${dependency}" >&2
     exit 1
   fi
 done
@@ -213,3 +230,45 @@ for dependency in termforge venice-cpp rasterforge; do
     exit 1
   fi
 done
+
+for dependency in miniaudio rtaudio; do
+  if [[ -d "${WORK_DIR}/aiforge-core/_deps/${dependency}-src" ]]; then
+    echo "Core-only AIForge unexpectedly activated ${dependency}" >&2
+    exit 1
+  fi
+done
+
+cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-audio-device-evaluation" \
+  "${COMMON_CMAKE_ARGS[@]}" \
+  -Daiforge_AUDIO_DEVICE_EVALUATION=ON \
+  -Daiforge_BUILD_ADAPTERS=OFF -Daiforge_BUILD_BIN=OFF -Daiforge_TESTS=OFF \
+  -DCMAKE_DISABLE_FIND_PACKAGE_miniaudio=TRUE \
+  -DCMAKE_DISABLE_FIND_PACKAGE_RtAudio=TRUE
+
+AUDIO_DEVICE_CACHE="${WORK_DIR}/aiforge-audio-device-evaluation/CMakeCache.txt"
+for expected in \
+  "AIFORGE_MINIAUDIO_DEPENDENCY_SOURCE:INTERNAL=controlled_source_fallback" \
+  "AIFORGE_RTAUDIO_DEPENDENCY_SOURCE:INTERNAL=controlled_source_fallback" \
+  "MINIAUDIO_ENABLE_ALSA:BOOL=ON" \
+  "MINIAUDIO_ENABLE_NULL:BOOL=ON" \
+  "MINIAUDIO_ENABLE_ONLY_SPECIFIC_BACKENDS:BOOL=ON" \
+  "MINIAUDIO_ENABLE_PULSEAUDIO:BOOL=ON" \
+  "MINIAUDIO_NO_DECODING:BOOL=ON" \
+  "MINIAUDIO_NO_ENCODING:BOOL=ON" \
+  "MINIAUDIO_NO_RUNTIME_LINKING:BOOL=OFF" \
+  "RTAUDIO_API_ALSA:BOOL=ON" \
+  "RTAUDIO_API_JACK:BOOL=OFF" \
+  "RTAUDIO_API_PULSE:BOOL=OFF" \
+  "RTAUDIO_BUILD_SHARED_LIBS:BOOL=OFF" \
+  "RTAUDIO_BUILD_TESTING:BOOL=OFF"; do
+  if ! grep -Fxq "${expected}" "${AUDIO_DEVICE_CACHE}"; then
+    echo "Audio-device evaluation dependency contract drifted: ${expected}" >&2
+    exit 1
+  fi
+done
+
+# Building the named targets is the activation proof. Their source directories
+# may live outside this temporary tree when COMMON_CMAKE_ARGS seeds an existing
+# verified download through FETCHCONTENT_SOURCE_DIR_*.
+cmake --build "${WORK_DIR}/aiforge-audio-device-evaluation" \
+  --target miniaudio rtaudio --parallel 2
