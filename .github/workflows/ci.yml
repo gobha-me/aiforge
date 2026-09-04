@@ -85,6 +85,7 @@ jobs:
         run: >-
           cmake -B "${{ matrix.build_dir }}" ${{ matrix.toolchain }}
           -Daiforge_DRAWFORGE_EVALUATION=ON
+          -Daiforge_PROCESS_ISOLATION_EVALUATION=ON
 
       - name: Build
         run: cmake --build "${{ matrix.build_dir }}" --parallel 2
@@ -98,3 +99,17 @@ jobs:
 
       - name: Verify dependency consumption
         run: tools/verify-dependency-consumption.sh "${{ matrix.build_dir }}"
+
+      - name: Capture process-isolation evidence
+        run: >-
+          "${{ matrix.build_dir }}/evaluation/process_isolation/aiforge_process_isolation_evaluation"
+          --source-sha "$GITHUB_SHA"
+          --output "${{ matrix.build_dir }}/process-isolation-evidence.json"
+
+      - name: Upload exact-SHA process-isolation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: process-isolation-evidence-${{ matrix.compiler }}-${{ github.sha }}
+          path: ${{ matrix.build_dir }}/process-isolation-evidence.json
+          if-no-files-found: error

@@ -184,6 +184,15 @@ Execution policy must be able to constrain working directory, readable and
 writable roots, environment variables, stdin, runtime, output bytes, process
 tree, and cancellation. stdout and stderr remain separate event channels.
 
+Operating-system isolation is an evidence-backed launch property, not an
+inference from compile-time APIs or a tool's declared capability scopes. An
+opt-in, noninstalled evaluator may record bounded primitive evidence for an
+exact source revision and host. Such a report grants no production authority,
+does not advertise an isolation level, and is never reused as launch-time
+availability. A later accepted mechanism ADR must map positively enforced
+primitives to each complete isolation contract; production must re-establish
+that contract at application launch and fail closed without downgrading.
+
 Never make the UI parse human terminal output when a structured adapter is
 available. Initial Kubernetes and Ceph adapters may wrap their CLIs with JSON
 output, but their domain results should not expose command-line formatting.

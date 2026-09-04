@@ -1,0 +1,19 @@
+---
+InheritParentConfig: true
+
+# This evaluator is a Linux/POSIX effect-boundary implementation. Its calls to
+# open(2), prctl(2), syscall(2), exec(3), and main(3) necessarily use C varargs,
+# pointer/array ABI forms, and descriptor buffers. Keep all other repository
+# checks inherited and fatal while excluding only rules incompatible with that
+# boundary.
+Checks: >
+  -cppcoreguidelines-avoid-c-arrays,
+  -cppcoreguidelines-avoid-do-while,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-vararg,
+  -modernize-avoid-c-arrays
+
+HeaderFilterRegex: '^.*/evaluation/process_isolation/'
+ExcludeHeaderFilterRegex: '^.*/(build[^/]*/|_deps/)/'

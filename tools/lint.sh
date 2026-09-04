@@ -48,7 +48,8 @@ cmake -S . -B "$build_dir" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   -Daiforge_TESTS=OFF \
-  -Daiforge_DRAWFORGE_EVALUATION=OFF
+  -Daiforge_DRAWFORGE_EVALUATION=OFF \
+  -Daiforge_PROCESS_ISOLATION_EVALUATION=ON
 
 output=$(mktemp)
 trap 'rm -f "$output"' EXIT
@@ -73,3 +74,14 @@ if ((status != 0)); then
 fi
 
 tools/check-clang-tidy.py "$output" "$baseline"
+
+"$runner" \
+  -p "$build_dir" \
+  -j "$jobs" \
+  -clang-tidy-binary "$tidy" \
+  -config-file "$repo_root/evaluation/process_isolation/.clang-tidy" \
+  -header-filter='^.*/evaluation/process_isolation/' \
+  -exclude-header-filter='^.*/(build[^/]*/|_deps/)/' \
+  -warnings-as-errors='*' \
+  -quiet \
+  "^${repo_root}/evaluation/process_isolation/(?!test_).*[.]cpp$"
