@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -71,6 +72,63 @@ class StateEnvironment final {
   std::optional<std::string> m_previous;
 };
 
+class CurrentDirectory final {
+ public:
+  explicit CurrentDirectory(const std::filesystem::path& path)
+      : m_previous(std::filesystem::current_path()) {
+    std::filesystem::current_path(path);
+  }
+
+  ~CurrentDirectory() {
+    std::error_code error;
+    std::filesystem::current_path(m_previous, error);
+  }
+
+  CurrentDirectory(const CurrentDirectory&) = delete;
+  auto operator=(const CurrentDirectory&) -> CurrentDirectory& = delete;
+
+ private:
+  std::filesystem::path m_previous;
+};
+
+auto shell_quote(const std::filesystem::path& path) -> std::string {
+  std::string result{"'"};
+  for (const char value : path.string()) {
+    if (value == '\'')
+      result.append("'\\''");
+    else
+      result.push_back(value);
+  }
+  result.push_back('\'');
+  return result;
+}
+
+auto run_git(const std::filesystem::path& root, const std::string& arguments)
+    -> void {
+  const auto command = shell_quote(PLAN_PROCESS_TEST_GIT) + " -C " +
+                       shell_quote(root) + " " + arguments + " >/dev/null 2>&1";
+  REQUIRE(std::system(command.c_str()) == 0);
+}
+
+auto initialized_repository(const std::filesystem::path& parent)
+    -> std::filesystem::path {
+  const auto root = parent / "repository";
+  REQUIRE(std::filesystem::create_directory(root));
+  run_git(root, "init -q");
+  run_git(root, "config user.email test@example.invalid");
+  run_git(root, "config user.name Test");
+  std::ofstream tracked{root / "tracked.txt", std::ios::binary};
+  REQUIRE(tracked);
+  tracked << "stable source\n";
+  tracked.close();
+  REQUIRE(tracked);
+  run_git(root, "add tracked.txt");
+  run_git(root,
+          "-c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm "
+          "initial");
+  return root;
+}
+
 auto attributes() -> domain::RunStarted {
   return {id<domain::SurfaceId>("test"), id<domain::WorkspaceId>("workspace"),
           id<domain::PermissionProfileId>("observe"), std::nullopt};
@@ -122,6 +180,8 @@ TEST_CASE("process plan emits one strict response per JSONL request",
           "[plan][jsonl][process][failure]") {
   TemporaryDirectory temporary;
   StateEnvironment environment_scope{temporary.path()};
+  const auto repository = initialized_repository(temporary.path());
+  CurrentDirectory directory_scope{repository};
   const auto session_id = id<domain::SessionId>("session");
   seed_session(temporary.path(), session_id);
 
@@ -159,6 +219,8 @@ TEST_CASE("process plan rejects terminal and empty protocol input",
           "[plan][jsonl][process][failure]") {
   TemporaryDirectory temporary;
   StateEnvironment environment_scope{temporary.path()};
+  const auto repository = initialized_repository(temporary.path());
+  CurrentDirectory directory_scope{repository};
   const auto session_id = id<domain::SessionId>("session");
   seed_session(temporary.path(), session_id);
   adapters::ProcessPlanCommand command;
@@ -186,6 +248,8 @@ TEST_CASE("process plan bounds a line before JSON parsing",
           "[plan][jsonl][process][limits][failure]") {
   TemporaryDirectory temporary;
   StateEnvironment environment_scope{temporary.path()};
+  const auto repository = initialized_repository(temporary.path());
+  CurrentDirectory directory_scope{repository};
   const auto session_id = id<domain::SessionId>("session");
   seed_session(temporary.path(), session_id);
   adapters::ProcessPlanCommand command;
@@ -209,6 +273,8 @@ TEST_CASE("process plan durably approves promotes and resolves an exact task",
           "[plan][jsonl][process][mutation]") {
   TemporaryDirectory temporary;
   StateEnvironment environment_scope{temporary.path()};
+  const auto repository = initialized_repository(temporary.path());
+  CurrentDirectory directory_scope{repository};
   const auto session_id = id<domain::SessionId>("session");
   seed_session(temporary.path(), session_id);
   adapters::ProcessPlanCommand command;
