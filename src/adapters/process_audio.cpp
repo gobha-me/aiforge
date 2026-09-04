@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <ranges>
@@ -25,6 +26,11 @@
 #include <aiforge/config/file_store.hpp>
 #include <aiforge/model/catalog.hpp>
 #include <aiforge/surfaces/audio.hpp>
+
+#ifdef AIFORGE_HAS_RTAUDIO_PLAYBACK
+#include "playback_device.hpp"
+#include "rtaudio_playback.hpp"
+#endif
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -301,6 +307,35 @@ class Descriptor final {
   return result;
 }
 
+[[nodiscard]] auto select_audio_artifact(
+    SqliteSessionStore& sessions, const domain::SessionId& session_id,
+    const std::optional<domain::ArtifactId>& artifact_id,
+    const std::stop_token stop_token)
+    -> std::expected<domain::ArtifactMetadata, cli::CommandFailure> {
+  auto events = sessions.replay_events(session_id, stop_token);
+  if (!events)
+    return failure(
+        events.error().code == storage::SessionStoreErrorCode::cancelled
+            ? cli::CommandFailureKind::cancelled
+            : cli::CommandFailureKind::runtime,
+        events.error().code == storage::SessionStoreErrorCode::not_found
+            ? "audio session was not found"
+            : "audio session could not be replayed");
+  auto artifacts = audio_artifacts(*events);
+  auto selected = artifacts.end();
+  if (artifact_id) {
+    selected = std::ranges::find(artifacts, *artifact_id,
+                                 &domain::ArtifactMetadata::artifact_id);
+  } else if (!artifacts.empty()) {
+    selected = std::prev(artifacts.end());
+  }
+  if (selected == artifacts.end())
+    return failure(cli::CommandFailureKind::runtime,
+                   artifact_id ? "audio artifact is not present in that session"
+                               : "session has no PCM WAV artifacts");
+  return *selected;
+}
+
 [[nodiscard]] auto read_validated(FilesystemArtifactStore& store,
                                   const domain::ArtifactMetadata& metadata,
                                   const std::stop_token stop_token)
@@ -344,7 +379,101 @@ class Descriptor final {
   return std::move(*id);
 }
 
+[[nodiscard]] auto playback_failure(const audio::PlaybackError& error)
+    -> cli::CommandFailure {
+  if (error.code == audio::PlaybackErrorCode::cancelled)
+    return {cli::CommandFailureKind::cancelled, error.message};
+  if (error.code == audio::PlaybackErrorCode::invalid_format ||
+      error.code == audio::PlaybackErrorCode::invalid_buffer ||
+      error.code == audio::PlaybackErrorCode::too_large) {
+    return {cli::CommandFailureKind::usage, error.message};
+  }
+  return {cli::CommandFailureKind::runtime, error.message};
+}
+
+[[nodiscard]] auto stage_name(const audio::PlaybackStage stage)
+    -> std::string_view {
+  switch (stage) {
+    case audio::PlaybackStage::open: return "opening";
+    case audio::PlaybackStage::start: return "starting";
+    case audio::PlaybackStage::stream: return "streaming";
+    case audio::PlaybackStage::stop: return "stopping";
+    case audio::PlaybackStage::close: return "closing";
+  }
+  return "unknown";
+}
+
+class ProcessPlaybackObserver final : public audio::PlaybackObserver {
+ public:
+  explicit ProcessPlaybackObserver(std::ostream& error) : m_error{error} {}
+
+  [[nodiscard]] auto stage_changed(const audio::PlaybackStage stage) noexcept
+      -> bool override {
+    try {
+      m_error << "aiforge: playback=" << stage_name(stage) << '\n';
+      return static_cast<bool>(m_error);
+    } catch (...) {
+      return false;
+    }
+  }
+
+ private:
+  std::ostream& m_error;
+};
+
+#ifdef AIFORGE_HAS_RTAUDIO_PLAYBACK
+class ProcessPlaybackPort final : public audio::PlaybackPort {
+ public:
+  explicit ProcessPlaybackPort(std::unique_ptr<RtAudioNative> native)
+      : m_device{std::move(native)}, m_controller{m_gate, m_device} {}
+
+  [[nodiscard]] auto play(audio::Signed16Buffer buffer,
+                          const std::stop_token stop_token,
+                          audio::PlaybackObserver* observer) noexcept
+      -> std::expected<audio::PlaybackStats, audio::PlaybackError> override {
+    return m_controller.play(std::move(buffer), stop_token, observer);
+  }
+
+ private:
+  // The gate owns quarantined callbacks and is deliberately destroyed after
+  // the device/native state that may still retain their addresses.
+  AudioDeviceGate m_gate;
+  RtAudioPlaybackDevice m_device;
+  PlaybackController m_controller;
+};
+#endif
+
+[[nodiscard]] auto production_playback_port()
+    -> std::expected<std::shared_ptr<audio::PlaybackPort>,
+                     cli::CommandFailure> {
+#ifdef AIFORGE_HAS_RTAUDIO_PLAYBACK
+  static const auto service =
+      []() -> std::expected<std::shared_ptr<audio::PlaybackPort>,
+                            cli::CommandFailure> {
+    auto native = make_rtaudio_native();
+    if (!native)
+      return failure(cli::CommandFailureKind::runtime,
+                     "audio playback is unavailable");
+    try {
+      return std::make_shared<ProcessPlaybackPort>(std::move(*native));
+    } catch (...) {
+      return failure(cli::CommandFailureKind::runtime,
+                     "audio playback could not be initialized");
+    }
+  }();
+  return service;
+#else
+  return failure(cli::CommandFailureKind::runtime,
+                 "audio playback is unavailable in this build");
+#endif
+}
+
 } // namespace
+
+ProcessAudioCommand::ProcessAudioCommand(PlaybackFactory playback_factory)
+    : m_playback_factory{std::move(playback_factory)} {
+  if (!m_playback_factory) m_playback_factory = production_playback_port;
+}
 
 auto ProcessAudioCommand::synthesize(SynthesizeRequest request,
                                      cli::CommandEnvironment& environment,
@@ -481,29 +610,10 @@ auto ProcessAudioCommand::export_artifact(ExportRequest request,
   try {
     auto stores = open_stores(FilesystemArtifactStoreOpenMode::existing);
     if (!stores) return std::unexpected(std::move(stores.error()));
-    auto events = stores->sessions->replay_events(request.session_id,
-                                                  environment.stop_token);
-    if (!events)
-      return failure(
-          events.error().code == storage::SessionStoreErrorCode::cancelled
-              ? cli::CommandFailureKind::cancelled
-              : cli::CommandFailureKind::runtime,
-          events.error().code == storage::SessionStoreErrorCode::not_found
-              ? "audio session was not found"
-              : "audio session could not be replayed");
-    auto artifacts = audio_artifacts(*events);
-    auto selected = artifacts.end();
-    if (request.artifact_id) {
-      selected = std::ranges::find(artifacts, *request.artifact_id,
-                                   &domain::ArtifactMetadata::artifact_id);
-    } else if (!artifacts.empty()) {
-      selected = std::prev(artifacts.end());
-    }
-    if (selected == artifacts.end())
-      return failure(cli::CommandFailureKind::runtime,
-                     request.artifact_id
-                         ? "audio artifact is not present in that session"
-                         : "session has no PCM WAV artifacts");
+    auto selected =
+        select_audio_artifact(*stores->sessions, request.session_id,
+                              request.artifact_id, environment.stop_token);
+    if (!selected) return std::unexpected(std::move(selected.error()));
     auto artifact =
         read_validated(*stores->artifacts, *selected, environment.stop_token);
     if (!artifact) return std::unexpected(std::move(artifact.error()));
@@ -520,6 +630,50 @@ auto ProcessAudioCommand::export_artifact(ExportRequest request,
   } catch (...) {
     return failure(cli::CommandFailureKind::runtime,
                    "audio export command failed internally");
+  }
+}
+
+auto ProcessAudioCommand::play(PlayRequest request,
+                               cli::CommandEnvironment& environment,
+                               std::ostream& output, std::ostream& error)
+    -> std::expected<void, cli::CommandFailure> {
+  try {
+    auto stores = open_stores(FilesystemArtifactStoreOpenMode::existing);
+    if (!stores) return std::unexpected(std::move(stores.error()));
+    auto selected =
+        select_audio_artifact(*stores->sessions, request.session_id,
+                              request.artifact_id, environment.stop_token);
+    if (!selected) return std::unexpected(std::move(selected.error()));
+    auto artifact =
+        read_validated(*stores->artifacts, *selected, environment.stop_token);
+    if (!artifact) return std::unexpected(std::move(artifact.error()));
+    auto decoded = audio::decode_pcm16_wav(
+        artifact->content,
+        {.maximum_bytes = maximum_audio_bytes, .maximum_channels = 2});
+    if (!decoded)
+      return failure(decoded.error().code == audio::PcmWavErrorCode::unsupported
+                         ? cli::CommandFailureKind::usage
+                         : cli::CommandFailureKind::runtime,
+                     "audio artifact is not playable signed-16 PCM WAV");
+
+    auto playback = m_playback_factory();
+    if (!playback) return std::unexpected(std::move(playback.error()));
+    if (*playback == nullptr)
+      return failure(cli::CommandFailureKind::runtime,
+                     "audio playback could not be initialized");
+    ProcessPlaybackObserver observer{error};
+    auto played = (*playback)->play(std::move(*decoded), environment.stop_token,
+                                    &observer);
+    if (!played) return std::unexpected(playback_failure(played.error()));
+    output << "frames=" << played->frames
+           << " artifact=" << selected->artifact_id.value() << '\n';
+    if (!output)
+      return failure(cli::CommandFailureKind::runtime,
+                     "audio playback output failed");
+    return {};
+  } catch (...) {
+    return failure(cli::CommandFailureKind::runtime,
+                   "audio playback command failed internally");
   }
 }
 

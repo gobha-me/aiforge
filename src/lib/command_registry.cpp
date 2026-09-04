@@ -547,6 +547,30 @@ auto audio_export_handler(CommandContext& context) -> int {
                         context);
 }
 
+auto audio_play_handler(CommandContext& context) -> int {
+  const auto session =
+      parsed_text_values(context.invocation, "audio.play.session");
+  const auto artifact =
+      parsed_text_values(context.invocation, "audio.play.artifact");
+  if (!session || session->size() != 1 || session->front().empty() ||
+      (artifact && (artifact->size() != 1 || artifact->front().empty()))) {
+    return usage_exit_code;
+  }
+  auto session_id = domain::SessionId::from(std::string{session->front()});
+  if (!session_id) return usage_exit_code;
+  std::optional<domain::ArtifactId> artifact_id;
+  if (artifact) {
+    auto parsed = domain::ArtifactId::from(std::string{artifact->front()});
+    if (!parsed) return usage_exit_code;
+    artifact_id = std::move(*parsed);
+  }
+  if (context.environment.audio == nullptr) return unavailable_handler(context);
+  return command_result(context.environment.audio->play(
+                            {std::move(*session_id), std::move(artifact_id)},
+                            context.environment, context.output, context.error),
+                        context);
+}
+
 auto image_generate_handler(CommandContext& context) -> int {
   const auto prompt =
       parsed_text_values(context.invocation, "image.generate.prompt");
@@ -1074,7 +1098,7 @@ auto builtin_command_registry() -> const CommandRegistry& {
          "Prompt text for a one-shot request."}},
        {{"audio",
          "audio",
-         "Synthesize, transcribe, or export durable PCM WAV artifacts.",
+         "Synthesize, transcribe, play, or export durable PCM WAV artifacts.",
          true,
          {},
          {},
@@ -1163,7 +1187,28 @@ auto builtin_command_registry() -> const CommandRegistry& {
              "Create the export path exclusively."}},
            {},
            {},
-           audio_export_handler}},
+           audio_export_handler},
+          {"audio-play",
+           "play",
+           "Play a durable PCM16 WAV artifact on the local output device.",
+           false,
+           {{{"audio.play.session",
+              {"--session"},
+              ArgumentValueKind::text,
+              1,
+              1},
+             "session-id",
+             "Select an exact durable session."},
+            {{"audio.play.artifact",
+              {"--artifact"},
+              ArgumentValueKind::text,
+              0,
+              1},
+             "artifact-id",
+             "Select an exact artifact; latest is default."}},
+           {},
+           {},
+           audio_play_handler}},
          audio_parent_handler},
         {"chat",
          "chat",

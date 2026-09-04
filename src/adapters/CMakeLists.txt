@@ -17,6 +17,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   process_tool.cpp
   process_one_shot.cpp
   process_plan.cpp
+  playback_device.cpp
   process_provenance.cpp
   process_repository.cpp
   process_draft_editor.cpp
@@ -35,6 +36,13 @@ add_library(${PROJECT_NAME}_adapters STATIC
   venice_model_catalog_source.cpp
 )
 add_library(${PROJECT_NAME}::adapters ALIAS ${PROJECT_NAME}_adapters)
+
+if (${PROJECT_NAME}_AUDIO_PLAYBACK)
+  target_sources(${PROJECT_NAME}_adapters PRIVATE rtaudio_playback.cpp)
+  target_compile_definitions(${PROJECT_NAME}_adapters
+    PRIVATE AIFORGE_HAS_RTAUDIO_PLAYBACK=1)
+  target_link_libraries(${PROJECT_NAME}_adapters PRIVATE RtAudio::rtaudio)
+endif ()
 
 target_include_directories(${PROJECT_NAME}_adapters
   PUBLIC

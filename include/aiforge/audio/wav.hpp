@@ -6,6 +6,8 @@
 #include <span>
 #include <string>
 
+#include <aiforge/audio/pcm.hpp>
+
 namespace aiforge::audio {
 
 struct PcmWavLimits {
@@ -42,5 +44,9 @@ struct PcmWavError {
 [[nodiscard]] auto validate_pcm_wav(std::span<const std::byte> encoded,
                                     PcmWavLimits limits = {})
     -> std::expected<PcmWavInfo, PcmWavError>;
+
+[[nodiscard]] auto decode_pcm16_wav(std::span<const std::byte> encoded,
+                                    PcmWavLimits limits = {})
+    -> std::expected<Signed16Buffer, PcmWavError>;
 
 } // namespace aiforge::audio
