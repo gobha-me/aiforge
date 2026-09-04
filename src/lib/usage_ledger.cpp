@@ -1,5 +1,7 @@
 #include <aiforge/domain/usage_ledger.hpp>
 
+#include <aiforge/domain/events.hpp>
+
 #include <algorithm>
 #include <array>
 #include <limits>

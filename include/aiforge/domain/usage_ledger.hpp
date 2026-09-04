@@ -1,14 +1,21 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <optional>
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include <aiforge/domain/events.hpp>
+#include <aiforge/domain/content.hpp>
+#include <aiforge/domain/digest.hpp>
+#include <aiforge/domain/events_fwd.hpp>
+#include <aiforge/domain/ids.hpp>
+#include <aiforge/domain/money.hpp>
+#include <aiforge/domain/pricing.hpp>
 
 namespace aiforge::domain {
 
@@ -94,6 +101,20 @@ struct SessionSpendSummary {
   std::vector<CostEstimateFailureCount> unavailable;
   std::optional<CostEstimateUnavailableReason> aggregation_failure;
   bool reached{};
+  std::optional<MonetaryAmount> inference_accounted{};
+  std::optional<MonetaryAmount> tool_accounted{};
+  std::optional<MonetaryAmount> tool_reserved_maximum{};
+  std::optional<MonetaryAmount> tool_reconciliation_maximum{};
+  std::optional<MonetaryAmount> tool_provider_reported_amount{};
+  std::optional<MonetaryAmount> tool_catalog_estimate_amount{};
+  std::optional<MonetaryAmount> tool_policy_upper_bound_amount{};
+  std::size_t tool_reservations{};
+  std::size_t tool_reserved{};
+  std::size_t tool_released{};
+  std::size_t tool_reconciliation_required{};
+  std::size_t tool_provider_reported{};
+  std::size_t tool_catalog_estimate{};
+  std::size_t tool_policy_upper_bound{};
   auto operator==(const SessionSpendSummary&) const -> bool = default;
 };
 

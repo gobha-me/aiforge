@@ -384,8 +384,27 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
                                   {scope},
                                   domain::ApprovalGrantLifetime::saved},
       domain::ToolPolicyFailed{invocation, error},
+      domain::ToolSpendReserved{domain::ToolSpendReservation{
+          invocation,
+          domain::MonetaryAmount::create(
+              "USD", domain::DecimalAmount::from("0.2").value())
+              .value(),
+          domain::ToolSpendEstimateBasis::catalog_estimate,
+          {"sha256", std::string(64, 'f'), 42},
+          domain::EventTimestamp::max()}},
       domain::ToolStarted{invocation},
       domain::ToolProgressed{invocation, {domain::TextBlock{"working"}}},
+      domain::ToolSpendReleased{invocation},
+      domain::ToolSpendFinalized{domain::ToolSpendFinalization{
+          invocation,
+          domain::MonetaryAmount::create(
+              "USD", domain::DecimalAmount::from("0.1").value())
+              .value(),
+          domain::ToolSpendFinalizationBasis::provider_reported,
+          domain::ContentDigest{"sha256", std::string(64, 'e'), 21}}},
+      domain::ToolSpendReconciliationRequired{
+          invocation,
+          domain::ToolSpendReconciliationReason::provider_cost_unavailable},
       domain::ToolResultRecorded{
           invocation, {domain::TextBlock{"done"}}, message},
       domain::ToolErrored{invocation, error, message},
@@ -897,6 +916,49 @@ TEST_CASE("forged persisted pricing observation fails replay explicitly",
   execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json, "
                     "'$.observation.rate_card_digest.value','forged') "
                     "WHERE event_id='pricing-event'");
+  store = open_store(path);
+  const auto replayed = store->replay_events(session);
+  REQUIRE_FALSE(replayed);
+  REQUIRE(replayed.error().code == storage::SessionStoreErrorCode::corrupt);
+}
+
+TEST_CASE("paid tool spend codecs reject invalid writes and stored damage",
+          "[storage][sqlite][spend][corrupt][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "spend-session", 100);
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  auto reserved =
+      event(1,
+            domain::ToolSpendReserved{domain::ToolSpendReservation{
+                invocation,
+                domain::MonetaryAmount::create(
+                    "USD", domain::DecimalAmount::from("0.2").value())
+                    .value(),
+                domain::ToolSpendEstimateBasis::catalog_estimate,
+                {"sha256", std::string(64, 'a'), 42},
+                domain::EventTimestamp{std::chrono::milliseconds{10'000}}}},
+            "spend-reserved");
+  reserved.metadata.invocation_id = invocation;
+  REQUIRE(store->append_events(session, std::array{reserved}));
+
+  auto invalid = reserved;
+  invalid.metadata.sequence = 2;
+  invalid.metadata.event_id = make_id<domain::EventId>("invalid-spend");
+  std::get<domain::ToolSpendReserved>(invalid.payload).reservation.maximum =
+      domain::MonetaryAmount::create("EUR",
+                                     domain::DecimalAmount::from("0.2").value())
+          .value();
+  auto rejected = store->append_events(session, std::array{invalid});
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code ==
+          storage::SessionStoreErrorCode::invalid_argument);
+
+  store.reset();
+  execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json, "
+                    "'$.reservation.evidence_digest.value','bad') "
+                    "WHERE event_id='spend-reserved'");
   store = open_store(path);
   const auto replayed = store->replay_events(session);
   REQUIRE_FALSE(replayed);
@@ -1472,6 +1534,56 @@ TEST_CASE("bounded SQLite writer contention is retryable",
           SQLITE_OK);
   REQUIRE(sqlite3_close(competing) == SQLITE_OK);
   REQUIRE(store->replay_events(session)->empty());
+}
+
+TEST_CASE("two SQLite writers cannot commit the same paid reservation slot",
+          "[storage][sqlite][spend][concurrency][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto first = open_store(path);
+  const auto session = create(*first, "spend-race", 100);
+  auto second = open_store(path);
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  const auto quote = domain::ToolSpendQuote{
+      domain::MonetaryAmount::create("USD",
+                                     domain::DecimalAmount::from("0.5").value())
+          .value(),
+      domain::ToolSpendEstimateBasis::policy_upper_bound,
+      {"sha256", std::string(64, 'a'), 32},
+      domain::EventTimestamp{std::chrono::milliseconds{10'000}}};
+  auto proposed = event(1,
+                        domain::ToolProposed{invocation,
+                                             "paid",
+                                             {"application/json", "{}"},
+                                             {domain::Effect::spend},
+                                             std::nullopt,
+                                             true,
+                                             {},
+                                             {},
+                                             std::nullopt,
+                                             quote,
+                                             domain::StructuredDataBlock{
+                                                 "application/json", "{}"}},
+                        "paid-proposed");
+  proposed.metadata.schema_version = 2;
+  proposed.metadata.invocation_id = invocation;
+  REQUIRE(first->append_events(session, std::array{proposed}));
+
+  const auto reservation =
+      domain::ToolSpendReservation{invocation, quote.maximum, quote.basis,
+                                   quote.evidence_digest, quote.valid_until};
+  auto admitted = event(2, domain::ToolSpendReserved{reservation}, "admitted");
+  admitted.metadata.invocation_id = invocation;
+  auto stale = event(2, domain::ToolSpendReserved{reservation}, "stale");
+  stale.metadata.invocation_id = invocation;
+  REQUIRE(first->append_events(session, std::array{admitted}));
+  const auto rejected = second->append_events(session, std::array{stale});
+  REQUIRE_FALSE(rejected);
+  CHECK(rejected.error().code == storage::SessionStoreErrorCode::conflict);
+  const auto replayed = second->replay_events(session);
+  REQUIRE(replayed);
+  CHECK(replayed->size() == 2);
+  CHECK(replayed->back() == admitted);
 }
 
 TEST_CASE(

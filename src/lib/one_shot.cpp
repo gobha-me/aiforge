@@ -1,3 +1,4 @@
+#include <aiforge/domain/tool_spend.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/presentation/text.hpp>
 #include <aiforge/runtime/context_builder.hpp>
@@ -214,7 +215,39 @@ auto write(std::ostream& stream, const std::string_view value) -> bool {
               " remaining=" + spend.remaining->amount().to_string() +
               (spend.reached ? " reached" : " open");
   }
-  result += " (provider-reported or catalog-derived)\n";
+  if (spend.inference_accounted) {
+    result += " inference.accounted=" +
+              spend.inference_accounted->amount().to_string();
+  }
+  if (spend.tool_reservations != 0) {
+    const auto amount_or_unavailable = [](const auto& value) {
+      return value ? value->amount().to_string() : std::string{"unavailable"};
+    };
+    result +=
+        " tools[accounted=" + amount_or_unavailable(spend.tool_accounted) +
+        " reserved.maximum_usd=" +
+        amount_or_unavailable(spend.tool_reserved_maximum) +
+        " reserved.count=" + std::to_string(spend.tool_reserved) +
+        " reconciliation.maximum_usd=" +
+        amount_or_unavailable(spend.tool_reconciliation_maximum) +
+        " reconciliation.count=" +
+        std::to_string(spend.tool_reconciliation_required) +
+        " released.count=" + std::to_string(spend.tool_released) +
+        " finalized.provider_reported_usd=" +
+        amount_or_unavailable(spend.tool_provider_reported_amount) +
+        " finalized.provider_reported_count=" +
+        std::to_string(spend.tool_provider_reported) +
+        " finalized.catalog_estimate_usd=" +
+        amount_or_unavailable(spend.tool_catalog_estimate_amount) +
+        " finalized.catalog_estimate_count=" +
+        std::to_string(spend.tool_catalog_estimate) +
+        " finalized.policy_upper_bound_usd=" +
+        amount_or_unavailable(spend.tool_policy_upper_bound_amount) +
+        " finalized.policy_upper_bound_count=" +
+        std::to_string(spend.tool_policy_upper_bound) + "]";
+  }
+  result += " (provider_reported requires correlated evidence; estimates and "
+            "upper bounds are not provider actuals)\n";
   return result;
 }
 
@@ -285,6 +318,7 @@ template <typename IdType>
 
 struct SpendState {
   domain::UsageLedgerProjection ledger;
+  domain::ToolSpendLedgerProjection tools;
   domain::SessionSpendCeilingProjection ceiling;
 };
 
@@ -304,7 +338,8 @@ struct SpendState {
     -> std::expected<SpendState, OneShotError> {
   SpendState state;
   for (const auto& event : log.events()) {
-    if (!state.ledger.apply(event) || !state.ceiling.apply(event)) {
+    if (!state.ledger.apply(event) || !state.tools.apply(event) ||
+        !state.ceiling.apply(event)) {
       return one_shot_error(OneShotErrorCode::run_failed,
                             "session spend history is invalid");
     }
@@ -680,18 +715,19 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       if (!opening_spend) {
         return std::unexpected(std::move(opening_spend.error()));
       }
-      const auto spend = domain::summarize_session_spend(
-          opening_spend->ledger.records(), *opening_spend->ceiling.ceiling());
-      if (!spend.accounted) {
+      const auto spend = domain::summarize_combined_session_spend(
+          opening_spend->ledger.records(), opening_spend->tools,
+          *opening_spend->ceiling.ceiling());
+      if (!spend || !spend->accounted) {
         return one_shot_error(OneShotErrorCode::spend_accounting_unavailable,
                               "session spend accounting is unavailable; "
                               "refusing another inference");
       }
-      if (spend.reached) {
+      if (spend->reached) {
         return one_shot_error(OneShotErrorCode::spend_ceiling_reached,
                               "session spend ceiling reached (USD " +
-                                  spend.accounted->amount().to_string() +
-                                  " of " + spend.ceiling.amount().to_string() +
+                                  spend->accounted->amount().to_string() +
+                                  " of " + spend->ceiling.amount().to_string() +
                                   ")");
       }
     }
@@ -1094,9 +1130,14 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       if (!final_spend_state) {
         return std::unexpected(std::move(final_spend_state.error()));
       }
-      spend = domain::summarize_session_spend(
-          final_spend_state->ledger.records(),
+      auto combined = domain::summarize_combined_session_spend(
+          final_spend_state->ledger.records(), final_spend_state->tools,
           *final_spend_state->ceiling.ceiling());
+      if (!combined) {
+        return one_shot_error(OneShotErrorCode::spend_accounting_unavailable,
+                              "session spend accounting is unavailable");
+      }
+      spend = std::move(*combined);
       if (!write(error, spend_line(*spend))) {
         return one_shot_error(OneShotErrorCode::output_failed,
                               "diagnostic output failed");

@@ -173,6 +173,103 @@ class ToolLoopBackend final : public backend::Backend {
   std::string m_arguments;
 };
 
+class PaidToolLoopBackend final : public backend::Backend {
+ public:
+  auto start(backend::BackendRequest request, std::stop_token)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    const auto assistant = request.assistant_message_id;
+    captured.push_back(std::move(request));
+    if (captured.size() == 1) {
+      return std::make_unique<VectorStream>(std::vector<Item>{
+          backend::BackendEvent{backend::ResponseStarted{"tool-response"}},
+          backend::BackendEvent{backend::UsageObserved{{1, 0, 0, 0}}},
+          backend::BackendEvent{backend::CostObserved{reported_cost("0.1")}},
+          backend::BackendEvent{
+              backend::ToolCallDelta{make_id<domain::InvocationId>("paid-call"),
+                                     "generate_image", "{}"}},
+          backend::BackendEvent{
+              backend::ResponseFinished{domain::FinishReason::tool_call}},
+          End{},
+      });
+    }
+    return std::make_unique<VectorStream>(success_items(assistant, "0.4"));
+  }
+
+  std::vector<backend::BackendRequest> captured;
+};
+
+class PaidResultStream final : public runtime::ToolExecutionStream {
+ public:
+  explicit PaidResultStream(runtime::ToolResult result)
+      : m_result(std::move(result)) {}
+
+  auto next(std::stop_token)
+      -> std::expected<std::optional<runtime::ToolExecutionEvent>,
+                       runtime::ToolExecutionError> override {
+    if (!m_result) return std::optional<runtime::ToolExecutionEvent>{};
+    auto result = std::move(*m_result);
+    m_result.reset();
+    return std::optional<runtime::ToolExecutionEvent>{std::move(result)};
+  }
+
+ private:
+  std::optional<runtime::ToolResult> m_result;
+};
+
+class PaidToolExecutor final : public runtime::ToolExecutor {
+ public:
+  explicit PaidToolExecutor(domain::ToolSpendQuote quote)
+      : m_quote(std::move(quote)) {}
+
+  auto validate(const domain::StructuredDataBlock& arguments) const
+      -> std::expected<runtime::ValidatedToolArguments,
+                       runtime::ToolExecutionError> override {
+    return runtime::ValidatedToolArguments{
+        arguments, {}, {domain::Effect::spend}, m_quote};
+  }
+
+  auto start(runtime::ToolInvocation invocation, std::stop_token)
+      -> std::expected<std::unique_ptr<runtime::ToolExecutionStream>,
+                       runtime::ToolExecutionError> override {
+    ++starts;
+    const auto finalization = domain::ToolSpendFinalization{
+        invocation.invocation_id,
+        domain::MonetaryAmount::create(
+            "USD", domain::DecimalAmount::from("0.2").value())
+            .value(),
+        domain::ToolSpendFinalizationBasis::catalog_estimate, std::nullopt};
+    return std::make_unique<PaidResultStream>(
+        runtime::ToolResult{{domain::TextBlock{"generated"}},
+                            {},
+                            domain::ToolSpendFinalized{finalization}});
+  }
+
+  std::size_t starts{};
+
+ private:
+  domain::ToolSpendQuote m_quote;
+};
+
+class AllowPaidPolicy final : public runtime::ToolPolicy {
+ public:
+  auto evaluate(const runtime::ToolPolicyRequest& request)
+      -> std::expected<runtime::ToolPolicyResolution,
+                       runtime::ToolPolicyError> override {
+    return runtime::ToolPolicyResolution{
+        domain::PolicyDecision::allow, request.scopes, "allowed by test",
+        domain::PolicyDecisionSource::permission_profile};
+  }
+
+  auto approve(const runtime::ToolPolicyRequest&, runtime::ToolPolicyApproval)
+      -> std::expected<runtime::ToolPolicyResolution,
+                       runtime::ToolPolicyError> override {
+    return std::unexpected(
+        runtime::ToolPolicyError{runtime::ToolPolicyErrorCode::invalid_request,
+                                 "approval is not expected", false});
+  }
+};
+
 class RejectingToolExecutor final : public runtime::ToolExecutor {
  public:
   auto validate(const domain::StructuredDataBlock&) const
@@ -924,6 +1021,91 @@ TEST_CASE("one-shot spend ceiling allows crossing then blocks durable resume",
   REQUIRE_FALSE(widened);
   REQUIRE(widened.error().code == surfaces::OneShotErrorCode::invalid_input);
   REQUIRE(backend.captured.size() == 1);
+}
+
+TEST_CASE("one-shot reports combined spend and blocks exhausted durable resume",
+          "[one-shot][spend][tools][session][failure]") {
+  FakeModels models;
+  PaidToolLoopBackend backend;
+  MemoryStore store;
+  const auto usd = [](const std::string& value) {
+    return domain::MonetaryAmount::create(
+               "USD", domain::DecimalAmount::from(value).value())
+        .value();
+  };
+  auto executor = std::make_shared<PaidToolExecutor>(
+      domain::ToolSpendQuote{usd("0.3"),
+                             domain::ToolSpendEstimateBasis::catalog_estimate,
+                             {"sha256", std::string(64, 'a'), 32},
+                             domain::EventTimestamp::max()});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      {"generate_image",
+       "Generate a bounded image",
+       {"application/schema+json", R"({"type":"object"})"},
+       {domain::Effect::spend},
+       {{domain::Effect::spend, "spend.microunits", "1000000"}}},
+      executor, {}, runtime::ToolExecutorContract{"test.generate-image", "1"}));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  surfaces::OneShotDependencies dependencies;
+  dependencies.tools = std::move(*tools);
+  dependencies.tool_policy = std::make_shared<AllowPaidPolicy>();
+  surfaces::OneShotSurface surface{backend, models,  store,
+                                   {},      nullptr, std::move(dependencies)};
+  std::ostringstream output;
+  std::ostringstream error;
+  const auto model = make_id<domain::ModelId>("model");
+  const auto cap = domain::SessionSpendCeiling::from("0.7").value();
+
+  const auto first = surface.run({"generate an image",
+                                  std::nullopt,
+                                  model,
+                                  surfaces::OneShotRequest::SessionMode::create,
+                                  std::nullopt,
+                                  run_provenance(),
+                                  {},
+                                  cap},
+                                 output, error);
+
+  std::string first_failure;
+  if (!first) first_failure = first.error().message;
+  INFO(first_failure);
+  REQUIRE(first);
+  REQUIRE(first->spend);
+  REQUIRE(first->spend->accounted);
+  REQUIRE(first->spend->inference_accounted);
+  REQUIRE(first->spend->tool_accounted);
+  CHECK(first->spend->accounted->amount().to_string() == "0.7");
+  CHECK(first->spend->inference_accounted->amount().to_string() == "0.5");
+  CHECK(first->spend->tool_accounted->amount().to_string() == "0.2");
+  CHECK(first->spend->reached);
+  CHECK(executor->starts == 1);
+  CHECK(backend.captured.size() == 2);
+  CHECK(error.str().find("spend: USD=0.7 cap=0.7 remaining=0 reached "
+                         "inference.accounted=0.5 tools[accounted=0.2 "
+                         "reserved.maximum_usd=0 reserved.count=0 "
+                         "reconciliation.maximum_usd=0 reconciliation.count=0 "
+                         "released.count=0 finalized.provider_reported_usd=0 "
+                         "finalized.provider_reported_count=0 "
+                         "finalized.catalog_estimate_usd=0.2 "
+                         "finalized.catalog_estimate_count=1 "
+                         "finalized.policy_upper_bound_usd=0 "
+                         "finalized.policy_upper_bound_count=0]") !=
+        std::string::npos);
+
+  output.str({});
+  error.str({});
+  const auto blocked = surface.run(
+      {"must not reach transport", std::nullopt, model,
+       surfaces::OneShotRequest::SessionMode::resume, first->session_id},
+      output, error);
+
+  REQUIRE_FALSE(blocked);
+  CHECK(blocked.error().code ==
+        surfaces::OneShotErrorCode::spend_ceiling_reached);
+  CHECK(executor->starts == 1);
+  CHECK(backend.captured.size() == 2);
 }
 
 TEST_CASE("one-shot global instructions fail before backend transport",
