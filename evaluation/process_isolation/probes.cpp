@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cerrno>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -27,7 +28,6 @@
 #include <linux/seccomp.h>
 #include <poll.h>
 #include <sched.h>
-#include <signal.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>

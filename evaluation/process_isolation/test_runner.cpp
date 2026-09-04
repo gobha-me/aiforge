@@ -4,13 +4,13 @@
 
 #include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <string_view>
 #include <utility>
 
-#include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -112,7 +112,23 @@ TEST_CASE("runner rejects unsafe launch options") {
   CHECK(result.error().code == isolation::RunnerErrorCode::invalid_options);
 
   options.child_argument_prefix.clear();
+  options.child_timeout = std::chrono::milliseconds::zero();
+  result = isolation::run_evaluation(std::string(40, 'a'), options);
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == isolation::RunnerErrorCode::invalid_options);
+
+  options.child_timeout = std::chrono::hours{1};
+  result = isolation::run_evaluation(std::string(40, 'a'), options);
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == isolation::RunnerErrorCode::invalid_options);
+
+  options.child_timeout = std::chrono::seconds{3};
   options.cpu_limit_probe_timeout = std::chrono::milliseconds::zero();
+  result = isolation::run_evaluation(std::string(40, 'a'), options);
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == isolation::RunnerErrorCode::invalid_options);
+
+  options.cpu_limit_probe_timeout = std::chrono::hours{1};
   result = isolation::run_evaluation(std::string(40, 'a'), options);
   REQUIRE_FALSE(result);
   CHECK(result.error().code == isolation::RunnerErrorCode::invalid_options);

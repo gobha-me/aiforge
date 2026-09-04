@@ -84,4 +84,4 @@ tools/check-clang-tidy.py "$output" "$baseline"
   -exclude-header-filter='^.*/(build[^/]*/|_deps/)/' \
   -warnings-as-errors='*' \
   -quiet \
-  "^${repo_root}/evaluation/process_isolation/(child_main|evidence|main|probes|runner)[.]cpp$"
+  "^${repo_root}/evaluation/process_isolation/(?!test_).*[.]cpp$"

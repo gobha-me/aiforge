@@ -10,6 +10,7 @@
 #include <charconv>
 #include <chrono>
 #include <climits>
+#include <csignal>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -23,7 +24,6 @@
 
 #include <fcntl.h>
 #include <poll.h>
-#include <signal.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -34,6 +34,8 @@
 
 namespace aiforge::evaluation::process_isolation {
 namespace {
+
+constexpr auto maximum_probe_timeout = std::chrono::seconds{60};
 
 [[nodiscard]] auto runner_error(const RunnerErrorCode code, std::string message)
     -> std::unexpected<RunnerError> {
@@ -401,7 +403,9 @@ auto run_evaluation(std::string source_sha, const RunnerOptions& options)
         !options.child_executable.is_absolute() || !safe_argument(executable) ||
         executable.empty() || !executable_is_runnable ||
         options.child_timeout <= std::chrono::milliseconds::zero() ||
+        options.child_timeout > maximum_probe_timeout ||
         options.cpu_limit_probe_timeout <= std::chrono::milliseconds::zero() ||
+        options.cpu_limit_probe_timeout > maximum_probe_timeout ||
         options.maximum_child_output_bytes == 0 ||
         options.maximum_child_output_bytes > maximum_child_record_bytes ||
         options.child_argument_prefix.size() > 16 || !arguments_are_safe) {
