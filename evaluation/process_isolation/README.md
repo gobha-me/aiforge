@@ -35,6 +35,10 @@ Only a completed adversarial enforcement assertion may report `enforced`;
 missing primitives, permission denial, malformed output, timeouts, signals,
 partial execution, and cleanup failure never do.
 
+Every row has a finite wall timeout. The CPU-limit assertion has a separate,
+longer wall allowance because `RLIMIT_CPU` advances on consumed CPU time rather
+than elapsed time and the reference runner may be contended.
+
 The schema-v1 names state the measured property rather than a broader future
 claim: Landlock covers read confinement, seccomp covers creation of one
 `AF_INET` stream socket, the disposable-workspace row is not a private-root

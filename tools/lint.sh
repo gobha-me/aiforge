@@ -60,10 +60,10 @@ set +e
   -j "$jobs" \
   -clang-tidy-binary "$tidy" \
   -config-file "$repo_root/.clang-tidy" \
-  -header-filter='^.*/(include/aiforge|src/(lib|adapters|bin)|evaluation/process_isolation)/' \
+  -header-filter='^.*/(include/aiforge|src/(lib|adapters|bin))/' \
   -exclude-header-filter='^.*/(build[^/]*/|_deps/)/' \
   -quiet \
-  "^${repo_root}/(src/(lib|adapters|bin)|evaluation/process_isolation)/.*[.]cpp$" >"$output" 2>&1
+  "^${repo_root}/src/(lib|adapters|bin)/.*[.]cpp$" >"$output" 2>&1
 status=$?
 set -e
 
@@ -74,3 +74,14 @@ if ((status != 0)); then
 fi
 
 tools/check-clang-tidy.py "$output" "$baseline"
+
+"$runner" \
+  -p "$build_dir" \
+  -j "$jobs" \
+  -clang-tidy-binary "$tidy" \
+  -config-file "$repo_root/evaluation/process_isolation/.clang-tidy" \
+  -header-filter='^.*/evaluation/process_isolation/' \
+  -exclude-header-filter='^.*/(build[^/]*/|_deps/)/' \
+  -warnings-as-errors='*' \
+  -quiet \
+  "^${repo_root}/evaluation/process_isolation/(child_main|evidence|main|probes|runner)[.]cpp$"

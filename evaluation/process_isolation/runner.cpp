@@ -24,12 +24,12 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
-#include <sys/prctl.h>
 #include <unistd.h>
 
 namespace aiforge::evaluation::process_isolation {
@@ -154,9 +154,10 @@ class SubreaperGuard {
   return true;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Proc parsing.
 [[nodiscard]] auto direct_descendants() -> std::optional<std::vector<pid_t>> {
-  const auto path = "/proc/self/task/" + std::to_string(::getpid()) +
-                    "/children";
+  const auto path =
+      "/proc/self/task/" + std::to_string(::getpid()) + "/children";
   const Descriptor descriptor{
       ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
   if (descriptor.get() < 0) return std::nullopt;
@@ -177,7 +178,8 @@ class SubreaperGuard {
   const char* cursor = document.data();
   const char* end = cursor + document.size();
   while (cursor != end) {
-    while (cursor != end && *cursor == ' ') ++cursor;
+    while (cursor != end && *cursor == ' ')
+      ++cursor;
     if (cursor == end) break;
     long value{};
     const auto parsed = std::from_chars(cursor, end, value);
@@ -196,6 +198,7 @@ struct DescendantCleanup {
   std::size_t observed{};
 };
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Cleanup loop.
 [[nodiscard]] auto cleanup_descendants() -> DescendantCleanup {
   DescendantCleanup result;
   const auto deadline =
@@ -222,8 +225,7 @@ struct DescendantCleanup {
     for (const auto child : *children) {
       if (::kill(child, SIGKILL) != 0 && errno != ESRCH) return result;
     }
-    if (std::chrono::steady_clock::now() >= deadline)
-      exceeded_deadline = true;
+    if (std::chrono::steady_clock::now() >= deadline) exceeded_deadline = true;
     static_cast<void>(::poll(nullptr, 0, 5));
   }
 }
@@ -234,10 +236,12 @@ auto terminate_child(const pid_t child) noexcept -> void {
   static_cast<void>(::kill(child, SIGKILL));
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Child process.
 [[nodiscard]] auto launch_probe(const ProbeId probe_id,
                                 const std::filesystem::path& state_directory,
                                 const RunnerOptions& options,
-                                const int executable_descriptor) -> ProbeRecord {
+                                const int executable_descriptor)
+    -> ProbeRecord {
   int output_pipe[2]{};
   if (::pipe2(output_pipe, O_CLOEXEC | O_NONBLOCK) != 0)
     return closed_record(probe_id, ReasonCode::internal_error);
@@ -296,8 +300,10 @@ auto terminate_child(const pid_t child) noexcept -> void {
   bool child_reaped{};
   bool wait_failed{};
   int status{};
-  const auto deadline =
-      std::chrono::steady_clock::now() + options.child_timeout;
+  const auto timeout = probe_id == ProbeId::rlimit_cpu
+                           ? options.cpu_limit_probe_timeout
+                           : options.child_timeout;
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (!child_reaped || !pipe_closed) {
     std::array<char, 1024> buffer{};
     for (;;) {
@@ -365,7 +371,7 @@ auto terminate_child(const pid_t child) noexcept -> void {
     return closed_record(probe_id, ReasonCode::malformed_protocol);
   if (descendant_cleanup.observed != 0)
     return closed_record(probe_id, ReasonCode::cleanup_failed);
-  return std::move(*parsed);
+  return *parsed;
 }
 
 auto mark_cleanup_failure(EvidenceReport& report) -> void {
@@ -377,6 +383,7 @@ auto mark_cleanup_failure(EvidenceReport& report) -> void {
 
 } // namespace
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Evaluation flow.
 auto run_evaluation(std::string source_sha, const RunnerOptions& options)
     -> std::expected<EvidenceReport, RunnerError> {
   try {
@@ -394,6 +401,7 @@ auto run_evaluation(std::string source_sha, const RunnerOptions& options)
         !options.child_executable.is_absolute() || !safe_argument(executable) ||
         executable.empty() || !executable_is_runnable ||
         options.child_timeout <= std::chrono::milliseconds::zero() ||
+        options.cpu_limit_probe_timeout <= std::chrono::milliseconds::zero() ||
         options.maximum_child_output_bytes == 0 ||
         options.maximum_child_output_bytes > maximum_child_record_bytes ||
         options.child_argument_prefix.size() > 16 || !arguments_are_safe) {
@@ -402,8 +410,9 @@ auto run_evaluation(std::string source_sha, const RunnerOptions& options)
     }
     const auto existing_children = direct_descendants();
     if (!existing_children || !existing_children->empty()) {
-      return runner_error(RunnerErrorCode::internal_error,
-                          "process-isolation runner requires no child processes");
+      return runner_error(
+          RunnerErrorCode::internal_error,
+          "process-isolation runner requires no child processes");
     }
     auto subreaper = SubreaperGuard::create();
     if (!subreaper) {
@@ -438,8 +447,8 @@ auto run_evaluation(std::string source_sha, const RunnerOptions& options)
         report->probes.push_back(
             closed_record(probe_id, ReasonCode::internal_error));
       } else {
-        auto record = launch_probe(probe_id, state, options,
-                                   executable_descriptor.get());
+        auto record =
+            launch_probe(probe_id, state, options, executable_descriptor.get());
         std::error_code cleanup_error;
         static_cast<void>(std::filesystem::remove_all(state, cleanup_error));
         std::error_code existence_error;
@@ -448,7 +457,7 @@ auto run_evaluation(std::string source_sha, const RunnerOptions& options)
         if (cleanup_error || existence_error || state_remains) {
           record = closed_record(probe_id, ReasonCode::cleanup_failed);
         }
-        report->probes.push_back(std::move(record));
+        report->probes.push_back(record);
       }
     }
     std::error_code cleanup_error;

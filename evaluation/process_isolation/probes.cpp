@@ -38,8 +38,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-extern char** environ;
-
 namespace aiforge::evaluation::process_isolation {
 namespace {
 
@@ -70,8 +68,7 @@ constexpr int assertion_internal_error = 23;
     return unavailable(id, ReasonCode::permission_denied);
   }
   if (error_number == ENOSYS || error_number == ENODEV ||
-      error_number == EOPNOTSUPP || error_number == ENOTSUP ||
-      error_number == EINVAL) {
+      error_number == EOPNOTSUPP || error_number == EINVAL) {
     return unavailable(id, ReasonCode::unsupported_kernel);
   }
   return probe_error(id, ReasonCode::internal_error);
@@ -82,8 +79,7 @@ constexpr int assertion_internal_error = 23;
     return assertion_permission_denied;
   }
   if (error_number == ENOSYS || error_number == ENODEV ||
-      error_number == EOPNOTSUPP || error_number == ENOTSUP ||
-      error_number == EINVAL) {
+      error_number == EOPNOTSUPP || error_number == EINVAL) {
     return assertion_mechanism_absent;
   }
   return assertion_internal_error;
@@ -276,9 +272,8 @@ template <typename Assertion>
     return unavailable(id, ReasonCode::permission_denied);
   if (WIFEXITED(status) && WEXITSTATUS(status) == assertion_mechanism_absent)
     return unavailable(id, ReasonCode::unsupported_kernel);
-  if (WIFEXITED(status) &&
-      (WEXITSTATUS(status) == assertion_enforced ||
-       WEXITSTATUS(status) == assertion_failed))
+  if (WIFEXITED(status) && (WEXITSTATUS(status) == assertion_enforced ||
+                            WEXITSTATUS(status) == assertion_failed))
     return unavailable(id, ReasonCode::enforcement_failed);
   return probe_error(id, ReasonCode::internal_error);
 }
@@ -362,15 +357,15 @@ template <typename Assertion>
   pollfd ready{descriptor, POLLIN | POLLHUP, 0};
   int polled{};
   do {
-    polled = ::poll(&ready, 1, 500);
+    polled = ::poll(&ready, 1, 2000);
   } while (polled < 0 && errno == EINTR);
   if (polled <= 0 || (ready.revents & POLLIN) == 0) return std::nullopt;
   pid_t value{};
   std::size_t offset{};
   while (offset < sizeof(value)) {
-    const auto count = ::read(descriptor,
-                              reinterpret_cast<char*>(&value) + offset,
-                              sizeof(value) - offset);
+    const auto count =
+        ::read(descriptor, reinterpret_cast<char*>(&value) + offset,
+               sizeof(value) - offset);
     if (count < 0) {
       if (errno == EINTR) continue;
       return std::nullopt;
@@ -391,8 +386,7 @@ auto emergency_reap(const pid_t target) -> void {
 [[nodiscard]] auto pidfd_cleanup_result(const ProbeId id, const pid_t target)
     -> ProbeRecord {
 #if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
-  const auto pidfd =
-      static_cast<int>(::syscall(SYS_pidfd_open, target, 0U));
+  const auto pidfd = static_cast<int>(::syscall(SYS_pidfd_open, target, 0U));
   if (pidfd < 0) {
     const auto saved_errno = errno;
     emergency_reap(target);
@@ -411,8 +405,7 @@ auto emergency_reap(const pid_t target) -> void {
   do {
     waited = ::waitpid(target, &status, 0);
   } while (waited < 0 && errno == EINTR);
-  if (waited != target)
-    return probe_error(id, ReasonCode::cleanup_failed);
+  if (waited != target) return probe_error(id, ReasonCode::cleanup_failed);
   return WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL
              ? enforced(id)
              : unavailable(id, ReasonCode::enforcement_failed);
@@ -431,6 +424,7 @@ auto restore_subreaper(const int previous) -> bool {
   return previous != 0 || ::prctl(PR_SET_CHILD_SUBREAPER, 0) == 0;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Child process.
 [[nodiscard]] auto session_containment_probe(const ProbeId id) -> ProbeRecord {
   int previous{};
   if (!enable_subreaper(previous)) return unavailable_from_errno(id, errno);
@@ -450,7 +444,8 @@ auto restore_subreaper(const int previous) -> bool {
       if (!write_all(readiness[1], std::as_bytes(std::span{&target, 1})))
         ::_exit(assertion_internal_error);
       static_cast<void>(::close(readiness[1]));
-      for (;;) ::pause();
+      for (;;)
+        ::pause();
     }
     ::_exit(0);
   }
@@ -471,15 +466,15 @@ auto restore_subreaper(const int previous) -> bool {
                         WEXITSTATUS(intermediate_status) == 0 && target
                     ? pidfd_cleanup_result(id, *target)
                     : probe_error(id, ReasonCode::malformed_protocol);
-  if (target &&
-      !(waited == intermediate && WIFEXITED(intermediate_status) &&
-        WEXITSTATUS(intermediate_status) == 0))
+  if (target && (waited != intermediate || !WIFEXITED(intermediate_status) ||
+                 WEXITSTATUS(intermediate_status) != 0))
     emergency_reap(*target);
   if (!restore_subreaper(previous))
     result = probe_error(id, ReasonCode::cleanup_failed);
   return result;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Child process.
 [[nodiscard]] auto double_fork_containment_probe(const ProbeId id)
     -> ProbeRecord {
   int previous{};
@@ -500,7 +495,8 @@ auto restore_subreaper(const int previous) -> bool {
           !write_all(readiness[1], std::as_bytes(std::span{&target, 1})))
         ::_exit(assertion_internal_error);
       static_cast<void>(::close(readiness[1]));
-      for (;;) ::pause();
+      for (;;)
+        ::pause();
     }
     ::_exit(0);
   }
@@ -521,9 +517,8 @@ auto restore_subreaper(const int previous) -> bool {
                         WEXITSTATUS(intermediate_status) == 0 && target
                     ? pidfd_cleanup_result(id, *target)
                     : probe_error(id, ReasonCode::malformed_protocol);
-  if (target &&
-      !(waited == intermediate && WIFEXITED(intermediate_status) &&
-        WEXITSTATUS(intermediate_status) == 0))
+  if (target && (waited != intermediate || !WIFEXITED(intermediate_status) ||
+                 WEXITSTATUS(intermediate_status) != 0))
     emergency_reap(*target);
   if (!restore_subreaper(previous))
     result = probe_error(id, ReasonCode::cleanup_failed);
@@ -613,7 +608,7 @@ auto restore_subreaper(const int previous) -> bool {
 #else
     constexpr std::uint32_t audit_architecture = AUDIT_ARCH_AARCH64;
 #endif
-    const std::array<sock_filter, 7> filter{{
+    std::array<sock_filter, 7> filter{{
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
                  static_cast<std::uint32_t>(offsetof(seccomp_data, arch))),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, audit_architecture, 1, 0),
@@ -625,7 +620,7 @@ auto restore_subreaper(const int previous) -> bool {
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     }};
     sock_fprog program{static_cast<unsigned short>(filter.size()),
-                       const_cast<sock_filter*>(filter.data())};
+                       filter.data()};
     if (::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
         ::prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) != 0) {
       return exit_for_errno(errno);
@@ -645,8 +640,7 @@ auto restore_subreaper(const int previous) -> bool {
 }
 
 [[nodiscard]] auto disposable_workspace_probe(
-    const ProbeId id, const std::filesystem::path& state)
-    -> ProbeRecord {
+    const ProbeId id, const std::filesystem::path& state) -> ProbeRecord {
   const auto file = state / "workspace-prerequisite";
   const auto descriptor =
       ::open(file.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
@@ -664,8 +658,7 @@ auto restore_subreaper(const int previous) -> bool {
   const bool safe = S_ISREG(attributes.st_mode) &&
                     attributes.st_uid == ::geteuid() &&
                     (attributes.st_mode & (S_IRWXG | S_IRWXO)) == 0;
-  return safe ? enforced(id)
-              : unavailable(id, ReasonCode::enforcement_failed);
+  return safe ? enforced(id) : unavailable(id, ReasonCode::enforcement_failed);
 }
 
 [[nodiscard]] auto openat2_probe(const ProbeId id,
@@ -804,6 +797,7 @@ auto child_process_is_sanitized() noexcept -> bool {
     if (directory == nullptr) return false;
     const auto inspection_descriptor = ::dirfd(directory);
     bool safe{true};
+    // NOLINTNEXTLINE(concurrency-mt-unsafe) -- Private directory stream.
     while (const auto* entry = ::readdir(directory)) {
       if (entry->d_name[0] == '.') continue;
       char* end{};
@@ -903,7 +897,7 @@ auto runtime_permission_denial() -> ProbeRecord {
 #else
     constexpr std::uint32_t audit_architecture = AUDIT_ARCH_AARCH64;
 #endif
-    const std::array<sock_filter, 7> filter{{
+    std::array<sock_filter, 7> filter{{
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
                  static_cast<std::uint32_t>(offsetof(seccomp_data, arch))),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, audit_architecture, 1, 0),
@@ -915,7 +909,7 @@ auto runtime_permission_denial() -> ProbeRecord {
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     }};
     sock_fprog program{static_cast<unsigned short>(filter.size()),
-                       const_cast<sock_filter*>(filter.data())};
+                       filter.data()};
     if (::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
         ::prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) != 0)
       return assertion_internal_error;

@@ -2,8 +2,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <chrono>
 #include <cerrno>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -76,7 +76,8 @@ class EscapedProcessGuard {
   options.child_executable = "/bin/sh";
   options.child_argument_prefix = {"-c", std::move(script)};
   options.temporary_parent = temporary.path();
-  options.child_timeout = std::chrono::seconds{1};
+  options.child_timeout = std::chrono::seconds{5};
+  options.cpu_limit_probe_timeout = options.child_timeout;
   return options;
 }
 
@@ -106,6 +107,12 @@ TEST_CASE("runner rejects unsafe launch options") {
   CHECK(result.error().code == isolation::RunnerErrorCode::invalid_options);
 
   options.child_argument_prefix = {std::string{"embedded\0nul", 12}};
+  result = isolation::run_evaluation(std::string(40, 'a'), options);
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == isolation::RunnerErrorCode::invalid_options);
+
+  options.child_argument_prefix.clear();
+  options.cpu_limit_probe_timeout = std::chrono::milliseconds::zero();
   result = isolation::run_evaluation(std::string(40, 'a'), options);
   REQUIRE_FALSE(result);
   CHECK(result.error().code == isolation::RunnerErrorCode::invalid_options);
@@ -142,6 +149,8 @@ TEST_CASE("runner maps timeout signal nonzero and excessive output closed") {
     auto options = shell_options(temporary, test_case.script);
     if (test_case.expected == isolation::ReasonCode::timeout)
       options.child_timeout = std::chrono::milliseconds{50};
+    if (test_case.expected == isolation::ReasonCode::timeout)
+      options.cpu_limit_probe_timeout = options.child_timeout;
     if (test_case.expected == isolation::ReasonCode::output_limit)
       options.maximum_child_output_bytes = 32;
     const auto result =
@@ -173,28 +182,27 @@ TEST_CASE("runner rejects a child record for the wrong probe") {
   }
 }
 
-TEST_CASE("runner kills and reaps a session descendant that escapes its group") {
+TEST_CASE(
+    "runner kills and reaps a session descendant that escapes its group") {
   TemporaryDirectory temporary;
   const auto marker = temporary.path() / "escaped-pid";
   EscapedProcessGuard emergency_cleanup{marker};
   const auto script =
-      std::string{"if [ \"$0\" = no_new_privileges ]; then "}
-      + "setsid /bin/sh -c 'echo $$ > \"$1\"; while :; do sleep 10; done' "
-        "daemon '"
-      + marker.string()
-      + "' </dev/null >/dev/null 2>&1 & "
-        "while [ ! -s '"
-      + marker.string()
-      + "' ]; do :; done; fi; "
-        "printf '{\"probe_id\":\"%s\",\"reason\":\"none\","
-        "\"schema_version\":1,\"state\":\"enforced\"}' \"$0\"";
+      std::string{"if [ \"$0\" = no_new_privileges ]; then "} +
+      "setsid /bin/sh -c 'echo $$ > \"$1\"; while :; do sleep 10; done' "
+      "daemon '" +
+      marker.string() +
+      "' </dev/null >/dev/null 2>&1 & "
+      "while [ ! -s '" +
+      marker.string() +
+      "' ]; do :; done; fi; "
+      "printf '{\"probe_id\":\"%s\",\"reason\":\"none\","
+      "\"schema_version\":1,\"state\":\"enforced\"}' \"$0\"";
   auto options = shell_options(temporary, script);
-  const auto result =
-      isolation::run_evaluation(std::string(40, 'a'), options);
+  const auto result = isolation::run_evaluation(std::string(40, 'a'), options);
   REQUIRE(result);
   REQUIRE(result->probes.front().state == isolation::ProbeState::probe_error);
-  CHECK(result->probes.front().reason ==
-        isolation::ReasonCode::cleanup_failed);
+  CHECK(result->probes.front().reason == isolation::ReasonCode::cleanup_failed);
 
   std::ifstream pid_file{marker};
   pid_t escaped{};

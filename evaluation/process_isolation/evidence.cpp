@@ -451,7 +451,7 @@ auto parse_report(const std::string_view document)
     for (const auto& row : rows) {
       auto record = parse_record_json(row, false);
       if (!record) return std::unexpected(std::move(record.error()));
-      result.probes.push_back(std::move(*record));
+      result.probes.push_back(*record);
     }
     auto valid = validate_report(result);
     if (!valid) return std::unexpected(std::move(valid.error()));

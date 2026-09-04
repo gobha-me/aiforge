@@ -16,6 +16,7 @@ struct RunnerOptions {
   std::vector<std::string> child_argument_prefix;
   std::filesystem::path temporary_parent;
   std::chrono::milliseconds child_timeout{std::chrono::seconds{3}};
+  std::chrono::milliseconds cpu_limit_probe_timeout{std::chrono::seconds{15}};
   std::size_t maximum_child_output_bytes{maximum_child_record_bytes};
 };
 

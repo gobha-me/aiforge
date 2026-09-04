@@ -72,6 +72,9 @@ TEST_CASE("Linux probe harness emits complete deterministic bounded evidence") {
   REQUIRE(isolation::validate_report(*report));
   REQUIRE(report->probes.size() == isolation::required_probe_ids().size());
   for (std::size_t index{}; index < report->probes.size(); ++index) {
+    CAPTURE(isolation::probe_id_name(report->probes[index].probe_id));
+    CAPTURE(isolation::probe_state_name(report->probes[index].state));
+    CAPTURE(isolation::reason_code_name(report->probes[index].reason));
     CHECK(report->probes[index].probe_id ==
           isolation::required_probe_ids()[index]);
     CHECK(report->probes[index].state != isolation::ProbeState::probe_error);
