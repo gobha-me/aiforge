@@ -46,6 +46,8 @@ constexpr int assertion_permission_denied = 20;
 constexpr int assertion_mechanism_absent = 21;
 constexpr int assertion_failed = 22;
 constexpr int assertion_internal_error = 23;
+constexpr int assertion_prerequisite_unavailable = 24;
+constexpr int assertion_runtime_mechanism_absent = 25;
 
 [[nodiscard]] auto enforced(const ProbeId id) -> ProbeRecord {
   return {id, ProbeState::enforced, ReasonCode::none};
@@ -85,6 +87,26 @@ constexpr int assertion_internal_error = 23;
   return assertion_internal_error;
 }
 
+[[nodiscard]] auto initial_namespace_observation_exit(const int error_number)
+    -> int {
+  if (error_number == EACCES || error_number == EPERM) {
+    return assertion_permission_denied;
+  }
+  if (error_number == ENOENT || error_number == ENOTDIR) {
+    return assertion_runtime_mechanism_absent;
+  }
+  if (error_number == ENOMEM) return assertion_prerequisite_unavailable;
+  return assertion_internal_error;
+}
+
+[[nodiscard]] auto unshare_exit(const int error_number) -> int {
+  if (error_number == ENOSPC || error_number == EUSERS ||
+      error_number == ENOMEM) {
+    return assertion_prerequisite_unavailable;
+  }
+  return exit_for_errno(error_number);
+}
+
 template <typename Assertion>
 [[nodiscard]] auto isolated_assertion(const ProbeId id, Assertion assertion)
     -> ProbeRecord {
@@ -105,6 +127,10 @@ template <typename Assertion>
       return unavailable(id, ReasonCode::permission_denied);
     case assertion_mechanism_absent:
       return unavailable(id, ReasonCode::unsupported_kernel);
+    case assertion_prerequisite_unavailable:
+      return unavailable(id, ReasonCode::prerequisite_unavailable);
+    case assertion_runtime_mechanism_absent:
+      return unavailable(id, ReasonCode::mechanism_absent);
     case assertion_failed:
       return unavailable(id, ReasonCode::enforcement_failed);
     default: return probe_error(id, ReasonCode::internal_error);
@@ -129,8 +155,9 @@ template <typename Assertion>
 [[nodiscard]] auto changed_namespace(const char* path, const int flag) -> int {
   struct stat before{};
   struct stat after{};
-  if (!namespace_identity(path, before)) return assertion_internal_error;
-  if (::unshare(flag) != 0) return exit_for_errno(errno);
+  if (!namespace_identity(path, before))
+    return initial_namespace_observation_exit(errno);
+  if (::unshare(flag) != 0) return unshare_exit(errno);
   if (!namespace_identity(path, after)) return assertion_internal_error;
   return before.st_dev != after.st_dev || before.st_ino != after.st_ino
              ? assertion_enforced
@@ -889,9 +916,13 @@ auto callable_assertion_failure() -> ProbeRecord {
                             [] { return assertion_failed; });
 }
 
-auto runtime_permission_denial() -> ProbeRecord {
+auto runtime_unshare_errno_outcome(const int error_number) -> ProbeRecord {
 #if defined(SYS_unshare) && (defined(__x86_64__) || defined(__aarch64__))
-  return isolated_assertion(ProbeId::user_namespace, [] {
+  if (error_number <= 0 ||
+      static_cast<std::uint32_t>(error_number) > SECCOMP_RET_DATA) {
+    return probe_error(ProbeId::user_namespace, ReasonCode::internal_error);
+  }
+  return isolated_assertion(ProbeId::user_namespace, [error_number] {
 #if defined(__x86_64__)
     constexpr std::uint32_t audit_architecture = AUDIT_ARCH_X86_64;
 #else
@@ -905,7 +936,8 @@ auto runtime_permission_denial() -> ProbeRecord {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
                  static_cast<std::uint32_t>(offsetof(seccomp_data, nr))),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_unshare, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_STMT(BPF_RET | BPF_K,
+                 SECCOMP_RET_ERRNO | static_cast<std::uint32_t>(error_number)),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     }};
     sock_fprog program{static_cast<unsigned short>(filter.size()),
@@ -919,6 +951,25 @@ auto runtime_permission_denial() -> ProbeRecord {
   return unavailable(ProbeId::user_namespace,
                      ReasonCode::unsupported_architecture);
 #endif
+}
+
+auto runtime_permission_denial() -> ProbeRecord {
+  return runtime_unshare_errno_outcome(EPERM);
+}
+
+auto initial_namespace_errno_outcome(const int error_number) -> ProbeRecord {
+  return isolated_assertion(ProbeId::user_namespace, [error_number] {
+    return initial_namespace_observation_exit(error_number);
+  });
+}
+
+auto post_namespace_errno_outcome() -> ProbeRecord {
+  return isolated_assertion(ProbeId::user_namespace,
+                            [] { return assertion_internal_error; });
+}
+
+auto generic_errno_outcome(const int error_number) -> ProbeRecord {
+  return unavailable_from_errno(ProbeId::openat2_resolution, error_number);
 }
 
 } // namespace test_support

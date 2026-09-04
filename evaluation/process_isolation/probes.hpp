@@ -17,6 +17,12 @@ namespace test_support {
 
 [[nodiscard]] auto callable_assertion_failure() -> ProbeRecord;
 [[nodiscard]] auto runtime_permission_denial() -> ProbeRecord;
+[[nodiscard]] auto runtime_unshare_errno_outcome(int error_number)
+    -> ProbeRecord;
+[[nodiscard]] auto initial_namespace_errno_outcome(int error_number)
+    -> ProbeRecord;
+[[nodiscard]] auto post_namespace_errno_outcome() -> ProbeRecord;
+[[nodiscard]] auto generic_errno_outcome(int error_number) -> ProbeRecord;
 
 } // namespace test_support
 #endif

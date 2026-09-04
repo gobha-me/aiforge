@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -121,6 +122,67 @@ TEST_CASE("callable probe failures stay unavailable rather than enforced") {
   CHECK(denied.state == isolation::ProbeState::unavailable);
   CHECK(denied.reason == isolation::ReasonCode::unsupported_architecture);
 #endif
+}
+
+TEST_CASE("namespace errno mapping remains stage specific and fail closed") {
+  struct Case {
+    int error_number;
+    isolation::ProbeState state;
+    isolation::ReasonCode reason;
+  };
+  const Case initial_cases[]{
+      {EACCES, isolation::ProbeState::unavailable,
+       isolation::ReasonCode::permission_denied},
+      {ENOENT, isolation::ProbeState::unavailable,
+       isolation::ReasonCode::mechanism_absent},
+      {ENOMEM, isolation::ProbeState::unavailable,
+       isolation::ReasonCode::prerequisite_unavailable},
+      {ENOSPC, isolation::ProbeState::probe_error,
+       isolation::ReasonCode::internal_error},
+  };
+  for (const auto& test_case : initial_cases) {
+    const auto outcome =
+        isolation::test_support::initial_namespace_errno_outcome(
+            test_case.error_number);
+    CAPTURE(test_case.error_number);
+    CHECK(outcome.state == test_case.state);
+    CHECK(outcome.reason == test_case.reason);
+  }
+
+  const Case unshare_cases[]{
+      {EACCES, isolation::ProbeState::unavailable,
+       isolation::ReasonCode::permission_denied},
+      {ENOSYS, isolation::ProbeState::unavailable,
+       isolation::ReasonCode::unsupported_kernel},
+      {ENOSPC, isolation::ProbeState::unavailable,
+       isolation::ReasonCode::prerequisite_unavailable},
+      {EUSERS, isolation::ProbeState::unavailable,
+       isolation::ReasonCode::prerequisite_unavailable},
+      {ENOMEM, isolation::ProbeState::unavailable,
+       isolation::ReasonCode::prerequisite_unavailable},
+      {EIO, isolation::ProbeState::probe_error,
+       isolation::ReasonCode::internal_error},
+  };
+#if defined(__x86_64__) || defined(__aarch64__)
+  for (const auto& test_case : unshare_cases) {
+    const auto outcome = isolation::test_support::runtime_unshare_errno_outcome(
+        test_case.error_number);
+    CAPTURE(test_case.error_number);
+    CHECK(outcome.state == test_case.state);
+    CHECK(outcome.reason == test_case.reason);
+  }
+#else
+  static_cast<void>(unshare_cases);
+#endif
+
+  const auto post = isolation::test_support::post_namespace_errno_outcome();
+  CHECK(post.state == isolation::ProbeState::probe_error);
+  CHECK(post.reason == isolation::ReasonCode::internal_error);
+
+  const auto generic = isolation::test_support::generic_errno_outcome(ENOENT);
+  CHECK(generic.probe_id == isolation::ProbeId::openat2_resolution);
+  CHECK(generic.state == isolation::ProbeState::probe_error);
+  CHECK(generic.reason == isolation::ReasonCode::internal_error);
 }
 
 TEST_CASE("a valid all-unavailable report is a completed evaluation") {
