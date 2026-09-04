@@ -740,6 +740,7 @@ struct InferenceCounts {
   return result;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Spend states.
 [[nodiscard]] auto usage_panel_lines(
     const domain::UsageLedgerProjection& ledger,
     const domain::ToolSpendLedgerProjection& tool_spend,
@@ -792,7 +793,7 @@ struct InferenceCounts {
     if (!spend) {
       lines.push_back("Accounted spend (USD): unavailable");
       lines.push_back("Tool spend unavailable: " + spend.error().message);
-    } else if (spend->accounted) {
+    } else if (spend->accounted && spend->remaining) {
       lines.push_back("Accounted spend (USD): " +
                       spend->accounted->amount().to_string());
       lines.push_back("Remaining spend (USD): " +
@@ -2014,6 +2015,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Session flow.
   auto switch_session(const surfaces::ChatSessionOpen::Mode mode,
                       std::optional<domain::SessionId> session_id) -> bool {
     if (m_session->active()) {
@@ -2027,7 +2029,7 @@ class ChatAppImpl final : public InteractiveChatApp {
                        : "A session ID is required";
         return false;
       }
-      if (*session_id == m_session->session_id()) {
+      if (session_id == m_session->session_id()) {
         m_help_visible = false;
         m_status = "Session is already current";
         return true;

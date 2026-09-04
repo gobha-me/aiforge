@@ -3186,6 +3186,7 @@ template <typename IdType>
           type == "run.child_created");
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Event encoder.
 [[nodiscard]] auto payload_json(const domain::RunEventPayload& payload,
                                 const std::uint32_t schema_version = 1)
     -> Json {
@@ -3560,6 +3561,7 @@ template <typename IdType>
       payload);
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Event decoder.
 [[nodiscard]] auto parse_payload(const std::string_view type, const Json& value,
                                  const std::uint32_t schema_version)
     -> domain::RunEventPayload {

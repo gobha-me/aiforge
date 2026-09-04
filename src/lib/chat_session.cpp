@@ -921,14 +921,14 @@ auto ChatSession::submit(std::string prompt)
     }
     auto ceiling = rebuild_spend_ceiling(m_impl->kernel->event_log());
     if (!ceiling) return std::unexpected(std::move(ceiling.error()));
-    if (ceiling->ceiling()) {
+    const auto session_ceiling = ceiling->ceiling();
+    if (session_ceiling) {
       auto spend_state = rebuild_spend_state(m_impl->kernel->event_log());
       if (!spend_state) {
         return std::unexpected(std::move(spend_state.error()));
       }
       const auto spend = domain::summarize_combined_session_spend(
-          spend_state->ledger.records(), spend_state->tools,
-          *spend_state->ceiling.ceiling());
+          spend_state->ledger.records(), spend_state->tools, *session_ceiling);
       if (!spend || !spend->accounted) {
         return error(ChatSessionErrorCode::spend_accounting_unavailable,
                      "session spend accounting is unavailable; refusing "

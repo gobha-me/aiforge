@@ -118,6 +118,7 @@ auto valid_tool_spend_reconciliation_reason(
   return false;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Spend reducer.
 auto ToolSpendLedgerProjection::apply(const RunEvent& event)
     -> std::expected<void, ToolSpendLedgerError> {
   try {
@@ -362,6 +363,7 @@ auto ToolSpendLedgerProjection::apply(const RunEvent& event)
   }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Spend summary.
 auto summarize_tool_spend(const ToolSpendLedgerProjection& ledger,
                           const SessionSpendCeiling& ceiling)
     -> std::expected<ToolSpendSummary, ToolSpendLedgerError> {
@@ -401,13 +403,19 @@ auto summarize_tool_spend(const ToolSpendLedgerProjection& ledger,
           }
           break;
         case ToolSpendStatus::released: ++summary.released; break;
-        case ToolSpendStatus::finalized:
+        case ToolSpendStatus::finalized: {
           ++summary.finalized;
-          switch (record.finalization->basis) {
+          if (!record.finalization) {
+            return std::unexpected(ledger_error(
+                ToolSpendLedgerErrorCode::invalid_transition,
+                "finalized tool spend lacks finalization details"));
+          }
+          const auto& finalization = *record.finalization;
+          switch (finalization.basis) {
             case ToolSpendFinalizationBasis::provider_reported:
               ++summary.provider_reported;
               if (!accumulate(provider_reported_amount,
-                              record.finalization->amount.amount())) {
+                              finalization.amount.amount())) {
                 return std::unexpected(
                     ledger_error(ToolSpendLedgerErrorCode::amount_overflow,
                                  "provider-reported tool amount overflowed"));
@@ -416,7 +424,7 @@ auto summarize_tool_spend(const ToolSpendLedgerProjection& ledger,
             case ToolSpendFinalizationBasis::catalog_estimate:
               ++summary.catalog_estimate;
               if (!accumulate(catalog_estimate_amount,
-                              record.finalization->amount.amount())) {
+                              finalization.amount.amount())) {
                 return std::unexpected(
                     ledger_error(ToolSpendLedgerErrorCode::amount_overflow,
                                  "catalog-estimated tool amount overflowed"));
@@ -425,15 +433,16 @@ auto summarize_tool_spend(const ToolSpendLedgerProjection& ledger,
             case ToolSpendFinalizationBasis::policy_upper_bound:
               ++summary.policy_upper_bound;
               if (!accumulate(policy_upper_bound_amount,
-                              record.finalization->amount.amount())) {
+                              finalization.amount.amount())) {
                 return std::unexpected(
                     ledger_error(ToolSpendLedgerErrorCode::amount_overflow,
                                  "policy-upper-bound tool amount overflowed"));
               }
               break;
           }
-          charged = &record.finalization->amount.amount();
+          charged = &finalization.amount.amount();
           break;
+        }
         case ToolSpendStatus::reconciliation_required:
           ++summary.reconciliation_required;
           charged = &record.reservation.maximum.amount();

@@ -961,6 +961,7 @@ struct RunKernel::Impl {
                                         std::move(message), retryable));
   }
 
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Paid recovery.
   [[nodiscard]] auto recover_paid_terminal_persistence(
       Transaction transaction, const storage::SessionStoreError& append_error)
       -> std::expected<void, RunKernelError> {
@@ -970,12 +971,11 @@ struct RunKernel::Impl {
       const auto* invocation_id = std::visit(
           [](const auto& payload) -> const domain::InvocationId* {
             using Payload = std::remove_cvref_t<decltype(payload)>;
-            if constexpr (std::same_as<Payload, domain::ToolSpendReleased>) {
-              return &payload.invocation_id;
-            } else if constexpr (std::same_as<Payload,
-                                              domain::ToolSpendFinalized>) {
+            if constexpr (std::same_as<Payload, domain::ToolSpendFinalized>) {
               return &payload.finalization.invocation_id;
-            } else if constexpr (std::same_as<
+            } else if constexpr (std::same_as<Payload,
+                                              domain::ToolSpendReleased> ||
+                                 std::same_as<
                                      Payload,
                                      domain::ToolSpendReconciliationRequired>) {
               return &payload.invocation_id;
@@ -1503,6 +1503,11 @@ struct RunKernel::Impl {
                                        PendingInvocation& invocation,
                                        domain::DomainError error)
       -> std::expected<void, RunKernelError> {
+    if (!transaction.active) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "tool error requires an active run"));
+    }
     if (invocation.terminal_event_seen) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_tool_state,
@@ -1532,6 +1537,11 @@ struct RunKernel::Impl {
   [[nodiscard]] auto reserve_tool_spend(Transaction& transaction,
                                         PendingInvocation& invocation)
       -> std::expected<bool, RunKernelError> {
+    if (!transaction.active) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "paid tool reservation requires an active run"));
+    }
     if (!includes_spend(invocation.requested_effects)) return true;
     if (invocation.spend_reserved || invocation.spend_terminal ||
         !invocation.arguments.spend_quote ||
@@ -2025,6 +2035,7 @@ struct RunKernel::Impl {
     return {};
   }
 
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Tool reducer.
   [[nodiscard]] auto process_tool_update(ToolUpdate update,
                                          Transaction& transaction)
       -> std::expected<void, RunKernelError> {
@@ -2044,7 +2055,10 @@ struct RunKernel::Impl {
                             "tool executor protocol failure", false});
     }
     return std::visit(
+        // clang-format off
+        // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Tool update variants.
         [&](auto&& event) -> std::expected<void, RunKernelError> {
+          // clang-format on
           using Event = std::remove_cvref_t<decltype(event)>;
           if constexpr (std::same_as<Event, ToolInputRequested>) {
             if (invocation.state != InvocationState::running ||
@@ -2367,6 +2381,7 @@ struct RunKernel::Impl {
     return {};
   }
 
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Tool startup.
   [[nodiscard]] auto launch_next_tool() -> std::expected<void, RunKernelError> {
     if (!active || active->run_terminal || active->inference_id ||
         active->active_tool_id) {
@@ -2384,6 +2399,11 @@ struct RunKernel::Impl {
     if (ready == active->invocation_order.end()) return {};
 
     auto transaction = this->transaction();
+    if (!transaction.active) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "tool launch requires an active run"));
+    }
     auto& invocation = transaction.active->invocations.at(*ready);
     auto admitted = reserve_tool_spend(transaction, invocation);
     if (!admitted) return std::unexpected(std::move(admitted.error()));
