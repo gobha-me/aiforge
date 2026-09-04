@@ -27,7 +27,7 @@ struct VeniceBackendOptions {
   std::optional<std::chrono::milliseconds> read_timeout;
   std::optional<std::chrono::milliseconds> write_timeout;
   std::size_t pending_events{256};
-  std::size_t maximum_image_response_bytes{32U * 1024U * 1024U};
+  std::size_t maximum_image_response_bytes{std::size_t{32} * 1024U * 1024U};
 };
 
 class VeniceBackend final : public backend::Backend,

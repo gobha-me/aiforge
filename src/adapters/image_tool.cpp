@@ -27,8 +27,8 @@ namespace {
 
 using Json = nlohmann::json;
 
-constexpr std::size_t kMaximumArgumentBytes{3U * 1024U * 1024U};
-constexpr std::size_t kMaximumPromptBytes{1024U * 1024U};
+constexpr std::size_t kMaximumArgumentBytes{std::size_t{3} * 1024U * 1024U};
+constexpr std::size_t kMaximumPromptBytes{std::size_t{1024} * 1024U};
 constexpr std::size_t kArgumentFramingBytes{256U};
 constexpr std::chrono::hours kMaximumCatalogLifetime{24U * 7U};
 constexpr std::chrono::milliseconds kMaximumTimeout{std::chrono::minutes{10}};
@@ -294,9 +294,9 @@ class ImageToolExecutor final : public runtime::ToolExecutor {
       : m_generator(generator), m_artifact_store(artifact_store),
         m_configuration(std::move(configuration)) {}
 
-  auto validate(const domain::StructuredDataBlock& arguments) const
-      -> std::expected<runtime::ValidatedToolArguments,
-                       runtime::ToolExecutionError> override {
+  [[nodiscard]] auto validate(const domain::StructuredDataBlock& arguments)
+      const -> std::expected<runtime::ValidatedToolArguments,
+                             runtime::ToolExecutionError> override {
     auto parsed = parse_provider_arguments(arguments, m_configuration);
     if (!parsed) return std::unexpected(std::move(parsed.error()));
     auto required_scopes = scopes(m_configuration);
@@ -481,15 +481,26 @@ auto resolve_image_tool_configuration(
       return registry_error(
           "configured generate_image model is unavailable or unsupported");
     }
-    if (!entry->pricing || !entry->pricing->generation ||
-        !entry->pricing->generation->usd ||
-        entry->pricing->generation->usd->coefficient() == 0 ||
-        !microunits(*entry->pricing->generation->usd)) {
+    if (!entry->pricing) {
       return registry_error(
           "configured generate_image model has no bounded USD price");
     }
-    auto maximum =
-        domain::MonetaryAmount::create("USD", *entry->pricing->generation->usd);
+    const auto& pricing = *entry->pricing;
+    if (!pricing.generation) {
+      return registry_error(
+          "configured generate_image model has no bounded USD price");
+    }
+    const auto& generation = *pricing.generation;
+    if (!generation.usd) {
+      return registry_error(
+          "configured generate_image model has no bounded USD price");
+    }
+    const auto& generation_usd = *generation.usd;
+    if (generation_usd.coefficient() == 0 || !microunits(generation_usd)) {
+      return registry_error(
+          "configured generate_image model has no bounded USD price");
+    }
+    auto maximum = domain::MonetaryAmount::create("USD", generation_usd);
     if (!maximum) {
       return registry_error(
           "configured generate_image model has no bounded USD price");
@@ -497,9 +508,7 @@ auto resolve_image_tool_configuration(
     ImageToolConfiguration result{
         configured_model,
         {std::move(*maximum), domain::ToolSpendEstimateBasis::catalog_estimate,
-         price_evidence_digest(snapshot, *entry,
-                               *entry->pricing->generation->usd),
-         valid_until},
+         price_evidence_digest(snapshot, *entry, generation_usd), valid_until},
         std::move(artifact_root),
         std::move(network_host)};
     if (!domain::valid_tool_spend_quote(result.spend_quote) ||
@@ -576,7 +585,7 @@ auto register_image_tool(runtime::ToolRegistry& registry,
         std::move(*declaration),
         std::make_shared<ImageToolExecutor>(generator, artifact_store,
                                             std::move(configuration)),
-        runtime::ToolExecutionLimits{64U * 1024U, 1, timeout},
+        runtime::ToolExecutionLimits{std::size_t{64} * 1024U, 1, timeout},
         runtime::ToolExecutorContract{"aiforge.adapters.generate_image", "1"},
         runtime::ToolCategory::media);
   } catch (...) {

@@ -18,7 +18,7 @@ struct VeniceImageRequestOptions {
   std::optional<std::chrono::milliseconds> connect_timeout;
   std::optional<std::chrono::milliseconds> read_timeout;
   std::optional<std::chrono::milliseconds> write_timeout;
-  std::size_t maximum_response_bytes{32U * 1024U * 1024U};
+  std::size_t maximum_response_bytes{std::size_t{32} * 1024U * 1024U};
 };
 
 [[nodiscard]] auto generate_venice_image(
