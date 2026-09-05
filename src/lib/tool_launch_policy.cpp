@@ -259,7 +259,7 @@ class LaunchPolicy final : public ToolPolicy {
             return denied();
           }
           {
-            const auto matched = m_configuration.automatic_matcher->match(
+            auto matched = m_configuration.automatic_matcher->match(
                 {checked->request.session_id, checked->request.run_id,
                  checked->request.invocation_id, checked->request.tool_name,
                  *checked->request.canonical_arguments,
@@ -271,7 +271,7 @@ class LaunchPolicy final : public ToolPolicy {
                 std::move(checked->request.scopes),
                 "allowed by a bounded automatic approval rule",
                 domain::PolicyDecisionSource::automatic_matcher,
-                std::move(**matched)};
+                std::move(*matched)};
           }
         case ApprovalMode::allow_all: break;
       }

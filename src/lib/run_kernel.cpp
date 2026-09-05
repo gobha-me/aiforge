@@ -715,6 +715,32 @@ using WorkerUpdate =
   return false;
 }
 
+[[nodiscard]] auto valid_automatic_policy_resolution(
+    const ToolPolicyResolution& resolution,
+    const domain::ToolPolicyProvenance* provenance) -> bool {
+  const bool automatic_source =
+      resolution.source == domain::PolicyDecisionSource::automatic_matcher;
+  if (automatic_source != resolution.automatic_approval.has_value()) {
+    return false;
+  }
+  if (!resolution.automatic_approval) return true;
+  return resolution.decision == domain::PolicyDecision::allow &&
+         provenance != nullptr &&
+         provenance->matcher_policy_identity ==
+             resolution.automatic_approval->policy_identity &&
+         domain::valid_automatic_approval_evidence(
+             *resolution.automatic_approval);
+}
+
+[[nodiscard]] auto canonical_arguments_or_empty(
+    const domain::StructuredDataBlock& arguments,
+    const std::size_t maximum_bytes) -> std::optional<CanonicalToolArguments> {
+  auto canonical =
+      canonicalize_validated_tool_arguments(arguments, maximum_bytes);
+  if (!canonical) return std::nullopt;
+  return std::move(*canonical);
+}
+
 [[nodiscard]] auto valid_approval_decision(
     const domain::ApprovalDecision decision) -> bool {
   switch (decision) {
@@ -2309,11 +2335,8 @@ struct RunKernel::Impl {
           invocation.terminal_event_seen) {
         continue;
       }
-      std::optional<CanonicalToolArguments> canonical_arguments;
-      if (auto canonical = canonicalize_validated_tool_arguments(
-              invocation.arguments.value, limits.tool_argument_bytes)) {
-        canonical_arguments = std::move(*canonical);
-      }
+      auto canonical_arguments = canonical_arguments_or_empty(
+          invocation.arguments.value, limits.tool_argument_bytes);
       invocation.policy_request =
           ToolPolicyRequest{transaction.event_log.session_id(),
                             transaction.active->run_id,
@@ -2355,16 +2378,8 @@ struct RunKernel::Impl {
            (resolution->redacted_reason->size() > 4096 ||
             has_control_character(*resolution->redacted_reason))) ||
           !scopes_are_unique(resolution->scopes) ||
-          ((resolution->source ==
-            domain::PolicyDecisionSource::automatic_matcher) !=
-           resolution->automatic_approval.has_value()) ||
-          (resolution->automatic_approval &&
-           (resolution->decision != domain::PolicyDecision::allow ||
-            policy->provenance() == nullptr ||
-            policy->provenance()->matcher_policy_identity !=
-                resolution->automatic_approval->policy_identity ||
-            !domain::valid_automatic_approval_evidence(
-                *resolution->automatic_approval)))) {
+          !valid_automatic_policy_resolution(*resolution,
+                                             policy->provenance())) {
         return fail_live_run(transaction, protocol_domain_error());
       }
       if (resolution->decision != domain::PolicyDecision::deny) {

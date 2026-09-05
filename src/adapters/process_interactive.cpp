@@ -7,6 +7,7 @@
 #include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
 #include <aiforge/adapters/persona_editor_dialog.hpp>
+#include <aiforge/adapters/pinned_repository_root_authority.hpp>
 #include <aiforge/adapters/process_credentials.hpp>
 #include <aiforge/adapters/process_draft_editor.hpp>
 #include <aiforge/adapters/process_interactive.hpp>
@@ -4557,6 +4558,12 @@ auto ProcessInteractiveCommand::execute(Request request,
       return failure(cli::CommandFailureKind::runtime,
                      image_tool_model.error().message);
     }
+    auto automatic_approval_rules =
+        config::resolve_automatic_approval_rules(*resolved);
+    if (!automatic_approval_rules) {
+      return failure(cli::CommandFailureKind::runtime,
+                     automatic_approval_rules.error().message);
+    }
     auto generation_options = venice_generation_options(*resolved);
     if (!generation_options) {
       return failure(request.web_search ? cli::CommandFailureKind::usage
@@ -4803,7 +4810,28 @@ auto ProcessInteractiveCommand::execute(Request request,
     std::shared_ptr<runtime::AutomaticApprovalMatcher> automatic_matcher;
     std::optional<std::string> matcher_policy_identity;
     if (*approval == runtime::ApprovalMode::automatic) {
-      auto compiled = runtime::compile_automatic_approval_matcher({});
+      std::shared_ptr<const runtime::DescriptorRelativePathAuthority>
+          repository_read_root;
+      const bool needs_repository_root = std::ranges::any_of(
+          automatic_approval_rules->rules, [](const auto& rule) {
+            return std::holds_alternative<
+                config::RepositoryPathAutomaticApprovalRuleConfig>(rule);
+          });
+      if (needs_repository_root) {
+        if (!repository_snapshot) {
+          return failure(cli::CommandFailureKind::runtime,
+                         "automatic approval repository root is unavailable");
+        }
+        auto pinned = open_pinned_repository_root_authority(
+            repository_snapshot->root.canonical_path);
+        if (!pinned) {
+          return failure(cli::CommandFailureKind::runtime,
+                         pinned.error().message);
+        }
+        repository_read_root = std::move(*pinned);
+      }
+      auto compiled = runtime::compile_configured_automatic_approval_matcher(
+          *automatic_approval_rules, std::move(repository_read_root));
       if (!compiled) {
         return failure(cli::CommandFailureKind::runtime,
                        compiled.error().message);

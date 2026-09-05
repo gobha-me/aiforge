@@ -16,6 +16,10 @@
 #include <aiforge/domain/events.hpp>
 #include <aiforge/runtime/application_launch_context.hpp>
 
+namespace aiforge::config {
+struct AutomaticApprovalRulesConfig;
+}
+
 namespace aiforge::runtime {
 
 struct CanonicalToolArguments {
@@ -42,9 +46,9 @@ struct AutomaticApprovalMatcherLimits {
   std::size_t maximum_rules{256};
   std::size_t maximum_tool_name_bytes{128};
   std::size_t maximum_identity_bytes{128};
-  std::size_t maximum_canonical_argument_bytes{64U * 1024U};
+  std::size_t maximum_canonical_argument_bytes{std::size_t{64U} * 1024U};
   std::size_t maximum_relative_path_bytes{4096};
-  std::size_t maximum_total_rule_bytes{1024U * 1024U};
+  std::size_t maximum_total_rule_bytes{std::size_t{1024U} * 1024U};
   std::uint64_t maximum_total_matches{1'000'000};
   std::chrono::milliseconds maximum_expiry{std::chrono::hours{24 * 365}};
   auto operator==(const AutomaticApprovalMatcherLimits&) const
@@ -138,11 +142,23 @@ class AutomaticApprovalMatcher final {
 
 [[nodiscard]] auto canonicalize_validated_tool_arguments(
     const domain::StructuredDataBlock& arguments,
-    std::size_t maximum_bytes = 64U * 1024U)
+    std::size_t maximum_bytes = std::size_t{64U} * 1024U)
     -> std::expected<CanonicalToolArguments, AutomaticApprovalMatcherError>;
 
 [[nodiscard]] auto compile_automatic_approval_matcher(
     std::vector<AutomaticApprovalRule> rules, AutomaticApprovalClock clock = {},
+    AutomaticApprovalMatcherLimits limits = {})
+    -> std::expected<std::shared_ptr<AutomaticApprovalMatcher>,
+                     AutomaticApprovalMatcherError>;
+
+// Converts the strict provider-neutral application configuration into the
+// closed runtime rule model. A missing repository authority is acceptable only
+// when no repository path rule was configured.
+[[nodiscard]] auto compile_configured_automatic_approval_matcher(
+    const config::AutomaticApprovalRulesConfig& configuration,
+    std::shared_ptr<const DescriptorRelativePathAuthority>
+        repository_read_root = {},
+    AutomaticApprovalClock clock = {},
     AutomaticApprovalMatcherLimits limits = {})
     -> std::expected<std::shared_ptr<AutomaticApprovalMatcher>,
                      AutomaticApprovalMatcherError>;

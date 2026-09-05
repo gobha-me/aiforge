@@ -22,6 +22,7 @@ enum class ConfigValueKind {
   text,
   text_list,
   text_map,
+  automatic_approval_rules,
 };
 
 struct ConfigTextMapEntry {
@@ -33,8 +34,49 @@ struct ConfigTextMapEntry {
 
 using ConfigTextMap = std::vector<ConfigTextMapEntry>;
 
+struct AutomaticApprovalRuleConstraintsConfig {
+  std::vector<std::string> allowed_restrictions;
+  std::uint64_t maximum_matches{};
+  std::optional<std::uint64_t> expires_after_milliseconds;
+  std::uint32_t precedence{};
+
+  auto operator==(const AutomaticApprovalRuleConstraintsConfig&) const
+      -> bool = default;
+};
+
+struct ExactAutomaticApprovalRuleConfig {
+  std::string tool_name;
+  // Strict JSON is canonicalized by the file adapter and validated again by
+  // the runtime matcher compiler. No JSON-library type crosses this boundary.
+  std::string canonical_arguments_json;
+  AutomaticApprovalRuleConstraintsConfig constraints;
+
+  auto operator==(const ExactAutomaticApprovalRuleConfig&) const
+      -> bool = default;
+};
+
+struct RepositoryPathAutomaticApprovalRuleConfig {
+  std::string tool_name;
+  std::string allowed_relative_path;
+  AutomaticApprovalRuleConstraintsConfig constraints;
+
+  auto operator==(const RepositoryPathAutomaticApprovalRuleConfig&) const
+      -> bool = default;
+};
+
+using AutomaticApprovalRuleConfig =
+    std::variant<ExactAutomaticApprovalRuleConfig,
+                 RepositoryPathAutomaticApprovalRuleConfig>;
+
+struct AutomaticApprovalRulesConfig {
+  std::vector<AutomaticApprovalRuleConfig> rules;
+
+  auto operator==(const AutomaticApprovalRulesConfig&) const -> bool = default;
+};
+
 using ConfigValue = std::variant<bool, std::int64_t, std::uint64_t, std::string,
-                                 std::vector<std::string>, ConfigTextMap>;
+                                 std::vector<std::string>, ConfigTextMap,
+                                 AutomaticApprovalRulesConfig>;
 
 enum class ConfigSource {
   command_line,
@@ -155,6 +197,8 @@ inline constexpr std::string_view model_maximum_tool_profiles_key{
 inline constexpr std::string_view persona_maximum_tool_profiles_key{
     "tools.personas.maximum_profiles"};
 inline constexpr std::string_view image_tool_model_key{"tools.image.model"};
+inline constexpr std::string_view automatic_approval_rules_key{
+    "tools.approval.automatic_rules"};
 inline constexpr std::string_view user_global_instructions_enabled_key{
     "instructions.global.enabled"};
 
@@ -176,5 +220,12 @@ struct ToolProfileMaximumMappings {
 // model catalog capability and pricing checks remain a runtime concern.
 [[nodiscard]] auto resolve_image_tool_model(const ResolvedConfig& resolved)
     -> std::expected<std::optional<domain::ModelId>, ConfigDiagnostic>;
+
+// Missing configuration is the explicit deny-all automatic policy. Invalid
+// values anywhere in this security-sensitive namespace fail closed instead of
+// falling through to the empty policy.
+[[nodiscard]] auto resolve_automatic_approval_rules(
+    const ResolvedConfig& resolved)
+    -> std::expected<AutomaticApprovalRulesConfig, ConfigDiagnostic>;
 
 } // namespace aiforge::config

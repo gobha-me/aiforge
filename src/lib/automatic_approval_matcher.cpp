@@ -16,6 +16,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <aiforge/config/config.hpp>
 #include <aiforge/detail/sha256.hpp>
 #include <aiforge/detail/utf8_text.hpp>
 
@@ -362,6 +363,213 @@ struct ReservedDecision {
   return contained.value_or(false);
 }
 
+[[nodiscard]] auto unique_matching_rule(
+    std::vector<CompiledRule>& rules,
+    const AutomaticApprovalMatchRequest& request,
+    const AutomaticApprovalMatcherLimits& limits,
+    const std::chrono::steady_clock::time_point now)
+    -> std::optional<std::size_t> {
+  std::optional<std::size_t> selected;
+  std::uint32_t highest_precedence{};
+  bool found{};
+  bool ambiguous{};
+  for (std::size_t index{}; index < rules.size(); ++index) {
+    const auto& rule = rules[index];
+    if (rule.remaining_matches == 0 ||
+        (rule.expires_at && now >= *rule.expires_at) ||
+        !std::ranges::contains(rule.allowed_restrictions,
+                               request.selected_restriction) ||
+        !condition_matches(rule, request, limits)) {
+      continue;
+    }
+    if (!found || rule.precedence > highest_precedence) {
+      selected = index;
+      highest_precedence = rule.precedence;
+      found = true;
+      ambiguous = false;
+    } else if (rule.precedence == highest_precedence) {
+      ambiguous = true;
+    }
+  }
+  return ambiguous ? std::nullopt : selected;
+}
+
+[[nodiscard]] auto valid_matcher_limits(
+    const AutomaticApprovalMatcherLimits& limits, const std::size_t rule_count)
+    -> bool {
+  constexpr AutomaticApprovalMatcherLimits maximums;
+  return limits.maximum_rules != 0 &&
+         limits.maximum_rules <= maximums.maximum_rules &&
+         limits.maximum_tool_name_bytes != 0 &&
+         limits.maximum_tool_name_bytes <= maximums.maximum_tool_name_bytes &&
+         limits.maximum_identity_bytes != 0 &&
+         limits.maximum_identity_bytes <= maximums.maximum_identity_bytes &&
+         limits.maximum_canonical_argument_bytes != 0 &&
+         limits.maximum_canonical_argument_bytes <=
+             maximums.maximum_canonical_argument_bytes &&
+         limits.maximum_relative_path_bytes != 0 &&
+         limits.maximum_relative_path_bytes <=
+             maximums.maximum_relative_path_bytes &&
+         limits.maximum_total_rule_bytes != 0 &&
+         limits.maximum_total_rule_bytes <= maximums.maximum_total_rule_bytes &&
+         limits.maximum_total_matches != 0 &&
+         limits.maximum_total_matches <= maximums.maximum_total_matches &&
+         limits.maximum_expiry > std::chrono::milliseconds::zero() &&
+         limits.maximum_expiry <= maximums.maximum_expiry &&
+         rule_count <= limits.maximum_rules;
+}
+
+struct CompiledRuleResult {
+  CompiledRule rule;
+  std::size_t bytes{};
+  std::string tool_name;
+};
+
+[[nodiscard]] auto compile_rule(
+    AutomaticApprovalRule& rule,
+    const std::chrono::steady_clock::time_point launch_time,
+    const AutomaticApprovalMatcherLimits& limits)
+    -> std::expected<CompiledRuleResult, AutomaticApprovalMatcherError> {
+  const auto& constraints = std::visit(
+      [](const auto& value) -> const AutomaticApprovalRuleConstraints& {
+        return value.constraints;
+      },
+      rule);
+  auto restrictions = validate_constraints(constraints, limits);
+  if (!restrictions) return std::unexpected(std::move(restrictions.error()));
+
+  std::string identity;
+  CompiledCondition condition;
+  std::size_t bytes{};
+  std::string tool_name;
+  if (auto* exact = std::get_if<ExactToolArgumentsApprovalRule>(&rule)) {
+    if (!valid_text(exact->tool_name, limits.maximum_tool_name_bytes) ||
+        !valid_canonical_arguments(exact->arguments, limits)) {
+      return failure(AutomaticApprovalMatcherErrorCode::invalid_configuration,
+                     "exact automatic approval rule is invalid");
+    }
+    identity = exact_rule_identity(*exact, *restrictions);
+    bytes = exact->tool_name.size() +
+            exact->arguments.canonicalization_identity.size() +
+            exact->arguments.value.media_type.size() +
+            exact->arguments.value.data.size();
+    tool_name = exact->tool_name;
+    condition = CompiledExactCondition{std::move(exact->tool_name),
+                                       std::move(exact->arguments)};
+  } else {
+    auto& repository = std::get<RepositoryReadPathApprovalRule>(rule);
+    if (!repository.root) {
+      return failure(AutomaticApprovalMatcherErrorCode::invalid_configuration,
+                     "repository-read automatic approval rule is invalid");
+    }
+    std::string root_identity{repository.root->identity()};
+    if (!valid_root_identity(root_identity) ||
+        root_identity.size() > limits.maximum_identity_bytes ||
+        !valid_relative_path(repository.allowed_relative_path,
+                             limits.maximum_relative_path_bytes, true)) {
+      return failure(AutomaticApprovalMatcherErrorCode::invalid_configuration,
+                     "repository-read automatic approval rule is invalid");
+    }
+    identity =
+        repository_rule_identity(repository, root_identity, *restrictions);
+    bytes = root_identity.size() + repository.allowed_relative_path.size();
+    tool_name = "read_repository_file";
+    condition = CompiledRepositoryCondition{
+        std::move(repository.root), std::move(root_identity),
+        std::move(repository.allowed_relative_path)};
+  }
+
+  std::optional<std::chrono::steady_clock::time_point> expires_at;
+  if (constraints.expires_after) {
+    if (launch_time > std::chrono::steady_clock::time_point::max() -
+                          *constraints.expires_after) {
+      return failure(AutomaticApprovalMatcherErrorCode::invalid_configuration,
+                     "automatic approval expiry cannot be represented");
+    }
+    expires_at.emplace(launch_time + *constraints.expires_after);
+  }
+  return CompiledRuleResult{{std::move(condition), std::move(*restrictions),
+                             constraints.maximum_matches, expires_at,
+                             constraints.precedence, std::move(identity)},
+                            bytes,
+                            std::move(tool_name)};
+}
+
+[[nodiscard]] auto configured_constraints(
+    const config::AutomaticApprovalRuleConstraintsConfig& configured)
+    -> std::expected<AutomaticApprovalRuleConstraints,
+                     AutomaticApprovalMatcherError> {
+  AutomaticApprovalRuleConstraints constraints;
+  constraints.maximum_matches = configured.maximum_matches;
+  constraints.precedence = configured.precedence;
+  constraints.allowed_restrictions.reserve(
+      configured.allowed_restrictions.size());
+  for (const auto& restriction : configured.allowed_restrictions) {
+    if (restriction == "none") {
+      constraints.allowed_restrictions.push_back(RestrictionLevel::none);
+    } else if (restriction == "low") {
+      constraints.allowed_restrictions.push_back(RestrictionLevel::low);
+    } else if (restriction == "medium") {
+      constraints.allowed_restrictions.push_back(RestrictionLevel::medium);
+    } else if (restriction == "high") {
+      constraints.allowed_restrictions.push_back(RestrictionLevel::high);
+    } else {
+      return failure(AutomaticApprovalMatcherErrorCode::invalid_configuration,
+                     "automatic approval restriction is invalid");
+    }
+  }
+  if (configured.expires_after_milliseconds) {
+    const auto expiry = *configured.expires_after_milliseconds;
+    if (expiry >
+        static_cast<std::uint64_t>(std::chrono::milliseconds::max().count())) {
+      return failure(AutomaticApprovalMatcherErrorCode::invalid_configuration,
+                     "automatic approval expiry cannot be represented");
+    }
+    constraints.expires_after.emplace(expiry);
+  }
+  return constraints;
+}
+
+[[nodiscard]] auto configured_rule(
+    const config::AutomaticApprovalRuleConfig& configured,
+    const std::shared_ptr<const DescriptorRelativePathAuthority>&
+        repository_read_root,
+    const AutomaticApprovalMatcherLimits& limits)
+    -> std::expected<AutomaticApprovalRule, AutomaticApprovalMatcherError> {
+  return std::visit(
+      [&]<typename Rule>(
+          const Rule& rule) -> std::expected<AutomaticApprovalRule,
+                                             AutomaticApprovalMatcherError> {
+        auto constraints = configured_constraints(rule.constraints);
+        if (!constraints)
+          return std::unexpected(std::move(constraints.error()));
+        if constexpr (std::same_as<Rule,
+                                   config::ExactAutomaticApprovalRuleConfig>) {
+          auto arguments = canonicalize_validated_tool_arguments(
+              {"application/json", rule.canonical_arguments_json},
+              limits.maximum_canonical_argument_bytes);
+          if (!arguments) {
+            return failure(
+                AutomaticApprovalMatcherErrorCode::invalid_configuration,
+                "exact automatic approval arguments are invalid");
+          }
+          return AutomaticApprovalRule{ExactToolArgumentsApprovalRule{
+              rule.tool_name, std::move(*arguments), std::move(*constraints)}};
+        } else {
+          if (rule.tool_name != "read_repository_file" ||
+              !repository_read_root) {
+            return failure(
+                AutomaticApprovalMatcherErrorCode::invalid_configuration,
+                "repository-read automatic approval authority is unavailable");
+          }
+          return AutomaticApprovalRule{RepositoryReadPathApprovalRule{
+              repository_read_root, rule.allowed_relative_path,
+              std::move(*constraints)}};
+        }
+      },
+      configured);
+}
+
 } // namespace
 
 struct AutomaticApprovalMatcher::Impl {
@@ -409,7 +617,7 @@ auto AutomaticApprovalMatcher::match(
                      "automatic approval request is invalid");
     }
     const auto request_digest = canonical_request_digest(request);
-    const auto invocation_identity =
+    auto invocation_identity =
         std::tuple{request.session_id, request.run_id, request.invocation_id};
     const auto now = m_impl->clock();
     if (const auto prior = m_impl->reservations.find(invocation_identity);
@@ -432,30 +640,12 @@ auto AutomaticApprovalMatcher::match(
       return std::optional{prior->second.evidence};
     }
 
-    std::vector<std::size_t> matches;
-    std::uint32_t highest_precedence{};
-    bool found{};
-    for (std::size_t index{}; index < m_impl->rules.size(); ++index) {
-      auto& rule = m_impl->rules[index];
-      if (rule.remaining_matches == 0 ||
-          (rule.expires_at && now >= *rule.expires_at) ||
-          !std::ranges::contains(rule.allowed_restrictions,
-                                 request.selected_restriction)) {
-        continue;
-      }
-      if (!condition_matches(rule, request, m_impl->limits)) continue;
-      if (!found || rule.precedence > highest_precedence) {
-        matches = {index};
-        highest_precedence = rule.precedence;
-        found = true;
-      } else if (rule.precedence == highest_precedence) {
-        matches.push_back(index);
-      }
-    }
-    if (matches.size() != 1) {
+    const auto match =
+        unique_matching_rule(m_impl->rules, request, m_impl->limits, now);
+    if (!match) {
       return std::optional<domain::AutomaticApprovalEvidence>{};
     }
-    auto& selected = m_impl->rules[matches.front()];
+    auto& selected = m_impl->rules[*match];
     --selected.remaining_matches;
     domain::AutomaticApprovalEvidence evidence{m_impl->identity,
                                                selected.identity};
@@ -502,26 +692,7 @@ auto compile_automatic_approval_matcher(
     -> std::expected<std::shared_ptr<AutomaticApprovalMatcher>,
                      AutomaticApprovalMatcherError> {
   try {
-    constexpr AutomaticApprovalMatcherLimits maximums;
-    if (limits.maximum_rules == 0 ||
-        limits.maximum_rules > maximums.maximum_rules ||
-        limits.maximum_tool_name_bytes == 0 ||
-        limits.maximum_tool_name_bytes > maximums.maximum_tool_name_bytes ||
-        limits.maximum_identity_bytes == 0 ||
-        limits.maximum_identity_bytes > maximums.maximum_identity_bytes ||
-        limits.maximum_canonical_argument_bytes == 0 ||
-        limits.maximum_canonical_argument_bytes >
-            maximums.maximum_canonical_argument_bytes ||
-        limits.maximum_relative_path_bytes == 0 ||
-        limits.maximum_relative_path_bytes >
-            maximums.maximum_relative_path_bytes ||
-        limits.maximum_total_rule_bytes == 0 ||
-        limits.maximum_total_rule_bytes > maximums.maximum_total_rule_bytes ||
-        limits.maximum_total_matches == 0 ||
-        limits.maximum_total_matches > maximums.maximum_total_matches ||
-        limits.maximum_expiry <= std::chrono::milliseconds::zero() ||
-        limits.maximum_expiry > maximums.maximum_expiry ||
-        rules.size() > limits.maximum_rules) {
+    if (!valid_matcher_limits(limits, rules.size())) {
       return failure(AutomaticApprovalMatcherErrorCode::invalid_configuration,
                      "automatic approval matcher limits are invalid");
     }
@@ -534,82 +705,28 @@ auto compile_automatic_approval_matcher(
     std::size_t total_bytes{};
     std::uint64_t total_matches{};
     for (auto& rule : rules) {
-      const auto& rule_constraints = std::visit(
-          [](const auto& value) -> const AutomaticApprovalRuleConstraints& {
-            return value.constraints;
-          },
-          rule);
-      auto restrictions = validate_constraints(rule_constraints, limits);
-      if (!restrictions)
-        return std::unexpected(std::move(restrictions.error()));
-      if (rule_constraints.maximum_matches >
-          limits.maximum_total_matches - total_matches) {
+      const auto maximum_matches =
+          std::visit(
+              [](const auto& value) -> const AutomaticApprovalRuleConstraints& {
+                return value.constraints;
+              },
+              rule)
+              .maximum_matches;
+      if (maximum_matches > limits.maximum_total_matches - total_matches) {
         return failure(AutomaticApprovalMatcherErrorCode::invalid_configuration,
                        "automatic approval match count is overbound");
       }
-      total_matches += rule_constraints.maximum_matches;
-
-      std::string identity;
-      CompiledCondition condition;
-      if (auto* exact = std::get_if<ExactToolArgumentsApprovalRule>(&rule)) {
-        if (!valid_text(exact->tool_name, limits.maximum_tool_name_bytes) ||
-            !valid_canonical_arguments(exact->arguments, limits)) {
-          return failure(
-              AutomaticApprovalMatcherErrorCode::invalid_configuration,
-              "exact automatic approval rule is invalid");
-        }
-        identity = exact_rule_identity(*exact, *restrictions);
-        total_bytes += exact->tool_name.size() +
-                       exact->arguments.canonicalization_identity.size() +
-                       exact->arguments.value.media_type.size() +
-                       exact->arguments.value.data.size();
-        condition = CompiledExactCondition{std::move(exact->tool_name),
-                                           std::move(exact->arguments)};
-        tool_names.insert(
-            std::get<CompiledExactCondition>(condition).tool_name);
-      } else {
-        auto& repository = std::get<RepositoryReadPathApprovalRule>(rule);
-        if (!repository.root) {
-          return failure(
-              AutomaticApprovalMatcherErrorCode::invalid_configuration,
-              "repository-read automatic approval rule is invalid");
-        }
-        const std::string root_identity{repository.root->identity()};
-        if (!valid_root_identity(root_identity) ||
-            root_identity.size() > limits.maximum_identity_bytes ||
-            !valid_relative_path(repository.allowed_relative_path,
-                                 limits.maximum_relative_path_bytes, true)) {
-          return failure(
-              AutomaticApprovalMatcherErrorCode::invalid_configuration,
-              "repository-read automatic approval rule is invalid");
-        }
-        identity =
-            repository_rule_identity(repository, root_identity, *restrictions);
-        total_bytes +=
-            root_identity.size() + repository.allowed_relative_path.size();
-        condition = CompiledRepositoryCondition{
-            std::move(repository.root), std::move(root_identity),
-            std::move(repository.allowed_relative_path)};
-        tool_names.insert("read_repository_file");
-      }
+      total_matches += maximum_matches;
+      auto converted = compile_rule(rule, launch_time, limits);
+      if (!converted) return std::unexpected(std::move(converted.error()));
+      total_bytes += converted->bytes;
       if (total_bytes > limits.maximum_total_rule_bytes ||
-          !identities.insert(identity).second) {
+          !identities.insert(converted->rule.identity).second) {
         return failure(AutomaticApprovalMatcherErrorCode::invalid_configuration,
                        "automatic approval rules are duplicate or overbound");
       }
-      std::optional<std::chrono::steady_clock::time_point> expires_at;
-      if (rule_constraints.expires_after) {
-        if (launch_time > std::chrono::steady_clock::time_point::max() -
-                              *rule_constraints.expires_after) {
-          return failure(
-              AutomaticApprovalMatcherErrorCode::invalid_configuration,
-              "automatic approval expiry cannot be represented");
-        }
-        expires_at = launch_time + *rule_constraints.expires_after;
-      }
-      compiled.push_back({std::move(condition), std::move(*restrictions),
-                          rule_constraints.maximum_matches, expires_at,
-                          rule_constraints.precedence, std::move(identity)});
+      tool_names.insert(std::move(converted->tool_name));
+      compiled.push_back(std::move(converted->rule));
     }
 
     detail::Sha256 policy_digest;
@@ -628,6 +745,29 @@ auto compile_automatic_approval_matcher(
   } catch (...) {
     return failure(AutomaticApprovalMatcherErrorCode::internal_failure,
                    "automatic approval matcher compilation failed internally");
+  }
+}
+
+auto compile_configured_automatic_approval_matcher(
+    const config::AutomaticApprovalRulesConfig& configuration,
+    std::shared_ptr<const DescriptorRelativePathAuthority> repository_read_root,
+    AutomaticApprovalClock clock, AutomaticApprovalMatcherLimits limits)
+    -> std::expected<std::shared_ptr<AutomaticApprovalMatcher>,
+                     AutomaticApprovalMatcherError> {
+  try {
+    std::vector<AutomaticApprovalRule> rules;
+    rules.reserve(configuration.rules.size());
+    for (const auto& configured : configuration.rules) {
+      auto converted =
+          configured_rule(configured, repository_read_root, limits);
+      if (!converted) return std::unexpected(converted.error());
+      rules.push_back(std::move(*converted));
+    }
+    return compile_automatic_approval_matcher(std::move(rules),
+                                              std::move(clock), limits);
+  } catch (...) {
+    return failure(AutomaticApprovalMatcherErrorCode::internal_failure,
+                   "automatic approval configuration failed internally");
   }
 }
 

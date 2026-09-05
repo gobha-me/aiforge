@@ -207,6 +207,89 @@ TEST_CASE("paid image tool model is explicit optional configuration",
   REQUIRE(invalid_model.error().code == ConfigDiagnosticCode::invalid_value);
 }
 
+TEST_CASE("automatic approval configuration is strict bounded and file-only",
+          "[config][automatic-approval][failure]") {
+  const auto empty = resolve_config(builtin_config_registry(), {});
+  REQUIRE(empty);
+  const auto empty_rules = resolve_automatic_approval_rules(*empty);
+  REQUIRE(empty_rules);
+  REQUIRE(empty_rules->rules.empty());
+
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "config.json";
+  write_file(path, R"({
+    "tools": {"approval": {"automatic_rules": [
+      {"type":"exact","tool":"lookup","arguments":{"count":1,"ok":true},
+       "restrictions":["none","high"],"maximum_matches":7,
+       "expires_after_ms":5000,"precedence":3},
+      {"type":"repository_read_path","tool":"read_repository_file",
+       "allowed_relative_path":"src","restrictions":["high"],
+       "maximum_matches":11,"precedence":2}
+    ]}}
+  })");
+  REQUIRE(::chmod(path.c_str(), 0600) == 0);
+  auto layer = JsonConfigFileStore{path}.load(builtin_config_registry());
+  REQUIRE(layer);
+  auto resolved = resolve_config(builtin_config_registry(), {&*layer, 1});
+  REQUIRE(resolved);
+  const auto configured = resolve_automatic_approval_rules(*resolved);
+  REQUIRE(configured);
+  REQUIRE(configured->rules.size() == 2);
+  const auto& exact =
+      std::get<ExactAutomaticApprovalRuleConfig>(configured->rules[0]);
+  REQUIRE(exact.tool_name == "lookup");
+  REQUIRE(exact.canonical_arguments_json == R"({"count":1,"ok":true})");
+  REQUIRE(exact.constraints.allowed_restrictions ==
+          std::vector<std::string>{"none", "high"});
+  REQUIRE(exact.constraints.maximum_matches == 7);
+  REQUIRE(exact.constraints.expires_after_milliseconds == 5000);
+  REQUIRE(exact.constraints.precedence == 3);
+  const auto& repository =
+      std::get<RepositoryPathAutomaticApprovalRuleConfig>(configured->rules[1]);
+  REQUIRE(repository.tool_name == "read_repository_file");
+  REQUIRE(repository.allowed_relative_path == "src");
+  REQUIRE(repository.constraints.maximum_matches == 11);
+
+  const std::array malformed{
+      R"({"tools":{"approval":{"automatic_rules":{}}}})",
+      R"({"tools":{"approval":{"automatic_rules":[{"type":"exact","tool":"lookup","arguments":{},"restrictions":["high"],"maximum_matches":1,"precedence":0,"unknown":true}]}}})",
+      R"({"tools":{"approval":{"automatic_rules":[{"type":"exact","tool":"lookup","arguments":{"value":1.0},"restrictions":["high"],"maximum_matches":1,"precedence":0}]}}})",
+      R"({"tools":{"approval":{"automatic_rules":[{"type":"repository_read_path","tool":"other","allowed_relative_path":"src","restrictions":["high"],"maximum_matches":1,"precedence":0}]}}})",
+      R"({"tools":{"approval":{"automatic_rules":[{"type":"exact","tool":"lookup","arguments":{},"restrictions":["high","high"],"maximum_matches":1,"precedence":0}]}}})",
+      R"({"tools":{"approval":{"automatic_rules":[{"type":"exact","tool":"lookup","arguments":{},"restrictions":["high"],"maximum_matches":0,"precedence":0}]}}})"};
+  for (const auto document : malformed) {
+    write_file(path, document);
+    REQUIRE(::chmod(path.c_str(), 0600) == 0);
+    layer = JsonConfigFileStore{path}.load(builtin_config_registry());
+    REQUIRE(layer);
+    resolved = resolve_config(builtin_config_registry(), {&*layer, 1});
+    REQUIRE(resolved);
+    REQUIRE_FALSE(resolve_automatic_approval_rules(*resolved));
+  }
+
+  AutomaticApprovalRulesConfig too_many;
+  too_many.rules.reserve(257);
+  for (std::size_t index{}; index < 257; ++index) {
+    too_many.rules.emplace_back(ExactAutomaticApprovalRuleConfig{
+        "lookup", "{}", {{"high"}, 1, std::nullopt, 0}});
+  }
+  const ConfigLayer overbound{
+      ConfigSource::file,
+      {candidate(std::string{automatic_approval_rules_key},
+                 std::move(too_many))},
+      {}};
+  resolved = resolve_config(builtin_config_registry(), {&overbound, 1});
+  REQUIRE(resolved);
+  REQUIRE_FALSE(resolve_automatic_approval_rules(*resolved));
+
+  const auto& registry = builtin_config_registry();
+  const auto spec = std::ranges::find(
+      registry.keys, automatic_approval_rules_key, &ConfigKeySpec::id);
+  REQUIRE(spec != registry.keys.end());
+  constexpr std::array values{std::string_view{"[]"}};
+  REQUIRE_FALSE(parse_config_value(*spec, values, ConfigSource::environment));
+}
+
 TEST_CASE("all present-layer permutations resolve by fixed precedence",
           "[config][precedence]") {
   const auto registry = test_registry();
@@ -995,7 +1078,8 @@ TEST_CASE("config CLI keeps content and diagnostics on their streams",
                     "memory.context.max_tokens\t2048\tdefault\n"
                     "tools.models.maximum_profiles\t<unset>\tunset\n"
                     "tools.personas.maximum_profiles\t<unset>\tunset\n"
-                    "tools.image.model\t<unset>\tunset\n");
+                    "tools.image.model\t<unset>\tunset\n"
+                    "tools.approval.automatic_rules\t<unset>\tunset\n");
   REQUIRE(error.empty());
 
   REQUIRE(run_cli({"config", "set", "model", "test-model"}, output, error) ==
@@ -1045,7 +1129,8 @@ TEST_CASE("malformed files are diagnostic for reads but never overwritten",
                     "memory.context.max_tokens\t2048\tdefault\n"
                     "tools.models.maximum_profiles\t<unset>\tunset\n"
                     "tools.personas.maximum_profiles\t<unset>\tunset\n"
-                    "tools.image.model\t<unset>\tunset\n");
+                    "tools.image.model\t<unset>\tunset\n"
+                    "tools.approval.automatic_rules\t<unset>\tunset\n");
   REQUIRE(error.find("warning") != std::string::npos);
 
   REQUIRE(run_cli({"config", "set", "model", "replacement"}, output, error) ==
@@ -1077,7 +1162,8 @@ TEST_CASE("read-only resolution survives an unavailable config home",
                     "memory.context.max_tokens\t2048\tdefault\n"
                     "tools.models.maximum_profiles\t<unset>\tunset\n"
                     "tools.personas.maximum_profiles\t<unset>\tunset\n"
-                    "tools.image.model\t<unset>\tunset\n");
+                    "tools.image.model\t<unset>\tunset\n"
+                    "tools.approval.automatic_rules\t<unset>\tunset\n");
   REQUIRE(error.find("warning") != std::string::npos);
   REQUIRE(error.find("environment-model") == std::string::npos);
 }

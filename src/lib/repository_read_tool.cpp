@@ -153,6 +153,12 @@ class DuplicateJsonKey final : public std::exception {};
   });
 }
 
+[[nodiscard]] auto valid_optional_relative_path(const std::string& value,
+                                                const std::size_t maximum)
+    -> bool {
+  return value.empty() || valid_relative_path(value, maximum);
+}
+
 [[nodiscard]] auto parse_relative_path(
     const domain::StructuredDataBlock& arguments,
     const RepositoryReadToolConfiguration& configuration)
@@ -431,13 +437,12 @@ auto make_repository_read_approval_rule(
     const std::string root_identity{root->identity()};
     if (root_identity.size() != digest_prefix.size() + 64U ||
         !root_identity.starts_with(digest_prefix) ||
-        std::ranges::any_of(root_identity.substr(digest_prefix.size()),
-                            [](const unsigned char character) {
-                              return !((character >= '0' && character <= '9') ||
-                                       (character >= 'a' && character <= 'f'));
-                            }) ||
-        (!allowed_relative_path.empty() &&
-         !valid_relative_path(allowed_relative_path, 4096U))) {
+        !std::ranges::all_of(root_identity.substr(digest_prefix.size()),
+                             [](const unsigned char character) {
+                               return (character >= '0' && character <= '9') ||
+                                      (character >= 'a' && character <= 'f');
+                             }) ||
+        !valid_optional_relative_path(allowed_relative_path, 4096U)) {
       return std::unexpected(AutomaticApprovalMatcherError{
           AutomaticApprovalMatcherErrorCode::invalid_configuration,
           "repository-read automatic approval rule is invalid"});

@@ -594,6 +594,19 @@ No production implicit-approval rules are installed by default. Selecting
 `auto` without an explicit bounded per-tool rule therefore denies every
 authority-bearing invocation without falling back to a prompt.
 
+Automatic rules are read only from the strict
+`tools.approval.automatic_rules` array in `config.json`. Each object names an
+exact `tool`, a nonempty `restrictions` array, positive `maximum_matches`, and
+an explicit `precedence`; optional `expires_after_ms` is measured from
+application launch. An `exact` rule contains the complete typed JSON
+`arguments`. A `repository_read_path` rule is limited to
+`read_repository_file` and contains one normalized `allowed_relative_path`
+under the repository root pinned at launch. Unknown fields, floating-point
+arguments, ambiguous paths, invalid bounds, unregistered tools, unavailable or
+replaced roots, and equal-precedence matches deny or fail launch. Tool/profile
+membership never creates a rule implicitly, and durable events contain only
+the matcher and selected-rule identities.
+
 ## Structured user questions
 
 `ask_user` is a no-authority model-facing tool for one or more bounded single-
