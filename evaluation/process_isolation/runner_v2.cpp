@@ -12,7 +12,9 @@
 #include <climits>
 #include <csignal>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <optional>
 #include <ranges>
@@ -22,7 +24,6 @@
 #include <utility>
 #include <vector>
 
-#include <dirent.h>
 #include <fcntl.h>
 #include <linux/magic.h>
 #include <poll.h>
@@ -169,44 +170,79 @@ class Descriptor {
   }
 }
 
+struct LinuxDirectoryEntry {
+  std::uint64_t inode;
+  std::int64_t offset;
+  unsigned short record_length;
+  unsigned char type;
+  char name;
+};
+
+template <typename Visitor>
+[[nodiscard]] auto visit_directory_entries(const int directory,
+                                           const Visitor& visitor) -> bool {
+#if defined(SYS_getdents64)
+  alignas(LinuxDirectoryEntry) std::array<std::byte, 4096> buffer{};
+  for (;;) {
+    const auto count =
+        ::syscall(SYS_getdents64, directory, buffer.data(), buffer.size());
+    if (count == 0) return true;
+    if (count < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    std::size_t position{};
+    const auto length = static_cast<std::size_t>(count);
+    while (position < length) {
+      const auto* entry = reinterpret_cast<const LinuxDirectoryEntry*>(
+          buffer.data() + position);
+      constexpr auto name_offset = offsetof(LinuxDirectoryEntry, name);
+      if (entry->record_length < name_offset + 1U ||
+          entry->record_length > length - position)
+        return false;
+      const auto maximum_name = entry->record_length - name_offset;
+      const auto* terminator = static_cast<const char*>(
+          std::memchr(&entry->name, '\0', maximum_name));
+      if (terminator == nullptr ||
+          !visitor(std::string_view{
+              &entry->name,
+              static_cast<std::size_t>(terminator - &entry->name)}))
+        return false;
+      position += entry->record_length;
+    }
+  }
+#else
+  static_cast<void>(directory);
+  static_cast<void>(visitor);
+  return false;
+#endif
+}
+
 [[nodiscard]] auto cgroup_directories(const int directory)
     -> std::optional<std::vector<std::string>> {
-  const auto duplicated = ::fcntl(directory, F_DUPFD_CLOEXEC, 5);
-  if (duplicated < 0) return std::nullopt;
-  auto* stream = ::fdopendir(duplicated);
-  if (stream == nullptr) {
-    static_cast<void>(::close(duplicated));
-    return std::nullopt;
-  }
+  const Descriptor scan{::fcntl(directory, F_DUPFD_CLOEXEC, 5)};
+  if (scan.get() < 0) return std::nullopt;
   std::vector<std::string> result;
-  bool valid{true};
-  errno = 0;
-  while (const auto* entry = ::readdir(stream)) {
-    const std::string_view name{entry->d_name};
-    if (name == "." || name == "..") continue;
+  const bool valid = visit_directory_entries(scan.get(), [&](const auto name) {
+    if (name == "." || name == "..") return true;
     struct stat attributes{};
-    if (::fstatat(directory, entry->d_name, &attributes, AT_SYMLINK_NOFOLLOW) !=
-        0) {
-      valid = false;
-      break;
-    }
-    if (!S_ISDIR(attributes.st_mode)) continue;
-    if (name.empty() || name.size() > 255 ||
-        !std::ranges::all_of(name,
-                             [](const unsigned char character) {
-                               return (character >= 'a' && character <= 'z') ||
-                                      (character >= 'A' && character <= 'Z') ||
-                                      (character >= '0' && character <= '9') ||
-                                      character == '-' || character == '_';
-                             }) ||
-        result.size() == maximum_cgroup_children) {
-      valid = false;
-      break;
-    }
-    result.emplace_back(name);
-  }
-  if (errno != 0) valid = false;
-  if (::closedir(stream) != 0) valid = false;
+    const std::string owned_name{name};
+    if (::fstatat(directory, owned_name.c_str(), &attributes,
+                  AT_SYMLINK_NOFOLLOW) != 0)
+      return false;
+    if (!S_ISDIR(attributes.st_mode)) return true;
+    const bool safe_name =
+        !name.empty() && name.size() <= 255 &&
+        std::ranges::all_of(name, [](const unsigned char character) {
+          return (character >= 'a' && character <= 'z') ||
+                 (character >= 'A' && character <= 'Z') ||
+                 (character >= '0' && character <= '9') || character == '-' ||
+                 character == '_';
+        });
+    if (!safe_name || result.size() == maximum_cgroup_children) return false;
+    result.push_back(owned_name);
+    return true;
+  });
   if (!valid) return std::nullopt;
   std::ranges::sort(result);
   return result;
@@ -231,30 +267,69 @@ class Descriptor {
   return false;
 }
 
-[[nodiscard]] auto cleanup_cgroup_tree(const int parent,
-                                       const std::string& name,
-                                       const std::size_t depth,
-                                       std::size_t& remaining) -> bool {
-  if (depth > maximum_cgroup_depth || remaining == 0) return false;
+struct CgroupCleanupFrame {
+  int parent{};
+  std::string name;
+  std::size_t depth{};
+  Descriptor child;
+  std::vector<std::string> descendants;
+  std::size_t next_descendant{};
+  bool complete{};
+};
+
+[[nodiscard]] auto make_cleanup_frame(const int parent, std::string name,
+                                      const std::size_t depth,
+                                      std::size_t& remaining)
+    -> std::expected<CgroupCleanupFrame, bool> {
+  if (depth > maximum_cgroup_depth || remaining == 0)
+    return std::unexpected(false);
   --remaining;
   Descriptor child{::openat(parent, name.c_str(),
                             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
-  if (child.get() < 0) return errno == ENOENT;
+  if (child.get() < 0) return std::unexpected(errno == ENOENT);
   bool complete = write_control(child.get(), "cgroup.kill", "1") &&
                   await_cgroup_empty(child.get());
-  const auto descendants = cgroup_directories(child.get());
-  if (!descendants) {
-    complete = false;
-  } else {
-    for (const auto& descendant : *descendants) {
-      if (!cleanup_cgroup_tree(child.get(), descendant, depth + 1, remaining))
-        complete = false;
+  auto descendants = cgroup_directories(child.get());
+  if (!descendants) complete = false;
+  return CgroupCleanupFrame{parent,
+                            std::move(name),
+                            depth,
+                            std::move(child),
+                            descendants ? std::move(*descendants)
+                                        : std::vector<std::string>{},
+                            0,
+                            complete};
+}
+
+[[nodiscard]] auto cleanup_cgroup_tree(const int parent, std::string name,
+                                       const std::size_t depth,
+                                       std::size_t& remaining) -> bool {
+  auto initial = make_cleanup_frame(parent, std::move(name), depth, remaining);
+  if (!initial) return initial.error();
+  std::vector<CgroupCleanupFrame> pending;
+  pending.push_back(std::move(*initial));
+  for (;;) {
+    auto& current = pending.back();
+    if (current.next_descendant < current.descendants.size()) {
+      auto descendant = make_cleanup_frame(
+          current.child.get(), current.descendants[current.next_descendant++],
+          current.depth + 1, remaining);
+      if (descendant) {
+        pending.push_back(std::move(*descendant));
+      } else if (!descendant.error()) {
+        current.complete = false;
+      }
+      continue;
     }
+    current.child.reset();
+    if (::unlinkat(current.parent, current.name.c_str(), AT_REMOVEDIR) != 0 &&
+        errno != ENOENT)
+      current.complete = false;
+    const bool complete = current.complete;
+    pending.pop_back();
+    if (pending.empty()) return complete;
+    if (!complete) pending.back().complete = false;
   }
-  child.reset();
-  if (::unlinkat(parent, name.c_str(), AT_REMOVEDIR) != 0 && errno != ENOENT)
-    complete = false;
-  return complete;
 }
 
 [[nodiscard]] auto cleanup_task_cgroups(const int root, const pid_t owner)
@@ -323,12 +398,12 @@ class Descriptor {
 [[nodiscard]] auto safe_delegated_root_path(const std::filesystem::path& path)
     -> bool {
   if (path.empty()) return true;
-  const auto text = path.native();
+  const auto& text = path.native();
   if (!path.is_absolute() || text.size() > 4096 || text == "/" ||
       text.back() == '/')
     return false;
   for (const auto& component : path) {
-    const auto value = component.native();
+    const auto& value = component.native();
     if (value == "/") continue;
     if (value.empty() || value == "." || value == ".." || value.size() > 255 ||
         !std::ranges::all_of(value, [](const unsigned char character) {
@@ -345,7 +420,7 @@ class Descriptor {
       Descriptor{::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
   if (current.get() < 0) return current;
   for (const auto& component : path) {
-    const auto value = component.native();
+    const auto& value = component.native();
     if (value == "/") continue;
     Descriptor next{::openat(current.get(), value.c_str(),
                              O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
@@ -365,86 +440,22 @@ class CgroupBootstrap final {
   [[nodiscard]] auto start(const std::filesystem::path& path) -> ReasonCode {
     if (path.empty()) return ReasonCode::missing_delegation;
     m_root = open_pinned_directory(path);
-    struct stat attributes{};
-    struct statfs filesystem{};
-    if (m_root.get() < 0 || ::fstat(m_root.get(), &attributes) != 0 ||
-        ::fstatfs(m_root.get(), &filesystem) != 0 ||
-        !S_ISDIR(attributes.st_mode) || attributes.st_uid != ::geteuid() ||
-        filesystem.f_type != CGROUP2_SUPER_MAGIC)
-      return ReasonCode::missing_delegation;
-    const auto controllers = read_control(m_root.get(), "cgroup.controllers");
-    const auto available =
-        controllers ? parse_tokens(*controllers) : std::nullopt;
-    if (!available) return ReasonCode::internal_error;
-    for (const auto* required : {"cpu", "memory", "pids"}) {
-      if (!available->contains(required)) return ReasonCode::missing_controller;
-    }
-    const auto processes_document = read_control(m_root.get(), "cgroup.procs");
-    const auto processes = processes_document
-                               ? parse_processes(*processes_document)
-                               : std::nullopt;
-    if (!processes) return ReasonCode::internal_error;
-    if (processes->size() != 1 || processes->front() != ::getpid())
-      return ReasonCode::missing_delegation;
-    const auto children = cgroup_directories(m_root.get());
-    if (!children || !children->empty())
-      return children ? ReasonCode::missing_delegation
-                      : ReasonCode::internal_error;
-    m_supervisor_name =
-        "aiforge-evidence-v2-supervisor-" + std::to_string(::getpid());
-    if (::mkdirat(m_root.get(), m_supervisor_name.c_str(), S_IRWXU) != 0)
-      return errno == EACCES || errno == EPERM || errno == EROFS
-                 ? ReasonCode::missing_delegation
-                 : ReasonCode::internal_error;
-    m_created = true;
-    m_supervisor =
-        Descriptor{::openat(m_root.get(), m_supervisor_name.c_str(),
-                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
-    if (m_supervisor.get() < 0) return fail(ReasonCode::internal_error);
-    const auto own_pid = std::to_string(::getpid());
-    if (!write_control(m_supervisor.get(), "cgroup.procs", own_pid))
-      return fail(ReasonCode::missing_delegation);
-    m_moved = true;
-    const auto supervisor_document =
-        read_control(m_supervisor.get(), "cgroup.procs");
-    const auto supervisor_processes =
-        supervisor_document ? parse_processes(*supervisor_document)
-                            : std::nullopt;
-    if (!supervisor_processes || supervisor_processes->size() != 1 ||
-        supervisor_processes->front() != ::getpid())
-      return fail(supervisor_processes ? ReasonCode::missing_delegation
-                                       : ReasonCode::internal_error);
-    const auto remaining_document = read_control(m_root.get(), "cgroup.procs");
-    const auto remaining = remaining_document
-                               ? parse_processes(*remaining_document)
-                               : std::nullopt;
-    if (!remaining || !remaining->empty())
-      return fail(remaining ? ReasonCode::missing_delegation
-                            : ReasonCode::internal_error);
-    if (!write_control(m_root.get(), "cgroup.subtree_control",
-                       "+cpu +memory +pids")) {
-      const auto enable_error = errno;
-      const auto partially_enabled =
-          read_control(m_root.get(), "cgroup.subtree_control");
-      const auto partial_tokens =
-          partially_enabled ? parse_tokens(*partially_enabled) : std::nullopt;
-      if (!partial_tokens) return fail(ReasonCode::internal_error);
-      m_enabled = partial_tokens->contains("cpu") ||
-                  partial_tokens->contains("memory") ||
-                  partial_tokens->contains("pids");
-      return fail(enable_error == EACCES || enable_error == EPERM ||
-                          enable_error == EBUSY
-                      ? ReasonCode::missing_delegation
-                      : ReasonCode::internal_error);
-    }
-    m_enabled = true;
-    const auto enabled = read_control(m_root.get(), "cgroup.subtree_control");
-    const auto enabled_tokens = enabled ? parse_tokens(*enabled) : std::nullopt;
-    if (!enabled_tokens || !enabled_tokens->contains("cpu") ||
-        !enabled_tokens->contains("memory") ||
-        !enabled_tokens->contains("pids"))
-      return fail(enabled_tokens ? ReasonCode::missing_controller
-                                 : ReasonCode::internal_error);
+    if (const auto validation = validate_root(); validation != ReasonCode::none)
+      return validation;
+    if (const auto validation = validate_controllers();
+        validation != ReasonCode::none)
+      return validation;
+    if (const auto validation = validate_root_ownership();
+        validation != ReasonCode::none)
+      return validation;
+    if (const auto creation = create_supervisor(); creation != ReasonCode::none)
+      return creation;
+    if (const auto migration = migrate_to_supervisor();
+        migration != ReasonCode::none)
+      return migration;
+    if (const auto enabling = enable_controllers();
+        enabling != ReasonCode::none)
+      return enabling;
     m_ready = true;
     return ReasonCode::none;
   }
@@ -509,6 +520,109 @@ class CgroupBootstrap final {
   }
 
  private:
+  [[nodiscard]] auto validate_root() const -> ReasonCode {
+    struct stat attributes{};
+    struct statfs filesystem{};
+    if (m_root.get() < 0 || ::fstat(m_root.get(), &attributes) != 0 ||
+        ::fstatfs(m_root.get(), &filesystem) != 0 ||
+        !S_ISDIR(attributes.st_mode) || attributes.st_uid != ::geteuid() ||
+        filesystem.f_type != CGROUP2_SUPER_MAGIC)
+      return ReasonCode::missing_delegation;
+    return ReasonCode::none;
+  }
+
+  [[nodiscard]] auto validate_controllers() const -> ReasonCode {
+    const auto controllers = read_control(m_root.get(), "cgroup.controllers");
+    const auto available =
+        controllers ? parse_tokens(*controllers) : std::nullopt;
+    if (!available) return ReasonCode::internal_error;
+    for (const auto* required : {"cpu", "memory", "pids"}) {
+      if (!available->contains(required)) return ReasonCode::missing_controller;
+    }
+    return ReasonCode::none;
+  }
+
+  [[nodiscard]] auto validate_root_ownership() const -> ReasonCode {
+    const auto processes_document = read_control(m_root.get(), "cgroup.procs");
+    const auto processes = processes_document
+                               ? parse_processes(*processes_document)
+                               : std::nullopt;
+    if (!processes) return ReasonCode::internal_error;
+    if (processes->size() != 1 || processes->front() != ::getpid())
+      return ReasonCode::missing_delegation;
+    const auto children = cgroup_directories(m_root.get());
+    if (!children || !children->empty())
+      return children ? ReasonCode::missing_delegation
+                      : ReasonCode::internal_error;
+    return ReasonCode::none;
+  }
+
+  [[nodiscard]] auto create_supervisor() -> ReasonCode {
+    m_supervisor_name =
+        "aiforge-evidence-v2-supervisor-" + std::to_string(::getpid());
+    if (::mkdirat(m_root.get(), m_supervisor_name.c_str(), S_IRWXU) != 0)
+      return errno == EACCES || errno == EPERM || errno == EROFS
+                 ? ReasonCode::missing_delegation
+                 : ReasonCode::internal_error;
+    m_created = true;
+    m_supervisor =
+        Descriptor{::openat(m_root.get(), m_supervisor_name.c_str(),
+                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
+    if (m_supervisor.get() < 0) return fail(ReasonCode::internal_error);
+    return ReasonCode::none;
+  }
+
+  [[nodiscard]] auto migrate_to_supervisor() -> ReasonCode {
+    const auto own_pid = std::to_string(::getpid());
+    if (!write_control(m_supervisor.get(), "cgroup.procs", own_pid))
+      return fail(ReasonCode::missing_delegation);
+    m_moved = true;
+    const auto supervisor_document =
+        read_control(m_supervisor.get(), "cgroup.procs");
+    const auto supervisor_processes =
+        supervisor_document ? parse_processes(*supervisor_document)
+                            : std::nullopt;
+    if (!supervisor_processes || supervisor_processes->size() != 1 ||
+        supervisor_processes->front() != ::getpid())
+      return fail(supervisor_processes ? ReasonCode::missing_delegation
+                                       : ReasonCode::internal_error);
+    const auto remaining_document = read_control(m_root.get(), "cgroup.procs");
+    const auto remaining = remaining_document
+                               ? parse_processes(*remaining_document)
+                               : std::nullopt;
+    if (!remaining || !remaining->empty())
+      return fail(remaining ? ReasonCode::missing_delegation
+                            : ReasonCode::internal_error);
+    return ReasonCode::none;
+  }
+
+  [[nodiscard]] auto enable_controllers() -> ReasonCode {
+    if (!write_control(m_root.get(), "cgroup.subtree_control",
+                       "+cpu +memory +pids")) {
+      const auto enable_error = errno;
+      const auto partially_enabled =
+          read_control(m_root.get(), "cgroup.subtree_control");
+      const auto partial_tokens =
+          partially_enabled ? parse_tokens(*partially_enabled) : std::nullopt;
+      if (!partial_tokens) return fail(ReasonCode::internal_error);
+      m_enabled = partial_tokens->contains("cpu") ||
+                  partial_tokens->contains("memory") ||
+                  partial_tokens->contains("pids");
+      return fail(enable_error == EACCES || enable_error == EPERM ||
+                          enable_error == EBUSY
+                      ? ReasonCode::missing_delegation
+                      : ReasonCode::internal_error);
+    }
+    m_enabled = true;
+    const auto enabled = read_control(m_root.get(), "cgroup.subtree_control");
+    const auto enabled_tokens = enabled ? parse_tokens(*enabled) : std::nullopt;
+    if (!enabled_tokens || !enabled_tokens->contains("cpu") ||
+        !enabled_tokens->contains("memory") ||
+        !enabled_tokens->contains("pids"))
+      return fail(enabled_tokens ? ReasonCode::missing_controller
+                                 : ReasonCode::internal_error);
+    return ReasonCode::none;
+  }
   [[nodiscard]] auto fail(const ReasonCode reason) -> ReasonCode {
     return cleanup() ? reason : ReasonCode::cleanup_failed;
   }
@@ -661,25 +775,26 @@ class SubreaperGuard {
   return true;
 }
 
-[[nodiscard]] auto direct_descendants() -> std::optional<std::vector<pid_t>> {
-  const auto path =
-      "/proc/self/task/" + std::to_string(::getpid()) + "/children";
-  const Descriptor descriptor{
-      ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
-  if (descriptor.get() < 0) return std::nullopt;
+[[nodiscard]] auto read_bounded_descriptor(const int descriptor,
+                                           const std::size_t maximum)
+    -> std::optional<std::string> {
   std::string document;
   std::array<char, 1024> buffer{};
   for (;;) {
-    const auto count = ::read(descriptor.get(), buffer.data(), buffer.size());
-    if (count == 0) break;
+    const auto count = ::read(descriptor, buffer.data(), buffer.size());
+    if (count == 0) return document;
     if (count < 0) {
       if (errno == EINTR) continue;
       return std::nullopt;
     }
-    if (document.size() + static_cast<std::size_t>(count) > 65536)
+    if (document.size() + static_cast<std::size_t>(count) > maximum)
       return std::nullopt;
     document.append(buffer.data(), static_cast<std::size_t>(count));
   }
+}
+
+[[nodiscard]] auto parse_space_separated_processes(
+    const std::string_view document) -> std::optional<std::vector<pid_t>> {
   std::vector<pid_t> result;
   const char* cursor = document.data();
   const char* end = cursor + document.size();
@@ -690,14 +805,23 @@ class SubreaperGuard {
     long value{};
     const auto parsed = std::from_chars(cursor, end, value);
     if (parsed.ec != std::errc{} || parsed.ptr == cursor || value <= 0 ||
-        value > INT_MAX) {
+        value > INT_MAX)
       return std::nullopt;
-    }
     result.push_back(static_cast<pid_t>(value));
     cursor = parsed.ptr;
     if (cursor != end && *cursor != ' ') return std::nullopt;
   }
   return result;
+}
+
+[[nodiscard]] auto direct_descendants() -> std::optional<std::vector<pid_t>> {
+  const auto path =
+      "/proc/self/task/" + std::to_string(::getpid()) + "/children";
+  const Descriptor descriptor{
+      ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
+  if (descriptor.get() < 0) return std::nullopt;
+  const auto document = read_bounded_descriptor(descriptor.get(), 65536);
+  return document ? parse_space_separated_processes(*document) : std::nullopt;
 }
 
 struct CleanupResult {

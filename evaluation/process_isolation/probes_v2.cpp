@@ -59,7 +59,7 @@ constexpr int assertion_internal_error = 23;
 constexpr int assertion_prerequisite_unavailable = 24;
 constexpr int assertion_limit_not_triggered = 25;
 constexpr auto observation_timeout = std::chrono::seconds{2};
-constexpr std::size_t maximum_control_bytes = 64U * 1024U;
+constexpr std::size_t maximum_control_bytes = 64UZ * 1024UZ;
 
 [[nodiscard]] auto apply_landlock(
     const std::filesystem::path& state, std::uint64_t handled,
@@ -390,11 +390,10 @@ class Descriptor {
   if (!document.starts_with("0::/") ||
       document.find('\n') != document.size() - 1)
     return std::nullopt;
-  const auto path =
-      std::filesystem::path{document.substr(3, document.size() - 4)};
+  auto path = std::filesystem::path{document.substr(3, document.size() - 4)};
   if (!path.is_absolute()) return std::nullopt;
   for (const auto& component : path) {
-    const auto value = component.native();
+    const auto& value = component.native();
     if (value == "/") continue;
     if (value.empty() || value == "." || value == ".." || value.size() > 255)
       return std::nullopt;
@@ -614,7 +613,7 @@ class Cgroup final {
 [[nodiscard]] auto required_cgroup_or_record(const ProbeId id)
     -> std::expected<Cgroup, ProbeRecord> {
   auto cgroup = cgroup_or_record(id);
-  if (!cgroup) return std::unexpected(std::move(cgroup.error()));
+  if (!cgroup) return std::unexpected(cgroup.error());
   const auto controllers = cgroup->has_required_controllers();
   if (!controllers) {
     return std::unexpected(probe_error(id, ReasonCode::internal_error));
@@ -763,6 +762,65 @@ enum class TreeShape {
   leader_exit
 };
 
+[[noreturn]] auto pause_forever() -> void {
+  for (;;)
+    ::pause();
+}
+
+[[nodiscard]] auto signal_tree_ready() -> bool {
+  constexpr int write_descriptor = 3;
+  const bool result = write_all(write_descriptor, "R");
+  static_cast<void>(::close(write_descriptor));
+  return result;
+}
+
+[[nodiscard]] auto run_detached_tree_child(const TreeShape shape) -> int {
+  const auto intermediate = ::fork();
+  if (intermediate < 0) return assertion_internal_error;
+  if (intermediate > 0) return assertion_enforced;
+  if (::setsid() < 0) return assertion_internal_error;
+  const auto daemon = ::fork();
+  if (daemon < 0) return assertion_internal_error;
+  if (daemon > 0) return assertion_enforced;
+  if (shape == TreeShape::daemon) {
+    static_cast<void>(::chdir("/"));
+    ::umask(0);
+  }
+  if (!signal_tree_ready()) return assertion_internal_error;
+  pause_forever();
+}
+
+[[nodiscard]] auto run_fanout_tree_child() -> int {
+  constexpr int write_descriptor = 3;
+  for (int index{}; index < 4; ++index) {
+    const auto descendant = ::fork();
+    if (descendant < 0) return assertion_internal_error;
+    if (descendant == 0) {
+      static_cast<void>(::close(write_descriptor));
+      pause_forever();
+    }
+  }
+  return assertion_enforced;
+}
+
+[[nodiscard]] auto run_tree_child(const TreeShape shape) -> int {
+  static_cast<void>(::close(STDIN_FILENO));
+  if (shape == TreeShape::setsid && ::setsid() < 0)
+    return assertion_internal_error;
+  if (shape == TreeShape::double_fork || shape == TreeShape::daemon)
+    return run_detached_tree_child(shape);
+  if (shape == TreeShape::fanout &&
+      run_fanout_tree_child() != assertion_enforced)
+    return assertion_internal_error;
+  if (shape == TreeShape::leader_exit) {
+    const auto descendant = ::fork();
+    if (descendant < 0) return assertion_internal_error;
+    if (descendant > 0) return assertion_enforced;
+  }
+  if (!signal_tree_ready()) return assertion_internal_error;
+  pause_forever();
+}
+
 [[nodiscard]] auto spawn_tree(Cgroup& cgroup, const TreeShape shape,
                               int& readiness_descriptor)
     -> std::expected<pid_t, ReasonCode> {
@@ -771,60 +829,32 @@ enum class TreeShape {
     return std::unexpected(ReasonCode::internal_error);
   readiness_descriptor = readiness[0];
   const auto child = atomic_child(
-      cgroup.child(),
-      [shape] {
-        constexpr int write = 3;
-        static_cast<void>(::close(STDIN_FILENO));
-        const auto ready = [] {
-          const bool result = write_all(write, "R");
-          static_cast<void>(::close(write));
-          return result;
-        };
-        if (shape == TreeShape::setsid && ::setsid() < 0)
-          return assertion_internal_error;
-        if (shape == TreeShape::double_fork || shape == TreeShape::daemon) {
-          const auto intermediate = ::fork();
-          if (intermediate < 0) return assertion_internal_error;
-          if (intermediate > 0) return assertion_enforced;
-          if (::setsid() < 0) return assertion_internal_error;
-          const auto daemon = ::fork();
-          if (daemon < 0) return assertion_internal_error;
-          if (daemon > 0) return assertion_enforced;
-          if (shape == TreeShape::daemon) {
-            static_cast<void>(::chdir("/"));
-            ::umask(0);
-          }
-          if (!ready()) return assertion_internal_error;
-          for (;;)
-            ::pause();
-        }
-        if (shape == TreeShape::fanout) {
-          for (int index{}; index < 4; ++index) {
-            const auto descendant = ::fork();
-            if (descendant < 0) return assertion_internal_error;
-            if (descendant == 0) {
-              static_cast<void>(::close(write));
-              for (;;)
-                ::pause();
-            }
-          }
-        }
-        if (shape == TreeShape::leader_exit) {
-          const auto descendant = ::fork();
-          if (descendant < 0) return assertion_internal_error;
-          if (descendant > 0) return assertion_enforced;
-        }
-        if (!ready()) return assertion_internal_error;
-        for (;;)
-          ::pause();
-      },
-      readiness[1]);
+      cgroup.child(), [shape] { return run_tree_child(shape); }, readiness[1]);
   static_cast<void>(::close(readiness[1]));
   if (!child) {
     static_cast<void>(::close(readiness[0]));
     readiness_descriptor = -1;
   }
   return child;
+}
+
+[[nodiscard]] auto await_cgroup_tree_death(
+    const std::vector<Descriptor>& identities, const int cgroup_descriptor)
+    -> std::optional<bool> {
+  const auto deadline = std::chrono::steady_clock::now() + observation_timeout;
+  bool all_dead{};
+  bool empty{};
+  do {
+    all_dead = std::ranges::all_of(identities, [](const Descriptor& value) {
+      return pidfd_dead(value.get());
+    });
+    const auto populated = cgroup_is_populated(cgroup_descriptor);
+    if (!populated) return std::nullopt;
+    empty = !*populated;
+    if (all_dead && empty) break;
+    static_cast<void>(::poll(nullptr, 0, 5));
+  } while (std::chrono::steady_clock::now() < deadline);
+  return all_dead && empty;
 }
 
 [[nodiscard]] auto terminate_cgroup_tree(const ProbeId id, Cgroup& cgroup,
@@ -850,21 +880,10 @@ enum class TreeShape {
         return probe_error(id, ReasonCode::cleanup_failed);
     }
   }
-  const auto deadline = std::chrono::steady_clock::now() + observation_timeout;
-  bool all_dead{};
-  bool empty{};
-  do {
-    all_dead = std::ranges::all_of(identities, [](const Descriptor& value) {
-      return pidfd_dead(value.get());
-    });
-    const auto populated = cgroup_is_populated(cgroup.child());
-    if (!populated) return probe_error(id, ReasonCode::malformed_protocol);
-    empty = !*populated;
-    if (all_dead && empty) break;
-    static_cast<void>(::poll(nullptr, 0, 5));
-  } while (std::chrono::steady_clock::now() < deadline);
+  const auto tree_dead = await_cgroup_tree_death(identities, cgroup.child());
+  if (!tree_dead) return probe_error(id, ReasonCode::malformed_protocol);
   if (!reap_all_children()) return probe_error(id, ReasonCode::cleanup_failed);
-  if (!all_dead || !empty) return probe_error(id, ReasonCode::cleanup_failed);
+  if (!*tree_dead) return probe_error(id, ReasonCode::cleanup_failed);
   return enforced(id);
 }
 
@@ -874,7 +893,7 @@ enum class TreeShape {
                               const bool cancellation_probe = false)
     -> ProbeRecord {
   auto cgroup = required_cgroup_or_record(id);
-  if (!cgroup) return std::move(cgroup.error());
+  if (!cgroup) return cgroup.error();
   int previous_subreaper{};
   if (::prctl(PR_GET_CHILD_SUBREAPER, &previous_subreaper) != 0 ||
       (previous_subreaper == 0 && ::prctl(PR_SET_CHILD_SUBREAPER, 1) != 0)) {
@@ -908,7 +927,7 @@ enum class TreeShape {
           ? cancellation_cleanup_observation(
                 tree_ready, cancellation.stop_requested(),
                 termination.state == ProbeState::enforced, cleanup_complete)
-          : std::move(termination);
+          : termination;
   if (!cancellation_probe && !cleanup_complete)
     result = probe_error(id, ReasonCode::cleanup_failed);
   result.probe_id = id;
@@ -948,14 +967,14 @@ enum class TreeShape {
 
 [[nodiscard]] auto cgroup_delegation_probe(const ProbeId id) -> ProbeRecord {
   auto cgroup = cgroup_or_record(id);
-  if (!cgroup) return std::move(cgroup.error());
+  if (!cgroup) return cgroup.error();
   return cgroup->cleanup() ? enforced(id)
                            : probe_error(id, ReasonCode::cleanup_failed);
 }
 
 [[nodiscard]] auto cgroup_controller_probe(const ProbeId id) -> ProbeRecord {
   auto cgroup = cgroup_or_record(id);
-  if (!cgroup) return std::move(cgroup.error());
+  if (!cgroup) return cgroup.error();
   const auto controllers = cgroup->has_required_controllers();
   auto result =
       !controllers
@@ -968,7 +987,7 @@ enum class TreeShape {
 
 [[nodiscard]] auto atomic_placement_probe(const ProbeId id) -> ProbeRecord {
   auto cgroup = required_cgroup_or_record(id);
-  if (!cgroup) return std::move(cgroup.error());
+  if (!cgroup) return cgroup.error();
   int readiness[2]{};
   if (::pipe2(readiness, O_CLOEXEC) != 0) {
     return cgroup->cleanup() ? probe_error(id, ReasonCode::internal_error)
@@ -1003,11 +1022,56 @@ enum class TreeShape {
   return result;
 }
 
+[[nodiscard]] auto run_migration_child(const std::filesystem::path& state,
+                                       const std::string& sibling_name) -> int {
+  constexpr int write_descriptor = 3;
+#if defined(LANDLOCK_ACCESS_FS_WRITE_FILE)
+  const auto setup = apply_landlock(state, LANDLOCK_ACCESS_FS_WRITE_FILE);
+#else
+  const auto setup = assertion_mechanism_absent;
+#endif
+  if (setup != assertion_enforced) {
+    const std::array results{setup, -1, -1};
+    static_cast<void>(
+        ::write(write_descriptor, results.data(), sizeof(results)));
+    static_cast<void>(::close(write_descriptor));
+    return setup;
+  }
+  const auto own_cgroup = current_cgroup_path();
+  if (!own_cgroup || !own_cgroup->has_parent_path())
+    return assertion_internal_error;
+  const auto delegated = std::filesystem::path{"/sys/fs/cgroup"} /
+                         own_cgroup->parent_path().relative_path();
+  const auto sibling_path = delegated / sibling_name;
+  const auto pid = std::to_string(::getpid());
+  errno = 0;
+  const bool escaped_sibling = write_process_to(sibling_path, pid);
+  const int sibling_error = escaped_sibling ? 0 : errno;
+  errno = 0;
+  const bool escaped_parent = write_process_to(delegated, pid);
+  const int parent_error = escaped_parent ? 0 : errno;
+  const std::array results{assertion_enforced, parent_error, sibling_error};
+  const bool sent =
+      ::write(write_descriptor, results.data(), sizeof(results)) ==
+      static_cast<ssize_t>(sizeof(results));
+  static_cast<void>(::close(write_descriptor));
+  if (!sent) return assertion_internal_error;
+  pause_forever();
+}
+
+[[nodiscard]] auto cleanup_cgroup_pair(const ProbeId id, Cgroup& first,
+                                       Cgroup& second, ProbeRecord result)
+    -> ProbeRecord {
+  if (!first.cleanup()) result = probe_error(id, ReasonCode::cleanup_failed);
+  if (!second.cleanup()) result = probe_error(id, ReasonCode::cleanup_failed);
+  return result;
+}
+
 [[nodiscard]] auto migration_denial_probe(const ProbeId id,
                                           const std::filesystem::path& state)
     -> ProbeRecord {
   auto cgroup = required_cgroup_or_record(id);
-  if (!cgroup) return std::move(cgroup.error());
+  if (!cgroup) return cgroup.error();
   auto sibling = Cgroup::create("-sibling");
   if (!sibling) {
     auto result = sibling.error() == ReasonCode::internal_error
@@ -1029,40 +1093,7 @@ enum class TreeShape {
   const auto child = atomic_child(
       cgroup->child(),
       [sibling_name, &state] {
-        constexpr int write = 3;
-#if defined(LANDLOCK_ACCESS_FS_WRITE_FILE)
-        const auto setup = apply_landlock(state, LANDLOCK_ACCESS_FS_WRITE_FILE);
-#else
-        const auto setup = assertion_mechanism_absent;
-#endif
-        if (setup != assertion_enforced) {
-          const std::array results{setup, -1, -1};
-          static_cast<void>(::write(write, results.data(), sizeof(results)));
-          static_cast<void>(::close(write));
-          return setup;
-        }
-        const auto own_cgroup = current_cgroup_path();
-        if (!own_cgroup || !own_cgroup->has_parent_path())
-          return assertion_internal_error;
-        const auto delegated = std::filesystem::path{"/sys/fs/cgroup"} /
-                               own_cgroup->parent_path().relative_path();
-        const auto sibling_path = delegated / sibling_name;
-        const auto pid = std::to_string(::getpid());
-        errno = 0;
-        const bool escaped_sibling = write_process_to(sibling_path, pid);
-        const int sibling_error = escaped_sibling ? 0 : errno;
-        errno = 0;
-        const bool escaped_parent = write_process_to(delegated, pid);
-        const int parent_error = escaped_parent ? 0 : errno;
-        const std::array results{assertion_enforced, parent_error,
-                                 sibling_error};
-        const bool sent = ::write(write, results.data(), sizeof(results)) ==
-                          static_cast<ssize_t>(sizeof(results));
-        static_cast<void>(::close(write));
-        for (;;) {
-          if (!sent) return assertion_internal_error;
-          ::pause();
-        }
+        return run_migration_child(state, sibling_name);
       },
       outcome[1]);
   static_cast<void>(::close(outcome[1]));
@@ -1096,9 +1127,7 @@ enum class TreeShape {
       !read ? probe_error(id, ReasonCode::setup_race)
             : migration_observation(error_numbers[0] == assertion_enforced,
                                     error_numbers[1], error_numbers[2]);
-  if (!sibling->cleanup()) result = probe_error(id, ReasonCode::cleanup_failed);
-  if (!cgroup->cleanup()) result = probe_error(id, ReasonCode::cleanup_failed);
-  return result;
+  return cleanup_cgroup_pair(id, *sibling, *cgroup, result);
 }
 
 [[nodiscard]] auto parse_named_counter(const std::string_view document,
@@ -1120,9 +1149,26 @@ enum class TreeShape {
   return value;
 }
 
+[[nodiscard]] auto await_counter_advance(const int cgroup_descriptor,
+                                         const char* control,
+                                         const std::string_view counter,
+                                         const std::uint64_t before,
+                                         const std::chrono::milliseconds wait)
+    -> std::optional<std::uint64_t> {
+  const auto deadline = std::chrono::steady_clock::now() + wait;
+  std::optional<std::uint64_t> after;
+  do {
+    const auto document = read_control(cgroup_descriptor, control);
+    if (document) after = parse_named_counter(*document, counter);
+    if (after && *after > before) break;
+    static_cast<void>(::poll(nullptr, 0, 10));
+  } while (std::chrono::steady_clock::now() < deadline);
+  return after;
+}
+
 [[nodiscard]] auto cpu_limit_probe(const ProbeId id) -> ProbeRecord {
   auto cgroup = required_cgroup_or_record(id);
-  if (!cgroup) return std::move(cgroup.error());
+  if (!cgroup) return cgroup.error();
   const auto before = read_control(cgroup->child(), "cpu.stat");
   const auto before_throttled =
       before ? parse_named_counter(*before, "nr_throttled") : std::nullopt;
@@ -1141,15 +1187,9 @@ enum class TreeShape {
     return cgroup->cleanup() ? unavailable(id, child.error())
                              : probe_error(id, ReasonCode::cleanup_failed);
   }
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds{500};
-  std::optional<std::uint64_t> after_throttled;
-  do {
-    const auto after = read_control(cgroup->child(), "cpu.stat");
-    if (after) after_throttled = parse_named_counter(*after, "nr_throttled");
-    if (after_throttled && *after_throttled > *before_throttled) break;
-    static_cast<void>(::poll(nullptr, 0, 10));
-  } while (std::chrono::steady_clock::now() < deadline);
+  const auto after_throttled =
+      await_counter_advance(cgroup->child(), "cpu.stat", "nr_throttled",
+                            *before_throttled, std::chrono::milliseconds{500});
   auto result = terminate_cgroup_tree(id, *cgroup, false, 1);
   if (result.state == ProbeState::enforced &&
       (!after_throttled || *after_throttled <= *before_throttled))
@@ -1158,9 +1198,37 @@ enum class TreeShape {
   return result;
 }
 
+[[nodiscard]] auto allocate_until_memory_limit() -> int {
+  constexpr std::size_t allocation = 256UZ * 1024UZ * 1024UZ;
+  auto* memory = static_cast<volatile std::byte*>(
+      ::mmap(nullptr, allocation, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  if (memory == MAP_FAILED) return assertion_prerequisite_unavailable;
+  for (std::size_t offset{}; offset < allocation; offset += 4096)
+    memory[offset] = std::byte{1};
+  return assertion_limit_not_triggered;
+}
+
+[[nodiscard]] auto await_child(const pid_t child, int& status) -> bool {
+  const auto deadline = std::chrono::steady_clock::now() + observation_timeout;
+  do {
+    const auto waited = ::waitpid(child, &status, WNOHANG);
+    if (waited == child) return true;
+    if (waited < 0 && errno != EINTR) return false;
+    static_cast<void>(::poll(nullptr, 0, 10));
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
+}
+
+auto kill_and_reap(const pid_t child, int& status) -> void {
+  static_cast<void>(::kill(child, SIGKILL));
+  while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {
+  }
+}
+
 [[nodiscard]] auto memory_limit_probe(const ProbeId id) -> ProbeRecord {
   auto cgroup = required_cgroup_or_record(id);
-  if (!cgroup) return std::move(cgroup.error());
+  if (!cgroup) return cgroup.error();
   const auto before = read_control(cgroup->child(), "memory.events");
   const auto before_oom_kill =
       before ? parse_named_counter(*before, "oom_kill") : std::nullopt;
@@ -1178,37 +1246,14 @@ enum class TreeShape {
       result = probe_error(id, ReasonCode::cleanup_failed);
     return result;
   }
-  const auto child = atomic_child(cgroup->child(), [] {
-    constexpr std::size_t allocation = 256U * 1024U * 1024U;
-    auto* memory = static_cast<volatile std::byte*>(
-        ::mmap(nullptr, allocation, PROT_READ | PROT_WRITE,
-               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-    if (memory == MAP_FAILED) return assertion_prerequisite_unavailable;
-    for (std::size_t offset{}; offset < allocation; offset += 4096) {
-      memory[offset] = std::byte{1};
-    }
-    return assertion_limit_not_triggered;
-  });
+  const auto child = atomic_child(cgroup->child(), allocate_until_memory_limit);
   if (!child) {
     return cgroup->cleanup() ? unavailable(id, child.error())
                              : probe_error(id, ReasonCode::cleanup_failed);
   }
   int status{};
-  bool reaped{};
-  const auto deadline = std::chrono::steady_clock::now() + observation_timeout;
-  do {
-    const auto waited = ::waitpid(*child, &status, WNOHANG);
-    if (waited == *child) {
-      reaped = true;
-      break;
-    }
-    if (waited < 0 && errno != EINTR) break;
-    static_cast<void>(::poll(nullptr, 0, 10));
-  } while (std::chrono::steady_clock::now() < deadline);
-  if (!reaped) static_cast<void>(::kill(*child, SIGKILL));
-  if (!reaped)
-    while (::waitpid(*child, &status, 0) < 0 && errno == EINTR) {
-    }
+  const bool reaped = await_child(*child, status);
+  if (!reaped) kill_and_reap(*child, status);
   const auto after = read_control(cgroup->child(), "memory.events");
   const auto after_oom_kill =
       after ? parse_named_counter(*after, "oom_kill") : std::nullopt;
@@ -1219,9 +1264,38 @@ enum class TreeShape {
   return result;
 }
 
+[[nodiscard]] auto run_pids_limit_child() -> int {
+  constexpr int write_descriptor = 3;
+  int error_number{};
+  for (;;) {
+    const auto descendant = ::fork();
+    if (descendant < 0) {
+      error_number = errno;
+      break;
+    }
+    if (descendant == 0) pause_forever();
+  }
+  const bool sent = ::write(write_descriptor, &error_number,
+                            sizeof(error_number)) == sizeof(error_number);
+  static_cast<void>(::close(write_descriptor));
+  if (!sent) return assertion_internal_error;
+  pause_forever();
+}
+
+[[nodiscard]] auto finish_subreaper_probe(const ProbeId id, Cgroup& cgroup,
+                                          const int previous_subreaper,
+                                          ProbeRecord result) -> ProbeRecord {
+  const bool cgroup_cleanup_complete = cgroup.cleanup();
+  const bool subreaper_restored =
+      previous_subreaper != 0 || ::prctl(PR_SET_CHILD_SUBREAPER, 0) == 0;
+  return cgroup_cleanup_complete && subreaper_restored
+             ? result
+             : probe_error(id, ReasonCode::cleanup_failed);
+}
+
 [[nodiscard]] auto pids_limit_probe(const ProbeId id) -> ProbeRecord {
   auto cgroup = required_cgroup_or_record(id);
-  if (!cgroup) return std::move(cgroup.error());
+  if (!cgroup) return cgroup.error();
   int previous_subreaper{};
   if (::prctl(PR_GET_CHILD_SUBREAPER, &previous_subreaper) != 0 ||
       (previous_subreaper == 0 && ::prctl(PR_SET_CHILD_SUBREAPER, 1) != 0)) {
@@ -1230,47 +1304,21 @@ enum class TreeShape {
       result = probe_error(id, ReasonCode::cleanup_failed);
     return result;
   }
-  const auto finish = [&](ProbeRecord result) {
-    const bool cgroup_cleanup_complete = cgroup->cleanup();
-    const bool subreaper_restored =
-        previous_subreaper != 0 || ::prctl(PR_SET_CHILD_SUBREAPER, 0) == 0;
-    if (!cgroup_cleanup_complete || !subreaper_restored)
-      return probe_error(id, ReasonCode::cleanup_failed);
-    return result;
-  };
   if (!write_control(cgroup->child(), "pids.max", "4")) {
-    return finish(unavailable_from_errno(id, errno));
+    return finish_subreaper_probe(id, *cgroup, previous_subreaper,
+                                  unavailable_from_errno(id, errno));
   }
   int outcome[2]{};
   if (::pipe2(outcome, O_CLOEXEC) != 0)
-    return finish(probe_error(id, ReasonCode::internal_error));
-  const auto child = atomic_child(
-      cgroup->child(),
-      [] {
-        constexpr int write = 3;
-        int error_number{};
-        for (;;) {
-          const auto descendant = ::fork();
-          if (descendant < 0) {
-            error_number = errno;
-            break;
-          }
-          if (descendant == 0)
-            for (;;)
-              ::pause();
-        }
-        const bool sent = ::write(write, &error_number, sizeof(error_number)) ==
-                          sizeof(error_number);
-        static_cast<void>(::close(write));
-        if (!sent) return assertion_internal_error;
-        for (;;)
-          ::pause();
-      },
-      outcome[1]);
+    return finish_subreaper_probe(id, *cgroup, previous_subreaper,
+                                  probe_error(id, ReasonCode::internal_error));
+  const auto child =
+      atomic_child(cgroup->child(), run_pids_limit_child, outcome[1]);
   static_cast<void>(::close(outcome[1]));
   const Descriptor observed{outcome[0]};
   if (!child) {
-    return finish(unavailable(id, child.error()));
+    return finish_subreaper_probe(id, *cgroup, previous_subreaper,
+                                  unavailable(id, child.error()));
   }
   pollfd ready{observed.get(), POLLIN | POLLHUP, 0};
   int error_number{};
@@ -1284,9 +1332,12 @@ enum class TreeShape {
                                 sizeof(error_number)) == sizeof(error_number) &&
                          error_number == EAGAIN;
   const auto termination = terminate_cgroup_tree(id, *cgroup, false, 4);
-  if (termination.state == ProbeState::probe_error) return finish(termination);
-  return finish(pids_limit_observation(
-      triggered, termination.state == ProbeState::enforced, true));
+  const auto result =
+      termination.state == ProbeState::probe_error
+          ? termination
+          : pids_limit_observation(
+                triggered, termination.state == ProbeState::enforced, true);
+  return finish_subreaper_probe(id, *cgroup, previous_subreaper, result);
 }
 
 [[nodiscard]] auto apply_landlock(
@@ -1446,6 +1497,21 @@ enum class TreeShape {
   }
 }
 
+[[nodiscard]] auto execute_path(std::string path) -> int {
+  const auto child = ::fork();
+  if (child < 0) return -1;
+  if (child == 0) {
+    char* arguments[]{path.data(), nullptr};
+    char* environment[]{nullptr};
+    ::execve(path.c_str(), arguments, environment);
+    ::_exit(errno == EACCES || errno == EPERM ? 126 : 127);
+  }
+  int status{};
+  while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {
+  }
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
 [[nodiscard]] auto landlock_execute_probe(const ProbeId id,
                                           const std::filesystem::path& state)
     -> ProbeRecord {
@@ -1460,22 +1526,9 @@ enum class TreeShape {
     const auto setup =
         apply_landlock(state, LANDLOCK_ACCESS_FS_EXECUTE, runtime_roots);
     if (setup != assertion_enforced) return setup;
-    auto execute = [](const char* path) {
-      const auto child = ::fork();
-      if (child < 0) return -1;
-      if (child == 0) {
-        char* arguments[]{const_cast<char*>(path), nullptr};
-        char* environment[]{nullptr};
-        ::execve(path, arguments, environment);
-        ::_exit(errno == EACCES || errno == EPERM ? 126 : 127);
-      }
-      int status{};
-      while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {
-      }
-      return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-    };
     const auto observation = execute_confinement_observation(
-        execute(local.c_str()) == 0, execute("/bin/true") == 126);
+        execute_path(local.string()) == 0,
+        execute_path(std::string{"/bin/true"}) == 126);
     return observation.state == ProbeState::enforced ? assertion_enforced
                                                      : assertion_failed;
   });
@@ -1523,6 +1576,12 @@ enum class TreeShape {
 #endif
 }
 
+[[nodiscard]] auto socket_is_denied(const int family) -> bool {
+  errno = 0;
+  const Descriptor descriptor{::socket(family, SOCK_STREAM | SOCK_CLOEXEC, 0)};
+  return descriptor.get() < 0 && errno == EPERM;
+}
+
 [[nodiscard]] auto seccomp_family_probe(const ProbeId id, const bool internet)
     -> ProbeRecord {
 #if defined(SYS_socket) && (defined(__x86_64__) || defined(__aarch64__))
@@ -1530,15 +1589,9 @@ enum class TreeShape {
     const auto setup = install_seccomp_family_filter(internet);
     if (setup != assertion_enforced) return setup;
     const auto first_family = internet ? AF_INET : AF_UNIX;
-    const auto denied = ::socket(first_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    const auto denied_errno = errno;
-    if (denied >= 0) static_cast<void>(::close(denied));
-    if (denied >= 0 || denied_errno != EPERM) return assertion_failed;
+    if (!socket_is_denied(first_family)) return assertion_failed;
     if (internet) {
-      const auto denied_v6 = ::socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC, 0);
-      const auto denied_v6_errno = errno;
-      if (denied_v6 >= 0) static_cast<void>(::close(denied_v6));
-      if (denied_v6 >= 0 || denied_v6_errno != EPERM) return assertion_failed;
+      if (!socket_is_denied(AF_INET6)) return assertion_failed;
       const Descriptor local{::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)};
       if (local.get() < 0) return assertion_failed;
     }
@@ -1593,55 +1646,28 @@ enum class TreeShape {
   return isolated_assertion(id, [&] { return establish_private_root(state); });
 }
 
-[[nodiscard]] auto mount_propagation_probe(const ProbeId id,
-                                           const std::filesystem::path& state)
-    -> ProbeRecord {
-  const auto target = state / "propagation-target";
-  const auto marker = target / "child-mount";
-  struct stat before{};
-  if (::mkdir(target.c_str(), S_IRWXU) != 0 ||
-      ::lstat(target.c_str(), &before) != 0)
-    return probe_error(id, ReasonCode::internal_error);
+[[noreturn]] auto run_mount_propagation_child(
+    const std::filesystem::path& target, const std::filesystem::path& marker,
+    const int readiness_descriptor) -> void {
+  const auto setup = establish_private_mount_namespace();
+  if (setup != assertion_enforced) ::_exit(setup);
+  if (::mount("tmpfs", target.c_str(), "tmpfs", MS_NODEV | MS_NOSUID,
+              "size=1048576,mode=0700") != 0)
+    ::_exit(assertion_exit_for_errno(errno));
+  const Descriptor mounted_marker{
+      ::open(marker.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+             S_IRUSR | S_IWUSR)};
+  if (mounted_marker.get() < 0 || !write_all(readiness_descriptor, "R"))
+    ::_exit(assertion_internal_error);
+  static_cast<void>(::close(readiness_descriptor));
+  pause_forever();
+}
 
-  int readiness[2]{};
-  if (::pipe2(readiness, O_CLOEXEC) != 0) {
-    static_cast<void>(::rmdir(target.c_str()));
-    return probe_error(id, ReasonCode::internal_error);
-  }
-  const auto child = ::fork();
-  if (child < 0) {
-    static_cast<void>(::close(readiness[0]));
-    static_cast<void>(::close(readiness[1]));
-    static_cast<void>(::rmdir(target.c_str()));
-    return probe_error(id, ReasonCode::internal_error);
-  }
-  if (child == 0) {
-    static_cast<void>(::close(readiness[0]));
-    const auto setup = establish_private_mount_namespace();
-    if (setup != assertion_enforced) ::_exit(setup);
-    if (::mount("tmpfs", target.c_str(), "tmpfs", MS_NODEV | MS_NOSUID,
-                "size=1048576,mode=0700") != 0)
-      ::_exit(assertion_exit_for_errno(errno));
-    const Descriptor mounted_marker{
-        ::open(marker.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
-               S_IRUSR | S_IWUSR)};
-    if (mounted_marker.get() < 0 || !write_all(readiness[1], "R"))
-      ::_exit(assertion_internal_error);
-    static_cast<void>(::close(readiness[1]));
-    for (;;)
-      ::pause();
-  }
-
-  static_cast<void>(::close(readiness[1]));
-  const Descriptor ready{readiness[0]};
-  const bool child_mounted = wait_for_byte(ready.get());
-  const bool termination_sent = ::kill(child, SIGKILL) == 0;
-  int status{};
-  pid_t waited{};
-  do {
-    waited = ::waitpid(child, &status, 0);
-  } while (waited < 0 && errno == EINTR);
-
+[[nodiscard]] auto mount_propagation_result(
+    const ProbeId id, const std::filesystem::path& target,
+    const std::filesystem::path& marker, const struct stat& before,
+    const bool child_mounted, const bool termination_sent, const pid_t child,
+    const pid_t waited, const int status) -> ProbeRecord {
   struct stat after{};
   errno = 0;
   const bool marker_visible = ::lstat(marker.c_str(), &after) == 0;
@@ -1672,6 +1698,46 @@ enum class TreeShape {
   return result;
 }
 
+[[nodiscard]] auto mount_propagation_probe(const ProbeId id,
+                                           const std::filesystem::path& state)
+    -> ProbeRecord {
+  const auto target = state / "propagation-target";
+  const auto marker = target / "child-mount";
+  struct stat before{};
+  if (::mkdir(target.c_str(), S_IRWXU) != 0 ||
+      ::lstat(target.c_str(), &before) != 0)
+    return probe_error(id, ReasonCode::internal_error);
+
+  int readiness[2]{};
+  if (::pipe2(readiness, O_CLOEXEC) != 0) {
+    static_cast<void>(::rmdir(target.c_str()));
+    return probe_error(id, ReasonCode::internal_error);
+  }
+  const auto child = ::fork();
+  if (child < 0) {
+    static_cast<void>(::close(readiness[0]));
+    static_cast<void>(::close(readiness[1]));
+    static_cast<void>(::rmdir(target.c_str()));
+    return probe_error(id, ReasonCode::internal_error);
+  }
+  if (child == 0) {
+    static_cast<void>(::close(readiness[0]));
+    run_mount_propagation_child(target, marker, readiness[1]);
+  }
+
+  static_cast<void>(::close(readiness[1]));
+  const Descriptor ready{readiness[0]};
+  const bool child_mounted = wait_for_byte(ready.get());
+  const bool termination_sent = ::kill(child, SIGKILL) == 0;
+  int status{};
+  pid_t waited{};
+  do {
+    waited = ::waitpid(child, &status, 0);
+  } while (waited < 0 && errno == EINTR);
+  return mount_propagation_result(id, target, marker, before, child_mounted,
+                                  termination_sent, child, waited, status);
+}
+
 [[nodiscard]] auto staged_output_probe(const ProbeId id,
                                        const std::filesystem::path& state)
     -> ProbeRecord {
@@ -1699,22 +1765,28 @@ enum class TreeShape {
              : unavailable(id, ReasonCode::enforcement_failed);
 }
 
+[[nodiscard]] auto finish_cgroup_probe(const ProbeId id, Cgroup& cgroup,
+                                       ProbeRecord result) -> ProbeRecord {
+  return cgroup.cleanup() ? result
+                          : probe_error(id, ReasonCode::cleanup_failed);
+}
+
+[[nodiscard]] auto apply_combined_limits(const int cgroup_descriptor) -> bool {
+  return write_control(cgroup_descriptor, "cpu.max", "50000 100000") &&
+         write_control(cgroup_descriptor, "memory.max", "67108864") &&
+         write_control(cgroup_descriptor, "memory.swap.max", "0") &&
+         write_control(cgroup_descriptor, "memory.oom.group", "1") &&
+         write_control(cgroup_descriptor, "pids.max", "16");
+}
+
 [[nodiscard]] auto combined_setup_probe(const ProbeId id,
                                         const std::filesystem::path& state)
     -> ProbeRecord {
   auto cgroup = required_cgroup_or_record(id);
-  if (!cgroup) return std::move(cgroup.error());
-  const auto finish = [&](ProbeRecord result) {
-    if (!cgroup->cleanup()) return probe_error(id, ReasonCode::cleanup_failed);
-    return result;
-  };
-  const bool limits_applied =
-      write_control(cgroup->child(), "cpu.max", "50000 100000") &&
-      write_control(cgroup->child(), "memory.max", "67108864") &&
-      write_control(cgroup->child(), "memory.swap.max", "0") &&
-      write_control(cgroup->child(), "memory.oom.group", "1") &&
-      write_control(cgroup->child(), "pids.max", "16");
-  if (!limits_applied) return finish(unavailable_from_errno(id, errno));
+  if (!cgroup) return cgroup.error();
+  const bool limits_applied = apply_combined_limits(cgroup->child());
+  if (!limits_applied)
+    return finish_cgroup_probe(id, *cgroup, unavailable_from_errno(id, errno));
 
   const auto input_path = state / "combined-input";
   const auto opened_input_path = state / "combined-input-opened";
@@ -1731,7 +1803,8 @@ enum class TreeShape {
       !write_all(input.get(), "I") || ::lseek(input.get(), 0, SEEK_SET) != 0 ||
       ::rename(input_path.c_str(), opened_input_path.c_str()) != 0 ||
       ::rename(output_path.c_str(), opened_output_path.c_str()) != 0) {
-    return finish(probe_error(id, ReasonCode::internal_error));
+    return finish_cgroup_probe(id, *cgroup,
+                               probe_error(id, ReasonCode::internal_error));
   }
   const Descriptor replacement_input{::open(
       input_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
@@ -1741,19 +1814,21 @@ enum class TreeShape {
       S_IRUSR | S_IWUSR)};
   if (replacement_input.get() < 0 || replacement_output.get() < 0 ||
       !write_all(replacement_input.get(), "X")) {
-    return finish(probe_error(id, ReasonCode::internal_error));
+    return finish_cgroup_probe(id, *cgroup,
+                               probe_error(id, ReasonCode::internal_error));
   }
 
   int readiness[2]{};
   if (::pipe2(readiness, O_CLOEXEC) != 0)
-    return finish(probe_error(id, ReasonCode::internal_error));
+    return finish_cgroup_probe(id, *cgroup,
+                               probe_error(id, ReasonCode::internal_error));
   const auto child =
       atomic_combined_payload(cgroup->child(), readiness[1], executable.get(),
                               input.get(), output.get(), state);
   static_cast<void>(::close(readiness[1]));
   const Descriptor ready{readiness[0]};
   if (!child) {
-    return finish(unavailable(id, child.error()));
+    return finish_cgroup_probe(id, *cgroup, unavailable(id, child.error()));
   }
   const bool payload_reached = wait_for_byte(ready.get());
   if (!payload_reached) {
@@ -1782,13 +1857,13 @@ enum class TreeShape {
       payload_reached, target_waiting_for_cleanup);
   const auto termination = terminate_cgroup_tree(id, *cgroup, false, 1);
   if (termination.state != ProbeState::enforced) result = termination;
-  return finish(std::move(result));
+  return finish_cgroup_probe(id, *cgroup, result);
 }
 
 [[nodiscard]] auto partial_setup_cleanup_probe(const ProbeId id)
     -> ProbeRecord {
   auto cgroup = required_cgroup_or_record(id);
-  if (!cgroup) return std::move(cgroup.error());
+  if (!cgroup) return cgroup.error();
   if (!write_control(cgroup->child(), "pids.max", "4")) {
     auto result = unavailable_from_errno(id, errno);
     if (!cgroup->cleanup())
@@ -1911,6 +1986,7 @@ auto run_probe(const ProbeId probe_id,
         return partial_setup_cleanup_probe(probe_id);
     }
   } catch (...) {
+    return probe_error(probe_id, ReasonCode::internal_error);
   }
   return probe_error(probe_id, ReasonCode::internal_error);
 }

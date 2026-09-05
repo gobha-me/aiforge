@@ -1,13 +1,20 @@
 #include "probes.hpp"
 #include "probes_v2.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <initializer_list>
+#include <string>
 #include <string_view>
 
-#include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 namespace isolation = aiforge::evaluation::process_isolation;
@@ -38,6 +45,75 @@ namespace {
   return true;
 }
 
+struct LinuxDirectoryEntry {
+  std::uint64_t inode;
+  std::int64_t offset;
+  unsigned short record_length;
+  unsigned char type;
+  char name;
+};
+
+template <typename Visitor>
+[[nodiscard]] auto visit_directory_entries(const int directory,
+                                           const Visitor& visitor) -> bool {
+  alignas(LinuxDirectoryEntry) std::array<std::byte, 4096> buffer{};
+  for (;;) {
+    const auto count =
+        ::syscall(SYS_getdents64, directory, buffer.data(), buffer.size());
+    if (count == 0) return true;
+    if (count < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    std::size_t position{};
+    const auto length = static_cast<std::size_t>(count);
+    while (position < length) {
+      const auto* entry = reinterpret_cast<const LinuxDirectoryEntry*>(
+          buffer.data() + position);
+      constexpr auto name_offset = offsetof(LinuxDirectoryEntry, name);
+      if (entry->record_length < name_offset + 1U ||
+          entry->record_length > length - position)
+        return false;
+      const auto maximum_name = entry->record_length - name_offset;
+      const auto* terminator = static_cast<const char*>(
+          std::memchr(&entry->name, '\0', maximum_name));
+      if (terminator == nullptr ||
+          !visitor(std::string_view{
+              &entry->name,
+              static_cast<std::size_t>(terminator - &entry->name)}))
+        return false;
+      position += entry->record_length;
+    }
+  }
+}
+
+[[nodiscard]] auto allowed_descriptor(const std::string_view name,
+                                      const int directory,
+                                      const std::initializer_list<int> allowed)
+    -> bool {
+  if (name.empty() || name.front() == '.') return true;
+  char* end{};
+  errno = 0;
+  const std::string owned_name{name};
+  const auto parsed = std::strtol(owned_name.c_str(), &end, 10);
+  const auto descriptor = static_cast<int>(parsed);
+  return errno == 0 && end != owned_name.c_str() && *end == '\0' &&
+         (descriptor == directory ||
+          std::ranges::find(allowed, descriptor) != allowed.end());
+}
+
+[[nodiscard]] auto descriptors_are_sanitized(
+    const std::initializer_list<int> allowed) -> bool {
+  const auto directory =
+      ::open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  if (directory < 0) return false;
+  const bool safe = visit_directory_entries(directory, [&](const auto name) {
+    return allowed_descriptor(name, directory, allowed);
+  });
+  static_cast<void>(::close(directory));
+  return safe;
+}
+
 [[nodiscard]] auto child_is_sanitized(const bool has_delegated_root) -> bool {
   if (::environ != nullptr && ::environ[0] != nullptr) return false;
   errno = 0;
@@ -51,28 +127,9 @@ namespace {
       (has_delegated_root &&
        (::fstat(4, &root) != 0 || !S_ISDIR(root.st_mode))))
     return false;
-  DIR* directory = ::opendir("/proc/self/fd");
-  if (directory == nullptr) return false;
-  const auto inspection = ::dirfd(directory);
-  bool safe{true};
-  while (const auto* entry = ::readdir(directory)) {
-    if (entry->d_name[0] == '.') continue;
-    char* end{};
-    errno = 0;
-    const auto parsed = std::strtol(entry->d_name, &end, 10);
-    if (errno != 0 || end == entry->d_name || *end != '\0') {
-      safe = false;
-      break;
-    }
-    const auto descriptor = static_cast<int>(parsed);
-    if (descriptor != STDOUT_FILENO && descriptor != STDERR_FILENO &&
-        descriptor != inspection && !(has_delegated_root && descriptor == 4)) {
-      safe = false;
-      break;
-    }
-  }
-  static_cast<void>(::closedir(directory));
-  return safe;
+  return has_delegated_root
+             ? descriptors_are_sanitized({STDOUT_FILENO, STDERR_FILENO, 4})
+             : descriptors_are_sanitized({STDOUT_FILENO, STDERR_FILENO});
 }
 
 [[nodiscard]] auto combined_payload_is_sanitized() -> bool {
@@ -91,29 +148,7 @@ namespace {
       !S_ISFIFO(ready.st_mode) || !S_ISREG(staged_input.st_mode) ||
       !S_ISREG(staged_output.st_mode))
     return false;
-  DIR* directory = ::opendir("/proc/self/fd");
-  if (directory == nullptr) return false;
-  const auto inspection = ::dirfd(directory);
-  bool safe{true};
-  while (const auto* entry = ::readdir(directory)) {
-    if (entry->d_name[0] == '.') continue;
-    char* end{};
-    errno = 0;
-    const auto parsed = std::strtol(entry->d_name, &end, 10);
-    if (errno != 0 || end == entry->d_name || *end != '\0') {
-      safe = false;
-      break;
-    }
-    const auto descriptor = static_cast<int>(parsed);
-    if (descriptor != STDOUT_FILENO && descriptor != STDERR_FILENO &&
-        descriptor != 3 && descriptor != 5 && descriptor != 6 &&
-        descriptor != inspection) {
-      safe = false;
-      break;
-    }
-  }
-  static_cast<void>(::closedir(directory));
-  return safe;
+  return descriptors_are_sanitized({STDOUT_FILENO, STDERR_FILENO, 3, 5, 6});
 }
 
 } // namespace
