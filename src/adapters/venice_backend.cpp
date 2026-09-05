@@ -675,7 +675,7 @@ struct VeniceRequestOptions {
   constexpr std::size_t maximum_citations{256};
   constexpr std::size_t maximum_uri_bytes{4096};
   constexpr std::size_t maximum_title_bytes{1024};
-  constexpr std::size_t maximum_total_bytes{256U * 1024U};
+  constexpr std::size_t maximum_total_bytes{std::size_t{256} * 1024U};
   if (citations.size() > maximum_citations) {
     return std::unexpected(
         protocol_error("Venice stream reported too many citations"));
@@ -800,6 +800,29 @@ class VeniceStream final : public backend::BackendStream {
     return true;
   }
 
+  auto emit_citation_snapshot(
+      const std::optional<std::vector<venice::ChatCitation>>& observed,
+      const bool disabled, bool& emitted,
+      std::optional<backend::BackendError>& local_error) -> bool {
+    if (!observed || emitted) return true;
+    if (disabled && !observed->empty()) {
+      local_error = protocol_error(
+          "Venice stream reported citations while they were disabled");
+      return false;
+    }
+    auto citations = checked_citations(*observed);
+    if (!citations) {
+      local_error = std::move(citations.error());
+      return false;
+    }
+    emitted = true;
+    for (auto& citation : *citations) {
+      if (m_cancel.cancelled()) return false;
+      if (!emit(backend::CitationObserved{std::move(citation)})) return false;
+    }
+    return true;
+  }
+
   auto produce() -> void {
     venice::StreamAccumulator accumulator{/*keep_chunks=*/false};
     bool response_started{};
@@ -911,25 +934,9 @@ class VeniceStream final : public backend::BackendStream {
         }
       }
 
-      if (delta.citations && !citations_emitted) {
-        if (citations_disabled && !delta.citations->empty()) {
-          local_error = protocol_error(
-              "Venice stream reported citations while they were disabled");
-          return false;
-        }
-        auto citations = checked_citations(*delta.citations);
-        if (!citations) {
-          local_error = std::move(citations.error());
-          return false;
-        }
-        citations_emitted = true;
-        for (auto& citation : *citations) {
-          if (m_cancel.cancelled()) return false;
-          if (!emit(backend::CitationObserved{std::move(citation)})) {
-            return false;
-          }
-        }
-      }
+      if (!emit_citation_snapshot(delta.citations, citations_disabled,
+                                  citations_emitted, local_error))
+        return false;
 
       if (delta.usage != nullptr) {
         try {
