@@ -36,6 +36,7 @@ add_dependencies(aiforge_process_isolation_evaluation
 )
 
 add_library(aiforge_process_isolation_evaluation_v2_support STATIC
+  evidence_mapping.cpp
   evidence_v2.cpp
   probes_v2.cpp
   runner_v2.cpp
@@ -85,6 +86,7 @@ if (${PROJECT_NAME}_TESTS)
     test_integration.cpp
     test_integration_v2.cpp
     test_evidence_v2.cpp
+    test_evidence_mapping.cpp
     test_probes_v2.cpp
     test_runner.cpp
     test_runner_v2.cpp
