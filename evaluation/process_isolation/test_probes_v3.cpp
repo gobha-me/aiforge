@@ -7,6 +7,7 @@
 #include <array>
 #include <cerrno>
 #include <cstdint>
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -250,6 +251,19 @@ TEST_CASE("bounding fingerprints reject every growth vector",
     CHECK(outcome.state == isolation::ProbeState::unavailable);
     CHECK(outcome.reason == v3::ReasonCode::enforcement_failed);
   }
+}
+
+TEST_CASE("maximum bounding fingerprint reserves its string terminator",
+          "[process-isolation][evidence-v3][capability][boundary]") {
+  const auto maximum = v3::test_support::encoded_bounding_fingerprint(
+      std::numeric_limits<std::uint64_t>::max());
+  REQUIRE(maximum);
+  CHECK(*maximum == "ffffffffffffffff");
+
+  const auto highest_bit =
+      v3::test_support::encoded_bounding_fingerprint(std::uint64_t{1} << 63);
+  REQUIRE(highest_bit);
+  CHECK(*highest_bit == "8000000000000000");
 }
 
 TEST_CASE("capability mechanism failures keep stable closed classes",

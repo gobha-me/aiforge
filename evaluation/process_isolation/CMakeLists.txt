@@ -141,6 +141,9 @@ add_dependencies(aiforge_process_isolation_evaluation_v3
 )
 
 if (${PROJECT_NAME}_TESTS)
+  target_compile_definitions(aiforge_process_isolation_linux_support
+    PUBLIC AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT=1
+  )
   target_compile_definitions(aiforge_process_isolation_evaluation_support
     PUBLIC AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT=1
   )

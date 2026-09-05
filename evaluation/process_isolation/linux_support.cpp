@@ -81,9 +81,10 @@ template <typename Visitor>
 #endif
 }
 
-[[nodiscard]] auto cgroup_directories(const int directory)
+[[nodiscard]] auto scan_cgroup_directories_impl(const int directory)
     -> std::optional<std::vector<std::string>> {
-  const Descriptor scan{::fcntl(directory, F_DUPFD_CLOEXEC, 5)};
+  const Descriptor scan{::openat(
+      directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
   if (scan.get() < 0) return std::nullopt;
   std::vector<std::string> result;
   const bool valid = visit_directory_entries(scan.get(), [&](const auto name) {
@@ -143,7 +144,7 @@ struct CgroupCleanupFrame {
   if (child.get() < 0) return std::unexpected(errno == ENOENT);
   bool complete = write_control(child.get(), "cgroup.kill", "1") &&
                   await_cgroup_empty(child.get());
-  auto descendants = cgroup_directories(child.get());
+  auto descendants = scan_cgroup_directories_impl(child.get());
   if (!descendants) complete = false;
   return CgroupCleanupFrame{parent,
                             std::move(name),
@@ -188,7 +189,7 @@ struct CgroupCleanupFrame {
 
 [[nodiscard]] auto cleanup_task_cgroups(const int root, const pid_t owner,
                                         const std::string_view prefix) -> bool {
-  const auto children = cgroup_directories(root);
+  const auto children = scan_cgroup_directories_impl(root);
   if (!children) return false;
   bool complete{true};
   std::size_t remaining{maximum_cgroup_children};
@@ -529,7 +530,7 @@ auto CgroupBootstrap::validate_root_ownership() const -> BootstrapError {
   if (!processes) return BootstrapError::internal_error;
   if (processes->size() != 1 || processes->front() != ::getpid())
     return BootstrapError::missing_delegation;
-  const auto children = cgroup_directories(m_root.get());
+  const auto children = scan_cgroup_directories_impl(m_root.get());
   if (!children || !children->empty())
     return children ? BootstrapError::missing_delegation
                     : BootstrapError::internal_error;
@@ -716,5 +717,17 @@ auto TaskCgroup::cleanup() -> bool {
   m_cleaned = true;
   return trustworthy && empty && removed;
 }
+
+#if defined(AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT)
+namespace test_support {
+
+auto scan_cgroup_directories(const int directory)
+    -> std::optional<std::vector<std::string>> {
+  return ::aiforge::evaluation::process_isolation::linux_support::
+      scan_cgroup_directories_impl(directory);
+}
+
+} // namespace test_support
+#endif
 
 } // namespace aiforge::evaluation::process_isolation::linux_support

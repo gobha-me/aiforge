@@ -132,4 +132,13 @@ class TaskCgroup final {
   bool m_cleaned{};
 };
 
+#if defined(AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT)
+namespace test_support {
+
+[[nodiscard]] auto scan_cgroup_directories(int directory)
+    -> std::optional<std::vector<std::string>>;
+
+} // namespace test_support
+#endif
+
 } // namespace aiforge::evaluation::process_isolation::linux_support

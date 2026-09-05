@@ -173,6 +173,18 @@ template <typename Value>
   return parsed.ec == std::errc{} && parsed.ptr == end;
 }
 
+using BoundingArgument = std::array<char, 18>;
+
+[[nodiscard]] auto encode_bounding_argument(const std::uint64_t fingerprint)
+    -> std::optional<BoundingArgument> {
+  BoundingArgument result{};
+  const auto encoded = std::to_chars(
+      result.data(), result.data() + result.size() - 1, fingerprint, 16);
+  if (encoded.ec != std::errc{}) return std::nullopt;
+  *encoded.ptr = '\0';
+  return result;
+}
+
 [[nodiscard]] auto read_cap_last() -> std::expected<unsigned int, ReasonCode> {
   const Descriptor descriptor{::open("/proc/sys/kernel/cap_last_cap",
                                      O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
@@ -777,24 +789,18 @@ auto run_low_capability_probe(const std::filesystem::path& state_directory)
       ::_exit(0);
     }
     std::array<char, 4> cap_last_argument{};
-    std::array<char, 17> bounding_argument{};
+    auto bounding_argument = encode_bounding_argument(*launch_bounding);
     const auto cap_last_encoded = std::to_chars(
         cap_last_argument.data(),
         cap_last_argument.data() + cap_last_argument.size(), *cap_last);
-    const auto bounding_encoded =
-        std::to_chars(bounding_argument.data(),
-                      bounding_argument.data() + bounding_argument.size(),
-                      *launch_bounding, 16);
-    if (cap_last_encoded.ec != std::errc{} ||
-        bounding_encoded.ec != std::errc{})
+    if (cap_last_encoded.ec != std::errc{} || !bounding_argument)
       setup_failed(ReasonCode::internal_error);
     *cap_last_encoded.ptr = '\0';
-    *bounding_encoded.ptr = '\0';
     std::array<char, 39> executable_name{"aiforge_process_isolation_probe_v3"};
     std::array<char, 25> mode{"--low-capability-payload"};
     std::array<char*, 5> arguments{executable_name.data(), mode.data(),
                                    cap_last_argument.data(),
-                                   bounding_argument.data(), nullptr};
+                                   bounding_argument->data(), nullptr};
     char* environment[]{nullptr};
     ::fexecve(executable_descriptor, arguments.data(), environment);
     setup_failed(ReasonCode::internal_error);
@@ -1142,6 +1148,12 @@ auto bounding_subset_outcome(const std::uint64_t launch,
                              const std::uint64_t current) -> ProbeRecord {
   return (current & ~launch) == 0 ? enforced()
                                   : unavailable(ReasonCode::enforcement_failed);
+}
+
+auto encoded_bounding_fingerprint(const std::uint64_t fingerprint)
+    -> std::optional<std::string> {
+  const auto encoded = encode_bounding_argument(fingerprint);
+  return encoded ? std::optional{std::string{encoded->data()}} : std::nullopt;
 }
 
 auto bounding_read_outcome(const int error_number) -> ProbeRecord {

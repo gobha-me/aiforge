@@ -5,6 +5,8 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
+#include <string>
 #include <string_view>
 
 namespace aiforge::evaluation::process_isolation::v3 {
@@ -92,6 +94,8 @@ struct PrivateCapabilityChecks {
 [[nodiscard]] auto bounding_subset_outcome(std::uint64_t launch,
                                            std::uint64_t current)
     -> ProbeRecord;
+[[nodiscard]] auto encoded_bounding_fingerprint(std::uint64_t fingerprint)
+    -> std::optional<std::string>;
 [[nodiscard]] auto bounding_read_outcome(int error_number) -> ProbeRecord;
 [[nodiscard]] auto x32_namespace_outcome(long result, int error_number)
     -> ProbeRecord;

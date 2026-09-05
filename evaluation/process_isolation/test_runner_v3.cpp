@@ -1,14 +1,20 @@
 #include "runner_v3.hpp"
 
+#include "linux_support.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
 #include <filesystem>
+#include <ranges>
 #include <string>
 
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace isolation = aiforge::evaluation::process_isolation;
+namespace linux_support = aiforge::evaluation::process_isolation::linux_support;
 namespace v3 = aiforge::evaluation::process_isolation::v3;
 
 namespace {
@@ -70,6 +76,33 @@ TEST_CASE("evidence v3 runner rejects unsafe bounds",
     REQUIRE_FALSE(result);
     CHECK(result.error().code == v3::RunnerErrorCode::invalid_options);
   }
+}
+
+TEST_CASE("a prior cgroup scan cannot hide an owned cgroup from cleanup",
+          "[process-isolation][evidence-v3][cleanup][failure]") {
+  TemporaryDirectory temporary;
+  const auto owner = ::getpid();
+  const auto owned_name = "aiforge-v3-task-" + std::to_string(owner);
+  REQUIRE(std::filesystem::create_directory(temporary.path() / owned_name));
+  REQUIRE(std::filesystem::create_directory(temporary.path() / "foreign"));
+  linux_support::Descriptor root{
+      ::open(temporary.path().c_str(),
+             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
+  REQUIRE(root.get() >= 0);
+
+  const auto validation_scan =
+      linux_support::test_support::scan_cgroup_directories(root.get());
+  REQUIRE(validation_scan);
+  CHECK(validation_scan->size() == 2);
+
+  const auto cleanup_scan =
+      linux_support::test_support::scan_cgroup_directories(root.get());
+  REQUIRE(cleanup_scan);
+  CHECK(*cleanup_scan == *validation_scan);
+  const auto owned = std::ranges::find_if(*cleanup_scan, [&](const auto& name) {
+    return linux_support::task_cgroup_owned_by(owner, "aiforge-v3-task-", name);
+  });
+  CHECK(owned != cleanup_scan->end());
 }
 
 TEST_CASE("v3 cleanup uncertainty dominates any direct-tree result",
