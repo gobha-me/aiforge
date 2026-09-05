@@ -1801,6 +1801,23 @@ auto kill_and_reap(const pid_t child, int& status) -> void {
   return std::nullopt;
 }
 
+[[nodiscard]] auto failed_combined_payload_outcome(const ProbeId id,
+                                                   Cgroup& cgroup,
+                                                   const pid_t child)
+    -> ProbeRecord {
+  const bool cgroup_cleanup = cgroup.cleanup();
+  int status{};
+  pid_t waited{};
+  do {
+    waited = ::waitpid(child, &status, 0);
+  } while (waited < 0 && errno == EINTR);
+  const bool reaped = reap_all_children();
+  if (!cgroup_cleanup || waited != child || !reaped)
+    return probe_error(id, ReasonCode::cleanup_failed);
+  return WIFEXITED(status) ? assertion_result(id, WEXITSTATUS(status))
+                           : probe_error(id, ReasonCode::setup_race);
+}
+
 [[nodiscard]] auto combined_setup_probe(const CombinedSetupMode mode,
                                         const std::filesystem::path& state)
     -> ProbeRecord {
@@ -1854,19 +1871,8 @@ auto kill_and_reap(const pid_t child, int& status) -> void {
     return finish_cgroup_probe(id, *cgroup, unavailable(id, child.error()));
   }
   const bool payload_reached = wait_for_byte(ready.get());
-  if (!payload_reached) {
-    const bool cgroup_cleanup = cgroup->cleanup();
-    int status{};
-    pid_t waited{};
-    do {
-      waited = ::waitpid(*child, &status, 0);
-    } while (waited < 0 && errno == EINTR);
-    const bool reaped = reap_all_children();
-    if (!cgroup_cleanup || waited != *child || !reaped)
-      return probe_error(id, ReasonCode::cleanup_failed);
-    return WIFEXITED(status) ? assertion_result(id, WEXITSTATUS(status))
-                             : probe_error(id, ReasonCode::setup_race);
-  }
+  if (!payload_reached)
+    return failed_combined_payload_outcome(id, *cgroup, *child);
 
   char output_marker{};
   const bool staged_descriptors =
