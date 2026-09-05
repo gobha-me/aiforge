@@ -38,6 +38,7 @@ add_dependencies(aiforge_process_isolation_evaluation
 add_library(aiforge_process_isolation_evaluation_v2_support STATIC
   evidence_mapping.cpp
   evidence_v2.cpp
+  linux_support.cpp
   probes_v2.cpp
   runner_v2.cpp
 )
