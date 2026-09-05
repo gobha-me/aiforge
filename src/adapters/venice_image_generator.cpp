@@ -89,7 +89,8 @@ auto detail::generate_venice_image(venice::Client& client,
     -> std::expected<backend::GeneratedImage, backend::ImageGenerationError> {
   try {
     using Code = backend::ImageGenerationErrorCode;
-    if (request.prompt.empty() || request.prompt.size() > 1024U * 1024U ||
+    if (request.prompt.empty() ||
+        request.prompt.size() > std::size_t{1024} * 1024U ||
         options.maximum_response_bytes == 0) {
       return std::unexpected(backend::ImageGenerationError{
           Code::invalid_request, "image generation request is invalid", false,

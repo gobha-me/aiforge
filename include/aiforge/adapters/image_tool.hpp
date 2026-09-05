@@ -19,7 +19,7 @@ struct ImageToolConfiguration {
   ImageBackendOptions image_options{};
   // Covers the 1 MiB prompt plus worst-case JSON string escaping and fixed
   // runtime-owned model/format framing under the kernel's 8 MiB ceiling.
-  std::size_t maximum_argument_bytes{3U * 1024U * 1024U};
+  std::size_t maximum_argument_bytes{std::size_t{3} * 1024U * 1024U};
   std::chrono::milliseconds timeout{std::chrono::minutes{2}};
 };
 

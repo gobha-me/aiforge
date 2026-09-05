@@ -82,7 +82,8 @@ class CredentialUnavailableBackend final : public backend::Backend {
 };
 
 constexpr std::size_t interactive_session_list_limit = 100U;
-constexpr std::size_t maximum_image_artifact_bytes = 32U * 1024U * 1024U;
+constexpr std::size_t maximum_image_artifact_bytes =
+    std::size_t{32} * 1024U * 1024U;
 
 [[nodiscard]] auto web_search_setting_name(const VeniceWebSearchSetting setting)
     -> std::string_view {
