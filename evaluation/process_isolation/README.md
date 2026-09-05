@@ -123,10 +123,15 @@ This path is trusted input to the opt-in evaluator only. It is not a production
 configuration seam, capability cache, or runtime authority, and the evaluator
 never infers a delegation root from its current cgroup or from `..`.
 
-CI creates a disposable systemd service with `Delegate=yes`, executes the
-evaluator as the service's sole process, and verifies that every required
-cgroup and combined-order row is `enforced` for the exact source SHA. A hosted
-runner without that explicit delegation fails the evidence step; an
-`unavailable` row is retained evidence but cannot satisfy this acceptance gate.
-Exit and signal handling stop, if necessary kill, and verify removal of the
-exact transient unit; incomplete unit cleanup dominates a successful capture.
+CI creates a disposable systemd service with `Delegate=yes` and a fixed
+`DelegateSubgroup=` leaf. Systemd retains the unit cgroup while the evaluator
+runs as the sole process and exclusive manager of that leaf. Before execution,
+the capture wrapper verifies the leaf identity, ownership, cgroup-v2 type,
+writable delegation controls, domain type, required controllers, empty
+subtree-control state, sole process, and absence of child cgroups. It then
+verifies that every required cgroup and combined-order row is `enforced` for
+the exact source SHA. A hosted runner without that explicit delegation fails
+the evidence step; an `unavailable` row is retained evidence but cannot satisfy
+this acceptance gate. Exit and signal handling stop, if necessary kill, and
+verify removal of the exact transient unit; incomplete unit cleanup dominates
+a successful capture.

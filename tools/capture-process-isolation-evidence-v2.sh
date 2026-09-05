@@ -14,7 +14,7 @@ if [[ $evaluator != /* || ! -x $evaluator || $output != /* ||
   echo "error: invalid process-isolation evidence arguments" >&2
   exit 2
 fi
-for required in systemctl systemd-run sudo id sleep timeout; do
+for required in systemctl systemd-run sudo id sleep stat timeout; do
   if ! command -v "$required" >/dev/null 2>&1; then
     echo "error: delegated cgroup evidence requires $required" >&2
     exit 1
@@ -80,18 +80,24 @@ if ! unit_is_absent; then
 fi
 
 # The transient service contains only the shell and then, via exec, the
-# evaluator itself. Delegate=yes makes the unit cgroup an explicit disposable
-# delegation; the evaluator still validates ownership, emptiness, controllers,
-# placement, and rollback before accepting any row as enforced.
+# evaluator itself. DelegateSubgroup places that process in a delegated leaf:
+# systemd retains ownership of the unit cgroup while the evaluator exclusively
+# owns the leaf subtree. The evaluator still validates ownership, emptiness,
+# controllers, placement, and rollback before accepting any row as enforced.
 unit_may_exist=1
 timeout 300s sudo -n systemd-run --quiet --wait --pipe --collect \
   --unit="$unit" \
   --service-type=exec \
   --property=Delegate=yes \
+  --property=DelegateSubgroup=aiforge-evaluator \
   --uid="$runner_user" \
   --gid="$runner_group" \
   /bin/bash -c '
     set -euo pipefail
+    fail_preflight() {
+      echo "error: delegated cgroup preflight failed: $1" >&2
+      exit 1
+    }
     relative=
     while IFS= read -r entry; do
       if [[ $entry == 0::* ]]; then
@@ -106,6 +112,33 @@ timeout 300s sudo -n systemd-run --quiet --wait --pipe --collect \
       echo "error: transient delegated cgroup identity is invalid" >&2
       exit 1
     fi
+    if [[ ${relative##*/} != aiforge-evaluator ]]; then
+      fail_preflight "systemd did not place the evaluator in its delegated subgroup"
+    fi
+    root="/sys/fs/cgroup${relative}"
+    [[ -d $root ]] || fail_preflight "delegated subgroup is absent"
+    [[ -O $root ]] || fail_preflight "delegated subgroup is not owned by the evaluator"
+    [[ -w $root && -w $root/cgroup.procs &&
+       -w $root/cgroup.subtree_control ]] ||
+      fail_preflight "delegated subgroup controls are not writable"
+    [[ $(stat -f -c %T -- "$root") == cgroup2fs ]] ||
+      fail_preflight "delegated subgroup is not cgroup v2"
+    type=$(<"$root/cgroup.type")
+    [[ $type == domain ]] || fail_preflight "delegated subgroup is not a domain cgroup"
+    controllers=$(<"$root/cgroup.controllers")
+    for controller in cpu memory pids; do
+      [[ " $controllers " == *" $controller "* ]] ||
+        fail_preflight "required $controller controller is unavailable"
+    done
+    enabled=$(<"$root/cgroup.subtree_control")
+    [[ -z $enabled ]] || fail_preflight "delegated subgroup controllers are already enabled"
+    mapfile -t processes <"$root/cgroup.procs"
+    [[ ${#processes[@]} -eq 1 && ${processes[0]} == $$ ]] ||
+      fail_preflight "delegated subgroup does not exclusively contain the evaluator"
+    shopt -s dotglob nullglob
+    children=("$root"/*/)
+    [[ ${#children[@]} -eq 0 ]] ||
+      fail_preflight "delegated subgroup already contains child cgroups"
     exec "$1" --source-sha "$2" --output "$3" \
-      --delegated-cgroup-root "/sys/fs/cgroup${relative}"
+      --delegated-cgroup-root "$root"
   ' _ "$evaluator" "$source_sha" "$output"

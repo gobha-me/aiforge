@@ -87,11 +87,30 @@ run_capture() {
 
 run_capture 0 0 0
 if ((observed != 0)) || [[ $(<"$fixture/state") != absent ]] ||
+  ! grep -Fq -- '--property=Delegate=yes' "$fixture/log" ||
+  ! grep -Fq -- '--property=DelegateSubgroup=aiforge-evaluator' \
+    "$fixture/log" ||
   ! grep -Eq '^systemctl stop aiforge-evidence-v2-[0-9]+\.service$' \
     "$fixture/log"; then
   echo "error: accepted capture did not remove its exact transient unit" >&2
   exit 1
 fi
+for preflight in \
+  'systemd did not place the evaluator in its delegated subgroup' \
+  'delegated subgroup is absent' \
+  'delegated subgroup is not owned by the evaluator' \
+  'delegated subgroup controls are not writable' \
+  'delegated subgroup is not cgroup v2' \
+  'delegated subgroup is not a domain cgroup' \
+  'controller is unavailable' \
+  'delegated subgroup controllers are already enabled' \
+  'delegated subgroup does not exclusively contain the evaluator' \
+  'delegated subgroup already contains child cgroups'; do
+  if ! grep -Fq "$preflight" "$fixture/log"; then
+    echo "error: delegated cgroup preflight diagnostic is missing" >&2
+    exit 1
+  fi
+done
 
 run_capture 0 1 0
 if ((observed == 0)) ||
