@@ -35,6 +35,20 @@ add_dependencies(aiforge_process_isolation_evaluation
   aiforge_process_isolation_probe
 )
 
+add_library(aiforge_process_isolation_evidence_v3_support STATIC
+  evidence_v3.cpp
+)
+target_compile_features(aiforge_process_isolation_evidence_v3_support
+  PUBLIC cxx_std_23
+)
+target_include_directories(aiforge_process_isolation_evidence_v3_support
+  PUBLIC ${CMAKE_CURRENT_LIST_DIR}
+)
+target_link_libraries(aiforge_process_isolation_evidence_v3_support
+  PRIVATE aiforge_process_isolation_evaluation_support
+  PRIVATE nlohmann_json::nlohmann_json
+)
+
 add_library(aiforge_process_isolation_evaluation_v2_support STATIC
   evidence_mapping.cpp
   evidence_v2.cpp
@@ -50,6 +64,7 @@ target_include_directories(aiforge_process_isolation_evaluation_v2_support
 )
 target_link_libraries(aiforge_process_isolation_evaluation_v2_support
   PRIVATE aiforge_process_isolation_evaluation_support
+  PRIVATE aiforge_process_isolation_evidence_v3_support
   PRIVATE nlohmann_json::nlohmann_json
 )
 
@@ -87,6 +102,7 @@ if (${PROJECT_NAME}_TESTS)
     test_integration.cpp
     test_integration_v2.cpp
     test_evidence_v2.cpp
+    test_evidence_v3.cpp
     test_evidence_mapping.cpp
     test_probes_v2.cpp
     test_runner.cpp
@@ -97,6 +113,7 @@ if (${PROJECT_NAME}_TESTS)
     PRIVATE Catch2::Catch2
     PRIVATE aiforge_process_isolation_evaluation_support
     PRIVATE aiforge_process_isolation_evaluation_v2_support
+    PRIVATE aiforge_process_isolation_evidence_v3_support
   )
   add_dependencies(process-isolation-evaluation-test
     aiforge_process_isolation_evaluation

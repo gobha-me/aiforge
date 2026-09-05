@@ -2,9 +2,11 @@
 
 #include "evidence.hpp"
 #include "evidence_v2.hpp"
+#include "evidence_v3.hpp"
 
 #include <array>
 #include <optional>
+#include <span>
 #include <string_view>
 
 namespace aiforge::evaluation::process_isolation::mapping {
@@ -41,10 +43,13 @@ struct EvidenceAssessment {
 [[nodiscard]] auto assess_linux_evidence(
     std::string_view expected_source_sha,
     std::optional<std::string_view> schema_v1_document,
-    std::optional<std::string_view> schema_v2_document) -> EvidenceAssessment;
+    std::optional<std::string_view> schema_v2_document,
+    std::optional<std::string_view> schema_v3_document) -> EvidenceAssessment;
 
 [[nodiscard]] auto evidence_level_name(EvidenceLevel value) -> std::string_view;
 [[nodiscard]] auto assessment_reason_name(AssessmentReason value)
     -> std::string_view;
+[[nodiscard]] auto required_v3_probe_ids(EvidenceLevel value)
+    -> std::span<const v3::ProbeId>;
 
 } // namespace aiforge::evaluation::process_isolation::mapping
