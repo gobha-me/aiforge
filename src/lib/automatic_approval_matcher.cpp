@@ -344,7 +344,8 @@ struct ReservedDecision {
 
 [[nodiscard]] auto condition_matches(
     const CompiledRule& rule, const AutomaticApprovalMatchRequest& request,
-    const AutomaticApprovalMatcherLimits& limits) -> bool {
+    const AutomaticApprovalMatcherLimits& limits)
+    -> std::expected<bool, AutomaticApprovalMatcherError> {
   if (const auto* exact =
           std::get_if<CompiledExactCondition>(&rule.condition)) {
     return exact->tool_name == request.tool_name &&
@@ -358,9 +359,7 @@ struct ReservedDecision {
   }
   const auto path = repository_candidate_path(request.arguments, limits);
   if (!path) return false;
-  const auto contained =
-      repository.root->contains(repository.allowed_relative_path, *path);
-  return contained.value_or(false);
+  return repository.root->contains(repository.allowed_relative_path, *path);
 }
 
 [[nodiscard]] auto unique_matching_rule(
@@ -368,7 +367,8 @@ struct ReservedDecision {
     const AutomaticApprovalMatchRequest& request,
     const AutomaticApprovalMatcherLimits& limits,
     const std::chrono::steady_clock::time_point now)
-    -> std::optional<std::size_t> {
+    -> std::expected<std::optional<std::size_t>,
+                     AutomaticApprovalMatcherError> {
   std::optional<std::size_t> selected;
   std::uint32_t highest_precedence{};
   bool found{};
@@ -378,10 +378,12 @@ struct ReservedDecision {
     if (rule.remaining_matches == 0 ||
         (rule.expires_at && now >= *rule.expires_at) ||
         !std::ranges::contains(rule.allowed_restrictions,
-                               request.selected_restriction) ||
-        !condition_matches(rule, request, limits)) {
+                               request.selected_restriction)) {
       continue;
     }
+    auto matches = condition_matches(rule, request, limits);
+    if (!matches) return std::unexpected(std::move(matches.error()));
+    if (!*matches) continue;
     if (!found || rule.precedence > highest_precedence) {
       selected = index;
       highest_precedence = rule.precedence;
@@ -392,6 +394,26 @@ struct ReservedDecision {
     }
   }
   return ambiguous ? std::nullopt : selected;
+}
+
+[[nodiscard]] auto verify_other_repository_authorities(
+    const std::vector<CompiledRule>& rules, const CompiledRule& selected,
+    const AutomaticApprovalMatchRequest& request,
+    const AutomaticApprovalMatcherLimits& limits,
+    const std::chrono::steady_clock::time_point now)
+    -> std::expected<void, AutomaticApprovalMatcherError> {
+  for (const auto& rule : rules) {
+    if (&rule == &selected || rule.remaining_matches == 0 ||
+        (rule.expires_at && now >= *rule.expires_at) ||
+        !std::ranges::contains(rule.allowed_restrictions,
+                               request.selected_restriction) ||
+        !std::holds_alternative<CompiledRepositoryCondition>(rule.condition)) {
+      continue;
+    }
+    auto matches = condition_matches(rule, request, limits);
+    if (!matches) return std::unexpected(std::move(matches.error()));
+  }
+  return {};
 }
 
 [[nodiscard]] auto valid_matcher_limits(
@@ -545,6 +567,11 @@ struct CompiledRuleResult {
           return std::unexpected(std::move(constraints.error()));
         if constexpr (std::same_as<Rule,
                                    config::ExactAutomaticApprovalRuleConfig>) {
+          if (rule.tool_name == "read_repository_file") {
+            return failure(
+                AutomaticApprovalMatcherErrorCode::invalid_configuration,
+                "repository reads require descriptor-pinned path authority");
+          }
           auto arguments = canonicalize_validated_tool_arguments(
               {"application/json", rule.canonical_arguments_json},
               limits.maximum_canonical_argument_bytes);
@@ -633,19 +660,25 @@ auto AutomaticApprovalMatcher::match(
       if (selected == m_impl->rules.end() ||
           (selected->expires_at && now >= *selected->expires_at) ||
           !std::ranges::contains(selected->allowed_restrictions,
-                                 request.selected_restriction) ||
-          !condition_matches(*selected, request, m_impl->limits)) {
+                                 request.selected_restriction)) {
         return std::optional<domain::AutomaticApprovalEvidence>{};
       }
+      auto matches = condition_matches(*selected, request, m_impl->limits);
+      if (!matches) return std::unexpected(std::move(matches.error()));
+      if (!*matches) return std::optional<domain::AutomaticApprovalEvidence>{};
+      auto verified = verify_other_repository_authorities(
+          m_impl->rules, *selected, request, m_impl->limits, now);
+      if (!verified) return std::unexpected(std::move(verified.error()));
       return std::optional{prior->second.evidence};
     }
 
-    const auto match =
+    auto match =
         unique_matching_rule(m_impl->rules, request, m_impl->limits, now);
-    if (!match) {
+    if (!match) return std::unexpected(std::move(match.error()));
+    if (!*match) {
       return std::optional<domain::AutomaticApprovalEvidence>{};
     }
-    auto& selected = m_impl->rules[*match];
+    auto& selected = m_impl->rules[**match];
     --selected.remaining_matches;
     domain::AutomaticApprovalEvidence evidence{m_impl->identity,
                                                selected.identity};

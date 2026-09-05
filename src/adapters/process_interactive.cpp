@@ -4728,6 +4728,28 @@ auto ProcessInteractiveCommand::execute(Request request,
       repository_id = snapshot->root.repository_id;
       repository_snapshot = std::move(*snapshot);
     }
+    std::shared_ptr<const runtime::DescriptorRelativePathAuthority>
+        repository_read_root;
+    const bool needs_repository_root =
+        *approval == runtime::ApprovalMode::automatic &&
+        std::ranges::any_of(
+            automatic_approval_rules->rules, [](const auto& rule) {
+              return std::holds_alternative<
+                  config::RepositoryPathAutomaticApprovalRuleConfig>(rule);
+            });
+    if (needs_repository_root) {
+      if (!repository_snapshot) {
+        return failure(cli::CommandFailureKind::runtime,
+                       "automatic approval repository root is unavailable");
+      }
+      auto pinned = open_pinned_repository_root_authority(
+          repository_snapshot->root.canonical_path);
+      if (!pinned) {
+        return failure(cli::CommandFailureKind::runtime,
+                       pinned.error().message);
+      }
+      repository_read_root = std::move(*pinned);
+    }
     std::optional<GitRepositorySnapshotSource> repository_source;
     std::optional<GitExactSourceEditor> repository_editor;
     std::unique_ptr<runtime::MemoryController> memory_controller;
@@ -4768,7 +4790,9 @@ auto ProcessInteractiveCommand::execute(Request request,
             GitExactSourceReadPolicy::tracked_regular_files);
         if (auto registered = runtime::register_repository_read_tool(
                 tool_registry, *repository_source, *repository_editor,
-                {repository_snapshot->root.canonical_path});
+                {repository_snapshot->root.canonical_path},
+                repository_read_root,
+                repository_read_root ? repository_snapshot : std::nullopt);
             !registered) {
           return failure(cli::CommandFailureKind::runtime,
                          registered.error().message);
@@ -4810,28 +4834,8 @@ auto ProcessInteractiveCommand::execute(Request request,
     std::shared_ptr<runtime::AutomaticApprovalMatcher> automatic_matcher;
     std::optional<std::string> matcher_policy_identity;
     if (*approval == runtime::ApprovalMode::automatic) {
-      std::shared_ptr<const runtime::DescriptorRelativePathAuthority>
-          repository_read_root;
-      const bool needs_repository_root = std::ranges::any_of(
-          automatic_approval_rules->rules, [](const auto& rule) {
-            return std::holds_alternative<
-                config::RepositoryPathAutomaticApprovalRuleConfig>(rule);
-          });
-      if (needs_repository_root) {
-        if (!repository_snapshot) {
-          return failure(cli::CommandFailureKind::runtime,
-                         "automatic approval repository root is unavailable");
-        }
-        auto pinned = open_pinned_repository_root_authority(
-            repository_snapshot->root.canonical_path);
-        if (!pinned) {
-          return failure(cli::CommandFailureKind::runtime,
-                         pinned.error().message);
-        }
-        repository_read_root = std::move(*pinned);
-      }
       auto compiled = runtime::compile_configured_automatic_approval_matcher(
-          *automatic_approval_rules, std::move(repository_read_root));
+          *automatic_approval_rules, repository_read_root);
       if (!compiled) {
         return failure(cli::CommandFailureKind::runtime,
                        compiled.error().message);

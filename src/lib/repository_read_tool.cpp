@@ -266,6 +266,32 @@ class DuplicateJsonKey final : public std::exception {};
                          "repository read failed internally");
 }
 
+[[nodiscard]] auto pinned_read_failure(
+    const AutomaticApprovalMatcherError& error)
+    -> std::unexpected<ToolExecutionError> {
+  using Code = AutomaticApprovalMatcherErrorCode;
+  switch (error.code) {
+    case Code::invalid_request:
+    case Code::invalid_configuration:
+      return execution_error(ToolExecutionErrorCode::protocol_failure,
+                             "pinned repository read was rejected");
+    case Code::path_unavailable:
+      return execution_error(ToolExecutionErrorCode::unavailable,
+                             "pinned repository path is unavailable", true);
+    case Code::resource_exhausted:
+      return execution_error(ToolExecutionErrorCode::output_limit,
+                             "repository file exceeded its read limit");
+    case Code::cancelled:
+      return execution_error(ToolExecutionErrorCode::cancelled,
+                             "repository read was cancelled");
+    case Code::internal_failure:
+      return execution_error(ToolExecutionErrorCode::internal_failure,
+                             "pinned repository read failed internally");
+  }
+  return execution_error(ToolExecutionErrorCode::internal_failure,
+                         "pinned repository read failed internally");
+}
+
 [[nodiscard]] auto valid_digest(const domain::ContentDigest& digest,
                                 const std::uint64_t maximum_bytes) -> bool {
   if (digest.algorithm.empty() || digest.algorithm.size() > 128 ||
@@ -326,11 +352,16 @@ class RepositoryReadStream final : public ToolExecutionStream {
 
 class RepositoryReadExecutor final : public ToolExecutor {
  public:
-  RepositoryReadExecutor(repository::RepositorySnapshotSource& snapshots,
-                         repository::ExactSourceEditor& sources,
-                         RepositoryReadToolConfiguration configuration)
+  RepositoryReadExecutor(
+      repository::RepositorySnapshotSource& snapshots,
+      repository::ExactSourceEditor& sources,
+      RepositoryReadToolConfiguration configuration,
+      std::shared_ptr<const DescriptorRelativePathAuthority> pinned_root,
+      std::optional<domain::RepositorySnapshot> pinned_baseline)
       : m_snapshots(snapshots), m_sources(sources),
-        m_configuration(std::move(configuration)) {}
+        m_configuration(std::move(configuration)),
+        m_pinned_root(std::move(pinned_root)),
+        m_pinned_baseline(std::move(pinned_baseline)) {}
 
   [[nodiscard]] auto validate(
       const domain::StructuredDataBlock& arguments) const
@@ -354,53 +385,32 @@ class RepositoryReadExecutor final : public ToolExecutor {
         return execution_error(ToolExecutionErrorCode::cancelled,
                                "repository read was cancelled");
       }
-      auto snapshot = m_snapshots.observe(
-          {m_configuration.repository_root, m_configuration.snapshot_limits},
-          stop_token);
-      if (!snapshot) return snapshot_failure(snapshot.error());
-      if (snapshot->root.canonical_path != m_configuration.repository_root ||
-          !repository::validate_repository_snapshot(
-              *snapshot, m_configuration.snapshot_limits)) {
-        return execution_error(
-            ToolExecutionErrorCode::protocol_failure,
-            "repository source returned an invalid snapshot");
-      }
-      if (!snapshot->vcs || snapshot->vcs->system != "git") {
-        return execution_error(
-            ToolExecutionErrorCode::protocol_failure,
-            "repository source did not return a Git snapshot");
-      }
-      const auto untracked = std::ranges::find(
-          snapshot->changes, *path, &domain::RepositoryChange::relative_path);
-      if (untracked != snapshot->changes.end() &&
-          untracked->stage == domain::RepositoryChangeStage::untracked) {
-        return execution_error(ToolExecutionErrorCode::unavailable,
-                               "repository path is not a tracked file");
-      }
+      auto baseline = baseline_for(*path, stop_token);
+      if (!baseline) return std::unexpected(std::move(baseline.error()));
       repository::ExactSourceReadRequest request{
-          std::move(*snapshot), std::move(*path), m_configuration.read_limits};
-      auto content = m_sources.read(request, stop_token);
-      if (!content) return source_failure(content.error());
+          std::move(*baseline), std::move(*path), m_configuration.read_limits};
+      auto read_result = read_from(request, stop_token);
+      if (!read_result) return std::unexpected(std::move(read_result.error()));
       if (stop_token.stop_requested()) {
         return execution_error(ToolExecutionErrorCode::cancelled,
                                "repository read was cancelled");
       }
-      if (!valid_result(request, *content)) {
+      if (!valid_result(request, *read_result)) {
         return execution_error(ToolExecutionErrorCode::protocol_failure,
                                "repository source returned an invalid result");
       }
       Json result{
-          {"repository_id", content->source.snapshot.repository_id.value()},
+          {"repository_id", read_result->source.snapshot.repository_id.value()},
           {"snapshot",
-           {{"algorithm", content->source.snapshot.fingerprint.algorithm},
-            {"value", content->source.snapshot.fingerprint.value},
-            {"byte_size", content->source.snapshot.fingerprint.byte_size}}},
-          {"relative_path", content->source.relative_path},
+           {{"algorithm", read_result->source.snapshot.fingerprint.algorithm},
+            {"value", read_result->source.snapshot.fingerprint.value},
+            {"byte_size", read_result->source.snapshot.fingerprint.byte_size}}},
+          {"relative_path", read_result->source.relative_path},
           {"content_digest",
-           {{"algorithm", content->source.content_digest.algorithm},
-            {"value", content->source.content_digest.value},
-            {"byte_size", content->source.content_digest.byte_size}}},
-          {"content", content->content}};
+           {{"algorithm", read_result->source.content_digest.algorithm},
+            {"value", read_result->source.content_digest.value},
+            {"byte_size", read_result->source.content_digest.byte_size}}},
+          {"content", read_result->content}};
       auto encoded = result.dump();
       if (encoded.size() > m_configuration.maximum_result_bytes) {
         return execution_error(ToolExecutionErrorCode::output_limit,
@@ -415,9 +425,66 @@ class RepositoryReadExecutor final : public ToolExecutor {
   }
 
  private:
+  [[nodiscard]] auto baseline_for(const std::string& relative_path,
+                                  const std::stop_token stop_token)
+      -> std::expected<domain::RepositorySnapshot, ToolExecutionError> {
+    std::optional<domain::RepositorySnapshot> observed;
+    if (m_pinned_root) {
+      observed = m_pinned_baseline;
+    } else {
+      auto snapshot = m_snapshots.observe(
+          {m_configuration.repository_root, m_configuration.snapshot_limits},
+          stop_token);
+      if (!snapshot) return snapshot_failure(snapshot.error());
+      observed = std::move(*snapshot);
+    }
+    if (!observed ||
+        observed->root.canonical_path != m_configuration.repository_root ||
+        !repository::validate_repository_snapshot(
+            *observed, m_configuration.snapshot_limits)) {
+      return execution_error(ToolExecutionErrorCode::protocol_failure,
+                             "repository source returned an invalid snapshot");
+    }
+    if (!observed->vcs || observed->vcs->system != "git") {
+      return execution_error(ToolExecutionErrorCode::protocol_failure,
+                             "repository source did not return a Git snapshot");
+    }
+    const auto untracked =
+        std::ranges::find(observed->changes, relative_path,
+                          &domain::RepositoryChange::relative_path);
+    if (untracked != observed->changes.end() &&
+        untracked->stage == domain::RepositoryChangeStage::untracked) {
+      return execution_error(ToolExecutionErrorCode::unavailable,
+                             "repository path is not a tracked file");
+    }
+    return std::move(*observed);
+  }
+
+  [[nodiscard]] auto read_from(
+      const repository::ExactSourceReadRequest& request,
+      const std::stop_token stop_token)
+      -> std::expected<repository::ExactSourceReadResult, ToolExecutionError> {
+    if (!m_pinned_root) {
+      auto content = m_sources.read(request, stop_token);
+      if (!content) return source_failure(content.error());
+      return std::move(*content);
+    }
+    auto content = m_pinned_root->read(
+        request.relative_path, request.limits.maximum_source_bytes, stop_token);
+    if (!content) return pinned_read_failure(content.error());
+    return repository::ExactSourceReadResult{
+        {domain::snapshot_identity(request.baseline),
+         request.relative_path,
+         std::move(content->content_digest),
+         {}},
+        std::move(content->content)};
+  }
+
   repository::RepositorySnapshotSource& m_snapshots;
   repository::ExactSourceEditor& m_sources;
   RepositoryReadToolConfiguration m_configuration;
+  std::shared_ptr<const DescriptorRelativePathAuthority> m_pinned_root;
+  std::optional<domain::RepositorySnapshot> m_pinned_baseline;
 };
 
 } // namespace
@@ -490,7 +557,9 @@ auto repository_read_tool_declaration(
 auto register_repository_read_tool(
     ToolRegistry& registry, repository::RepositorySnapshotSource& snapshots,
     repository::ExactSourceEditor& sources,
-    RepositoryReadToolConfiguration configuration)
+    RepositoryReadToolConfiguration configuration,
+    std::shared_ptr<const DescriptorRelativePathAuthority> pinned_root,
+    std::optional<domain::RepositorySnapshot> pinned_baseline)
     -> std::expected<void, ToolRegistryError> {
   try {
     if (!snapshots.guarantees_read_only_observation() ||
@@ -501,14 +570,25 @@ auto register_repository_read_tool(
           "repository-read sources must guarantee coupled read-only tracked "
           "file observation");
     }
+    if (static_cast<bool>(pinned_root) != pinned_baseline.has_value() ||
+        (pinned_baseline &&
+         (pinned_baseline->root.canonical_path !=
+              configuration.repository_root ||
+          !pinned_baseline->vcs || pinned_baseline->vcs->system != "git" ||
+          !repository::validate_repository_snapshot(
+              *pinned_baseline, configuration.snapshot_limits)))) {
+      return registry_error(
+          "pinned repository-read authority and baseline are invalid");
+    }
     auto declaration = repository_read_tool_declaration(configuration);
     if (!declaration) return std::unexpected(std::move(declaration.error()));
     const auto output_limit = configuration.maximum_result_bytes;
     const auto timeout = configuration.read_limits.timeout;
     return registry.register_tool(
         std::move(*declaration),
-        std::make_shared<RepositoryReadExecutor>(snapshots, sources,
-                                                 std::move(configuration)),
+        std::make_shared<RepositoryReadExecutor>(
+            snapshots, sources, std::move(configuration),
+            std::move(pinned_root), std::move(pinned_baseline)),
         ToolExecutionLimits{output_limit, 1, timeout},
         ToolExecutorContract{"aiforge.runtime.read_repository_file", "2"},
         ToolCategory::repository);

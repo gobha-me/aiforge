@@ -109,6 +109,36 @@ struct RootComponent {
   return S_ISREG(static_cast<mode_t>(identity.mode));
 }
 
+[[nodiscard]] auto read_content(const int descriptor,
+                                const std::uint64_t maximum_bytes,
+                                const std::stop_token stop_token)
+    -> std::expected<std::string, Error> {
+  std::string content;
+  content.reserve(static_cast<std::size_t>(
+      std::min<std::uint64_t>(maximum_bytes, std::uint64_t{64U} * 1024U)));
+  std::array<char, std::size_t{16U} * 1024U> buffer{};
+  for (;;) {
+    if (stop_token.stop_requested()) {
+      return failure(ErrorCode::cancelled, "repository read was cancelled");
+    }
+    const auto count = ::read(descriptor, buffer.data(), buffer.size());
+    if (count < 0) {
+      if (errno == EINTR) continue;
+      return failure(ErrorCode::path_unavailable,
+                     "repository read path is unavailable");
+    }
+    if (count == 0) break;
+    const auto bytes = static_cast<std::size_t>(count);
+    if (content.size() > maximum_bytes ||
+        bytes > maximum_bytes - content.size()) {
+      return failure(ErrorCode::resource_exhausted,
+                     "repository file exceeded its read limit");
+    }
+    content.append(buffer.data(), bytes);
+  }
+  return content;
+}
+
 [[nodiscard]] auto valid_relative_path(const std::string_view value,
                                        const bool allow_empty) -> bool {
   if (value.empty()) return allow_empty;
@@ -241,13 +271,15 @@ class PinnedRepositoryRootAuthority final
       if (!within(allowed_relative_path, candidate_relative_path)) return false;
       auto reopened = reopen_verified_root();
       if (!reopened) return std::unexpected(std::move(reopened.error()));
+      auto pinned = duplicate_pinned_root();
+      if (!pinned) return std::unexpected(std::move(pinned.error()));
       if (auto traversed =
-              traverse_candidate(std::move(*reopened), candidate_relative_path);
+              traverse_candidate(std::move(*pinned), candidate_relative_path);
           !traversed) {
         return std::unexpected(std::move(traversed.error()));
       }
-      const auto pinned = descriptor_identity(m_descriptor.get());
-      if (!pinned || *pinned != m_root) {
+      const auto pinned_identity = descriptor_identity(m_descriptor.get());
+      if (!pinned_identity || *pinned_identity != m_root) {
         return failure(ErrorCode::path_unavailable,
                        "repository approval root changed or is unavailable");
       }
@@ -262,7 +294,72 @@ class PinnedRepositoryRootAuthority final
     }
   }
 
+  [[nodiscard]] auto read(const std::string_view candidate_relative_path,
+                          const std::uint64_t maximum_bytes,
+                          const std::stop_token stop_token) const
+      -> std::expected<runtime::DescriptorRelativeReadResult, Error> override {
+    try {
+      if (!valid_relative_path(candidate_relative_path, false) ||
+          maximum_bytes == 0 ||
+          maximum_bytes > std::uint64_t{64U} * 1024U * 1024U) {
+        return failure(ErrorCode::invalid_request,
+                       "repository read request is invalid");
+      }
+      if (stop_token.stop_requested()) {
+        return failure(ErrorCode::cancelled, "repository read was cancelled");
+      }
+      auto reopened = reopen_verified_root();
+      if (!reopened) return std::unexpected(std::move(reopened.error()));
+      auto pinned = duplicate_pinned_root();
+      if (!pinned) return std::unexpected(std::move(pinned.error()));
+      auto file =
+          traverse_candidate(std::move(*pinned), candidate_relative_path);
+      if (!file) return std::unexpected(std::move(file.error()));
+      const auto initial_identity = descriptor_identity(file->get());
+      if (!initial_identity || !regular_identity(*initial_identity)) {
+        return failure(ErrorCode::path_unavailable,
+                       "repository read path is unavailable");
+      }
+
+      auto content = read_content(file->get(), maximum_bytes, stop_token);
+      if (!content) return std::unexpected(std::move(content.error()));
+      const auto final_identity = descriptor_identity(file->get());
+      if (!final_identity || *final_identity != *initial_identity) {
+        return failure(ErrorCode::path_unavailable,
+                       "repository read path changed or is unavailable");
+      }
+      const auto pinned_identity = descriptor_identity(m_descriptor.get());
+      if (!pinned_identity || *pinned_identity != m_root) {
+        return failure(ErrorCode::path_unavailable,
+                       "repository approval root changed or is unavailable");
+      }
+      auto final_root = reopen_verified_root();
+      if (!final_root) return std::unexpected(std::move(final_root.error()));
+
+      detail::Sha256 digest;
+      digest.update(std::as_bytes(std::span{content->data(), content->size()}));
+      return runtime::DescriptorRelativeReadResult{
+          {"sha256", digest.finish(), content->size()}, std::move(*content)};
+    } catch (...) {
+      return failure(ErrorCode::internal_failure,
+                     "repository read failed internally");
+    }
+  }
+
  private:
+  [[nodiscard]] auto duplicate_pinned_root() const
+      -> std::expected<UniqueFd, Error> {
+    const auto descriptor = ::fcntl(m_descriptor.get(), F_DUPFD_CLOEXEC, 0);
+    UniqueFd duplicate{descriptor};
+    const auto identity = descriptor_identity(duplicate.get());
+    if (!duplicate || !identity || *identity != m_root ||
+        !directory_identity(*identity)) {
+      return failure(ErrorCode::path_unavailable,
+                     "repository approval root changed or is unavailable");
+    }
+    return duplicate;
+  }
+
   [[nodiscard]] auto reopen_verified_root() const
       -> std::expected<UniqueFd, Error> {
     UniqueFd current{
@@ -299,7 +396,7 @@ class PinnedRepositoryRootAuthority final
 
   [[nodiscard]] static auto traverse_candidate(
       UniqueFd current, const std::string_view candidate_relative_path)
-      -> std::expected<void, Error> {
+      -> std::expected<UniqueFd, Error> {
     const std::filesystem::path candidate{candidate_relative_path};
     auto component = candidate.begin();
     while (component != candidate.end()) {
@@ -324,7 +421,7 @@ class PinnedRepositoryRootAuthority final
       current = std::move(next);
       ++component;
     }
-    return {};
+    return current;
   }
 
   UniqueFd m_descriptor;

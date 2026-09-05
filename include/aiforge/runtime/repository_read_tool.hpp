@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <aiforge/repository/exact_source_edit.hpp>
@@ -45,7 +46,9 @@ struct RepositoryReadToolConfiguration {
 [[nodiscard]] auto register_repository_read_tool(
     ToolRegistry& registry, repository::RepositorySnapshotSource& snapshots,
     repository::ExactSourceEditor& sources,
-    RepositoryReadToolConfiguration configuration)
+    RepositoryReadToolConfiguration configuration,
+    std::shared_ptr<const DescriptorRelativePathAuthority> pinned_root = {},
+    std::optional<domain::RepositorySnapshot> pinned_baseline = std::nullopt)
     -> std::expected<void, ToolRegistryError>;
 
 } // namespace aiforge::runtime

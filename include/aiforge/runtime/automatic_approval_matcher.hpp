@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -32,6 +33,8 @@ enum class AutomaticApprovalMatcherErrorCode {
   invalid_configuration,
   invalid_request,
   path_unavailable,
+  resource_exhausted,
+  cancelled,
   internal_failure,
 };
 
@@ -64,6 +67,12 @@ struct AutomaticApprovalRuleConstraints {
       -> bool = default;
 };
 
+struct DescriptorRelativeReadResult {
+  domain::ContentDigest content_digest;
+  std::string content;
+  auto operator==(const DescriptorRelativeReadResult&) const -> bool = default;
+};
+
 class DescriptorRelativePathAuthority {
  public:
   virtual ~DescriptorRelativePathAuthority() = default;
@@ -77,6 +86,14 @@ class DescriptorRelativePathAuthority {
   [[nodiscard]] virtual auto contains(std::string_view allowed_relative_path,
                                       std::string_view candidate_relative_path)
       const -> std::expected<bool, AutomaticApprovalMatcherError> = 0;
+
+  // Reads file content through the application-lifetime root descriptor. The
+  // configured root chain is reobserved only to verify its pinned identity.
+  [[nodiscard]] virtual auto read(std::string_view candidate_relative_path,
+                                  std::uint64_t maximum_bytes,
+                                  std::stop_token stop_token = {}) const
+      -> std::expected<DescriptorRelativeReadResult,
+                       AutomaticApprovalMatcherError> = 0;
 };
 
 struct ExactToolArgumentsApprovalRule {

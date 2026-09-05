@@ -14,6 +14,9 @@
 #include <aiforge/adapters/pinned_repository_root_authority.hpp>
 #include <aiforge/config/config.hpp>
 #include <aiforge/runtime/automatic_approval_matcher.hpp>
+#include <aiforge/runtime/repository_read_tool.hpp>
+#include <aiforge/testing/scripted_exact_source_editor.hpp>
+#include <aiforge/testing/scripted_repository_snapshot_source.hpp>
 
 namespace {
 
@@ -79,6 +82,21 @@ auto request(std::string invocation, std::string tool_name,
 auto constraints(const std::uint64_t matches, const std::uint32_t precedence)
     -> config::AutomaticApprovalRuleConstraintsConfig {
   return {{"high"}, matches, std::nullopt, precedence};
+}
+
+auto digest(std::string value, const std::uint64_t bytes)
+    -> domain::ContentDigest {
+  return {"sha256", std::move(value), bytes};
+}
+
+auto snapshot(const std::string& root) -> domain::RepositorySnapshot {
+  return {{id<domain::RepositoryId>("repository-1"), root},
+          domain::VcsState{"git", "sha256", domain::VcsHeadKind::branch, "main",
+                           "bbbbbbbbbbbbbbbb"},
+          {},
+          digest("aaaaaaaaaaaaaaaa", 64),
+          std::chrono::sys_time<std::chrono::milliseconds>{
+              std::chrono::milliseconds{100}}};
 }
 
 } // namespace
@@ -157,6 +175,107 @@ TEST_CASE("production configuration compiles nonempty exact and path rules",
       (*empty)->match(request("deny", "lookup", R"({"id":1})")).value());
 }
 
+TEST_CASE("automatic repository effect never reopens a replaced root",
+          "[automatic-approval][repository][effect][failure]") {
+  TemporaryDirectory temporary;
+  const auto root = temporary.path() / "repository";
+  REQUIRE(std::filesystem::create_directories(root / "src"));
+  write_file(root / "src" / "main.cpp", "approved bytes");
+
+  auto authority = adapters::open_pinned_repository_root_authority(root);
+  REQUIRE(authority);
+  auto rule = runtime::make_repository_read_approval_rule(
+      *authority, "src", {{runtime::RestrictionLevel::high}, 1, {}, 0});
+  REQUIRE(rule);
+  auto matcher = runtime::compile_automatic_approval_matcher({*rule});
+  REQUIRE(matcher);
+  auto decision =
+      (*matcher)->match(request("invocation", "read_repository_file",
+                                R"({"relative_path":"src/main.cpp"})"));
+  REQUIRE(decision);
+  REQUIRE(decision->has_value());
+
+  testing::ScriptedRepositorySnapshotSource snapshots;
+  testing::ScriptedExactSourceEditor sources;
+  sources.couple_to(snapshots, true);
+  runtime::ToolRegistry registry;
+  runtime::RepositoryReadToolConfiguration configuration{root.generic_string()};
+  REQUIRE(runtime::register_repository_read_tool(
+      registry, snapshots, sources, configuration, *authority,
+      snapshot(root.generic_string())));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  const auto* tool = tools->find("read_repository_file");
+  REQUIRE(tool != nullptr);
+  auto validated = tool->executor->validate(
+      {"application/json", R"({"relative_path":"src/main.cpp"})"});
+  REQUIRE(validated);
+
+  const auto original = temporary.path() / "original";
+  std::filesystem::rename(root, original);
+  REQUIRE(std::filesystem::create_directories(root / "src"));
+  write_file(root / "src" / "main.cpp", "replacement bytes");
+
+  auto started = tool->executor->start({id<domain::InvocationId>("invocation"),
+                                        std::nullopt,
+                                        "read_repository_file",
+                                        std::move(*validated),
+                                        {},
+                                        tool->limits},
+                                       {});
+  REQUIRE_FALSE(started);
+  CHECK(started.error().code == runtime::ToolExecutionErrorCode::unavailable);
+  CHECK(snapshots.recorded_requests().empty());
+  CHECK(sources.recorded_read_requests().empty());
+}
+
+TEST_CASE("automatic repository effect reads through the pinned descriptor",
+          "[automatic-approval][repository][effect]") {
+  TemporaryDirectory temporary;
+  const auto root = temporary.path() / "repository";
+  REQUIRE(std::filesystem::create_directories(root / "src"));
+  write_file(root / "src" / "main.cpp", "descriptor bytes");
+
+  auto authority = adapters::open_pinned_repository_root_authority(root);
+  REQUIRE(authority);
+  testing::ScriptedRepositorySnapshotSource snapshots;
+  testing::ScriptedExactSourceEditor sources;
+  sources.couple_to(snapshots, true);
+  runtime::ToolRegistry registry;
+  runtime::RepositoryReadToolConfiguration configuration{root.generic_string()};
+  REQUIRE(runtime::register_repository_read_tool(
+      registry, snapshots, sources, configuration, *authority,
+      snapshot(root.generic_string())));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  const auto* tool = tools->find("read_repository_file");
+  REQUIRE(tool != nullptr);
+  auto validated = tool->executor->validate(
+      {"application/json", R"({"relative_path":"src/main.cpp"})"});
+  REQUIRE(validated);
+
+  auto started = tool->executor->start({id<domain::InvocationId>("invocation"),
+                                        std::nullopt,
+                                        "read_repository_file",
+                                        std::move(*validated),
+                                        {},
+                                        tool->limits},
+                                       {});
+  REQUIRE(started);
+  auto result = (*started)->next({});
+  REQUIRE(result);
+  REQUIRE(result->has_value());
+  const auto* completed = std::get_if<runtime::ToolResult>(&result->value());
+  REQUIRE(completed != nullptr);
+  REQUIRE(completed->content.size() == 1);
+  const auto* structured =
+      std::get_if<domain::StructuredDataBlock>(&completed->content.front());
+  REQUIRE(structured != nullptr);
+  CHECK(structured->data.find("descriptor bytes") != std::string::npos);
+  CHECK(snapshots.recorded_requests().empty());
+  CHECK(sources.recorded_read_requests().empty());
+}
+
 TEST_CASE("configured matcher rejects missing authority and overbound values",
           "[automatic-approval][configuration][failure]") {
   config::AutomaticApprovalRulesConfig repository{{
@@ -165,6 +284,14 @@ TEST_CASE("configured matcher rejects missing authority and overbound values",
   }};
   REQUIRE_FALSE(
       runtime::compile_configured_automatic_approval_matcher(repository));
+
+  config::AutomaticApprovalRulesConfig exact_repository_read{{
+      config::ExactAutomaticApprovalRuleConfig{
+          "read_repository_file", R"({"relative_path":"src/main.cpp"})",
+          constraints(1, 0)},
+  }};
+  REQUIRE_FALSE(runtime::compile_configured_automatic_approval_matcher(
+      exact_repository_read));
 
   auto expiry = constraints(1, 0);
   expiry.expires_after_milliseconds =
