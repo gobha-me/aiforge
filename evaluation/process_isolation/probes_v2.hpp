@@ -2,7 +2,9 @@
 
 #include "evidence_v2.hpp"
 
+#include <cstdint>
 #include <filesystem>
+#include <string>
 
 namespace aiforge::evaluation::process_isolation::v2 {
 
@@ -30,6 +32,8 @@ namespace test_support {
 [[nodiscard]] auto memory_limit_outcome(bool killed, bool oom_kill_advanced)
     -> ProbeRecord;
 [[nodiscard]] auto pids_limit_outcome(bool exhausted, bool tree_complete,
+                                      bool controller_counter_observed,
+                                      bool controller_limit_advanced,
                                       bool cleanup_complete) -> ProbeRecord;
 [[nodiscard]] auto execute_confinement_outcome(bool local_executed,
                                                bool outside_denied)
@@ -53,6 +57,8 @@ namespace test_support {
     -> ProbeRecord;
 [[nodiscard]] auto combined_setup_errno_outcome(ProbeId id, int error_number)
     -> ProbeRecord;
+[[nodiscard]] auto namespace_identity_map(std::uint64_t outside_id)
+    -> std::string;
 [[nodiscard]] auto setup_order_outcome(
     ProbeId id, bool limits_applied, bool placed, bool staged_descriptors,
     bool descriptor_launched, bool setup_descriptors_closed,

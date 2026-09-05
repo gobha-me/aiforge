@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cerrno>
+#include <cstdint>
 #include <utility>
 
 namespace isolation = aiforge::evaluation::process_isolation;
@@ -82,16 +83,24 @@ TEST_CASE("limit and execute evidence require causal observations",
   CHECK(v2::test_support::memory_limit_outcome(true, true).state ==
         isolation::ProbeState::enforced);
 
-  CHECK(v2::test_support::pids_limit_outcome(false, true, true).state ==
-        isolation::ProbeState::unavailable);
-  CHECK(v2::test_support::pids_limit_outcome(true, false, true).state ==
-        isolation::ProbeState::unavailable);
+  CHECK(v2::test_support::pids_limit_outcome(false, true, true, true, true)
+            .state == isolation::ProbeState::unavailable);
+  CHECK(v2::test_support::pids_limit_outcome(true, false, true, true, true)
+            .state == isolation::ProbeState::unavailable);
+  const auto unrelated_exhaustion =
+      v2::test_support::pids_limit_outcome(true, true, true, false, true);
+  CHECK(unrelated_exhaustion.state == isolation::ProbeState::unavailable);
+  CHECK(unrelated_exhaustion.reason == v2::ReasonCode::limit_not_triggered);
+  const auto malformed_counter =
+      v2::test_support::pids_limit_outcome(true, true, false, false, true);
+  CHECK(malformed_counter.state == isolation::ProbeState::probe_error);
+  CHECK(malformed_counter.reason == v2::ReasonCode::malformed_protocol);
   const auto pids_cleanup =
-      v2::test_support::pids_limit_outcome(true, true, false);
+      v2::test_support::pids_limit_outcome(true, true, false, false, false);
   CHECK(pids_cleanup.state == isolation::ProbeState::probe_error);
   CHECK(pids_cleanup.reason == v2::ReasonCode::cleanup_failed);
-  CHECK(v2::test_support::pids_limit_outcome(true, true, true).state ==
-        isolation::ProbeState::enforced);
+  CHECK(v2::test_support::pids_limit_outcome(true, true, true, true, true)
+            .state == isolation::ProbeState::enforced);
 
   CHECK(v2::test_support::execute_confinement_outcome(false, true).state ==
         isolation::ProbeState::unavailable);
@@ -99,6 +108,14 @@ TEST_CASE("limit and execute evidence require causal observations",
         isolation::ProbeState::unavailable);
   CHECK(v2::test_support::execute_confinement_outcome(true, true).state ==
         isolation::ProbeState::enforced);
+}
+
+TEST_CASE("namespace identity maps preserve the outer user identity",
+          "[process-isolation][evidence-v2][failure]") {
+  CHECK(v2::test_support::namespace_identity_map(0) == "0 0 1");
+  CHECK(v2::test_support::namespace_identity_map(1000) == "0 1000 1");
+  CHECK(v2::test_support::namespace_identity_map(UINT32_MAX) ==
+        "0 4294967295 1");
 }
 
 TEST_CASE("mount propagation requires an isolated child mount observation",

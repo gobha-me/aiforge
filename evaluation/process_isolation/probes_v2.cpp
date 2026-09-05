@@ -117,14 +117,18 @@ constexpr std::size_t maximum_control_bytes = 64UZ * 1024UZ;
                            ReasonCode::limit_not_triggered);
 }
 
-[[nodiscard]] auto pids_limit_observation(const bool exhausted,
-                                          const bool tree_complete,
-                                          const bool cleanup_complete)
+[[nodiscard]] auto pids_limit_observation(
+    const bool exhausted, const bool tree_complete,
+    const bool controller_counter_observed,
+    const bool controller_limit_advanced, const bool cleanup_complete)
     -> ProbeRecord {
   if (!cleanup_complete)
     return probe_error(ProbeId::cgroup_pids_limit_enforcement,
                        ReasonCode::cleanup_failed);
-  return exhausted && tree_complete
+  if (!controller_counter_observed)
+    return probe_error(ProbeId::cgroup_pids_limit_enforcement,
+                       ReasonCode::malformed_protocol);
+  return exhausted && tree_complete && controller_limit_advanced
              ? enforced(ProbeId::cgroup_pids_limit_enforcement)
              : unavailable(ProbeId::cgroup_pids_limit_enforcement,
                            ReasonCode::limit_not_triggered);
@@ -1307,6 +1311,15 @@ auto kill_and_reap(const pid_t child, int& status) -> void {
 [[nodiscard]] auto pids_limit_probe(const ProbeId id) -> ProbeRecord {
   auto cgroup = required_cgroup_or_record(id);
   if (!cgroup) return cgroup.error();
+  const auto before = read_control(cgroup->child(), "pids.events");
+  const auto before_max =
+      before ? parse_named_counter(*before, "max") : std::nullopt;
+  if (!before_max) {
+    auto result = probe_error(id, ReasonCode::malformed_protocol);
+    if (!cgroup->cleanup())
+      result = probe_error(id, ReasonCode::cleanup_failed);
+    return result;
+  }
   int previous_subreaper{};
   if (::prctl(PR_GET_CHILD_SUBREAPER, &previous_subreaper) != 0 ||
       (previous_subreaper == 0 && ::prctl(PR_SET_CHILD_SUBREAPER, 1) != 0)) {
@@ -1342,12 +1355,17 @@ auto kill_and_reap(const pid_t child, int& status) -> void {
                          ::read(observed.get(), &error_number,
                                 sizeof(error_number)) == sizeof(error_number) &&
                          error_number == EAGAIN;
+  const auto after_max =
+      await_counter_advance(cgroup->child(), "pids.events", "max", *before_max,
+                            std::chrono::milliseconds{500});
   const auto termination = terminate_cgroup_tree(id, *cgroup, false, 4);
   const auto result =
       termination.state == ProbeState::probe_error
           ? termination
-          : pids_limit_observation(
-                triggered, termination.state == ProbeState::enforced, true);
+          : pids_limit_observation(triggered,
+                                   termination.state == ProbeState::enforced,
+                                   after_max.has_value(),
+                                   after_max && *after_max > *before_max, true);
   return finish_subreaper_probe(id, *cgroup, previous_subreaper, result);
 }
 
@@ -1614,12 +1632,21 @@ auto kill_and_reap(const pid_t child, int& status) -> void {
 #endif
 }
 
+[[nodiscard]] auto namespace_identity_map_value(const std::uint64_t outside_id)
+    -> std::string {
+  return "0 " + std::to_string(outside_id) + " 1";
+}
+
 [[nodiscard]] auto establish_private_mount_namespace() -> int {
+  // Once the new user namespace exists, the still-unmapped parent IDs read as
+  // overflow IDs. Preserve the outer identity before crossing that boundary.
+  const auto parent_uid = ::geteuid();
+  const auto parent_gid = ::getegid();
   if (::unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0)
     return assertion_exit_for_errno(errno);
   static_cast<void>(write_control(AT_FDCWD, "/proc/self/setgroups", "deny"));
-  const auto uid_map = "0 " + std::to_string(::getuid()) + " 1";
-  const auto gid_map = "0 " + std::to_string(::getgid()) + " 1";
+  const auto uid_map = namespace_identity_map_value(parent_uid);
+  const auto gid_map = namespace_identity_map_value(parent_gid);
   if (!write_control(AT_FDCWD, "/proc/self/uid_map", uid_map) ||
       !write_control(AT_FDCWD, "/proc/self/gid_map", gid_map))
     return assertion_exit_for_errno(errno);
@@ -2067,8 +2094,12 @@ auto memory_limit_outcome(const bool killed, const bool oom_kill_advanced)
 }
 
 auto pids_limit_outcome(const bool exhausted, const bool tree_complete,
+                        const bool controller_counter_observed,
+                        const bool controller_limit_advanced,
                         const bool cleanup_complete) -> ProbeRecord {
-  return pids_limit_observation(exhausted, tree_complete, cleanup_complete);
+  return pids_limit_observation(exhausted, tree_complete,
+                                controller_counter_observed,
+                                controller_limit_advanced, cleanup_complete);
 }
 
 auto execute_confinement_outcome(const bool local_executed,
@@ -2113,6 +2144,10 @@ auto pid_identity_outcome(const bool pidfd_opened, const bool identity_stable)
 auto combined_setup_errno_outcome(const ProbeId id, const int error_number)
     -> ProbeRecord {
   return assertion_result(id, assertion_exit_for_errno(error_number));
+}
+
+auto namespace_identity_map(const std::uint64_t outside_id) -> std::string {
+  return namespace_identity_map_value(outside_id);
 }
 
 auto setup_order_outcome(const ProbeId id, const bool limits_applied,
