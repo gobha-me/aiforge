@@ -47,8 +47,7 @@ struct RepositoryReadToolConfiguration {
     ToolRegistry& registry, repository::RepositorySnapshotSource& snapshots,
     repository::ExactSourceEditor& sources,
     RepositoryReadToolConfiguration configuration,
-    std::shared_ptr<const DescriptorRelativePathAuthority> pinned_root = {},
-    std::optional<domain::RepositorySnapshot> pinned_baseline = std::nullopt)
+    std::shared_ptr<const PinnedRepositoryReadAuthority> pinned_root = {})
     -> std::expected<void, ToolRegistryError>;
 
 } // namespace aiforge::runtime

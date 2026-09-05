@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <aiforge/domain/events.hpp>
+#include <aiforge/repository/exact_source_edit.hpp>
 #include <aiforge/runtime/application_launch_context.hpp>
 
 namespace aiforge::config {
@@ -33,8 +34,6 @@ enum class AutomaticApprovalMatcherErrorCode {
   invalid_configuration,
   invalid_request,
   path_unavailable,
-  resource_exhausted,
-  cancelled,
   internal_failure,
 };
 
@@ -67,12 +66,6 @@ struct AutomaticApprovalRuleConstraints {
       -> bool = default;
 };
 
-struct DescriptorRelativeReadResult {
-  domain::ContentDigest content_digest;
-  std::string content;
-  auto operator==(const DescriptorRelativeReadResult&) const -> bool = default;
-};
-
 class DescriptorRelativePathAuthority {
  public:
   virtual ~DescriptorRelativePathAuthority() = default;
@@ -86,14 +79,19 @@ class DescriptorRelativePathAuthority {
   [[nodiscard]] virtual auto contains(std::string_view allowed_relative_path,
                                       std::string_view candidate_relative_path)
       const -> std::expected<bool, AutomaticApprovalMatcherError> = 0;
+};
 
-  // Reads file content through the application-lifetime root descriptor. The
-  // configured root chain is reobserved only to verify its pinned identity.
-  [[nodiscard]] virtual auto read(std::string_view candidate_relative_path,
-                                  std::uint64_t maximum_bytes,
-                                  std::stop_token stop_token = {}) const
-      -> std::expected<DescriptorRelativeReadResult,
-                       AutomaticApprovalMatcherError> = 0;
+class PinnedRepositoryReadAuthority : public DescriptorRelativePathAuthority {
+ public:
+  // Captured from this descriptor lease before the authority is published.
+  [[nodiscard]] virtual auto baseline() const noexcept
+      -> const domain::RepositorySnapshot& = 0;
+
+  [[nodiscard]] virtual auto read_exact(
+      repository::ExactSourceReadRequest request,
+      std::stop_token stop_token = {}) const
+      -> std::expected<repository::ExactSourceReadResult,
+                       repository::ExactSourceEditError> = 0;
 };
 
 struct ExactToolArgumentsApprovalRule {

@@ -52,15 +52,6 @@ class ScriptedPathAuthority final
             candidate_relative_path[allowed_relative_path.size()] == '/');
   }
 
-  [[nodiscard]] auto read(std::string_view, std::uint64_t,
-                          std::stop_token) const
-      -> std::expected<runtime::DescriptorRelativeReadResult,
-                       runtime::AutomaticApprovalMatcherError> override {
-    return std::unexpected(runtime::AutomaticApprovalMatcherError{
-        runtime::AutomaticApprovalMatcherErrorCode::path_unavailable,
-        "scripted path read is unavailable"});
-  }
-
   std::string m_identity;
   std::optional<std::string> identity_after_first;
   mutable std::atomic<std::size_t> identity_calls{};
@@ -167,6 +158,9 @@ TEST_CASE("automatic approval matcher rejects malformed and overbound rules",
   std::get<runtime::ExactToolArgumentsApprovalRule>(noncanonical)
       .arguments.value.data = R"({ "path": "a" })";
   REQUIRE_FALSE(runtime::compile_automatic_approval_matcher({noncanonical}));
+
+  REQUIRE_FALSE(runtime::compile_automatic_approval_matcher({exact_rule(
+      "read_repository_file", R"({"relative_path":"src/main.cpp"})")}));
 }
 
 TEST_CASE("matcher identities are deterministic and semantic",
@@ -423,6 +417,11 @@ TEST_CASE("repository rules require descriptor-relative pinned-root membership",
   auto rule = runtime::make_repository_read_approval_rule(authority, "src",
                                                           constraints(4));
   REQUIRE(rule);
+  authority->fail = true;
+  REQUIRE_FALSE(runtime::compile_automatic_approval_matcher(
+      {*rule, exact_rule("read_repository_file",
+                         R"({"relative_path":"src/lib/file.cpp"})")}));
+  authority->fail = false;
   auto matcher = runtime::compile_automatic_approval_matcher({*rule});
   REQUIRE(matcher);
 
@@ -474,33 +473,36 @@ TEST_CASE("repository rules require descriptor-relative pinned-root membership",
                                                             constraints()));
 }
 
-TEST_CASE("repository authority errors dominate overlapping exact rules",
+TEST_CASE("repository authority errors dominate overlapping path rules",
           "[approval-matcher][repository][failure]") {
-  auto authority =
+  auto failing =
       std::make_shared<ScriptedPathAuthority>("sha256:" + std::string(64, 'a'));
-  authority->fail = true;
-  auto repository_rule = runtime::make_repository_read_approval_rule(
-      authority, "src", constraints(1, 1));
-  REQUIRE(repository_rule);
+  auto healthy =
+      std::make_shared<ScriptedPathAuthority>("sha256:" + std::string(64, 'b'));
+  auto failing_rule = runtime::make_repository_read_approval_rule(
+      failing, "src", constraints(1, 1));
+  auto healthy_rule = runtime::make_repository_read_approval_rule(
+      healthy, "src", constraints(1, 2));
+  REQUIRE(failing_rule);
+  REQUIRE(healthy_rule);
   auto matcher = runtime::compile_automatic_approval_matcher(
-      {*repository_rule,
-       exact_rule("read_repository_file", R"({"relative_path":"src/main.cpp"})",
-                  constraints(1, 2))});
+      {*healthy_rule, *failing_rule});
   REQUIRE(matcher);
-
   const auto candidate = request("overlap", "read_repository_file",
                                  R"({"relative_path":"src/main.cpp"})");
+
+  failing->fail = true;
   const auto failed = (*matcher)->match(candidate);
   REQUIRE_FALSE(failed);
   CHECK(failed.error().code ==
         runtime::AutomaticApprovalMatcherErrorCode::path_unavailable);
 
-  authority->fail = false;
-  const auto retried = (*matcher)->match(candidate);
-  REQUIRE(retried);
-  REQUIRE(retried->has_value());
+  failing->fail = false;
+  const auto approved = (*matcher)->match(candidate);
+  REQUIRE(approved);
+  REQUIRE(approved->has_value());
 
-  authority->fail = true;
+  failing->fail = true;
   const auto replayed = (*matcher)->match(candidate);
   REQUIRE_FALSE(replayed);
   CHECK(replayed.error().code ==

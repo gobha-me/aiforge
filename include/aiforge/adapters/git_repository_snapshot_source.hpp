@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <stop_token>
 #include <string>
 
 #include <aiforge/repository/snapshot_source.hpp>
@@ -41,6 +42,13 @@ class GitRepositorySnapshotSource final
                              std::stop_token stop_token = {})
       -> std::expected<domain::RepositorySnapshot,
                        repository::RepositorySnapshotError> override;
+
+  [[nodiscard]] auto observe_pinned(int root_descriptor,
+                                    std::string canonical_root,
+                                    repository::RepositorySnapshotLimits limits,
+                                    std::stop_token stop_token = {})
+      -> std::expected<domain::RepositorySnapshot,
+                       repository::RepositorySnapshotError>;
 
  private:
   friend class GitProjectInstructionSource;

@@ -266,32 +266,6 @@ class DuplicateJsonKey final : public std::exception {};
                          "repository read failed internally");
 }
 
-[[nodiscard]] auto pinned_read_failure(
-    const AutomaticApprovalMatcherError& error)
-    -> std::unexpected<ToolExecutionError> {
-  using Code = AutomaticApprovalMatcherErrorCode;
-  switch (error.code) {
-    case Code::invalid_request:
-    case Code::invalid_configuration:
-      return execution_error(ToolExecutionErrorCode::protocol_failure,
-                             "pinned repository read was rejected");
-    case Code::path_unavailable:
-      return execution_error(ToolExecutionErrorCode::unavailable,
-                             "pinned repository path is unavailable", true);
-    case Code::resource_exhausted:
-      return execution_error(ToolExecutionErrorCode::output_limit,
-                             "repository file exceeded its read limit");
-    case Code::cancelled:
-      return execution_error(ToolExecutionErrorCode::cancelled,
-                             "repository read was cancelled");
-    case Code::internal_failure:
-      return execution_error(ToolExecutionErrorCode::internal_failure,
-                             "pinned repository read failed internally");
-  }
-  return execution_error(ToolExecutionErrorCode::internal_failure,
-                         "pinned repository read failed internally");
-}
-
 [[nodiscard]] auto valid_digest(const domain::ContentDigest& digest,
                                 const std::uint64_t maximum_bytes) -> bool {
   if (digest.algorithm.empty() || digest.algorithm.size() > 128 ||
@@ -356,7 +330,7 @@ class RepositoryReadExecutor final : public ToolExecutor {
       repository::RepositorySnapshotSource& snapshots,
       repository::ExactSourceEditor& sources,
       RepositoryReadToolConfiguration configuration,
-      std::shared_ptr<const DescriptorRelativePathAuthority> pinned_root,
+      std::shared_ptr<const PinnedRepositoryReadAuthority> pinned_root,
       std::optional<domain::RepositorySnapshot> pinned_baseline)
       : m_snapshots(snapshots), m_sources(sources),
         m_configuration(std::move(configuration)),
@@ -469,21 +443,15 @@ class RepositoryReadExecutor final : public ToolExecutor {
       if (!content) return source_failure(content.error());
       return std::move(*content);
     }
-    auto content = m_pinned_root->read(
-        request.relative_path, request.limits.maximum_source_bytes, stop_token);
-    if (!content) return pinned_read_failure(content.error());
-    return repository::ExactSourceReadResult{
-        {domain::snapshot_identity(request.baseline),
-         request.relative_path,
-         std::move(content->content_digest),
-         {}},
-        std::move(content->content)};
+    auto content = m_pinned_root->read_exact(request, stop_token);
+    if (!content) return source_failure(content.error());
+    return std::move(*content);
   }
 
   repository::RepositorySnapshotSource& m_snapshots;
   repository::ExactSourceEditor& m_sources;
   RepositoryReadToolConfiguration m_configuration;
-  std::shared_ptr<const DescriptorRelativePathAuthority> m_pinned_root;
+  std::shared_ptr<const PinnedRepositoryReadAuthority> m_pinned_root;
   std::optional<domain::RepositorySnapshot> m_pinned_baseline;
 };
 
@@ -558,8 +526,7 @@ auto register_repository_read_tool(
     ToolRegistry& registry, repository::RepositorySnapshotSource& snapshots,
     repository::ExactSourceEditor& sources,
     RepositoryReadToolConfiguration configuration,
-    std::shared_ptr<const DescriptorRelativePathAuthority> pinned_root,
-    std::optional<domain::RepositorySnapshot> pinned_baseline)
+    std::shared_ptr<const PinnedRepositoryReadAuthority> pinned_root)
     -> std::expected<void, ToolRegistryError> {
   try {
     if (!snapshots.guarantees_read_only_observation() ||
@@ -570,18 +537,20 @@ auto register_repository_read_tool(
           "repository-read sources must guarantee coupled read-only tracked "
           "file observation");
     }
-    if (static_cast<bool>(pinned_root) != pinned_baseline.has_value() ||
-        (pinned_baseline &&
-         (pinned_baseline->root.canonical_path !=
-              configuration.repository_root ||
-          !pinned_baseline->vcs || pinned_baseline->vcs->system != "git" ||
-          !repository::validate_repository_snapshot(
-              *pinned_baseline, configuration.snapshot_limits)))) {
-      return registry_error(
-          "pinned repository-read authority and baseline are invalid");
-    }
     auto declaration = repository_read_tool_declaration(configuration);
     if (!declaration) return std::unexpected(std::move(declaration.error()));
+    std::optional<domain::RepositorySnapshot> pinned_baseline;
+    if (pinned_root) {
+      const auto& observed = pinned_root->baseline();
+      if (observed.root.canonical_path != configuration.repository_root ||
+          !observed.vcs || observed.vcs->system != "git" ||
+          !repository::validate_repository_snapshot(
+              observed, configuration.snapshot_limits)) {
+        return registry_error(
+            "pinned repository-read baseline could not be established");
+      }
+      pinned_baseline = observed;
+    }
     const auto output_limit = configuration.maximum_result_bytes;
     const auto timeout = configuration.read_limits.timeout;
     return registry.register_tool(

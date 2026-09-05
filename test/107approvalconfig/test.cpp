@@ -2,21 +2,21 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <unistd.h>
 #include <utility>
 #include <vector>
 
+#include <aiforge/adapters/git_exact_source_editor.hpp>
+#include <aiforge/adapters/git_repository_snapshot_source.hpp>
 #include <aiforge/adapters/pinned_repository_root_authority.hpp>
 #include <aiforge/config/config.hpp>
 #include <aiforge/runtime/automatic_approval_matcher.hpp>
 #include <aiforge/runtime/repository_read_tool.hpp>
-#include <aiforge/testing/scripted_exact_source_editor.hpp>
-#include <aiforge/testing/scripted_repository_snapshot_source.hpp>
 
 namespace {
 
@@ -84,19 +84,43 @@ auto constraints(const std::uint64_t matches, const std::uint32_t precedence)
   return {{"high"}, matches, std::nullopt, precedence};
 }
 
-auto digest(std::string value, const std::uint64_t bytes)
-    -> domain::ContentDigest {
-  return {"sha256", std::move(value), bytes};
+auto shell_quote(const std::filesystem::path& path) -> std::string {
+  std::string result{"'"};
+  for (const char value : path.string()) {
+    if (value == '\'')
+      result.append("'\\''");
+    else
+      result.push_back(value);
+  }
+  result.push_back('\'');
+  return result;
 }
 
-auto snapshot(const std::string& root) -> domain::RepositorySnapshot {
-  return {{id<domain::RepositoryId>("repository-1"), root},
-          domain::VcsState{"git", "sha256", domain::VcsHeadKind::branch, "main",
-                           "bbbbbbbbbbbbbbbb"},
-          {},
-          digest("aaaaaaaaaaaaaaaa", 64),
-          std::chrono::sys_time<std::chrono::milliseconds>{
-              std::chrono::milliseconds{100}}};
+auto git(const std::filesystem::path& root, const std::string_view arguments)
+    -> void {
+  const auto command = shell_quote(REPOSITORY_TEST_GIT) + " -C " +
+                       shell_quote(root) + " " + std::string{arguments} +
+                       " >/dev/null 2>&1";
+  REQUIRE(std::system(command.c_str()) == 0);
+}
+
+auto initialize_repository(const std::filesystem::path& root,
+                           const std::string_view content = "content") -> void {
+  REQUIRE(std::filesystem::create_directories(root / "src"));
+  git(root, "init -q");
+  git(root, "config user.email test@example.invalid");
+  git(root, "config user.name Test");
+  write_file(root / ".gitignore", "ignored.txt\n");
+  write_file(root / "src" / "main.cpp", content);
+  git(root, "add .gitignore src/main.cpp");
+  git(root, "commit -qm initial");
+}
+
+auto git_source() -> adapters::GitRepositorySnapshotSource {
+  auto source = adapters::GitRepositorySnapshotSource::open(
+      REPOSITORY_TEST_GIT, adapters::GitCommandPolicy::isolated_read_only);
+  REQUIRE(source);
+  return std::move(*source);
 }
 
 } // namespace
@@ -105,46 +129,50 @@ TEST_CASE("pinned repository authority rejects symlinks and root replacement",
           "[automatic-approval][repository][failure]") {
   TemporaryDirectory temporary;
   const auto repository = temporary.path() / "repository";
-  REQUIRE(std::filesystem::create_directories(repository / "src"));
-  write_file(repository / "src" / "file.cpp");
+  initialize_repository(repository);
+  auto source = git_source();
+  adapters::GitExactSourceEditor editor{
+      source, adapters::GitExactSourceReadPolicy::tracked_regular_files};
   std::filesystem::create_directory_symlink(repository / "src",
                                             repository / "src" / "linked");
   REQUIRE(std::filesystem::is_symlink(repository / "src" / "linked"));
 
-  const auto authority =
-      adapters::open_pinned_repository_root_authority(repository);
+  const auto authority = adapters::open_pinned_repository_root_authority(
+      repository, source, editor);
   REQUIRE(authority);
   REQUIRE((*authority)->identity().starts_with("sha256:"));
-  REQUIRE((*authority)->contains("src", "src/file.cpp").value());
-  REQUIRE_FALSE((*authority)->contains("docs", "src/file.cpp").value());
-  REQUIRE_FALSE((*authority)->contains("src", "src/linked/file.cpp"));
+  REQUIRE((*authority)->contains("src", "src/main.cpp").value());
+  REQUIRE_FALSE((*authority)->contains("docs", "src/main.cpp").value());
+  REQUIRE_FALSE((*authority)->contains("src", "src/linked/main.cpp"));
   REQUIRE_FALSE((*authority)->contains("src", "src/missing.cpp"));
   REQUIRE_FALSE((*authority)->contains("src", "../src/file.cpp"));
 
   const auto symlinked_root = temporary.path() / "repository-link";
   std::filesystem::create_directory_symlink(repository, symlinked_root);
   REQUIRE(std::filesystem::is_symlink(symlinked_root));
-  REQUIRE_FALSE(
-      adapters::open_pinned_repository_root_authority(symlinked_root));
   REQUIRE_FALSE(adapters::open_pinned_repository_root_authority(
-      std::filesystem::path{"/" + std::string(4097U, 'x')}));
+      symlinked_root, source, editor));
+  REQUIRE_FALSE(adapters::open_pinned_repository_root_authority(
+      std::filesystem::path{"/" + std::string(4097U, 'x')}, source, editor));
 
   const auto original = temporary.path() / "original-repository";
   std::filesystem::rename(repository, original);
   REQUIRE(std::filesystem::is_directory(original));
   REQUIRE(std::filesystem::create_directories(repository / "src"));
-  write_file(repository / "src" / "file.cpp", "replacement");
-  REQUIRE_FALSE((*authority)->contains("src", "src/file.cpp"));
+  write_file(repository / "src" / "main.cpp", "replacement");
+  REQUIRE_FALSE((*authority)->contains("src", "src/main.cpp"));
 }
 
 TEST_CASE("production configuration compiles nonempty exact and path rules",
           "[automatic-approval][configuration]") {
   TemporaryDirectory temporary;
   const auto repository = temporary.path() / "repository";
-  REQUIRE(std::filesystem::create_directories(repository / "src"));
-  write_file(repository / "src" / "file.cpp");
-  const auto authority =
-      adapters::open_pinned_repository_root_authority(repository);
+  initialize_repository(repository);
+  auto source = git_source();
+  adapters::GitExactSourceEditor editor{
+      source, adapters::GitExactSourceReadPolicy::tracked_regular_files};
+  const auto authority = adapters::open_pinned_repository_root_authority(
+      repository, source, editor);
   REQUIRE(authority);
 
   config::AutomaticApprovalRulesConfig configured{{
@@ -165,7 +193,7 @@ TEST_CASE("production configuration compiles nonempty exact and path rules",
                     .value());
   REQUIRE((*matcher)
               ->match(request("path", "read_repository_file",
-                              R"({"relative_path":"src/file.cpp"})"))
+                              R"({"relative_path":"src/main.cpp"})"))
               .value());
 
   const auto empty = runtime::compile_configured_automatic_approval_matcher({});
@@ -179,11 +207,26 @@ TEST_CASE("automatic repository effect never reopens a replaced root",
           "[automatic-approval][repository][effect][failure]") {
   TemporaryDirectory temporary;
   const auto root = temporary.path() / "repository";
-  REQUIRE(std::filesystem::create_directories(root / "src"));
-  write_file(root / "src" / "main.cpp", "approved bytes");
+  initialize_repository(root, "approved bytes");
 
-  auto authority = adapters::open_pinned_repository_root_authority(root);
+  auto source = git_source();
+  adapters::GitExactSourceEditor editor{
+      source, adapters::GitExactSourceReadPolicy::tracked_regular_files};
+  auto authority =
+      adapters::open_pinned_repository_root_authority(root, source, editor);
   REQUIRE(authority);
+  runtime::ToolRegistry registry;
+  runtime::RepositoryReadToolConfiguration configuration{root.generic_string()};
+  REQUIRE(runtime::register_repository_read_tool(registry, source, editor,
+                                                 configuration, *authority));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  const auto* tool = tools->find("read_repository_file");
+  REQUIRE(tool != nullptr);
+  auto validated = tool->executor->validate(
+      {"application/json", R"({"relative_path":"src/main.cpp"})"});
+  REQUIRE(validated);
+
   auto rule = runtime::make_repository_read_approval_rule(
       *authority, "src", {{runtime::RestrictionLevel::high}, 1, {}, 0});
   REQUIRE(rule);
@@ -194,22 +237,6 @@ TEST_CASE("automatic repository effect never reopens a replaced root",
                                 R"({"relative_path":"src/main.cpp"})"));
   REQUIRE(decision);
   REQUIRE(decision->has_value());
-
-  testing::ScriptedRepositorySnapshotSource snapshots;
-  testing::ScriptedExactSourceEditor sources;
-  sources.couple_to(snapshots, true);
-  runtime::ToolRegistry registry;
-  runtime::RepositoryReadToolConfiguration configuration{root.generic_string()};
-  REQUIRE(runtime::register_repository_read_tool(
-      registry, snapshots, sources, configuration, *authority,
-      snapshot(root.generic_string())));
-  auto tools = registry.snapshot();
-  REQUIRE(tools);
-  const auto* tool = tools->find("read_repository_file");
-  REQUIRE(tool != nullptr);
-  auto validated = tool->executor->validate(
-      {"application/json", R"({"relative_path":"src/main.cpp"})"});
-  REQUIRE(validated);
 
   const auto original = temporary.path() / "original";
   std::filesystem::rename(root, original);
@@ -225,27 +252,25 @@ TEST_CASE("automatic repository effect never reopens a replaced root",
                                        {});
   REQUIRE_FALSE(started);
   CHECK(started.error().code == runtime::ToolExecutionErrorCode::unavailable);
-  CHECK(snapshots.recorded_requests().empty());
-  CHECK(sources.recorded_read_requests().empty());
+  CHECK(started.error().message.find("replacement bytes") == std::string::npos);
 }
 
-TEST_CASE("automatic repository effect reads through the pinned descriptor",
+TEST_CASE("automatic repository effect preserves pinned Git provenance",
           "[automatic-approval][repository][effect]") {
   TemporaryDirectory temporary;
   const auto root = temporary.path() / "repository";
-  REQUIRE(std::filesystem::create_directories(root / "src"));
-  write_file(root / "src" / "main.cpp", "descriptor bytes");
+  initialize_repository(root, "descriptor bytes");
 
-  auto authority = adapters::open_pinned_repository_root_authority(root);
+  auto source = git_source();
+  adapters::GitExactSourceEditor editor{
+      source, adapters::GitExactSourceReadPolicy::tracked_regular_files};
+  auto authority =
+      adapters::open_pinned_repository_root_authority(root, source, editor);
   REQUIRE(authority);
-  testing::ScriptedRepositorySnapshotSource snapshots;
-  testing::ScriptedExactSourceEditor sources;
-  sources.couple_to(snapshots, true);
   runtime::ToolRegistry registry;
   runtime::RepositoryReadToolConfiguration configuration{root.generic_string()};
-  REQUIRE(runtime::register_repository_read_tool(
-      registry, snapshots, sources, configuration, *authority,
-      snapshot(root.generic_string())));
+  REQUIRE(runtime::register_repository_read_tool(registry, source, editor,
+                                                 configuration, *authority));
   auto tools = registry.snapshot();
   REQUIRE(tools);
   const auto* tool = tools->find("read_repository_file");
@@ -272,8 +297,84 @@ TEST_CASE("automatic repository effect reads through the pinned descriptor",
       std::get_if<domain::StructuredDataBlock>(&completed->content.front());
   REQUIRE(structured != nullptr);
   CHECK(structured->data.find("descriptor bytes") != std::string::npos);
-  CHECK(snapshots.recorded_requests().empty());
-  CHECK(sources.recorded_read_requests().empty());
+  CHECK(structured->data.find(R"("algorithm":"git-sha1")") !=
+        std::string::npos);
+}
+
+TEST_CASE("pinned repository effect rejects absent ignored and untracked files",
+          "[automatic-approval][repository][effect][failure]") {
+  TemporaryDirectory temporary;
+  const auto root = temporary.path() / "repository";
+  initialize_repository(root);
+  auto source = git_source();
+  adapters::GitExactSourceEditor editor{
+      source, adapters::GitExactSourceReadPolicy::tracked_regular_files};
+  auto authority =
+      adapters::open_pinned_repository_root_authority(root, source, editor);
+  REQUIRE(authority);
+  runtime::ToolRegistry registry;
+  REQUIRE(runtime::register_repository_read_tool(
+      registry, source, editor, {root.generic_string()}, *authority));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  const auto* tool = tools->find("read_repository_file");
+  REQUIRE(tool != nullptr);
+
+  write_file(root / "ignored.txt", "ignored secret");
+  write_file(root / "untracked.txt", "untracked secret");
+  for (const std::string_view path : {"ignored.txt", "untracked.txt"}) {
+    auto validated = tool->executor->validate(
+        {"application/json",
+         "{\"relative_path\":\"" + std::string{path} + "\"}"});
+    REQUIRE(validated);
+    auto started = tool->executor->start(
+        {id<domain::InvocationId>(std::string{"read-"} + std::string{path}),
+         std::nullopt,
+         "read_repository_file",
+         std::move(*validated),
+         {},
+         tool->limits},
+        {});
+    REQUIRE_FALSE(started);
+    CHECK(started.error().code == runtime::ToolExecutionErrorCode::unavailable);
+    CHECK(started.error().message.find("secret") == std::string::npos);
+  }
+}
+
+TEST_CASE("pinned repository effect rejects stale in-place tracked content",
+          "[automatic-approval][repository][effect][failure]") {
+  TemporaryDirectory temporary;
+  const auto root = temporary.path() / "repository";
+  initialize_repository(root, "baseline bytes");
+  auto source = git_source();
+  adapters::GitExactSourceEditor editor{
+      source, adapters::GitExactSourceReadPolicy::tracked_regular_files};
+  auto authority =
+      adapters::open_pinned_repository_root_authority(root, source, editor);
+  REQUIRE(authority);
+  runtime::ToolRegistry registry;
+  REQUIRE(runtime::register_repository_read_tool(
+      registry, source, editor, {root.generic_string()}, *authority));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  const auto* tool = tools->find("read_repository_file");
+  REQUIRE(tool != nullptr);
+  auto validated = tool->executor->validate(
+      {"application/json", R"({"relative_path":"src/main.cpp"})"});
+  REQUIRE(validated);
+
+  write_file(root / "src" / "main.cpp", "stale replacement bytes");
+  auto started = tool->executor->start({id<domain::InvocationId>("stale"),
+                                        std::nullopt,
+                                        "read_repository_file",
+                                        std::move(*validated),
+                                        {},
+                                        tool->limits},
+                                       {});
+  REQUIRE_FALSE(started);
+  CHECK(started.error().code == runtime::ToolExecutionErrorCode::unavailable);
+  CHECK(started.error().message.find("stale replacement bytes") ==
+        std::string::npos);
 }
 
 TEST_CASE("configured matcher rejects missing authority and overbound values",

@@ -1,10 +1,14 @@
 #include <aiforge/adapters/pinned_repository_root_authority.hpp>
 
+#include <aiforge/adapters/git_exact_source_editor.hpp>
+#include <aiforge/adapters/git_repository_snapshot_source.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <fcntl.h>
 #include <iterator>
 #include <optional>
@@ -107,36 +111,6 @@ struct RootComponent {
 
 [[nodiscard]] auto regular_identity(const FileIdentity& identity) -> bool {
   return S_ISREG(static_cast<mode_t>(identity.mode));
-}
-
-[[nodiscard]] auto read_content(const int descriptor,
-                                const std::uint64_t maximum_bytes,
-                                const std::stop_token stop_token)
-    -> std::expected<std::string, Error> {
-  std::string content;
-  content.reserve(static_cast<std::size_t>(
-      std::min<std::uint64_t>(maximum_bytes, std::uint64_t{64U} * 1024U)));
-  std::array<char, std::size_t{16U} * 1024U> buffer{};
-  for (;;) {
-    if (stop_token.stop_requested()) {
-      return failure(ErrorCode::cancelled, "repository read was cancelled");
-    }
-    const auto count = ::read(descriptor, buffer.data(), buffer.size());
-    if (count < 0) {
-      if (errno == EINTR) continue;
-      return failure(ErrorCode::path_unavailable,
-                     "repository read path is unavailable");
-    }
-    if (count == 0) break;
-    const auto bytes = static_cast<std::size_t>(count);
-    if (content.size() > maximum_bytes ||
-        bytes > maximum_bytes - content.size()) {
-      return failure(ErrorCode::resource_exhausted,
-                     "repository file exceeded its read limit");
-    }
-    content.append(buffer.data(), bytes);
-  }
-  return content;
 }
 
 [[nodiscard]] auto valid_relative_path(const std::string_view value,
@@ -247,13 +221,18 @@ struct OpenedRoot {
 }
 
 class PinnedRepositoryRootAuthority final
-    : public runtime::DescriptorRelativePathAuthority {
+    : public runtime::PinnedRepositoryReadAuthority {
  public:
   PinnedRepositoryRootAuthority(UniqueFd descriptor, FileIdentity root,
                                 std::vector<RootComponent> components,
-                                std::string identity)
+                                std::string identity,
+                                std::string canonical_root,
+                                GitRepositorySnapshotSource& snapshot_source,
+                                GitExactSourceEditor& exact_source)
       : m_descriptor(std::move(descriptor)), m_root(root),
-        m_components(std::move(components)), m_identity(std::move(identity)) {}
+        m_components(std::move(components)), m_identity(std::move(identity)),
+        m_canonical_root(std::move(canonical_root)),
+        m_snapshot_source(snapshot_source), m_exact_source(exact_source) {}
 
   [[nodiscard]] auto identity() const noexcept -> std::string_view override {
     return m_identity;
@@ -294,59 +273,96 @@ class PinnedRepositoryRootAuthority final
     }
   }
 
-  [[nodiscard]] auto read(const std::string_view candidate_relative_path,
-                          const std::uint64_t maximum_bytes,
-                          const std::stop_token stop_token) const
-      -> std::expected<runtime::DescriptorRelativeReadResult, Error> override {
+  [[nodiscard]] auto baseline() const noexcept
+      -> const domain::RepositorySnapshot& override {
+    if (!m_baseline) std::terminate();
+    return *m_baseline;
+  }
+
+  [[nodiscard]] auto establish_baseline(
+      const repository::RepositorySnapshotLimits limits)
+      -> std::expected<void, repository::RepositorySnapshotError> {
     try {
-      if (!valid_relative_path(candidate_relative_path, false) ||
-          maximum_bytes == 0 ||
-          maximum_bytes > std::uint64_t{64U} * 1024U * 1024U) {
-        return failure(ErrorCode::invalid_request,
-                       "repository read request is invalid");
+      if (auto verified = verify_root(); !verified) {
+        return std::unexpected(repository::RepositorySnapshotError{
+            repository::RepositorySnapshotErrorCode::unstable,
+            "pinned repository root changed or is unavailable", true});
       }
-      if (stop_token.stop_requested()) {
-        return failure(ErrorCode::cancelled, "repository read was cancelled");
+      auto result = m_snapshot_source.observe_pinned(
+          m_descriptor.get(), m_canonical_root, limits, {});
+      if (!result) return std::unexpected(std::move(result.error()));
+      if (auto verified = verify_root(); !verified) {
+        return std::unexpected(repository::RepositorySnapshotError{
+            repository::RepositorySnapshotErrorCode::unstable,
+            "pinned repository root changed or is unavailable", true});
       }
-      auto reopened = reopen_verified_root();
-      if (!reopened) return std::unexpected(std::move(reopened.error()));
-      auto pinned = duplicate_pinned_root();
-      if (!pinned) return std::unexpected(std::move(pinned.error()));
-      auto file =
-          traverse_candidate(std::move(*pinned), candidate_relative_path);
-      if (!file) return std::unexpected(std::move(file.error()));
-      const auto initial_identity = descriptor_identity(file->get());
-      if (!initial_identity || !regular_identity(*initial_identity)) {
-        return failure(ErrorCode::path_unavailable,
-                       "repository read path is unavailable");
-      }
-
-      auto content = read_content(file->get(), maximum_bytes, stop_token);
-      if (!content) return std::unexpected(std::move(content.error()));
-      const auto final_identity = descriptor_identity(file->get());
-      if (!final_identity || *final_identity != *initial_identity) {
-        return failure(ErrorCode::path_unavailable,
-                       "repository read path changed or is unavailable");
-      }
-      const auto pinned_identity = descriptor_identity(m_descriptor.get());
-      if (!pinned_identity || *pinned_identity != m_root) {
-        return failure(ErrorCode::path_unavailable,
-                       "repository approval root changed or is unavailable");
-      }
-      auto final_root = reopen_verified_root();
-      if (!final_root) return std::unexpected(std::move(final_root.error()));
-
-      detail::Sha256 digest;
-      digest.update(std::as_bytes(std::span{content->data(), content->size()}));
-      return runtime::DescriptorRelativeReadResult{
-          {"sha256", digest.finish(), content->size()}, std::move(*content)};
+      m_baseline = std::move(*result);
+      return {};
     } catch (...) {
-      return failure(ErrorCode::internal_failure,
-                     "repository read failed internally");
+      return std::unexpected(repository::RepositorySnapshotError{
+          repository::RepositorySnapshotErrorCode::internal_failure,
+          "pinned repository observation failed internally"});
+    }
+  }
+
+  [[nodiscard]] auto read_exact(repository::ExactSourceReadRequest request,
+                                const std::stop_token stop_token) const
+      -> std::expected<repository::ExactSourceReadResult,
+                       repository::ExactSourceEditError> override {
+    try {
+      if (!m_baseline || request.baseline != *m_baseline ||
+          request.baseline.root.canonical_path != m_canonical_root) {
+        return std::unexpected(repository::ExactSourceEditError{
+            repository::ExactSourceEditErrorCode::invalid_request,
+            "pinned exact-source baseline root is invalid",
+            {},
+            {},
+            false,
+            false});
+      }
+      if (auto verified = verify_root(); !verified) {
+        return root_read_failure();
+      }
+      auto result = m_exact_source.read_pinned(std::move(request),
+                                               m_descriptor.get(), stop_token);
+      if (!result) return std::unexpected(std::move(result.error()));
+      if (auto verified = verify_root(); !verified) {
+        return root_read_failure();
+      }
+      return result;
+    } catch (...) {
+      return std::unexpected(repository::ExactSourceEditError{
+          repository::ExactSourceEditErrorCode::internal_failure,
+          "pinned exact-source read failed internally",
+          {},
+          {},
+          false,
+          false});
     }
   }
 
  private:
+  [[nodiscard]] static auto root_read_failure()
+      -> std::unexpected<repository::ExactSourceEditError> {
+    return std::unexpected(repository::ExactSourceEditError{
+        repository::ExactSourceEditErrorCode::concurrent_change,
+        "pinned repository root changed or is unavailable",
+        {},
+        {},
+        true});
+  }
+
+  [[nodiscard]] auto verify_root() const -> std::expected<void, Error> {
+    auto reopened = reopen_verified_root();
+    if (!reopened) return std::unexpected(std::move(reopened.error()));
+    const auto pinned_identity = descriptor_identity(m_descriptor.get());
+    if (!pinned_identity || *pinned_identity != m_root) {
+      return failure(ErrorCode::path_unavailable,
+                     "repository approval root changed or is unavailable");
+    }
+    return {};
+  }
+
   [[nodiscard]] auto duplicate_pinned_root() const
       -> std::expected<UniqueFd, Error> {
     const auto descriptor = ::fcntl(m_descriptor.get(), F_DUPFD_CLOEXEC, 0);
@@ -428,23 +444,48 @@ class PinnedRepositoryRootAuthority final
   FileIdentity m_root;
   std::vector<RootComponent> m_components;
   std::string m_identity;
+  std::string m_canonical_root;
+  GitRepositorySnapshotSource& m_snapshot_source;
+  GitExactSourceEditor& m_exact_source;
+  std::optional<domain::RepositorySnapshot> m_baseline;
 };
 
 } // namespace
 
 auto open_pinned_repository_root_authority(
-    std::filesystem::path repository_root)
+    std::filesystem::path repository_root,
+    GitRepositorySnapshotSource& snapshot_source,
+    GitExactSourceEditor& exact_source,
+    const repository::RepositorySnapshotLimits snapshot_limits)
     -> std::expected<
-        std::shared_ptr<const runtime::DescriptorRelativePathAuthority>,
+        std::shared_ptr<const runtime::PinnedRepositoryReadAuthority>,
         runtime::AutomaticApprovalMatcherError> {
   try {
+    if (!snapshot_source.guarantees_read_only_observation() ||
+        !exact_source.guarantees_tracked_regular_files() ||
+        !exact_source.guarantees_read_only_execution() ||
+        !exact_source.is_coupled_to(snapshot_source)) {
+      return failure(ErrorCode::invalid_configuration,
+                     "pinned repository sources are invalid");
+    }
     auto opened = open_root(repository_root);
     if (!opened) return std::unexpected(std::move(opened.error()));
     auto identity = root_identity(opened->components, opened->identity);
     auto authority = std::make_shared<PinnedRepositoryRootAuthority>(
         std::move(opened->descriptor), opened->identity,
-        std::move(opened->components), std::move(identity));
-    return std::shared_ptr<const runtime::DescriptorRelativePathAuthority>{
+        std::move(opened->components), std::move(identity),
+        repository_root.generic_string(), snapshot_source, exact_source);
+    if (auto established = authority->establish_baseline(snapshot_limits);
+        !established) {
+      const auto code =
+          established.error().code ==
+                  repository::RepositorySnapshotErrorCode::invalid_request
+              ? ErrorCode::invalid_configuration
+              : ErrorCode::path_unavailable;
+      return failure(code,
+                     "pinned repository baseline could not be established");
+    }
+    return std::shared_ptr<const runtime::PinnedRepositoryReadAuthority>{
         std::move(authority)};
   } catch (...) {
     return failure(ErrorCode::internal_failure,

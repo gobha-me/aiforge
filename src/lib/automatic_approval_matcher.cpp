@@ -465,7 +465,8 @@ struct CompiledRuleResult {
   std::size_t bytes{};
   std::string tool_name;
   if (auto* exact = std::get_if<ExactToolArgumentsApprovalRule>(&rule)) {
-    if (!valid_text(exact->tool_name, limits.maximum_tool_name_bytes) ||
+    if (exact->tool_name == "read_repository_file" ||
+        !valid_text(exact->tool_name, limits.maximum_tool_name_bytes) ||
         !valid_canonical_arguments(exact->arguments, limits)) {
       return failure(AutomaticApprovalMatcherErrorCode::invalid_configuration,
                      "exact automatic approval rule is invalid");
