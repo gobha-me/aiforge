@@ -1,0 +1,1259 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
+#include "runner_v2.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cerrno>
+#include <charconv>
+#include <chrono>
+#include <climits>
+#include <csignal>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <optional>
+#include <ranges>
+#include <set>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <fcntl.h>
+#include <linux/magic.h>
+#include <poll.h>
+#include <sys/prctl.h>
+#include <sys/stat.h>
+#include <sys/statfs.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <sys/utsname.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+namespace aiforge::evaluation::process_isolation::v2 {
+namespace {
+
+constexpr auto maximum_probe_timeout = std::chrono::seconds{60};
+constexpr auto task_cgroup_prefix = std::string_view{"aiforge-evidence-v2-"};
+constexpr std::size_t maximum_cgroup_children{64};
+constexpr std::size_t maximum_cgroup_depth{8};
+
+[[nodiscard]] auto runner_error(const RunnerErrorCode code, std::string message)
+    -> std::unexpected<RunnerError> {
+  return std::unexpected(RunnerError{code, std::move(message)});
+}
+
+[[nodiscard]] auto closed_record(const ProbeId id, const ReasonCode reason)
+    -> ProbeRecord {
+  return {id, ProbeState::probe_error, reason};
+}
+
+[[nodiscard]] auto unavailable_record(const ProbeId id, const ReasonCode reason)
+    -> ProbeRecord {
+  return {id, ProbeState::unavailable, reason};
+}
+
+[[nodiscard]] auto cleanup_outcome(ProbeRecord record,
+                                   const bool cleanup_complete) -> ProbeRecord {
+  return cleanup_complete
+             ? record
+             : closed_record(record.probe_id, ReasonCode::cleanup_failed);
+}
+
+[[nodiscard]] auto requires_delegated_cgroup(const ProbeId id) -> bool {
+  switch (id) {
+    case ProbeId::cgroup_v2_delegation:
+    case ProbeId::cgroup_required_controllers:
+    case ProbeId::cgroup_atomic_child_placement:
+    case ProbeId::cgroup_self_migration_denial:
+    case ProbeId::cgroup_whole_tree_enumeration:
+    case ProbeId::cgroup_kill:
+    case ProbeId::cgroup_populated_zero:
+    case ProbeId::cgroup_setsid_containment:
+    case ProbeId::cgroup_double_fork_containment:
+    case ProbeId::cgroup_daemon_containment:
+    case ProbeId::cgroup_clone_fork_fanout:
+    case ProbeId::cgroup_leader_exit_containment:
+    case ProbeId::cgroup_cancellation_cleanup:
+    case ProbeId::cgroup_cpu_limit_enforcement:
+    case ProbeId::cgroup_memory_limit_termination:
+    case ProbeId::cgroup_pids_limit_enforcement:
+    case ProbeId::combined_setup_order:
+    case ProbeId::private_root_combined_setup_order:
+    case ProbeId::partial_setup_cleanup: return true;
+    case ProbeId::landlock_read_confinement:
+    case ProbeId::landlock_write_confinement:
+    case ProbeId::landlock_execute_confinement:
+    case ProbeId::seccomp_internet_socket_family_denial:
+    case ProbeId::seccomp_unix_socket_denial:
+    case ProbeId::private_root_construction:
+    case ProbeId::private_mount_propagation:
+    case ProbeId::descriptor_relative_launch:
+    case ProbeId::staged_input_identity:
+    case ProbeId::staged_output_identity: return false;
+  }
+  return false;
+}
+
+class Descriptor {
+ public:
+  explicit Descriptor(const int value = -1) : m_value(value) {}
+  Descriptor(const Descriptor&) = delete;
+  auto operator=(const Descriptor&) -> Descriptor& = delete;
+  Descriptor(Descriptor&& other) noexcept : m_value(other.release()) {}
+  auto operator=(Descriptor&& other) noexcept -> Descriptor& {
+    if (this == &other) return *this;
+    reset(other.release());
+    return *this;
+  }
+  ~Descriptor() { reset(); }
+  [[nodiscard]] auto get() const noexcept -> int { return m_value; }
+  [[nodiscard]] auto release() noexcept -> int {
+    const auto result = m_value;
+    m_value = -1;
+    return result;
+  }
+  auto reset(const int value = -1) noexcept -> void {
+    if (m_value >= 0) static_cast<void>(::close(m_value));
+    m_value = value;
+  }
+
+ private:
+  int m_value{-1};
+};
+
+[[nodiscard]] auto write_all(const int descriptor, const std::string_view value)
+    -> bool {
+  std::size_t offset{};
+  while (offset < value.size()) {
+    const auto count =
+        ::write(descriptor, value.data() + offset, value.size() - offset);
+    if (count < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    if (count == 0) return false;
+    offset += static_cast<std::size_t>(count);
+  }
+  return true;
+}
+
+[[nodiscard]] auto write_control(const int directory, const char* name,
+                                 const std::string_view value) -> bool {
+  const Descriptor descriptor{
+      ::openat(directory, name, O_WRONLY | O_CLOEXEC | O_NOFOLLOW)};
+  return descriptor.get() >= 0 && write_all(descriptor.get(), value);
+}
+
+[[nodiscard]] auto read_control(const int directory, const char* name)
+    -> std::optional<std::string> {
+  const Descriptor descriptor{
+      ::openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
+  if (descriptor.get() < 0) return std::nullopt;
+  std::string result;
+  std::array<char, 1024> buffer{};
+  for (;;) {
+    const auto count = ::read(descriptor.get(), buffer.data(), buffer.size());
+    if (count == 0) return result;
+    if (count < 0) {
+      if (errno == EINTR) continue;
+      return std::nullopt;
+    }
+    if (result.size() + static_cast<std::size_t>(count) > 65536)
+      return std::nullopt;
+    result.append(buffer.data(), static_cast<std::size_t>(count));
+  }
+}
+
+struct LinuxDirectoryEntry {
+  std::uint64_t inode;
+  std::int64_t offset;
+  unsigned short record_length;
+  unsigned char type;
+  char name;
+};
+
+template <typename Visitor>
+[[nodiscard]] auto visit_directory_entries(const int directory,
+                                           const Visitor& visitor) -> bool {
+#if defined(SYS_getdents64)
+  alignas(LinuxDirectoryEntry) std::array<std::byte, 4096> buffer{};
+  for (;;) {
+    const auto count =
+        ::syscall(SYS_getdents64, directory, buffer.data(), buffer.size());
+    if (count == 0) return true;
+    if (count < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    std::size_t position{};
+    const auto length = static_cast<std::size_t>(count);
+    while (position < length) {
+      const auto* entry = reinterpret_cast<const LinuxDirectoryEntry*>(
+          buffer.data() + position);
+      constexpr auto name_offset = offsetof(LinuxDirectoryEntry, name);
+      if (entry->record_length < name_offset + 1U ||
+          entry->record_length > length - position)
+        return false;
+      const auto maximum_name = entry->record_length - name_offset;
+      const auto* terminator = static_cast<const char*>(
+          std::memchr(&entry->name, '\0', maximum_name));
+      if (terminator == nullptr ||
+          !visitor(std::string_view{
+              &entry->name,
+              static_cast<std::size_t>(terminator - &entry->name)}))
+        return false;
+      position += entry->record_length;
+    }
+  }
+#else
+  static_cast<void>(directory);
+  static_cast<void>(visitor);
+  return false;
+#endif
+}
+
+[[nodiscard]] auto cgroup_directories(const int directory)
+    -> std::optional<std::vector<std::string>> {
+  const Descriptor scan{::fcntl(directory, F_DUPFD_CLOEXEC, 5)};
+  if (scan.get() < 0) return std::nullopt;
+  std::vector<std::string> result;
+  const bool valid = visit_directory_entries(scan.get(), [&](const auto name) {
+    if (name == "." || name == "..") return true;
+    struct stat attributes{};
+    const std::string owned_name{name};
+    if (::fstatat(directory, owned_name.c_str(), &attributes,
+                  AT_SYMLINK_NOFOLLOW) != 0)
+      return false;
+    if (!S_ISDIR(attributes.st_mode)) return true;
+    const bool safe_name =
+        !name.empty() && name.size() <= 255 &&
+        std::ranges::all_of(name, [](const unsigned char character) {
+          return (character >= 'a' && character <= 'z') ||
+                 (character >= 'A' && character <= 'Z') ||
+                 (character >= '0' && character <= '9') || character == '-' ||
+                 character == '_';
+        });
+    if (!safe_name || result.size() == maximum_cgroup_children) return false;
+    result.push_back(owned_name);
+    return true;
+  });
+  if (!valid) return std::nullopt;
+  std::ranges::sort(result);
+  return result;
+}
+
+[[nodiscard]] auto task_cgroup_owned_by(const pid_t process,
+                                        const std::string_view name) -> bool {
+  if (process <= 0) return false;
+  const auto base = std::string{task_cgroup_prefix} + std::to_string(process);
+  return name == base || (name.starts_with(base) && name.size() > base.size() &&
+                          name[base.size()] == '-');
+}
+
+[[nodiscard]] auto await_cgroup_empty(const int directory) -> bool {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds{2};
+  do {
+    const auto events = read_control(directory, "cgroup.events");
+    if (events && events->find("populated 0") != std::string::npos) return true;
+    static_cast<void>(::poll(nullptr, 0, 5));
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
+}
+
+struct CgroupCleanupFrame {
+  int parent{};
+  std::string name;
+  std::size_t depth{};
+  Descriptor child;
+  std::vector<std::string> descendants;
+  std::size_t next_descendant{};
+  bool complete{};
+};
+
+[[nodiscard]] auto make_cleanup_frame(const int parent, std::string name,
+                                      const std::size_t depth,
+                                      std::size_t& remaining)
+    -> std::expected<CgroupCleanupFrame, bool> {
+  if (depth > maximum_cgroup_depth || remaining == 0)
+    return std::unexpected(false);
+  --remaining;
+  Descriptor child{::openat(parent, name.c_str(),
+                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
+  if (child.get() < 0) return std::unexpected(errno == ENOENT);
+  bool complete = write_control(child.get(), "cgroup.kill", "1") &&
+                  await_cgroup_empty(child.get());
+  auto descendants = cgroup_directories(child.get());
+  if (!descendants) complete = false;
+  return CgroupCleanupFrame{parent,
+                            std::move(name),
+                            depth,
+                            std::move(child),
+                            descendants ? std::move(*descendants)
+                                        : std::vector<std::string>{},
+                            0,
+                            complete};
+}
+
+[[nodiscard]] auto cleanup_cgroup_tree(const int parent, std::string name,
+                                       const std::size_t depth,
+                                       std::size_t& remaining) -> bool {
+  auto initial = make_cleanup_frame(parent, std::move(name), depth, remaining);
+  if (!initial) return initial.error();
+  std::vector<CgroupCleanupFrame> pending;
+  pending.push_back(std::move(*initial));
+  for (;;) {
+    auto& current = pending.back();
+    if (current.next_descendant < current.descendants.size()) {
+      auto descendant = make_cleanup_frame(
+          current.child.get(), current.descendants[current.next_descendant++],
+          current.depth + 1, remaining);
+      if (descendant) {
+        pending.push_back(std::move(*descendant));
+      } else if (!descendant.error()) {
+        current.complete = false;
+      }
+      continue;
+    }
+    current.child.reset();
+    if (::unlinkat(current.parent, current.name.c_str(), AT_REMOVEDIR) != 0 &&
+        errno != ENOENT)
+      current.complete = false;
+    const bool complete = current.complete;
+    pending.pop_back();
+    if (pending.empty()) return complete;
+    if (!complete) pending.back().complete = false;
+  }
+}
+
+[[nodiscard]] auto cleanup_task_cgroups(const int root, const pid_t owner)
+    -> bool {
+  const auto children = cgroup_directories(root);
+  if (!children) return false;
+  bool complete{true};
+  std::size_t remaining{maximum_cgroup_children};
+  for (const auto& child : *children) {
+    if (task_cgroup_owned_by(owner, child) &&
+        !cleanup_cgroup_tree(root, child, 1, remaining)) {
+      complete = false;
+    }
+  }
+  return complete;
+}
+
+[[nodiscard]] auto parse_tokens(const std::string_view document)
+    -> std::optional<std::set<std::string>> {
+  std::set<std::string> result;
+  std::size_t offset{};
+  while (offset < document.size()) {
+    while (offset < document.size() &&
+           (document[offset] == ' ' || document[offset] == '\n'))
+      ++offset;
+    if (offset == document.size()) break;
+    const auto end = document.find_first_of(" \n", offset);
+    const auto token = document.substr(offset, end == std::string_view::npos
+                                                   ? document.size() - offset
+                                                   : end - offset);
+    if (token.empty() || token.size() > 128 ||
+        !std::ranges::all_of(token, [](const unsigned char character) {
+          return (character >= 'a' && character <= 'z') || character == '_';
+        }))
+      return std::nullopt;
+    result.emplace(token);
+    if (end == std::string_view::npos) break;
+    offset = end + 1;
+  }
+  return result;
+}
+
+[[nodiscard]] auto parse_processes(const std::string_view document)
+    -> std::optional<std::vector<pid_t>> {
+  std::vector<pid_t> result;
+  const char* cursor = document.data();
+  const char* end = cursor + document.size();
+  while (cursor != end) {
+    while (cursor != end && (*cursor == ' ' || *cursor == '\n'))
+      ++cursor;
+    if (cursor == end) break;
+    long value{};
+    const auto parsed = std::from_chars(cursor, end, value);
+    if (parsed.ec != std::errc{} || parsed.ptr == cursor || value <= 0 ||
+        value > INT_MAX)
+      return std::nullopt;
+    result.push_back(static_cast<pid_t>(value));
+    cursor = parsed.ptr;
+    if (cursor != end && *cursor != '\n') return std::nullopt;
+  }
+  std::ranges::sort(result);
+  if (std::ranges::adjacent_find(result) != result.end()) return std::nullopt;
+  return result;
+}
+
+[[nodiscard]] auto safe_delegated_root_path(const std::filesystem::path& path)
+    -> bool {
+  if (path.empty()) return true;
+  const auto& text = path.native();
+  if (!path.is_absolute() || text.size() > 4096 || text == "/" ||
+      text.back() == '/')
+    return false;
+  for (const auto& component : path) {
+    const auto& value = component.native();
+    if (value == "/") continue;
+    if (value.empty() || value == "." || value == ".." || value.size() > 255 ||
+        !std::ranges::all_of(value, [](const unsigned char character) {
+          return character >= 0x21U && character != 0x7fU;
+        }))
+      return false;
+  }
+  return true;
+}
+
+[[nodiscard]] auto open_pinned_directory(const std::filesystem::path& path)
+    -> Descriptor {
+  auto current =
+      Descriptor{::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
+  if (current.get() < 0) return current;
+  for (const auto& component : path) {
+    const auto& value = component.native();
+    if (value == "/") continue;
+    Descriptor next{::openat(current.get(), value.c_str(),
+                             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
+    if (next.get() < 0) return Descriptor{};
+    current = std::move(next);
+  }
+  return current;
+}
+
+class CgroupBootstrap final {
+ public:
+  CgroupBootstrap() = default;
+  CgroupBootstrap(const CgroupBootstrap&) = delete;
+  auto operator=(const CgroupBootstrap&) -> CgroupBootstrap& = delete;
+  ~CgroupBootstrap() { static_cast<void>(cleanup()); }
+
+  [[nodiscard]] auto start(const std::filesystem::path& path) -> ReasonCode {
+    if (path.empty()) return ReasonCode::missing_delegation;
+    m_root = open_pinned_directory(path);
+    if (const auto validation = validate_root(); validation != ReasonCode::none)
+      return validation;
+    if (const auto validation = validate_controllers();
+        validation != ReasonCode::none)
+      return validation;
+    if (const auto validation = validate_root_ownership();
+        validation != ReasonCode::none)
+      return validation;
+    if (const auto creation = create_supervisor(); creation != ReasonCode::none)
+      return creation;
+    if (const auto migration = migrate_to_supervisor();
+        migration != ReasonCode::none)
+      return migration;
+    if (const auto enabling = enable_controllers();
+        enabling != ReasonCode::none)
+      return enabling;
+    m_ready = true;
+    return ReasonCode::none;
+  }
+
+  [[nodiscard]] auto descriptor() const noexcept -> int {
+    return m_ready ? m_root.get() : -1;
+  }
+
+  auto remember_task_owner(const pid_t process) -> void {
+    if (process > 0) m_task_owners.push_back(process);
+  }
+
+  [[nodiscard]] auto cleanup_task_owner(const pid_t process) -> bool {
+    return m_root.get() >= 0 && cleanup_task_cgroups(m_root.get(), process);
+  }
+
+  [[nodiscard]] auto cleanup() noexcept -> bool {
+    if (m_cleaned) return m_cleanup_okay;
+    try {
+      bool okay{true};
+      m_ready = false;
+      for (const auto process : m_task_owners) {
+        if (!cleanup_task_owner(process)) okay = false;
+      }
+      m_task_owners.clear();
+      if (m_enabled && !write_control(m_root.get(), "cgroup.subtree_control",
+                                      "-cpu -memory -pids"))
+        okay = false;
+      m_enabled = false;
+      if (m_moved && !write_control(m_root.get(), "cgroup.procs",
+                                    std::to_string(::getpid())))
+        okay = false;
+      m_moved = false;
+      if (m_supervisor.get() >= 0) {
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds{2};
+        bool empty{};
+        do {
+          const auto events = read_control(m_supervisor.get(), "cgroup.events");
+          if (events && events->find("populated 0") != std::string::npos) {
+            empty = true;
+            break;
+          }
+          static_cast<void>(::poll(nullptr, 0, 5));
+        } while (std::chrono::steady_clock::now() < deadline);
+        if (!empty) okay = false;
+        m_supervisor.reset();
+      }
+      if (m_created && ::unlinkat(m_root.get(), m_supervisor_name.c_str(),
+                                  AT_REMOVEDIR) != 0)
+        okay = false;
+      m_created = false;
+      m_cleaned = true;
+      m_cleanup_okay = okay;
+      return okay;
+    } catch (...) {
+      m_ready = false;
+      m_cleaned = true;
+      m_cleanup_okay = false;
+      return false;
+    }
+  }
+
+ private:
+  [[nodiscard]] auto validate_root() const -> ReasonCode {
+    struct stat attributes{};
+    struct statfs filesystem{};
+    if (m_root.get() < 0 || ::fstat(m_root.get(), &attributes) != 0 ||
+        ::fstatfs(m_root.get(), &filesystem) != 0 ||
+        !S_ISDIR(attributes.st_mode) || attributes.st_uid != ::geteuid() ||
+        filesystem.f_type != CGROUP2_SUPER_MAGIC)
+      return ReasonCode::missing_delegation;
+    return ReasonCode::none;
+  }
+
+  [[nodiscard]] auto validate_controllers() const -> ReasonCode {
+    const auto controllers = read_control(m_root.get(), "cgroup.controllers");
+    const auto available =
+        controllers ? parse_tokens(*controllers) : std::nullopt;
+    if (!available) return ReasonCode::internal_error;
+    for (const auto* required : {"cpu", "memory", "pids"}) {
+      if (!available->contains(required)) return ReasonCode::missing_controller;
+    }
+    return ReasonCode::none;
+  }
+
+  [[nodiscard]] auto validate_root_ownership() const -> ReasonCode {
+    const auto processes_document = read_control(m_root.get(), "cgroup.procs");
+    const auto processes = processes_document
+                               ? parse_processes(*processes_document)
+                               : std::nullopt;
+    if (!processes) return ReasonCode::internal_error;
+    if (processes->size() != 1 || processes->front() != ::getpid())
+      return ReasonCode::missing_delegation;
+    const auto children = cgroup_directories(m_root.get());
+    if (!children || !children->empty())
+      return children ? ReasonCode::missing_delegation
+                      : ReasonCode::internal_error;
+    return ReasonCode::none;
+  }
+
+  [[nodiscard]] auto create_supervisor() -> ReasonCode {
+    m_supervisor_name =
+        "aiforge-evidence-v2-supervisor-" + std::to_string(::getpid());
+    if (::mkdirat(m_root.get(), m_supervisor_name.c_str(), S_IRWXU) != 0)
+      return errno == EACCES || errno == EPERM || errno == EROFS
+                 ? ReasonCode::missing_delegation
+                 : ReasonCode::internal_error;
+    m_created = true;
+    m_supervisor =
+        Descriptor{::openat(m_root.get(), m_supervisor_name.c_str(),
+                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
+    if (m_supervisor.get() < 0) return fail(ReasonCode::internal_error);
+    return ReasonCode::none;
+  }
+
+  [[nodiscard]] auto migrate_to_supervisor() -> ReasonCode {
+    const auto own_pid = std::to_string(::getpid());
+    if (!write_control(m_supervisor.get(), "cgroup.procs", own_pid))
+      return fail(ReasonCode::missing_delegation);
+    m_moved = true;
+    const auto supervisor_document =
+        read_control(m_supervisor.get(), "cgroup.procs");
+    const auto supervisor_processes =
+        supervisor_document ? parse_processes(*supervisor_document)
+                            : std::nullopt;
+    if (!supervisor_processes || supervisor_processes->size() != 1 ||
+        supervisor_processes->front() != ::getpid())
+      return fail(supervisor_processes ? ReasonCode::missing_delegation
+                                       : ReasonCode::internal_error);
+    const auto remaining_document = read_control(m_root.get(), "cgroup.procs");
+    const auto remaining = remaining_document
+                               ? parse_processes(*remaining_document)
+                               : std::nullopt;
+    if (!remaining || !remaining->empty())
+      return fail(remaining ? ReasonCode::missing_delegation
+                            : ReasonCode::internal_error);
+    return ReasonCode::none;
+  }
+
+  [[nodiscard]] auto enable_controllers() -> ReasonCode {
+    if (!write_control(m_root.get(), "cgroup.subtree_control",
+                       "+cpu +memory +pids")) {
+      const auto enable_error = errno;
+      const auto partially_enabled =
+          read_control(m_root.get(), "cgroup.subtree_control");
+      const auto partial_tokens =
+          partially_enabled ? parse_tokens(*partially_enabled) : std::nullopt;
+      if (!partial_tokens) return fail(ReasonCode::internal_error);
+      m_enabled = partial_tokens->contains("cpu") ||
+                  partial_tokens->contains("memory") ||
+                  partial_tokens->contains("pids");
+      return fail(enable_error == EACCES || enable_error == EPERM ||
+                          enable_error == EBUSY
+                      ? ReasonCode::missing_delegation
+                      : ReasonCode::internal_error);
+    }
+    m_enabled = true;
+    const auto enabled = read_control(m_root.get(), "cgroup.subtree_control");
+    const auto enabled_tokens = enabled ? parse_tokens(*enabled) : std::nullopt;
+    if (!enabled_tokens || !enabled_tokens->contains("cpu") ||
+        !enabled_tokens->contains("memory") ||
+        !enabled_tokens->contains("pids"))
+      return fail(enabled_tokens ? ReasonCode::missing_controller
+                                 : ReasonCode::internal_error);
+    return ReasonCode::none;
+  }
+  [[nodiscard]] auto fail(const ReasonCode reason) -> ReasonCode {
+    return cleanup() ? reason : ReasonCode::cleanup_failed;
+  }
+  Descriptor m_root;
+  Descriptor m_supervisor;
+  std::string m_supervisor_name;
+  bool m_created{};
+  bool m_moved{};
+  bool m_enabled{};
+  bool m_ready{};
+  bool m_cleaned{};
+  bool m_cleanup_okay{true};
+  std::vector<pid_t> m_task_owners;
+};
+
+class SubreaperGuard {
+ public:
+  [[nodiscard]] static auto create() -> std::optional<SubreaperGuard> {
+    int previous{};
+    if (::prctl(PR_GET_CHILD_SUBREAPER, &previous) != 0 ||
+        (previous == 0 && ::prctl(PR_SET_CHILD_SUBREAPER, 1) != 0)) {
+      return std::nullopt;
+    }
+    return SubreaperGuard{previous};
+  }
+  SubreaperGuard(const SubreaperGuard&) = delete;
+  auto operator=(const SubreaperGuard&) -> SubreaperGuard& = delete;
+  SubreaperGuard(SubreaperGuard&& other) noexcept
+      : m_previous(other.m_previous), m_active(other.m_active) {
+    other.m_active = false;
+  }
+  ~SubreaperGuard() { static_cast<void>(restore()); }
+  [[nodiscard]] auto restore() noexcept -> bool {
+    if (!m_active) return true;
+    if (m_previous == 0 && ::prctl(PR_SET_CHILD_SUBREAPER, 0) != 0)
+      return false;
+    m_active = false;
+    return true;
+  }
+
+ private:
+  explicit SubreaperGuard(const int previous) : m_previous(previous) {}
+  int m_previous{};
+  bool m_active{true};
+};
+
+[[nodiscard]] auto valid_source_sha(const std::string_view value) -> bool {
+  return value.size() == 40 &&
+         std::ranges::all_of(value, [](const unsigned char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
+}
+
+[[nodiscard]] auto safe_component(const std::string_view value) -> bool {
+  return !value.empty() && value.size() <= maximum_platform_metadata_bytes &&
+         std::ranges::all_of(value, [](const unsigned char character) {
+           return (character >= 'a' && character <= 'z') ||
+                  (character >= 'A' && character <= 'Z') ||
+                  (character >= '0' && character <= '9') || character == '.' ||
+                  character == '_' || character == '-' || character == '+';
+         });
+}
+
+[[nodiscard]] auto safe_argument(const std::string_view value) -> bool {
+  return value.size() <= 4096 && value.find('\0') == std::string_view::npos;
+}
+
+[[nodiscard]] auto platform_report(std::string source_sha)
+    -> std::expected<EvidenceReport, RunnerError> {
+  struct utsname identity{};
+  if (::uname(&identity) != 0) {
+    return runner_error(RunnerErrorCode::platform_metadata,
+                        "platform metadata is unavailable");
+  }
+  EvidenceReport result{
+      std::move(source_sha), "linux", identity.release, identity.machine, {}};
+  if (!safe_component(result.platform) || !safe_component(result.kernel) ||
+      !safe_component(result.architecture)) {
+    return runner_error(RunnerErrorCode::platform_metadata,
+                        "platform metadata is invalid");
+  }
+  return result;
+}
+
+[[nodiscard]] auto make_temporary_root(const std::filesystem::path& parent)
+    -> std::optional<std::filesystem::path> {
+  auto pattern = (parent / "aiforge-isolation-v2-XXXXXX").string();
+  std::vector<char> writable(pattern.begin(), pattern.end());
+  writable.push_back('\0');
+  const auto* created = ::mkdtemp(writable.data());
+  if (created == nullptr) return std::nullopt;
+  return std::filesystem::path{created};
+}
+
+[[nodiscard]] auto cleanup_temporary_root(const std::filesystem::path& root,
+                                          const RunnerOptions& options) noexcept
+    -> bool {
+  std::error_code cleanup_error;
+  static_cast<void>(std::filesystem::remove_all(root, cleanup_error));
+  std::error_code existence_error;
+  const bool removed = !cleanup_error &&
+                       !std::filesystem::exists(root, existence_error) &&
+                       !existence_error;
+#if defined(AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT)
+  return removed && !options.force_temporary_root_cleanup_failure;
+#else
+  static_cast<void>(options);
+  return removed;
+#endif
+}
+
+[[nodiscard]] auto direct_descendants() -> std::optional<std::vector<pid_t>>;
+
+[[nodiscard]] auto direct_descendants_for_run(const RunnerOptions& options)
+    -> std::optional<std::vector<pid_t>> {
+#if defined(AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT)
+  if (options.early_failure == EarlyRunnerFailure::descendant_scan)
+    return std::nullopt;
+#else
+  static_cast<void>(options);
+#endif
+  return direct_descendants();
+}
+
+[[nodiscard]] auto subreaper_for_run(const RunnerOptions& options)
+    -> std::optional<SubreaperGuard> {
+#if defined(AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT)
+  if (options.early_failure == EarlyRunnerFailure::subreaper_setup)
+    return std::nullopt;
+#else
+  static_cast<void>(options);
+#endif
+  return SubreaperGuard::create();
+}
+
+[[nodiscard]] auto close_unrelated_descriptors(
+    const unsigned int first) noexcept -> bool {
+#ifdef SYS_close_range
+  if (::syscall(SYS_close_range, first, UINT_MAX, 0U) == 0) return true;
+  if (errno != ENOSYS && errno != EINVAL) return false;
+#endif
+  const auto maximum = ::sysconf(_SC_OPEN_MAX);
+  if (maximum <= 0 || maximum > INT_MAX) return false;
+  for (int descriptor = static_cast<int>(first); descriptor < maximum;
+       ++descriptor) {
+    if (::close(descriptor) != 0 && errno != EBADF && errno != EINTR)
+      return false;
+  }
+  return true;
+}
+
+[[nodiscard]] auto read_bounded_descriptor(const int descriptor,
+                                           const std::size_t maximum)
+    -> std::optional<std::string> {
+  std::string document;
+  std::array<char, 1024> buffer{};
+  for (;;) {
+    const auto count = ::read(descriptor, buffer.data(), buffer.size());
+    if (count == 0) return document;
+    if (count < 0) {
+      if (errno == EINTR) continue;
+      return std::nullopt;
+    }
+    if (document.size() + static_cast<std::size_t>(count) > maximum)
+      return std::nullopt;
+    document.append(buffer.data(), static_cast<std::size_t>(count));
+  }
+}
+
+[[nodiscard]] auto parse_space_separated_processes(
+    const std::string_view document) -> std::optional<std::vector<pid_t>> {
+  std::vector<pid_t> result;
+  const char* cursor = document.data();
+  const char* end = cursor + document.size();
+  while (cursor != end) {
+    while (cursor != end && *cursor == ' ')
+      ++cursor;
+    if (cursor == end) break;
+    long value{};
+    const auto parsed = std::from_chars(cursor, end, value);
+    if (parsed.ec != std::errc{} || parsed.ptr == cursor || value <= 0 ||
+        value > INT_MAX)
+      return std::nullopt;
+    result.push_back(static_cast<pid_t>(value));
+    cursor = parsed.ptr;
+    if (cursor != end && *cursor != ' ') return std::nullopt;
+  }
+  return result;
+}
+
+[[nodiscard]] auto direct_descendants() -> std::optional<std::vector<pid_t>> {
+  const auto path =
+      "/proc/self/task/" + std::to_string(::getpid()) + "/children";
+  const Descriptor descriptor{
+      ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
+  if (descriptor.get() < 0) return std::nullopt;
+  const auto document = read_bounded_descriptor(descriptor.get(), 65536);
+  return document ? parse_space_separated_processes(*document) : std::nullopt;
+}
+
+struct CleanupResult {
+  bool complete{};
+  bool pidfd_verified{true};
+  std::size_t observed{};
+};
+
+auto signal_pidfd(const pid_t process) -> bool {
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+  const Descriptor pidfd{
+      static_cast<int>(::syscall(SYS_pidfd_open, process, 0U))};
+  if (pidfd.get() < 0) return errno == ESRCH;
+  return ::syscall(SYS_pidfd_send_signal, pidfd.get(), SIGKILL, nullptr, 0U) ==
+             0 ||
+         errno == ESRCH;
+#else
+  static_cast<void>(process);
+  return false;
+#endif
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Cleanup loop.
+[[nodiscard]] auto cleanup_descendants() -> CleanupResult {
+  CleanupResult result;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds{2};
+  for (;;) {
+    int status{};
+    for (;;) {
+      const auto reaped = ::waitpid(-1, &status, WNOHANG);
+      if (reaped > 0) {
+        ++result.observed;
+        continue;
+      }
+      if (reaped < 0 && errno != ECHILD && errno != EINTR) return result;
+      break;
+    }
+    const auto children = direct_descendants();
+    if (!children) return result;
+    if (children->empty()) {
+      result.complete = true;
+      return result;
+    }
+    result.observed += children->size();
+    for (const auto child : *children) {
+      if (!signal_pidfd(child)) {
+        result.pidfd_verified = false;
+        static_cast<void>(::kill(child, SIGKILL));
+      }
+    }
+    if (std::chrono::steady_clock::now() >= deadline) return result;
+    static_cast<void>(::poll(nullptr, 0, 5));
+  }
+}
+
+auto terminate_child(const pid_t child, const int pidfd) noexcept -> void {
+  if (child <= 0) return;
+  static_cast<void>(::kill(-child, SIGKILL));
+#if defined(SYS_pidfd_send_signal)
+  if (pidfd >= 0) {
+    static_cast<void>(
+        ::syscall(SYS_pidfd_send_signal, pidfd, SIGKILL, nullptr, 0U));
+    return;
+  }
+#else
+  static_cast<void>(pidfd);
+#endif
+  static_cast<void>(::kill(child, SIGKILL));
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Child process.
+[[nodiscard]] auto launch_probe(const ProbeId probe_id,
+                                const std::filesystem::path& state_directory,
+                                const RunnerOptions& options,
+                                const int executable_descriptor,
+                                CgroupBootstrap* cgroup_bootstrap,
+                                const std::stop_token stop_token)
+    -> ProbeRecord {
+  const auto delegated_root_descriptor =
+      cgroup_bootstrap != nullptr ? cgroup_bootstrap->descriptor() : -1;
+  int output_pipe[2]{};
+  if (::pipe2(output_pipe, O_CLOEXEC | O_NONBLOCK) != 0)
+    return closed_record(probe_id, ReasonCode::internal_error);
+  const auto child = ::fork();
+  if (child < 0) {
+    static_cast<void>(::close(output_pipe[0]));
+    static_cast<void>(::close(output_pipe[1]));
+    return closed_record(probe_id, ReasonCode::internal_error);
+  }
+  if (child == 0) {
+    static_cast<void>(::setpgid(0, 0));
+    static_cast<void>(::close(STDIN_FILENO));
+    if (::dup2(output_pipe[1], STDOUT_FILENO) < 0) ::_exit(126);
+    const auto null_descriptor =
+        ::open("/dev/null", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (null_descriptor < 0 || ::dup2(null_descriptor, STDERR_FILENO) < 0)
+      ::_exit(126);
+    static_cast<void>(::close(output_pipe[0]));
+    static_cast<void>(::close(output_pipe[1]));
+    if (null_descriptor != STDERR_FILENO)
+      static_cast<void>(::close(null_descriptor));
+    std::vector<std::string> arguments;
+    arguments.reserve(options.child_argument_prefix.size() + 4);
+    arguments.push_back(options.child_executable.string());
+    arguments.insert(arguments.end(), options.child_argument_prefix.begin(),
+                     options.child_argument_prefix.end());
+    arguments.emplace_back(probe_id_name(probe_id));
+    arguments.push_back(state_directory.string());
+    arguments.emplace_back(delegated_root_descriptor >= 0
+                               ? "delegated-root-fd-4"
+                               : "no-delegated-root");
+    std::vector<char*> raw_arguments;
+    raw_arguments.reserve(arguments.size() + 1);
+    for (auto& argument : arguments)
+      raw_arguments.push_back(argument.data());
+    raw_arguments.push_back(nullptr);
+    if (executable_descriptor != 3 &&
+        ::dup3(executable_descriptor, 3, O_CLOEXEC) < 0)
+      ::_exit(126);
+    if (executable_descriptor == 3 &&
+        ::fcntl(executable_descriptor, F_SETFD, FD_CLOEXEC) != 0)
+      ::_exit(126);
+    if (delegated_root_descriptor >= 0) {
+      if (delegated_root_descriptor != 4 &&
+          ::dup3(delegated_root_descriptor, 4, 0) < 0)
+        ::_exit(126);
+      if (delegated_root_descriptor == 4 &&
+          ::fcntl(delegated_root_descriptor, F_SETFD, 0) != 0)
+        ::_exit(126);
+    }
+    char* environment[]{nullptr};
+    if (!close_unrelated_descriptors(delegated_root_descriptor >= 0 ? 5U : 4U))
+      ::_exit(126);
+    ::fexecve(3, raw_arguments.data(), environment);
+    ::_exit(127);
+  }
+
+  static_cast<void>(::setpgid(child, child));
+  if (cgroup_bootstrap != nullptr) cgroup_bootstrap->remember_task_owner(child);
+  static_cast<void>(::close(output_pipe[1]));
+#if defined(SYS_pidfd_open)
+  const Descriptor child_pidfd{
+      static_cast<int>(::syscall(SYS_pidfd_open, child, 0U))};
+#else
+  const Descriptor child_pidfd;
+#endif
+  std::string output;
+  output.reserve(
+      std::min(options.maximum_child_output_bytes, maximum_child_record_bytes));
+  bool output_exceeded{};
+  bool read_failed{};
+  bool timed_out{};
+  bool cancelled{};
+  bool pipe_closed{};
+  bool child_reaped{};
+  bool wait_failed{};
+  int status{};
+  const auto deadline =
+      std::chrono::steady_clock::now() + options.child_timeout;
+  while (!child_reaped || !pipe_closed) {
+    std::array<char, 1024> buffer{};
+    for (;;) {
+      const auto count = ::read(output_pipe[0], buffer.data(), buffer.size());
+      if (count > 0) {
+        const auto amount = static_cast<std::size_t>(count);
+        const auto retained =
+            std::min(output.size(), options.maximum_child_output_bytes);
+        if (amount > options.maximum_child_output_bytes - retained) {
+          output_exceeded = true;
+          terminate_child(child, child_pidfd.get());
+          break;
+        }
+        output.append(buffer.data(), amount);
+        continue;
+      }
+      if (count == 0) pipe_closed = true;
+      if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+          errno != EINTR) {
+        read_failed = true;
+        terminate_child(child, child_pidfd.get());
+      }
+      break;
+    }
+    if (!child_reaped) {
+      const auto waited = ::waitpid(child, &status, WNOHANG);
+      if (waited == child) child_reaped = true;
+      if (waited < 0 && errno != EINTR) {
+        child_reaped = true;
+        wait_failed = true;
+      }
+    }
+    if (output_exceeded || read_failed) break;
+    if (child_reaped && pipe_closed) break;
+    if (stop_token.stop_requested()) {
+      cancelled = true;
+      terminate_child(child, child_pidfd.get());
+      break;
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      timed_out = true;
+      terminate_child(child, child_pidfd.get());
+      break;
+    }
+    pollfd descriptor{output_pipe[0], POLLIN | POLLHUP, 0};
+    static_cast<void>(::poll(&descriptor, 1, 10));
+  }
+  static_cast<void>(::close(output_pipe[0]));
+  if (!child_reaped) {
+    pid_t waited{};
+    do {
+      waited = ::waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited != child) wait_failed = true;
+  }
+  const auto cleanup = cleanup_descendants();
+  const auto cgroup_cleanup = cgroup_bootstrap == nullptr ||
+                              cgroup_bootstrap->cleanup_task_owner(child);
+  const bool interrupted = cancelled || timed_out;
+  if (interrupted) {
+    const auto reason = cancelled ? ReasonCode::cancelled : ReasonCode::timeout;
+    return cleanup_outcome(closed_record(probe_id, reason),
+                           cleanup.complete && cleanup.pidfd_verified &&
+                               cgroup_cleanup && !wait_failed &&
+                               child_pidfd.get() >= 0);
+  }
+  if (!cleanup.complete || !cleanup.pidfd_verified || !cgroup_cleanup ||
+      cleanup.observed != 0)
+    return closed_record(probe_id, ReasonCode::cleanup_failed);
+  if (wait_failed || child_pidfd.get() < 0)
+    return closed_record(probe_id, ReasonCode::pid_reuse);
+  if (output_exceeded) return closed_record(probe_id, ReasonCode::output_limit);
+  if (read_failed) return closed_record(probe_id, ReasonCode::internal_error);
+  if (WIFSIGNALED(status)) return closed_record(probe_id, ReasonCode::signaled);
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    return closed_record(probe_id, ReasonCode::nonzero_exit);
+  auto parsed = parse_child_record(output);
+  if (!parsed || parsed->probe_id != probe_id)
+    return closed_record(probe_id, ReasonCode::malformed_protocol);
+  return *parsed;
+}
+
+auto mark_cleanup_failure(EvidenceReport& report) -> void {
+  for (auto& record : report.probes) {
+    record.state = ProbeState::probe_error;
+    record.reason = ReasonCode::cleanup_failed;
+  }
+}
+
+} // namespace
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Evaluation flow.
+auto run_evaluation(std::string source_sha, const RunnerOptions& options,
+                    const std::stop_token stop_token)
+    -> std::expected<EvidenceReport, RunnerError> {
+  std::optional<SubreaperGuard> active_subreaper;
+  std::optional<CgroupBootstrap> active_cgroup;
+  std::optional<std::filesystem::path> active_root;
+  try {
+    const auto executable = options.child_executable.native();
+    const auto arguments_are_safe =
+        std::ranges::all_of(options.child_argument_prefix, safe_argument);
+    const Descriptor executable_descriptor{
+        ::open(options.child_executable.c_str(), O_RDONLY | O_CLOEXEC)};
+    struct stat executable_attributes{};
+    const auto executable_is_regular =
+        executable_descriptor.get() >= 0 &&
+        ::fstat(executable_descriptor.get(), &executable_attributes) == 0 &&
+        S_ISREG(executable_attributes.st_mode);
+    if (!valid_source_sha(source_sha) ||
+        !options.child_executable.is_absolute() || executable.empty() ||
+        !safe_argument(executable) || !executable_is_regular ||
+        options.child_timeout <= std::chrono::milliseconds::zero() ||
+        options.child_timeout > maximum_probe_timeout ||
+        options.maximum_child_output_bytes == 0 ||
+        options.maximum_child_output_bytes > maximum_child_record_bytes ||
+        options.child_argument_prefix.size() > 16 || !arguments_are_safe) {
+      return runner_error(RunnerErrorCode::invalid_options,
+                          "process-isolation v2 runner options are invalid");
+    }
+    if (!safe_delegated_root_path(options.delegated_cgroup_root)) {
+      return runner_error(RunnerErrorCode::invalid_options,
+                          "delegated cgroup root path is invalid");
+    }
+    auto report = platform_report(std::move(source_sha));
+    if (!report) return std::unexpected(std::move(report.error()));
+    auto temporary_parent = options.temporary_parent;
+    if (temporary_parent.empty()) {
+      std::error_code error;
+      temporary_parent = std::filesystem::temp_directory_path(error);
+      if (error) temporary_parent.clear();
+    }
+    if (temporary_parent.empty() || !temporary_parent.is_absolute()) {
+      return runner_error(RunnerErrorCode::invalid_options,
+                          "temporary parent is unavailable");
+    }
+    const auto root = make_temporary_root(temporary_parent);
+    report->probes.reserve(required_probe_ids().size());
+    if (!root) {
+      for (const auto probe_id : required_probe_ids())
+        report->probes.push_back(
+            closed_record(probe_id, ReasonCode::internal_error));
+      return std::move(*report);
+    }
+    active_root = *root;
+    const auto existing_children = direct_descendants_for_run(options);
+    if (!existing_children || !existing_children->empty()) {
+      const bool root_removed = cleanup_temporary_root(*active_root, options);
+      active_root.reset();
+      if (!root_removed) {
+        return runner_error(
+            RunnerErrorCode::internal_error,
+            "process-isolation v2 temporary root cleanup failed");
+      }
+      return runner_error(
+          RunnerErrorCode::internal_error,
+          "process-isolation v2 runner requires no child processes");
+    }
+    auto subreaper = subreaper_for_run(options);
+    if (!subreaper) {
+      const bool root_removed = cleanup_temporary_root(*active_root, options);
+      active_root.reset();
+      if (!root_removed) {
+        return runner_error(
+            RunnerErrorCode::internal_error,
+            "process-isolation v2 temporary root cleanup failed");
+      }
+      return runner_error(RunnerErrorCode::internal_error,
+                          "process-isolation v2 cleanup cannot be established");
+    }
+    active_subreaper.emplace(std::move(*subreaper));
+    active_cgroup.emplace();
+    const auto cgroup_reason =
+        active_cgroup->start(options.delegated_cgroup_root);
+    for (const auto probe_id : required_probe_ids()) {
+      const auto state = *root / std::string{probe_id_name(probe_id)};
+      ProbeRecord record = closed_record(probe_id, ReasonCode::internal_error);
+      if (stop_token.stop_requested()) {
+        record = closed_record(probe_id, ReasonCode::cancelled);
+      } else if (requires_delegated_cgroup(probe_id) &&
+                 cgroup_reason != ReasonCode::none) {
+        record = cgroup_reason == ReasonCode::cleanup_failed ||
+                         cgroup_reason == ReasonCode::internal_error
+                     ? closed_record(probe_id, cgroup_reason)
+                     : unavailable_record(probe_id, cgroup_reason);
+      } else if (::mkdir(state.c_str(), S_IRWXU) == 0 &&
+                 ::chmod(state.c_str(), S_IRWXU) == 0) {
+        record = launch_probe(
+            probe_id, state, options, executable_descriptor.get(),
+            requires_delegated_cgroup(probe_id) ? &*active_cgroup : nullptr,
+            stop_token);
+      }
+      std::error_code cleanup_error;
+      static_cast<void>(std::filesystem::remove_all(state, cleanup_error));
+      std::error_code existence_error;
+      if (cleanup_error || std::filesystem::exists(state, existence_error) ||
+          existence_error) {
+        record = closed_record(probe_id, ReasonCode::cleanup_failed);
+      }
+      report->probes.push_back(record);
+    }
+    if (!active_cgroup->cleanup()) mark_cleanup_failure(*report);
+    active_cgroup.reset();
+    const bool root_removed = cleanup_temporary_root(*root, options);
+    const bool subreaper_restored = active_subreaper->restore();
+    if (!root_removed || !subreaper_restored) {
+      mark_cleanup_failure(*report);
+    }
+    active_root.reset();
+    active_subreaper.reset();
+    return std::move(*report);
+  } catch (...) {
+    bool cleanup_complete{true};
+    if (active_cgroup && !active_cgroup->cleanup()) cleanup_complete = false;
+    if (active_root) {
+      if (!cleanup_temporary_root(*active_root, options))
+        cleanup_complete = false;
+    }
+    if (active_subreaper && !active_subreaper->restore())
+      cleanup_complete = false;
+    return runner_error(
+        RunnerErrorCode::internal_error,
+        cleanup_complete ? "process-isolation v2 evaluation failed internally"
+                         : "process-isolation v2 evaluation cleanup failed");
+  }
+}
+
+#if defined(AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT)
+namespace test_support {
+
+auto bootstrap_failure_outcome(const BootstrapFailurePhase phase,
+                               const bool rollback_complete) -> ProbeRecord {
+  if (!rollback_complete)
+    return closed_record(ProbeId::cgroup_v2_delegation,
+                         ReasonCode::cleanup_failed);
+  switch (phase) {
+    case BootstrapFailurePhase::verify_controllers:
+      return unavailable_record(ProbeId::cgroup_required_controllers,
+                                ReasonCode::missing_controller);
+    case BootstrapFailurePhase::disable_controllers:
+    case BootstrapFailurePhase::move_to_root:
+    case BootstrapFailurePhase::await_empty:
+    case BootstrapFailurePhase::remove_supervisor:
+      return closed_record(ProbeId::cgroup_v2_delegation,
+                           ReasonCode::cleanup_failed);
+    case BootstrapFailurePhase::pin_root:
+    case BootstrapFailurePhase::verify_ownership:
+    case BootstrapFailurePhase::create_supervisor:
+    case BootstrapFailurePhase::move_to_supervisor:
+    case BootstrapFailurePhase::verify_supervisor:
+    case BootstrapFailurePhase::verify_root_empty:
+    case BootstrapFailurePhase::enable_controllers:
+    case BootstrapFailurePhase::verify_enabled_controllers:
+      return unavailable_record(ProbeId::cgroup_v2_delegation,
+                                ReasonCode::missing_delegation);
+  }
+  return closed_record(ProbeId::cgroup_v2_delegation,
+                       ReasonCode::internal_error);
+}
+
+auto cleanup_outcome(ProbeRecord record, const bool cleanup_complete)
+    -> ProbeRecord {
+  return ::aiforge::evaluation::process_isolation::v2::cleanup_outcome(
+      std::move(record), cleanup_complete);
+}
+
+auto owns_task_cgroup(const int process, const std::string_view name) -> bool {
+  return task_cgroup_owned_by(static_cast<pid_t>(process), name);
+}
+
+} // namespace test_support
+#endif
+
+} // namespace aiforge::evaluation::process_isolation::v2

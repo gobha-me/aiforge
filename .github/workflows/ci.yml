@@ -124,6 +124,25 @@ jobs:
           path: ${{ matrix.build_dir }}/process-isolation-evidence.json
           if-no-files-found: error
 
+      - name: Capture process-isolation evidence v2
+        run: |
+          python3 tools/test_verify_process_isolation_evidence_v2.py
+          bash tools/test-capture-process-isolation-evidence-v2.sh
+          evaluator="$GITHUB_WORKSPACE/${{ matrix.build_dir }}/evaluation/process_isolation/aiforge_process_isolation_evaluation_v2"
+          report="$GITHUB_WORKSPACE/${{ matrix.build_dir }}/process-isolation-evidence-v2.json"
+          bash tools/capture-process-isolation-evidence-v2.sh \
+            "$evaluator" "$GITHUB_SHA" "$report"
+          python3 tools/verify-process-isolation-evidence-v2.py \
+            "$report" "$GITHUB_SHA"
+
+      - name: Upload exact-SHA process-isolation evidence v2
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: process-isolation-evidence-v2-${{ matrix.compiler }}-${{ github.sha }}
+          path: ${{ matrix.build_dir }}/process-isolation-evidence-v2.json
+          if-no-files-found: error
+
       - name: Capture audio-device evidence
         run: >-
           timeout 30s

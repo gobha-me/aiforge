@@ -1,0 +1,228 @@
+#include "probes_v2.hpp"
+
+#include <catch2/catch_test_macros.hpp>
+
+#include <array>
+#include <cerrno>
+#include <cstdint>
+#include <utility>
+
+namespace isolation = aiforge::evaluation::process_isolation;
+namespace v2 = aiforge::evaluation::process_isolation::v2;
+
+TEST_CASE("evidence v2 classifies cgroup prerequisites without authority",
+          "[process-isolation][evidence-v2][failure]") {
+  const auto absent = v2::test_support::cgroup_prerequisite_outcome(
+      false, false, false, false, false);
+  CHECK(absent.state == isolation::ProbeState::unavailable);
+  CHECK(absent.reason == v2::ReasonCode::mechanism_absent);
+
+  const auto undelegated = v2::test_support::cgroup_prerequisite_outcome(
+      true, false, true, true, true);
+  CHECK(undelegated.state == isolation::ProbeState::unavailable);
+  CHECK(undelegated.reason == v2::ReasonCode::missing_delegation);
+
+  for (const auto controllers :
+       {std::array{false, true, true}, std::array{true, false, true},
+        std::array{true, true, false}}) {
+    const auto missing = v2::test_support::cgroup_prerequisite_outcome(
+        true, true, controllers[0], controllers[1], controllers[2]);
+    CHECK(missing.state == isolation::ProbeState::unavailable);
+    CHECK(missing.reason == v2::ReasonCode::missing_controller);
+  }
+
+  const auto complete = v2::test_support::cgroup_prerequisite_outcome(
+      true, true, true, true, true);
+  CHECK(complete.state == isolation::ProbeState::enforced);
+  CHECK(complete.reason == v2::ReasonCode::none);
+}
+
+TEST_CASE("migration and pid identity uncertainty fail closed",
+          "[process-isolation][evidence-v2][failure]") {
+  for (const auto denied_error : {EACCES, EPERM}) {
+    const auto denied = v2::test_support::migration_attempt_outcome(
+        true, denied_error, denied_error);
+    CHECK(denied.state == isolation::ProbeState::enforced);
+    CHECK(denied.reason == v2::ReasonCode::none);
+  }
+  for (const auto& result : {std::pair{0, EPERM}, std::pair{EPERM, 0}}) {
+    const auto escaped = v2::test_support::migration_attempt_outcome(
+        true, result.first, result.second);
+    CHECK(escaped.state == isolation::ProbeState::unavailable);
+    CHECK(escaped.reason == v2::ReasonCode::enforcement_failed);
+  }
+  const auto unexpected =
+      v2::test_support::migration_attempt_outcome(true, EIO, EPERM);
+  CHECK(unexpected.state == isolation::ProbeState::probe_error);
+  CHECK(unexpected.reason == v2::ReasonCode::internal_error);
+  const auto unconfined =
+      v2::test_support::migration_attempt_outcome(false, EPERM, EPERM);
+  CHECK(unconfined.state == isolation::ProbeState::unavailable);
+  CHECK(unconfined.reason == v2::ReasonCode::unsupported_combination);
+
+  for (const auto& input : {std::pair{false, false}, std::pair{false, true},
+                            std::pair{true, false}}) {
+    const auto unstable =
+        v2::test_support::pid_identity_outcome(input.first, input.second);
+    CHECK(unstable.state == isolation::ProbeState::probe_error);
+    CHECK(unstable.reason == v2::ReasonCode::pid_reuse);
+  }
+  CHECK(v2::test_support::pid_identity_outcome(true, true).state ==
+        isolation::ProbeState::enforced);
+}
+
+TEST_CASE("limit and execute evidence require causal observations",
+          "[process-isolation][evidence-v2][failure]") {
+  for (const auto& input : {std::pair{false, false}, std::pair{true, false},
+                            std::pair{false, true}}) {
+    const auto memory =
+        v2::test_support::memory_limit_outcome(input.first, input.second);
+    CHECK(memory.state == isolation::ProbeState::unavailable);
+    CHECK(memory.reason == v2::ReasonCode::limit_not_triggered);
+  }
+  CHECK(v2::test_support::memory_limit_outcome(true, true).state ==
+        isolation::ProbeState::enforced);
+
+  CHECK(v2::test_support::pids_limit_outcome(false, true, true, true, true)
+            .state == isolation::ProbeState::unavailable);
+  CHECK(v2::test_support::pids_limit_outcome(true, false, true, true, true)
+            .state == isolation::ProbeState::unavailable);
+  const auto unrelated_exhaustion =
+      v2::test_support::pids_limit_outcome(true, true, true, false, true);
+  CHECK(unrelated_exhaustion.state == isolation::ProbeState::unavailable);
+  CHECK(unrelated_exhaustion.reason == v2::ReasonCode::limit_not_triggered);
+  const auto malformed_counter =
+      v2::test_support::pids_limit_outcome(true, true, false, false, true);
+  CHECK(malformed_counter.state == isolation::ProbeState::probe_error);
+  CHECK(malformed_counter.reason == v2::ReasonCode::malformed_protocol);
+  const auto pids_cleanup =
+      v2::test_support::pids_limit_outcome(true, true, false, false, false);
+  CHECK(pids_cleanup.state == isolation::ProbeState::probe_error);
+  CHECK(pids_cleanup.reason == v2::ReasonCode::cleanup_failed);
+  CHECK(v2::test_support::pids_limit_outcome(true, true, true, true, true)
+            .state == isolation::ProbeState::enforced);
+
+  CHECK(v2::test_support::execute_confinement_outcome(false, true).state ==
+        isolation::ProbeState::unavailable);
+  CHECK(v2::test_support::execute_confinement_outcome(true, false).state ==
+        isolation::ProbeState::unavailable);
+  CHECK(v2::test_support::execute_confinement_outcome(true, true).state ==
+        isolation::ProbeState::enforced);
+}
+
+TEST_CASE("namespace identity maps preserve the outer user identity",
+          "[process-isolation][evidence-v2][failure]") {
+  CHECK(v2::test_support::namespace_identity_map(0) == "0 0 1");
+  CHECK(v2::test_support::namespace_identity_map(1000) == "0 1000 1");
+  CHECK(v2::test_support::namespace_identity_map(UINT32_MAX) ==
+        "0 4294967295 1");
+}
+
+TEST_CASE("mount propagation requires an isolated child mount observation",
+          "[process-isolation][evidence-v2][failure]") {
+  const auto absent =
+      v2::test_support::mount_propagation_outcome(false, false, true);
+  CHECK(absent.state == isolation::ProbeState::unavailable);
+  CHECK(absent.reason == v2::ReasonCode::enforcement_failed);
+
+  const auto leaked =
+      v2::test_support::mount_propagation_outcome(true, true, true);
+  CHECK(leaked.state == isolation::ProbeState::unavailable);
+  CHECK(leaked.reason == v2::ReasonCode::enforcement_failed);
+
+  const auto uncertain_cleanup =
+      v2::test_support::mount_propagation_outcome(true, false, false);
+  CHECK(uncertain_cleanup.state == isolation::ProbeState::probe_error);
+  CHECK(uncertain_cleanup.reason == v2::ReasonCode::cleanup_failed);
+
+  CHECK(v2::test_support::mount_propagation_outcome(true, false, true).state ==
+        isolation::ProbeState::enforced);
+}
+
+TEST_CASE("cgroup cancellation evidence requires a requested cancellation",
+          "[process-isolation][evidence-v2][failure]") {
+  for (const auto& input : {
+           std::array{false, true, true, true},
+           std::array{true, false, true, true},
+       }) {
+    const auto result = v2::test_support::cancellation_cleanup_outcome(
+        input[0], input[1], input[2], input[3]);
+    CHECK(result.state == isolation::ProbeState::probe_error);
+    CHECK(result.reason == v2::ReasonCode::setup_race);
+  }
+  const auto survived =
+      v2::test_support::cancellation_cleanup_outcome(true, true, false, true);
+  CHECK(survived.state == isolation::ProbeState::probe_error);
+  CHECK(survived.reason == v2::ReasonCode::cleanup_failed);
+  const auto uncertain =
+      v2::test_support::cancellation_cleanup_outcome(true, true, true, false);
+  CHECK(uncertain.state == isolation::ProbeState::probe_error);
+  CHECK(uncertain.reason == v2::ReasonCode::cleanup_failed);
+  CHECK(v2::test_support::cancellation_cleanup_outcome(true, true, true, true)
+            .state == isolation::ProbeState::enforced);
+}
+
+TEST_CASE("write confinement requires every mutation class to be denied",
+          "[process-isolation][evidence-v2][failure]") {
+  for (std::size_t missing{}; missing < 6; ++missing) {
+    std::array observations{true, true, true, true, true, true};
+    observations[missing] = false;
+    const auto result = v2::test_support::write_confinement_outcome(
+        observations[0], observations[1], observations[2], observations[3],
+        observations[4], observations[5]);
+    CHECK(result.state == isolation::ProbeState::unavailable);
+    CHECK(result.reason == v2::ReasonCode::enforcement_failed);
+  }
+  CHECK(v2::test_support::write_confinement_outcome(true, true, true, true,
+                                                    true, true)
+            .state == isolation::ProbeState::enforced);
+}
+
+TEST_CASE("combined setup never reports partial setup as enforcement",
+          "[process-isolation][evidence-v2][failure]") {
+  for (const auto id : {v2::ProbeId::combined_setup_order,
+                        v2::ProbeId::private_root_combined_setup_order}) {
+    for (std::size_t missing{}; missing < 8; ++missing) {
+      std::array setup{true, true, true, true, true, true, true, true};
+      setup[missing] = false;
+      const auto partial = v2::test_support::setup_order_outcome(
+          id, setup[0], setup[1], setup[2], setup[3], setup[4], setup[5],
+          setup[6], setup[7], false, false);
+      CHECK(partial.probe_id == id);
+      CHECK(partial.state == isolation::ProbeState::unavailable);
+      CHECK(partial.reason == v2::ReasonCode::unsupported_combination);
+    }
+  }
+  const auto race = v2::test_support::setup_order_outcome(
+      v2::ProbeId::combined_setup_order, true, true, true, true, true, true,
+      true, true, false, true);
+  CHECK(race.state == isolation::ProbeState::probe_error);
+  CHECK(race.reason == v2::ReasonCode::setup_race);
+  const auto exited = v2::test_support::setup_order_outcome(
+      v2::ProbeId::combined_setup_order, true, true, true, true, true, true,
+      true, true, true, false);
+  CHECK(exited.state == isolation::ProbeState::probe_error);
+  CHECK(exited.reason == v2::ReasonCode::setup_race);
+  CHECK(v2::test_support::setup_order_outcome(
+            v2::ProbeId::private_root_combined_setup_order, true, true, true,
+            true, true, true, true, true, true, true)
+            .state == isolation::ProbeState::enforced);
+}
+
+TEST_CASE("combined setup preserves row identity and exact failure class",
+          "[process-isolation][evidence-v2][failure]") {
+  const auto id = v2::ProbeId::private_root_combined_setup_order;
+  for (const auto& expected : {
+           std::pair{EACCES, v2::ReasonCode::permission_denied},
+           std::pair{ENOSYS, v2::ReasonCode::mechanism_absent},
+           std::pair{EIO, v2::ReasonCode::internal_error},
+       }) {
+    const auto result =
+        v2::test_support::combined_setup_errno_outcome(id, expected.first);
+    CHECK(result.probe_id == id);
+    CHECK(result.reason == expected.second);
+    CHECK(result.state == (expected.first == EIO
+                               ? isolation::ProbeState::probe_error
+                               : isolation::ProbeState::unavailable));
+  }
+}
