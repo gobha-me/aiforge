@@ -61,6 +61,8 @@ namespace {
       return std::holds_alternative<std::vector<std::string>>(value);
     case ConfigValueKind::text_map:
       return std::holds_alternative<ConfigTextMap>(value);
+    case ConfigValueKind::automatic_approval_rules:
+      return std::holds_alternative<AutomaticApprovalRulesConfig>(value);
   }
   return false;
 }
@@ -104,6 +106,58 @@ namespace {
   return true;
 }
 
+[[nodiscard]] auto valid_automatic_approval_constraints(
+    const AutomaticApprovalRuleConstraintsConfig& constraints) -> bool {
+  if (constraints.allowed_restrictions.empty() ||
+      constraints.allowed_restrictions.size() > 4U ||
+      constraints.maximum_matches == 0 ||
+      (constraints.expires_after_milliseconds &&
+       *constraints.expires_after_milliseconds == 0)) {
+    return false;
+  }
+  std::unordered_set<std::string_view> restrictions;
+  for (const auto& restriction : constraints.allowed_restrictions) {
+    if ((restriction != "none" && restriction != "low" &&
+         restriction != "medium" && restriction != "high") ||
+        !restrictions.insert(restriction).second) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] auto valid_automatic_approval_rules(
+    const AutomaticApprovalRulesConfig& configuration,
+    const ConfigKeySpec& spec) -> bool {
+  if (configuration.rules.size() > spec.maximum_list_items) return false;
+  return std::ranges::all_of(configuration.rules, [&](const auto& rule) {
+    return std::visit(
+        [&]<typename Rule>(const Rule& concrete) {
+          if (concrete.tool_name.empty() ||
+              concrete.tool_name.size() > spec.maximum_text_bytes ||
+              !detail::is_safe_utf8_text(concrete.tool_name) ||
+              concrete.tool_name.find_first_of("\r\n\t") != std::string::npos ||
+              !valid_automatic_approval_constraints(concrete.constraints)) {
+            return false;
+          }
+          if constexpr (std::same_as<Rule, ExactAutomaticApprovalRuleConfig>) {
+            return !concrete.canonical_arguments_json.empty() &&
+                   concrete.canonical_arguments_json.size() <=
+                       spec.maximum_text_bytes &&
+                   valid_utf8(concrete.canonical_arguments_json);
+          } else {
+            return concrete.tool_name == "read_repository_file" &&
+                   concrete.allowed_relative_path.size() <=
+                       spec.maximum_text_bytes &&
+                   detail::is_safe_utf8_text(concrete.allowed_relative_path) &&
+                   concrete.allowed_relative_path.find_first_of("\r\n\t") ==
+                       std::string::npos;
+          }
+        },
+        rule);
+  });
+}
+
 // clang-format off
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Closed variants require explicit bounded validation branches.
 [[nodiscard]] auto validate_value(const ConfigKeySpec& spec,
@@ -121,6 +175,13 @@ namespace {
     return std::unexpected(
         diagnostic(ConfigDiagnosticCode::invalid_value, source, spec.id,
                    "configuration maps are supported only by the file source"));
+  }
+  if (spec.value_kind == ConfigValueKind::automatic_approval_rules &&
+      source != ConfigSource::file &&
+      source != ConfigSource::compiled_default) {
+    return std::unexpected(diagnostic(
+        ConfigDiagnosticCode::invalid_value, source, spec.id,
+        "automatic approval rules are supported only by the file source"));
   }
   if (const auto* text = std::get_if<std::string>(&value);
       text != nullptr && text->size() > spec.maximum_text_bytes) {
@@ -182,6 +243,12 @@ namespace {
                        "configuration map keys must be unique"));
       }
     }
+  }
+  if (const auto* rules = std::get_if<AutomaticApprovalRulesConfig>(&value);
+      rules != nullptr && !valid_automatic_approval_rules(*rules, spec)) {
+    return std::unexpected(
+        diagnostic(ConfigDiagnosticCode::invalid_value, source, spec.id,
+                   "automatic approval rules are malformed or overbound"));
   }
   return {};
 }
@@ -280,9 +347,12 @@ auto parse_config_value(const ConfigKeySpec& spec,
         diagnostic(ConfigDiagnosticCode::invalid_value, source, spec.id,
                    "the value is invalid for the configuration key"));
   };
-  // Map values have no delimiter-based command-line or environment grammar.
-  // They are accepted only as native objects by the configuration-file adapter.
-  if (spec.value_kind == ConfigValueKind::text_map) return invalid();
+  // Structured values have no delimiter-based command-line or environment
+  // grammar. They are accepted only as native values by the JSON adapter.
+  if (spec.value_kind == ConfigValueKind::text_map ||
+      spec.value_kind == ConfigValueKind::automatic_approval_rules) {
+    return invalid();
+  }
   if (spec.value_kind != ConfigValueKind::text_list && values.size() != 1) {
     return invalid();
   }
@@ -327,7 +397,8 @@ auto parse_config_value(const ConfigKeySpec& spec,
       parsed = std::move(list);
       break;
     }
-    case ConfigValueKind::text_map: return invalid();
+    case ConfigValueKind::text_map:
+    case ConfigValueKind::automatic_approval_rules: return invalid();
   }
   if (auto valid = validate_value(spec, parsed, source); !valid) {
     return std::unexpected(std::move(valid.error()));
@@ -361,6 +432,10 @@ auto format_config_value(const ConfigValue& value) -> std::string {
             result.append(entry.value);
           }
           return result;
+        } else if constexpr (std::same_as<Value,
+                                          AutomaticApprovalRulesConfig>) {
+          return std::to_string(concrete.rules.size()) +
+                 (concrete.rules.size() == 1U ? " rule" : " rules");
         } else {
           return std::to_string(concrete);
         }
@@ -590,6 +665,9 @@ auto builtin_config_registry() -> const ConfigRegistry& {
       {std::string{image_tool_model_key}, ConfigValueKind::text,
        std::string{"AIFORGE_TOOLS_IMAGE_MODEL"}, std::nullopt, false, true,
        domain::ModelId::max_size, 1},
+      {std::string{automatic_approval_rules_key},
+       ConfigValueKind::automatic_approval_rules, std::nullopt, std::nullopt,
+       false, true, std::size_t{64U} * 1024U, 256},
   }};
   return registry;
 }
@@ -751,6 +829,32 @@ auto resolve_image_tool_model(const ResolvedConfig& resolved)
                    "the image tool model setting is invalid"));
   }
   return std::optional<domain::ModelId>{std::move(*model_id)};
+}
+
+auto resolve_automatic_approval_rules(const ResolvedConfig& resolved)
+    -> std::expected<AutomaticApprovalRulesConfig, ConfigDiagnostic> {
+  constexpr std::string_view namespace_key{"tools.approval"};
+  for (const auto& issue : resolved.diagnostics) {
+    if (issue.key == namespace_key ||
+        issue.key == automatic_approval_rules_key ||
+        (issue.key.size() > namespace_key.size() &&
+         issue.key.starts_with(namespace_key) &&
+         issue.key[namespace_key.size()] == '.')) {
+      return std::unexpected(issue);
+    }
+  }
+  const auto* entry = resolved.find(automatic_approval_rules_key);
+  if (entry == nullptr || !entry->value) return AutomaticApprovalRulesConfig{};
+  const auto* configured =
+      std::get_if<AutomaticApprovalRulesConfig>(&*entry->value);
+  if (configured == nullptr) {
+    return std::unexpected(
+        diagnostic(ConfigDiagnosticCode::invalid_value,
+                   entry->source.value_or(ConfigSource::compiled_default),
+                   std::string{automatic_approval_rules_key},
+                   "automatic approval rules have an invalid value type"));
+  }
+  return *configured;
 }
 
 } // namespace aiforge::config

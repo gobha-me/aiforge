@@ -67,16 +67,28 @@ auto launch_policy(
   context_configuration.unavailable_reason.reset();
   context_configuration.restriction_policy_identity = "test.process-policy.v1";
   context_configuration.approval_mode = approval;
+  std::shared_ptr<runtime::AutomaticApprovalMatcher> matcher;
   if (approval == runtime::ApprovalMode::automatic) {
+    std::vector<runtime::AutomaticApprovalRule> rules;
+    for (auto& tool_name : automatic) {
+      rules.emplace_back(runtime::ExactToolArgumentsApprovalRule{
+          std::move(tool_name),
+          runtime::canonicalize_validated_tool_arguments(
+              {"application/json", "{}"})
+              .value(),
+          {{restriction}, 1024, std::nullopt, 0}});
+    }
+    matcher =
+        runtime::compile_automatic_approval_matcher(std::move(rules)).value();
     context_configuration.matcher_policy_identity =
-        runtime::exact_tool_allowlist_matcher_identity(automatic).value();
+        std::string{matcher->identity()};
   }
   auto context = runtime::make_application_launch_context(
       std::move(context_configuration));
   REQUIRE(context);
   auto policy = runtime::make_tool_launch_policy(
-      tools, {std::move(permission_profile), std::move(*context),
-              std::move(automatic)});
+      tools,
+      {std::move(permission_profile), std::move(*context), std::move(matcher)});
   REQUIRE(policy);
   return std::move(*policy);
 }
@@ -467,7 +479,9 @@ TEST_CASE("paid image tool requires media selection and authority ceilings",
   const auto medium = launch_policy(*snapshot);
   resolved = runtime::resolve_tool_profile(*snapshot, selection, *medium);
   REQUIRE(resolved);
-  CHECK(resolved->effective_tools.find("generate_image") != nullptr);
+  REQUIRE(resolved->effective_tools.find("generate_image") != nullptr);
+  CHECK(resolved->effective_tools.find("generate_image")->executor ==
+        image_executor);
   REQUIRE(resolved->tool_availability.size() == 3);
   CHECK(resolved->tool_availability.back().reason ==
         runtime::ToolProfileAvailabilityReason::available);

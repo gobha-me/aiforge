@@ -249,6 +249,8 @@ template <typename Enum>
     case domain::PolicyDecisionSource::fallback: return "fallback";
     case domain::PolicyDecisionSource::permission_profile:
       return "permission_profile";
+    case domain::PolicyDecisionSource::automatic_matcher:
+      return "automatic_matcher";
     case domain::PolicyDecisionSource::session_grant: return "session_grant";
     case domain::PolicyDecisionSource::saved_grant: return "saved_grant";
     case domain::PolicyDecisionSource::user_approval: return "user_approval";
@@ -263,9 +265,36 @@ template <typename Enum>
       name,
       {{"fallback", domain::PolicyDecisionSource::fallback},
        {"permission_profile", domain::PolicyDecisionSource::permission_profile},
+       {"automatic_matcher", domain::PolicyDecisionSource::automatic_matcher},
        {"session_grant", domain::PolicyDecisionSource::session_grant},
        {"saved_grant", domain::PolicyDecisionSource::saved_grant},
        {"user_approval", domain::PolicyDecisionSource::user_approval}});
+}
+
+[[nodiscard]] auto automatic_approval_json(
+    const std::optional<domain::AutomaticApprovalEvidence>& value) -> Json {
+  if (!value) return nullptr;
+  return {{"policy_identity", value->policy_identity},
+          {"rule_identity", value->rule_identity}};
+}
+
+[[nodiscard]] auto parse_automatic_approval(const Json& value)
+    -> std::optional<domain::AutomaticApprovalEvidence> {
+  if (value.is_null()) return std::nullopt;
+  if (!value.is_object() || value.size() != 2U ||
+      !value.contains("policy_identity") ||
+      !value.at("policy_identity").is_string() ||
+      !value.contains("rule_identity") ||
+      !value.at("rule_identity").is_string()) {
+    throw CodecFailure{"automatic approval evidence is malformed"};
+  }
+  domain::AutomaticApprovalEvidence result{
+      value.at("policy_identity").get<std::string>(),
+      value.at("rule_identity").get<std::string>()};
+  if (!domain::valid_automatic_approval_evidence(result)) {
+    throw CodecFailure{"automatic approval evidence identity is invalid"};
+  }
+  return result;
 }
 
 [[nodiscard]] auto spend_ceiling_source_name(
@@ -3290,7 +3319,7 @@ auto parse_v2_tool_policy_fields(const Json& value,
   return (schema_version == 1 && known_payload_type(type)) ||
          (schema_version == 2 &&
           (type == "plan.revision_proposed" || type == "run.child_created" ||
-           type == "tool.proposed")) ||
+           type == "tool.proposed" || type == "tool.policy_decided")) ||
          ((schema_version == 3 || schema_version == 4) &&
           type == "run.child_created");
 }
@@ -3412,12 +3441,17 @@ auto parse_v2_tool_policy_fields(const Json& value,
             }
             return result;
           },
-          [](const domain::ToolPolicyDecided& value) -> Json {
-            return {{"invocation_id", id_text(value.invocation_id)},
-                    {"decision", policy_name(value.decision)},
-                    {"scopes", scopes_json(value.scopes)},
-                    {"reason", optional_string_json(value.reason)},
-                    {"source", policy_source_name(value.source)}};
+          [schema_version](const domain::ToolPolicyDecided& value) -> Json {
+            Json result{{"invocation_id", id_text(value.invocation_id)},
+                        {"decision", policy_name(value.decision)},
+                        {"scopes", scopes_json(value.scopes)},
+                        {"reason", optional_string_json(value.reason)},
+                        {"source", policy_source_name(value.source)}};
+            if (schema_version >= 2) {
+              result["automatic_approval"] =
+                  automatic_approval_json(value.automatic_approval);
+            }
+            return result;
           },
           [](const domain::ToolApprovalRequested& value) -> Json {
             return {{"invocation_id", id_text(value.invocation_id)},
@@ -3813,12 +3847,27 @@ auto parse_v2_tool_policy_fields(const Json& value,
             : std::nullopt};
   }
   if (type == "tool.policy_decided") {
-    return domain::ToolPolicyDecided{
+    if (schema_version >= 2 && !value.contains("automatic_approval")) {
+      throw CodecFailure{
+          "automatic approval evidence is missing from policy decision"};
+    }
+    domain::ToolPolicyDecided result{
         parse_id<domain::InvocationId>(value.at("invocation_id")),
-        parse_policy(value.at("decision")), parse_scopes(value.at("scopes")),
+        parse_policy(value.at("decision")),
+        parse_scopes(value.at("scopes")),
         parse_optional_string(value.at("reason")),
         value.contains("source") ? parse_policy_source(value.at("source"))
-                                 : domain::PolicyDecisionSource::fallback};
+                                 : domain::PolicyDecisionSource::fallback,
+        schema_version >= 2
+            ? parse_automatic_approval(value.at("automatic_approval"))
+            : std::nullopt};
+    if ((result.source == domain::PolicyDecisionSource::automatic_matcher) !=
+            result.automatic_approval.has_value() ||
+        (result.automatic_approval &&
+         result.decision != domain::PolicyDecision::allow)) {
+      throw CodecFailure{"automatic approval evidence is inconsistent"};
+    }
+    return result;
   }
   if (type == "tool.approval_requested") {
     return domain::ToolApprovalRequested{
@@ -4115,6 +4164,22 @@ struct EncodedPayload {
 
 auto validate_payload_schema_for_encoding(const domain::RunEvent& event)
     -> void {
+  if (const auto* decided =
+          std::get_if<domain::ToolPolicyDecided>(&event.payload)) {
+    const bool automatic_source =
+        decided->source == domain::PolicyDecisionSource::automatic_matcher;
+    if (automatic_source != decided->automatic_approval.has_value() ||
+        (decided->automatic_approval &&
+         (decided->decision != domain::PolicyDecision::allow ||
+          !domain::valid_automatic_approval_evidence(
+              *decided->automatic_approval)))) {
+      throw CodecFailure{"automatic approval evidence is inconsistent"};
+    }
+    if (event.metadata.schema_version < 2 && decided->automatic_approval) {
+      throw CodecFailure{
+          "automatic approval evidence requires policy schema version 2"};
+    }
+  }
   if (event.metadata.schema_version < 2) return;
   const auto* proposed = std::get_if<domain::ToolProposed>(&event.payload);
   if (proposed == nullptr) return;

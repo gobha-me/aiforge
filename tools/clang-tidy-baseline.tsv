@@ -93,10 +93,7 @@ src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-varar
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	ad1351ed1d0ecfaf0cc3	do not call c-style vararg functions
 src/adapters/git_repository_snapshot_source.cpp	modernize-use-integer-sign-comparison	26b24ff743c699515bd0	comparison between 'signed' and 'unsigned' integers
 src/adapters/git_repository_snapshot_source.cpp	modernize-use-integer-sign-comparison	84b47d22b7e97a187e44	comparison between 'signed' and 'unsigned' integers
-src/adapters/git_repository_snapshot_source.cpp	readability-else-after-return	dac9994d6c168c7e8ac9	do not use 'else' after 'return'
-src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	09db0175f59d912d2faf	function 'observe_git_once' has cognitive complexity of 77 (threshold 20)
 src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	0ad80642abc0b54bce39	function 'valid_utf8_instruction' has cognitive complexity of 28 (threshold 20)
-src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	102e73454c1fb916eb3e	function 'hash_path' has cognitive complexity of 22 (threshold 20)
 src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	a6aef2f4519215c8efd6	function 'discover' has cognitive complexity of 110 (threshold 20)
 src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	c5a0f0faa0f86a50e9a4	function 'create' has cognitive complexity of 30 (threshold 20)
 src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	d321e7aed1727bb22a26	function 'observe_plain_once' has cognitive complexity of 30 (threshold 20)

@@ -137,34 +137,55 @@ auto configuration(
     const runtime::ApprovalMode approval = runtime::ApprovalMode::allow_all,
     std::vector<std::string> automatic = {}, const bool available = true)
     -> runtime::ToolLaunchPolicyConfiguration {
+  std::shared_ptr<runtime::AutomaticApprovalMatcher> matcher;
   std::optional<std::string> matcher_policy_identity;
   if (approval == runtime::ApprovalMode::automatic) {
-    auto identity = runtime::exact_tool_allowlist_matcher_identity(automatic);
-    matcher_policy_identity =
-        identity ? std::move(*identity) : std::string{"invalid.matcher.v1"};
+    std::vector<runtime::AutomaticApprovalRule> rules;
+    for (auto& tool_name : automatic) {
+      rules.emplace_back(runtime::ExactToolArgumentsApprovalRule{
+          std::move(tool_name),
+          runtime::canonicalize_validated_tool_arguments(
+              {"application/json", "{}"})
+              .value(),
+          {{restriction}, 1024, std::nullopt, 0}});
+    }
+    auto compiled =
+        runtime::compile_automatic_approval_matcher(std::move(rules));
+    if (compiled) {
+      matcher = std::move(*compiled);
+      matcher_policy_identity = std::string{matcher->identity()};
+    } else {
+      matcher_policy_identity = "invalid.matcher.v1";
+    }
   }
   return {id<domain::PermissionProfileId>("launch"),
           launch_context(restriction, approval, available,
                          std::move(matcher_policy_identity)),
-          std::move(automatic)};
+          std::move(matcher)};
 }
 
 auto request(std::string tool, std::vector<domain::Effect> effects,
              std::vector<domain::CapabilityScope> scopes = {})
     -> runtime::ToolPolicyRequest {
-  return {id<domain::SessionId>("session"),
-          id<domain::RunId>("run"),
-          id<domain::InvocationId>("invocation"),
-          id<domain::PermissionProfileId>("launch"),
-          std::move(tool),
-          std::move(effects),
-          std::move(scopes)};
+  const auto invocation = "invocation-" + tool;
+  return {
+      id<domain::SessionId>("session"),
+      id<domain::RunId>("run"),
+      id<domain::InvocationId>(invocation),
+      id<domain::PermissionProfileId>("launch"),
+      std::move(tool),
+      std::move(effects),
+      std::move(scopes),
+      runtime::canonicalize_validated_tool_arguments({"application/json", "{}"})
+          .value(),
+      std::nullopt};
 }
 
 auto decision(runtime::ToolPolicy& policy, std::string tool,
               const domain::Effect effect) -> domain::PolicyDecision {
-  auto result =
-      policy.evaluate(request(std::move(tool), {effect}, {scope(effect)}));
+  auto policy_request = request(std::move(tool), {effect}, {scope(effect)});
+  policy_request.selected_restriction = policy.selected_restriction();
+  auto result = policy.evaluate(policy_request);
   REQUIRE(result);
   return result->decision;
 }
@@ -264,8 +285,10 @@ TEST_CASE("launch policy configuration rejects ambiguity before evaluation",
           "[launch-policy][failure]") {
   const auto tools = registry();
 
-  auto ignored_allowlist = configuration(
-      runtime::RestrictionLevel::none, runtime::ApprovalMode::prompt, {"read"});
+  auto ignored_allowlist = configuration(runtime::RestrictionLevel::none,
+                                         runtime::ApprovalMode::prompt);
+  ignored_allowlist.automatic_matcher =
+      runtime::compile_automatic_approval_matcher({}).value();
   REQUIRE_FALSE(
       runtime::make_tool_launch_policy(tools, std::move(ignored_allowlist)));
 
@@ -273,35 +296,42 @@ TEST_CASE("launch policy configuration rejects ambiguity before evaluation",
                                runtime::ApprovalMode::automatic, {"unknown"});
   REQUIRE_FALSE(runtime::make_tool_launch_policy(tools, std::move(unknown)));
 
-  auto duplicate =
-      configuration(runtime::RestrictionLevel::none,
-                    runtime::ApprovalMode::automatic, {"read", "read"});
-  REQUIRE_FALSE(runtime::make_tool_launch_policy(tools, std::move(duplicate)));
+  const auto duplicate_value = runtime::canonicalize_validated_tool_arguments(
+      {"application/json", "{}"});
+  REQUIRE(duplicate_value);
+  const runtime::AutomaticApprovalRule duplicate_rule{
+      runtime::ExactToolArgumentsApprovalRule{
+          "read",
+          *duplicate_value,
+          {{runtime::RestrictionLevel::none}, 1, std::nullopt, 0}}};
+  REQUIRE_FALSE(runtime::compile_automatic_approval_matcher(
+      {duplicate_rule, duplicate_rule}));
 
   auto mismatched = runtime::ToolLaunchPolicyConfiguration{
       id<domain::PermissionProfileId>("launch"),
       launch_context(runtime::RestrictionLevel::none,
                      runtime::ApprovalMode::automatic, true,
                      "aiforge.wrong-matcher.v1"),
-      {"read"}};
+      runtime::compile_automatic_approval_matcher({}).value()};
   REQUIRE_FALSE(runtime::make_tool_launch_policy(tools, std::move(mismatched)));
 
   auto stale_matcher = configuration(runtime::RestrictionLevel::none,
                                      runtime::ApprovalMode::automatic);
-  stale_matcher.automatically_eligible_tools = {"read"};
+  stale_matcher.automatic_matcher =
+      runtime::compile_automatic_approval_matcher(
+          {runtime::ExactToolArgumentsApprovalRule{
+              "read",
+              *duplicate_value,
+              {{runtime::RestrictionLevel::none}, 1, std::nullopt, 0}}})
+          .value();
   REQUIRE_FALSE(
       runtime::make_tool_launch_policy(tools, std::move(stale_matcher)));
 
-  const std::array first{std::string{"write"}, std::string{"read"}};
-  const std::array reordered{std::string{"read"}, std::string{"write"}};
-  const std::array drifted{std::string{"read"}};
-  REQUIRE(runtime::exact_tool_allowlist_matcher_identity(first) ==
-          runtime::exact_tool_allowlist_matcher_identity(reordered));
-  REQUIRE(runtime::exact_tool_allowlist_matcher_identity(first) !=
-          runtime::exact_tool_allowlist_matcher_identity(drifted));
-  REQUIRE(runtime::exact_tool_allowlist_matcher_identity(first) ==
-          "aiforge.exact-tool-allowlist.v1.sha256:"
-          "cd44cfefddbc655a38450dd258fd4c2a654f050928f7706ce0ff5bed02001255");
+  const auto empty_first = runtime::compile_automatic_approval_matcher({});
+  const auto empty_second = runtime::compile_automatic_approval_matcher({});
+  REQUIRE(empty_first);
+  REQUIRE(empty_second);
+  REQUIRE((*empty_first)->identity() == (*empty_second)->identity());
 }
 
 TEST_CASE("process registration matches the restriction network contract",
@@ -424,14 +454,26 @@ TEST_CASE("every restriction and approval mode combination is closed",
       auto policy =
           runtime::make_tool_launch_policy(tools, std::move(configured));
       REQUIRE(policy);
-      auto result = (*policy)->evaluate(request("read", {domain::Effect::read},
-                                                {scope(domain::Effect::read)}));
+      auto policy_request = request("read", {domain::Effect::read},
+                                    {scope(domain::Effect::read)});
+      policy_request.selected_restriction = restriction;
+      auto result = (*policy)->evaluate(policy_request);
       REQUIRE(result);
 
       const auto expected = mode == runtime::ApprovalMode::prompt
                                 ? domain::PolicyDecision::require_approval
                                 : domain::PolicyDecision::allow;
       REQUIRE(result->decision == expected);
+
+      policy_request.invocation_id =
+          id<domain::InvocationId>("invocation-without-canonical-arguments");
+      policy_request.canonical_arguments.reset();
+      result = (*policy)->evaluate(policy_request);
+      REQUIRE(result);
+      const auto missing_expected = mode == runtime::ApprovalMode::automatic
+                                        ? domain::PolicyDecision::deny
+                                        : expected;
+      REQUIRE(result->decision == missing_expected);
     }
   }
 }
@@ -542,9 +584,16 @@ TEST_CASE("prompt mode requires exact invocation approval for effectful tools",
           domain::PolicyDecision::require_approval);
 }
 
-TEST_CASE("automatic mode allows only configured registered tools",
+TEST_CASE("automatic mode allows only matching registered rules",
           "[launch-policy][automatic][failure]") {
   const auto tools = registry();
+  auto deny_all = runtime::make_tool_launch_policy(
+      tools, configuration(runtime::RestrictionLevel::low,
+                           runtime::ApprovalMode::automatic));
+  REQUIRE(deny_all);
+  REQUIRE(decision(**deny_all, "read", domain::Effect::read) ==
+          domain::PolicyDecision::deny);
+
   auto policy = runtime::make_tool_launch_policy(
       tools, configuration(runtime::RestrictionLevel::low,
                            runtime::ApprovalMode::automatic,
@@ -567,6 +616,69 @@ TEST_CASE("automatic mode allows only configured registered tools",
           runtime::ToolPolicyErrorCode::invalid_request);
 }
 
+TEST_CASE("automatic matching cannot bypass launch authority checks",
+          "[launch-policy][automatic][scope][restriction][failure]") {
+  const auto tools = registry();
+  auto matcher = runtime::compile_automatic_approval_matcher(
+      {runtime::ExactToolArgumentsApprovalRule{
+          "read",
+          runtime::canonicalize_validated_tool_arguments(
+              {"application/json", "{}"})
+              .value(),
+          {{runtime::RestrictionLevel::low}, 1, std::nullopt, 0}}});
+  REQUIRE(matcher);
+  const auto matcher_identity = std::string{(*matcher)->identity()};
+  auto configured = runtime::ToolLaunchPolicyConfiguration{
+      id<domain::PermissionProfileId>("launch"),
+      launch_context(runtime::RestrictionLevel::low,
+                     runtime::ApprovalMode::automatic, true, matcher_identity),
+      *matcher};
+  auto policy = runtime::make_tool_launch_policy(tools, std::move(configured));
+  REQUIRE(policy);
+
+  auto stale_restriction =
+      request("read", {domain::Effect::read}, {scope(domain::Effect::read)});
+  stale_restriction.selected_restriction = runtime::RestrictionLevel::medium;
+  REQUIRE((*policy)->evaluate(stale_restriction)->decision ==
+          domain::PolicyDecision::deny);
+
+  auto widened = request("read", {domain::Effect::read},
+                         {{domain::Effect::read, "filesystem.root", "/"}});
+  widened.selected_restriction = runtime::RestrictionLevel::low;
+  REQUIRE((*policy)->evaluate(widened)->decision ==
+          domain::PolicyDecision::deny);
+
+  auto stale_canonicalization =
+      request("read", {domain::Effect::read}, {scope(domain::Effect::read)});
+  stale_canonicalization.selected_restriction = runtime::RestrictionLevel::low;
+  stale_canonicalization.canonical_arguments->canonicalization_identity =
+      "aiforge.canonical-tool-json.v2";
+  const auto stale = (*policy)->evaluate(stale_canonicalization);
+  REQUIRE(stale);
+  REQUIRE(stale->decision == domain::PolicyDecision::deny);
+
+  auto missing_canonicalization =
+      request("read", {domain::Effect::read}, {scope(domain::Effect::read)});
+  missing_canonicalization.selected_restriction =
+      runtime::RestrictionLevel::low;
+  missing_canonicalization.canonical_arguments.reset();
+  const auto missing = (*policy)->evaluate(missing_canonicalization);
+  REQUIRE(missing);
+  REQUIRE(missing->decision == domain::PolicyDecision::deny);
+
+  auto valid =
+      request("read", {domain::Effect::read}, {scope(domain::Effect::read)});
+  valid.selected_restriction = runtime::RestrictionLevel::low;
+  const auto allowed = (*policy)->evaluate(valid);
+  REQUIRE(allowed);
+  REQUIRE(allowed->decision == domain::PolicyDecision::allow);
+  REQUIRE(allowed->source == domain::PolicyDecisionSource::automatic_matcher);
+  REQUIRE(allowed->automatic_approval.has_value());
+
+  valid.invocation_id = id<domain::InvocationId>("second-read");
+  REQUIRE((*policy)->evaluate(valid)->decision == domain::PolicyDecision::deny);
+}
+
 TEST_CASE("v2 policy provenance is bounded and omits raw automatic rules",
           "[launch-policy][provenance][failure]") {
   const auto tools = registry();
@@ -586,10 +698,7 @@ TEST_CASE("v2 policy provenance is bounded and omits raw automatic rules",
   REQUIRE(provenance->mechanism_version == "0018");
   REQUIRE(provenance->restriction_policy_identity == "test.process-policy.v1");
   REQUIRE(provenance->approval_mode == domain::ToolApprovalMode::automatic);
-  const std::array<std::string, 2> automatic_tools{"read", "infrastructure"};
-  REQUIRE(
-      provenance->matcher_policy_identity ==
-      runtime::exact_tool_allowlist_matcher_identity(automatic_tools).value());
+  REQUIRE(provenance->matcher_policy_identity.has_value());
   REQUIRE(provenance->automatically_eligible_tools.empty());
   REQUIRE(std::ranges::find(provenance->effect_ceiling,
                             domain::Effect::change_privileges) !=

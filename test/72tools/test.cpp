@@ -497,6 +497,7 @@ class CountingPolicy final : public runtime::ToolPolicy {
       -> std::expected<runtime::ToolPolicyResolution,
                        runtime::ToolPolicyError> override {
     ++evaluations;
+    requests.push_back(request);
     return m_delegate->evaluate(request);
   }
 
@@ -512,10 +513,59 @@ class CountingPolicy final : public runtime::ToolPolicy {
     return m_delegate->provenance();
   }
 
+  [[nodiscard]] auto selected_restriction() const noexcept
+      -> std::optional<runtime::RestrictionLevel> override {
+    return m_delegate->selected_restriction();
+  }
+
   std::size_t evaluations{};
+  std::vector<runtime::ToolPolicyRequest> requests;
 
  private:
   std::shared_ptr<runtime::ToolPolicy> m_delegate;
+};
+
+class CorruptingAutomaticPolicy final : public runtime::ToolPolicy {
+ public:
+  explicit CorruptingAutomaticPolicy(
+      std::shared_ptr<runtime::ToolPolicy> delegate)
+      : m_delegate(std::move(delegate)) {}
+
+  auto evaluate(const runtime::ToolPolicyRequest& request)
+      -> std::expected<runtime::ToolPolicyResolution,
+                       runtime::ToolPolicyError> override {
+    auto resolution = m_delegate->evaluate(request);
+    if (resolution && resolution->automatic_approval) {
+      resolution->automatic_approval->rule_identity = "SecretLikeRuleToken456";
+    }
+    return resolution;
+  }
+
+  auto approve(const runtime::ToolPolicyRequest& request,
+               runtime::ToolPolicyApproval approval)
+      -> std::expected<runtime::ToolPolicyResolution,
+                       runtime::ToolPolicyError> override {
+    return m_delegate->approve(request, std::move(approval));
+  }
+
+  [[nodiscard]] auto provenance() const noexcept
+      -> const domain::ToolPolicyProvenance* override {
+    return m_delegate->provenance();
+  }
+
+  [[nodiscard]] auto selected_restriction() const noexcept
+      -> std::optional<runtime::RestrictionLevel> override {
+    return m_delegate->selected_restriction();
+  }
+
+ private:
+  std::shared_ptr<runtime::ToolPolicy> m_delegate;
+};
+
+enum class AutomaticReplayScenario {
+  changed_policy,
+  exhausted_matcher,
+  expired_matcher,
 };
 
 template <typename Payload>
@@ -530,11 +580,12 @@ auto persisted_event(const std::uint64_t sequence, Payload payload,
 }
 
 auto tool_call_script(const domain::InvocationId& invocation,
-                      std::string tool_name = "lookup")
-    -> testing::StreamScript {
+                      std::string tool_name = "lookup",
+                      std::string arguments = "{}") -> testing::StreamScript {
   return testing::StreamScript{{
       step(backend::ResponseStarted{"response"}),
-      step(backend::ToolCallDelta{invocation, std::move(tool_name), "{}"}),
+      step(backend::ToolCallDelta{invocation, std::move(tool_name),
+                                  std::move(arguments)}),
       step(backend::ResponseFinished{domain::FinishReason::tool_call}),
       testing::EndOfStream{},
   }};
@@ -1627,7 +1678,7 @@ TEST_CASE("durable pending approval is reconstructed without execution",
   REQUIRE(policy);
   auto initial = request("inference-1", "assistant-1", tools.declarations());
   testing::ScriptedBackend backend{{
-      {initial, tool_call_script(invocation)},
+      {initial, tool_call_script(invocation, "lookup", R"({"ratio":1.5})")},
   }};
   MemoryStore store;
   WakeCounter wake;
@@ -1699,7 +1750,7 @@ TEST_CASE("durable consumed approval is renewed before restart execution",
   REQUIRE(policy);
   auto initial = request("inference-1", "assistant-1", tools.declarations());
   testing::ScriptedBackend backend{{
-      {initial, tool_call_script(invocation)},
+      {initial, tool_call_script(invocation, "lookup", R"({"ratio":1.5})")},
   }};
   MemoryStore store;
   WakeCounter wake;
@@ -1765,11 +1816,101 @@ TEST_CASE("durable consumed approval is renewed before restart execution",
           }) == 2);
 }
 
+TEST_CASE("floating-point tool arguments remain usable outside automatic mode",
+          "[tools][policy][automatic][canonical][failure]") {
+  const auto approval =
+      GENERATE(runtime::ApprovalMode::prompt, runtime::ApprovalMode::automatic,
+               runtime::ApprovalMode::allow_all);
+  CAPTURE(approval);
+  const auto invocation = make_id<domain::InvocationId>("floating-call");
+  const auto profile =
+      make_id<domain::PermissionProfileId>("tools-none-floating-v2");
+  auto executor = std::make_shared<ImmediateExecutor>(
+      std::vector{scope()}, std::vector{domain::Effect::read},
+      runtime::ToolResult{{domain::TextBlock{"done"}}});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(declaration(), executor));
+  const auto tools = snapshot_of(registry);
+
+  std::shared_ptr<runtime::AutomaticApprovalMatcher> matcher;
+  std::optional<std::string> matcher_identity;
+  if (approval == runtime::ApprovalMode::automatic) {
+    matcher = runtime::compile_automatic_approval_matcher(
+                  {runtime::ExactToolArgumentsApprovalRule{
+                      "lookup",
+                      runtime::canonicalize_validated_tool_arguments(
+                          {"application/json", "{}"})
+                          .value(),
+                      {{runtime::RestrictionLevel::none}, 1, std::nullopt, 0}}})
+                  .value();
+    matcher_identity = std::string{matcher->identity()};
+  }
+  auto launch_policy = runtime::make_tool_launch_policy(
+      tools, {profile,
+              testing::available_application_launch_context(
+                  runtime::RestrictionLevel::none, approval,
+                  std::move(matcher_identity)),
+              std::move(matcher)});
+  REQUIRE(launch_policy);
+  auto policy = std::make_shared<CountingPolicy>(std::move(*launch_policy));
+
+  auto initial = request("inference-1", "assistant-1", tools.declarations());
+  testing::ScriptedBackend backend{{
+      {initial, tool_call_script(invocation, "lookup", R"({"ratio":1.5})")},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            tools,
+                            policy};
+  auto start = run_start(initial);
+  start.attributes.permission_profile_id = profile;
+  REQUIRE(kernel.start(std::move(start)));
+  drain_to_inference_boundary(kernel, wake);
+  REQUIRE(policy->requests.size() == 1);
+  REQUIRE_FALSE(policy->requests.front().canonical_arguments);
+
+  if (approval == runtime::ApprovalMode::automatic) {
+    REQUIRE(executor->invocations().empty());
+    const auto decided = std::ranges::find_if(
+        kernel.event_log().events(), [](const auto& event) {
+          const auto* value =
+              std::get_if<domain::ToolPolicyDecided>(&event.payload);
+          return value != nullptr &&
+                 value->decision == domain::PolicyDecision::deny;
+        });
+    REQUIRE(decided != kernel.event_log().events().end());
+  } else {
+    if (approval == runtime::ApprovalMode::prompt) {
+      REQUIRE(kernel.pending_tool_approval());
+      REQUIRE(
+          kernel.decide_approval(make_id<domain::RunId>("run"), invocation,
+                                 {domain::ApprovalDecision::approved,
+                                  {scope()},
+                                  domain::ApprovalGrantLifetime::invocation}));
+    }
+    for (int attempt = 0; attempt < 100 && executor->invocations().empty();
+         ++attempt) {
+      REQUIRE(kernel.drain());
+      if (executor->invocations().empty()) wake.wait_for_change(wake.count());
+    }
+    REQUIRE(executor->invocations().size() == 1);
+    REQUIRE(executor->invocations().front().arguments.value.data ==
+            R"({"ratio":1.5})");
+  }
+  REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
+}
+
 TEST_CASE("durable implicit approval is revalidated before restart execution",
           "[tools][policy][storage][replay][failure]") {
   const auto approval = GENERATE(runtime::ApprovalMode::automatic,
                                  runtime::ApprovalMode::allow_all);
   CAPTURE(approval);
+  const std::string arguments =
+      approval == runtime::ApprovalMode::automatic ? "{}" : R"({"ratio":1.5})";
   const auto invocation = make_id<domain::InvocationId>("call");
   const auto profile =
       make_id<domain::PermissionProfileId>("tools-none-implicit-v2");
@@ -1779,23 +1920,27 @@ TEST_CASE("durable implicit approval is revalidated before restart execution",
       declaration(), executor, {},
       runtime::ToolExecutorContract{"test.lookup", "1"}));
   const auto tools = snapshot_of(registry);
-  const std::vector<std::string> automatic_tools =
-      approval == runtime::ApprovalMode::automatic
-          ? std::vector<std::string>{"lookup"}
-          : std::vector<std::string>{};
   const auto make_policy = [&] {
+    std::shared_ptr<runtime::AutomaticApprovalMatcher> matcher;
     std::optional<std::string> matcher_identity;
     if (approval == runtime::ApprovalMode::automatic) {
-      matcher_identity =
-          runtime::exact_tool_allowlist_matcher_identity(automatic_tools)
+      matcher =
+          runtime::compile_automatic_approval_matcher(
+              {runtime::ExactToolArgumentsApprovalRule{
+                  "lookup",
+                  runtime::canonicalize_validated_tool_arguments(
+                      {"application/json", "{}"})
+                      .value(),
+                  {{runtime::RestrictionLevel::none}, 1, std::nullopt, 0}}})
               .value();
+      matcher_identity = std::string{matcher->identity()};
     }
     auto policy = runtime::make_tool_launch_policy(
         tools, {profile,
                 testing::available_application_launch_context(
                     runtime::RestrictionLevel::none, approval,
                     std::move(matcher_identity)),
-                automatic_tools});
+                std::move(matcher)});
     REQUIRE(policy);
     return std::make_shared<CountingPolicy>(std::move(*policy));
   };
@@ -1803,7 +1948,7 @@ TEST_CASE("durable implicit approval is revalidated before restart execution",
   auto policy = make_policy();
   auto initial = request("inference-1", "assistant-1", tools.declarations());
   testing::ScriptedBackend backend{{
-      {initial, tool_call_script(invocation)},
+      {initial, tool_call_script(invocation, "lookup", arguments)},
   }};
   MemoryStore store;
   store.fail_next_tool_started_append = true;
@@ -1831,15 +1976,49 @@ TEST_CASE("durable implicit approval is revalidated before restart execution",
   REQUIRE(interruption);
   REQUIRE(interruption->code == runtime::RunKernelErrorCode::storage_failure);
   REQUIRE(policy->evaluations == 1);
+  REQUIRE(policy->requests.size() == 1);
+  REQUIRE(policy->requests.front().canonical_arguments.has_value() ==
+          (approval == runtime::ApprovalMode::automatic));
   REQUIRE(executor->validations == 1);
   REQUIRE(executor->starts == 0);
   REQUIRE(std::ranges::count_if(store.events, [](const auto& event) {
             return std::holds_alternative<domain::ToolPolicyDecided>(
                 event.payload);
           }) == 1);
+  const auto decided =
+      std::ranges::find_if(store.events, [](const auto& event) {
+        return std::holds_alternative<domain::ToolPolicyDecided>(event.payload);
+      });
+  REQUIRE(decided != store.events.end());
+  const auto& policy_decision =
+      std::get<domain::ToolPolicyDecided>(decided->payload);
+  REQUIRE(decided->metadata.schema_version == 2);
+  if (approval == runtime::ApprovalMode::automatic) {
+    REQUIRE(policy_decision.source ==
+            domain::PolicyDecisionSource::automatic_matcher);
+    REQUIRE(policy_decision.automatic_approval.has_value());
+    REQUIRE_FALSE(
+        policy_decision.automatic_approval->policy_identity.contains("lookup"));
+    REQUIRE_FALSE(
+        policy_decision.automatic_approval->rule_identity.contains("{}"));
+  } else {
+    REQUIRE_FALSE(policy_decision.automatic_approval);
+  }
   REQUIRE(std::ranges::none_of(store.events, [](const auto& event) {
     return std::holds_alternative<domain::ToolStarted>(event.payload);
   }));
+  if (approval == runtime::ApprovalMode::automatic) {
+    auto exhausted_request = policy->requests.front();
+    exhausted_request.invocation_id =
+        make_id<domain::InvocationId>("after-failed-start");
+    const auto exhausted = policy->evaluate(exhausted_request);
+    REQUIRE(exhausted);
+    REQUIRE(exhausted->decision == domain::PolicyDecision::deny);
+    REQUIRE(exhausted->scopes.empty());
+    REQUIRE_FALSE(exhausted->automatic_approval);
+    REQUIRE(policy->evaluations == 2);
+    REQUIRE(executor->starts == 0);
+  }
   kernel->reset();
 
   auto replay_policy = make_policy();
@@ -1850,6 +2029,9 @@ TEST_CASE("durable implicit approval is revalidated before restart execution",
       store, replay_backend, &replay_wake, {}, {}, tools, replay_policy);
   REQUIRE(replayed);
   REQUIRE(replay_policy->evaluations == 1);
+  REQUIRE(replay_policy->requests.size() == 1);
+  REQUIRE(replay_policy->requests.front().canonical_arguments.has_value() ==
+          (approval == runtime::ApprovalMode::automatic));
   REQUIRE(executor->validations == 1);
   REQUIRE(executor->starts == 0);
   REQUIRE_FALSE((*replayed)->pending_tool_approval());
@@ -1866,6 +2048,207 @@ TEST_CASE("durable implicit approval is revalidated before restart execution",
   REQUIRE(replay_policy->evaluations == 1);
   REQUIRE(executor->validations == 1);
   REQUIRE(executor->starts == 1);
+}
+
+TEST_CASE("automatic approval replay rejects matcher drift and stale state",
+          "[tools][policy][automatic][storage][replay][failure]") {
+  const auto scenario = GENERATE(AutomaticReplayScenario::changed_policy,
+                                 AutomaticReplayScenario::exhausted_matcher,
+                                 AutomaticReplayScenario::expired_matcher);
+  CAPTURE(scenario);
+  const auto invocation = make_id<domain::InvocationId>("call");
+  const auto profile =
+      make_id<domain::PermissionProfileId>("tools-none-automatic-v2");
+  auto executor = std::make_shared<CountingExecutor>();
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      declaration(), executor, {},
+      runtime::ToolExecutorContract{"test.lookup", "1"}));
+  const auto tools = snapshot_of(registry);
+  const auto canonical = runtime::canonicalize_validated_tool_arguments(
+      {"application/json", "{}"});
+  REQUIRE(canonical);
+  auto now = std::chrono::steady_clock::time_point{};
+  const auto clock = [&] { return now; };
+  const auto maximum_matches =
+      scenario == AutomaticReplayScenario::expired_matcher ? 2U : 1U;
+  const auto expiry = scenario == AutomaticReplayScenario::expired_matcher
+                          ? std::optional{10ms}
+                          : std::nullopt;
+  auto initial_matcher = runtime::compile_automatic_approval_matcher(
+      {runtime::ExactToolArgumentsApprovalRule{
+          "lookup",
+          *canonical,
+          {{runtime::RestrictionLevel::none}, maximum_matches, expiry, 0}}},
+      clock);
+  REQUIRE(initial_matcher);
+  const auto make_policy =
+      [&](std::shared_ptr<runtime::AutomaticApprovalMatcher> matcher) {
+        auto launch_policy = runtime::make_tool_launch_policy(
+            tools, {profile,
+                    testing::available_application_launch_context(
+                        runtime::RestrictionLevel::none,
+                        runtime::ApprovalMode::automatic,
+                        std::string{matcher->identity()}),
+                    std::move(matcher)});
+        REQUIRE(launch_policy);
+        return std::make_shared<CountingPolicy>(std::move(*launch_policy));
+      };
+  auto initial_policy = make_policy(*initial_matcher);
+  auto initial = request("inference-1", "assistant-1", tools.declarations());
+  testing::ScriptedBackend backend{{
+      {initial, tool_call_script(invocation)},
+  }};
+  MemoryStore store;
+  store.fail_next_tool_started_append = true;
+  WakeCounter wake;
+  auto kernel = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::create, store.created},
+      store, backend, &wake, {}, {}, tools, initial_policy);
+  REQUIRE(kernel);
+  auto start = run_start(initial);
+  start.attributes.permission_profile_id = profile;
+  start.provenance = provenance();
+  REQUIRE((*kernel)->start(std::move(start)));
+
+  std::optional<runtime::RunKernelError> interruption;
+  std::size_t observed{};
+  for (int attempt = 0; attempt < 100 && !interruption; ++attempt) {
+    auto drained = (*kernel)->drain();
+    if (!drained) {
+      interruption = std::move(drained.error());
+      break;
+    }
+    if ((*kernel)->active_inference_id()) wake.wait_for_change(observed);
+    observed = wake.count();
+  }
+  REQUIRE(interruption);
+  REQUIRE(interruption->code == runtime::RunKernelErrorCode::storage_failure);
+  REQUIRE(initial_policy->evaluations == 1);
+  REQUIRE(executor->starts == 0);
+  REQUIRE(std::ranges::none_of(store.events, [](const auto& event) {
+    return std::holds_alternative<domain::ToolStarted>(event.payload);
+  }));
+  kernel->reset();
+
+  std::shared_ptr<CountingPolicy> replay_policy;
+  std::size_t expected_evaluations{};
+  if (scenario == AutomaticReplayScenario::changed_policy) {
+    const auto changed = runtime::canonicalize_validated_tool_arguments(
+        {"application/json", R"({"changed":true})"});
+    REQUIRE(changed);
+    auto changed_matcher = runtime::compile_automatic_approval_matcher(
+        {runtime::ExactToolArgumentsApprovalRule{
+            "lookup",
+            *changed,
+            {{runtime::RestrictionLevel::none}, 1, std::nullopt, 0}}},
+        clock);
+    REQUIRE(changed_matcher);
+    replay_policy = make_policy(*changed_matcher);
+  } else if (scenario == AutomaticReplayScenario::exhausted_matcher) {
+    auto exhausted_matcher = runtime::compile_automatic_approval_matcher(
+        {runtime::ExactToolArgumentsApprovalRule{
+            "lookup",
+            *canonical,
+            {{runtime::RestrictionLevel::none}, 1, std::nullopt, 0}}},
+        clock);
+    REQUIRE(exhausted_matcher);
+    const auto consumed = (*exhausted_matcher)
+                              ->match(runtime::AutomaticApprovalMatchRequest{
+                                  store.session_id,
+                                  make_id<domain::RunId>("preconsume-run"),
+                                  make_id<domain::InvocationId>("preconsume"),
+                                  "lookup",
+                                  *canonical,
+                                  runtime::RestrictionLevel::none,
+                                  {domain::Effect::read},
+                                  {scope()}});
+    REQUIRE(consumed);
+    REQUIRE(consumed->has_value());
+    replay_policy = make_policy(*exhausted_matcher);
+    expected_evaluations = 1;
+  } else {
+    now += 10ms;
+    replay_policy = initial_policy;
+    expected_evaluations = 2;
+  }
+
+  testing::ScriptedBackend replay_backend{{}};
+  WakeCounter replay_wake;
+  auto replayed = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::resume, store.created},
+      store, replay_backend, &replay_wake, {}, {}, tools, replay_policy);
+  REQUIRE_FALSE(replayed);
+  REQUIRE(replayed.error().code ==
+          runtime::RunKernelErrorCode::replay_rejected);
+  REQUIRE(replay_policy->evaluations == expected_evaluations);
+  REQUIRE(executor->starts == 0);
+  REQUIRE(std::ranges::none_of(store.events, [](const auto& event) {
+    return std::holds_alternative<domain::ToolStarted>(event.payload);
+  }));
+}
+
+TEST_CASE("run kernel rejects secret-like automatic approval evidence",
+          "[tools][policy][automatic][redaction][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("call");
+  const auto profile = make_id<domain::PermissionProfileId>("observe");
+  auto executor = std::make_shared<CountingExecutor>();
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(declaration(), executor));
+  const auto tools = snapshot_of(registry);
+
+  auto matcher = runtime::compile_automatic_approval_matcher(
+      {runtime::ExactToolArgumentsApprovalRule{
+          "lookup",
+          runtime::canonicalize_validated_tool_arguments(
+              {"application/json", "{}"})
+              .value(),
+          {{runtime::RestrictionLevel::none}, 1, std::nullopt, 0}}});
+  REQUIRE(matcher);
+  auto launch_policy = runtime::make_tool_launch_policy(
+      tools,
+      {profile,
+       testing::available_application_launch_context(
+           runtime::RestrictionLevel::none, runtime::ApprovalMode::automatic,
+           std::string{(*matcher)->identity()}),
+       *matcher});
+  REQUIRE(launch_policy);
+  auto policy =
+      std::make_shared<CorruptingAutomaticPolicy>(std::move(*launch_policy));
+
+  auto initial = request("inference-1", "assistant-1", tools.declarations());
+  testing::ScriptedBackend backend{{
+      {initial, tool_call_script(invocation)},
+  }};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            {},
+                            tools,
+                            std::move(policy)};
+  REQUIRE(kernel.start(run_start(initial)));
+  std::size_t observed{};
+  for (int attempt = 0; attempt < 100 && kernel.active_inference_id();
+       ++attempt) {
+    REQUIRE(kernel.drain());
+    if (kernel.active_inference_id()) wake.wait_for_change(observed);
+    observed = wake.count();
+  }
+  REQUIRE_FALSE(kernel.active_inference_id());
+  REQUIRE(executor->validations == 1);
+  REQUIRE(executor->starts == 0);
+  REQUIRE(
+      std::ranges::any_of(kernel.event_log().events(), [](const auto& event) {
+        return std::holds_alternative<domain::RunFailed>(event.payload);
+      }));
+  REQUIRE(
+      std::ranges::none_of(kernel.event_log().events(), [](const auto& event) {
+        return std::holds_alternative<domain::ToolPolicyDecided>(
+                   event.payload) ||
+               std::holds_alternative<domain::ToolStarted>(event.payload);
+      }));
 }
 
 TEST_CASE("durable paid approval replay invokes no executor methods",
@@ -2918,6 +3301,10 @@ TEST_CASE("argument validation can narrow a declaration's effects",
           std::vector<domain::Effect>{domain::Effect::read});
   REQUIRE(policy->requests.front().scopes ==
           std::vector<domain::CapabilityScope>{read_scope});
+  REQUIRE(
+      policy->requests.front().canonical_arguments ==
+      runtime::canonicalize_validated_tool_arguments({"application/json", "{}"})
+          .value());
   const auto proposed =
       std::ranges::find_if(kernel.event_log().events(), [](const auto& event) {
         return std::holds_alternative<domain::ToolProposed>(event.payload);

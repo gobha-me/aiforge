@@ -365,6 +365,116 @@ class DuplicateJsonKey final : public std::exception {
   return ConfigValue{std::move(result)};
 }
 
+[[nodiscard]] auto unsigned_value(const Json& value)
+    -> std::optional<std::uint64_t> {
+  if (value.is_number_unsigned()) return value.get<std::uint64_t>();
+  if (!value.is_number_integer()) return std::nullopt;
+  const auto integer = value.get<std::int64_t>();
+  if (integer < 0) return std::nullopt;
+  return static_cast<std::uint64_t>(integer);
+}
+
+[[nodiscard]] auto exact_number_tree(const Json& value) -> bool {
+  std::vector<const Json*> pending{&value};
+  while (!pending.empty()) {
+    const auto* current = pending.back();
+    pending.pop_back();
+    if (current->is_number_float()) return false;
+    if (current->is_array() || current->is_object()) {
+      for (const auto& child : *current)
+        pending.push_back(&child);
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] auto automatic_approval_constraints(
+    const Json& value, AutomaticApprovalRuleConstraintsConfig& constraints)
+    -> bool {
+  const auto matches = unsigned_value(value.at("maximum_matches"));
+  const auto precedence = unsigned_value(value.at("precedence"));
+  if (!matches || !precedence ||
+      *precedence > std::numeric_limits<std::uint32_t>::max() ||
+      !value.at("restrictions").is_array()) {
+    return false;
+  }
+  constraints.maximum_matches = *matches;
+  constraints.precedence = static_cast<std::uint32_t>(*precedence);
+  constraints.allowed_restrictions.reserve(value.at("restrictions").size());
+  for (const auto& restriction : value.at("restrictions")) {
+    if (!restriction.is_string()) return false;
+    constraints.allowed_restrictions.push_back(restriction.get<std::string>());
+  }
+  if (value.contains("expires_after_ms")) {
+    const auto expiry = unsigned_value(value.at("expires_after_ms"));
+    if (!expiry) return false;
+    constraints.expires_after_milliseconds.emplace(*expiry);
+  }
+  return true;
+}
+
+[[nodiscard]] auto automatic_approval_rule(const Json& rule)
+    -> std::optional<AutomaticApprovalRuleConfig> {
+  if (!rule.is_object() || !rule.contains("type") ||
+      !rule.at("type").is_string() || !rule.contains("tool") ||
+      !rule.at("tool").is_string() || !rule.contains("restrictions") ||
+      !rule.contains("maximum_matches") || !rule.contains("precedence")) {
+    return std::nullopt;
+  }
+  const auto type = rule.at("type").get<std::string>();
+  const bool expiry = rule.contains("expires_after_ms");
+  AutomaticApprovalRuleConstraintsConfig constraints;
+  if (!automatic_approval_constraints(rule, constraints)) return std::nullopt;
+  if (type == "exact") {
+    if (rule.size() != (expiry ? 7U : 6U) || !rule.contains("arguments") ||
+        !rule.at("arguments").is_object() ||
+        !exact_number_tree(rule.at("arguments"))) {
+      return std::nullopt;
+    }
+    return ExactAutomaticApprovalRuleConfig{rule.at("tool").get<std::string>(),
+                                            rule.at("arguments").dump(),
+                                            std::move(constraints)};
+  }
+  if (type == "repository_read_path") {
+    if (rule.size() != (expiry ? 7U : 6U) ||
+        !rule.contains("allowed_relative_path") ||
+        !rule.at("allowed_relative_path").is_string()) {
+      return std::nullopt;
+    }
+    return RepositoryPathAutomaticApprovalRuleConfig{
+        rule.at("tool").get<std::string>(),
+        rule.at("allowed_relative_path").get<std::string>(),
+        std::move(constraints)};
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] auto json_automatic_approval_rules(const Json& value,
+                                                 const ConfigKeySpec& spec)
+    -> std::expected<ConfigValue, ConfigDiagnostic> {
+  const auto invalid = [&]() {
+    return std::unexpected(ConfigDiagnostic{
+        ConfigDiagnosticCode::invalid_value, ConfigSource::file, spec.id,
+        "automatic approval rules are malformed or overbound"});
+  };
+  if (!value.is_array() || value.size() > spec.maximum_list_items) {
+    return invalid();
+  }
+  AutomaticApprovalRulesConfig result;
+  result.rules.reserve(value.size());
+  for (const auto& rule : value) {
+    auto parsed = automatic_approval_rule(rule);
+    if (!parsed) return invalid();
+    result.rules.push_back(std::move(*parsed));
+  }
+  ConfigValue configured{std::move(result)};
+  if (auto valid = validate_config_value(spec, configured, ConfigSource::file);
+      !valid) {
+    return std::unexpected(std::move(valid.error()));
+  }
+  return configured;
+}
+
 [[nodiscard]] auto json_value(const Json& value, const ConfigKeySpec& spec)
     -> std::expected<ConfigValue, ConfigDiagnostic> {
   const auto invalid = [&]() {
@@ -417,6 +527,8 @@ class DuplicateJsonKey final : public std::exception {
         return ConfigValue{std::move(result)};
       }
       case ConfigValueKind::text_map: return json_text_map(value, spec);
+      case ConfigValueKind::automatic_approval_rules:
+        return json_automatic_approval_rules(value, spec);
     }
   } catch (const Json::exception&) {
     return invalid();
@@ -459,6 +571,36 @@ auto collect_leaf_keys(const Json& value, const std::string& prefix,
   });
 }
 
+[[nodiscard]] auto automatic_approval_rules_json(
+    const AutomaticApprovalRulesConfig& configuration) -> Json {
+  auto result = Json::array();
+  for (const auto& rule : configuration.rules) {
+    result.push_back(std::visit(
+        []<typename Rule>(const Rule& concrete) {
+          Json encoded{
+              {"tool", concrete.tool_name},
+              {"restrictions", concrete.constraints.allowed_restrictions},
+              {"maximum_matches", concrete.constraints.maximum_matches},
+              {"precedence", concrete.constraints.precedence}};
+          if (concrete.constraints.expires_after_milliseconds) {
+            encoded["expires_after_ms"] =
+                *concrete.constraints.expires_after_milliseconds;
+          }
+          if constexpr (std::same_as<Rule, ExactAutomaticApprovalRuleConfig>) {
+            encoded["type"] = "exact";
+            encoded["arguments"] =
+                Json::parse(concrete.canonical_arguments_json);
+          } else {
+            encoded["type"] = "repository_read_path";
+            encoded["allowed_relative_path"] = concrete.allowed_relative_path;
+          }
+          return encoded;
+        },
+        rule));
+  }
+  return result;
+}
+
 [[nodiscard]] auto config_value_json(const ConfigValue& value) -> Json {
   return std::visit(
       []<typename Value>(const Value& concrete) {
@@ -467,6 +609,9 @@ auto collect_leaf_keys(const Json& value, const std::string& prefix,
           for (const auto& entry : concrete)
             result[entry.key] = entry.value;
           return result;
+        } else if constexpr (std::same_as<Value,
+                                          AutomaticApprovalRulesConfig>) {
+          return automatic_approval_rules_json(concrete);
         } else {
           return Json(concrete);
         }

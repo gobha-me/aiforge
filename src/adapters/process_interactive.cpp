@@ -7,6 +7,7 @@
 #include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
 #include <aiforge/adapters/persona_editor_dialog.hpp>
+#include <aiforge/adapters/pinned_repository_root_authority.hpp>
 #include <aiforge/adapters/process_credentials.hpp>
 #include <aiforge/adapters/process_draft_editor.hpp>
 #include <aiforge/adapters/process_interactive.hpp>
@@ -4557,6 +4558,12 @@ auto ProcessInteractiveCommand::execute(Request request,
       return failure(cli::CommandFailureKind::runtime,
                      image_tool_model.error().message);
     }
+    auto automatic_approval_rules =
+        config::resolve_automatic_approval_rules(*resolved);
+    if (!automatic_approval_rules) {
+      return failure(cli::CommandFailureKind::runtime,
+                     automatic_approval_rules.error().message);
+    }
     auto generation_options = venice_generation_options(*resolved);
     if (!generation_options) {
       return failure(request.web_search ? cli::CommandFailureKind::usage
@@ -4721,6 +4728,15 @@ auto ProcessInteractiveCommand::execute(Request request,
       repository_id = snapshot->root.repository_id;
       repository_snapshot = std::move(*snapshot);
     }
+    std::shared_ptr<const runtime::PinnedRepositoryReadAuthority>
+        repository_read_root;
+    const bool needs_repository_root =
+        *approval == runtime::ApprovalMode::automatic &&
+        std::ranges::any_of(
+            automatic_approval_rules->rules, [](const auto& rule) {
+              return std::holds_alternative<
+                  config::RepositoryPathAutomaticApprovalRuleConfig>(rule);
+            });
     std::optional<GitRepositorySnapshotSource> repository_source;
     std::optional<GitExactSourceEditor> repository_editor;
     std::unique_ptr<runtime::MemoryController> memory_controller;
@@ -4759,14 +4775,40 @@ auto ProcessInteractiveCommand::execute(Request request,
         repository_editor.emplace(
             *repository_source,
             GitExactSourceReadPolicy::tracked_regular_files);
+        if (needs_repository_root) {
+          auto pinned = open_pinned_repository_root_authority(
+              repository_snapshot->root.canonical_path, *repository_source,
+              *repository_editor);
+          if (!pinned) {
+            return failure(cli::CommandFailureKind::runtime,
+                           pinned.error().message);
+          }
+          repository_read_root = std::move(*pinned);
+          const auto& pinned_baseline = repository_read_root->baseline();
+          if (!domain::same_source_state(*repository_snapshot,
+                                         pinned_baseline) ||
+              repository_snapshot->vcs != pinned_baseline.vcs ||
+              repository_snapshot->changes != pinned_baseline.changes) {
+            return failure(cli::CommandFailureKind::runtime,
+                           "repository changed while launch authority was "
+                           "being established");
+          }
+          repository_snapshot = pinned_baseline;
+          repository_id = pinned_baseline.root.repository_id;
+        }
         if (auto registered = runtime::register_repository_read_tool(
                 tool_registry, *repository_source, *repository_editor,
-                {repository_snapshot->root.canonical_path});
+                {repository_snapshot->root.canonical_path},
+                repository_read_root);
             !registered) {
           return failure(cli::CommandFailureKind::runtime,
                          registered.error().message);
         }
       }
+    }
+    if (needs_repository_root && !repository_read_root) {
+      return failure(cli::CommandFailureKind::runtime,
+                     "automatic approval repository root is unavailable");
     }
     if (*image_tool_model && image_generator != nullptr && artifact_store &&
         artifact_root) {
@@ -4800,20 +4842,17 @@ auto ProcessInteractiveCommand::execute(Request request,
                      tool_snapshot.error().message);
     }
     tools = std::move(*tool_snapshot);
-    std::vector<std::string> automatically_eligible_tools;
-    if (*approval == runtime::ApprovalMode::automatic &&
-        tools.find("read_repository_file") != nullptr) {
-      automatically_eligible_tools = {"read_repository_file"};
-    }
+    std::shared_ptr<runtime::AutomaticApprovalMatcher> automatic_matcher;
     std::optional<std::string> matcher_policy_identity;
     if (*approval == runtime::ApprovalMode::automatic) {
-      auto identity = runtime::exact_tool_allowlist_matcher_identity(
-          automatically_eligible_tools);
-      if (!identity) {
+      auto compiled = runtime::compile_configured_automatic_approval_matcher(
+          *automatic_approval_rules, repository_read_root);
+      if (!compiled) {
         return failure(cli::CommandFailureKind::runtime,
-                       identity.error().message);
+                       compiled.error().message);
       }
-      matcher_policy_identity = std::move(*identity);
+      automatic_matcher = std::move(*compiled);
+      matcher_policy_identity = std::string{automatic_matcher->identity()};
     }
     auto launch_context = application_launch_context(
         *restriction, *approval, std::move(matcher_policy_identity));
@@ -4823,7 +4862,7 @@ auto ProcessInteractiveCommand::execute(Request request,
     }
     runtime::ToolLaunchPolicyConfiguration policy_configuration{
         *permission_profile_id, std::move(*launch_context),
-        std::move(automatically_eligible_tools)};
+        std::move(automatic_matcher)};
     auto tool_policy = runtime::make_tool_launch_policy(
         tools, std::move(policy_configuration));
     if (!tool_policy) {

@@ -36,12 +36,23 @@ class GitExactSourceEditor final : public repository::ExactSourceEditor {
       -> std::expected<repository::ExactSourceReadResult,
                        repository::ExactSourceEditError> override;
 
+  [[nodiscard]] auto read_pinned(repository::ExactSourceReadRequest request,
+                                 int root_descriptor,
+                                 std::stop_token stop_token = {})
+      -> std::expected<repository::ExactSourceReadResult,
+                       repository::ExactSourceEditError>;
+
   [[nodiscard]] auto apply(repository::ExactSourceEditRequest request,
                            std::stop_token stop_token = {})
       -> std::expected<repository::ExactSourceEditReceipt,
                        repository::ExactSourceEditError> override;
 
  private:
+  [[nodiscard]] auto read_impl(repository::ExactSourceReadRequest request,
+                               std::stop_token stop_token, int root_descriptor)
+      -> std::expected<repository::ExactSourceReadResult,
+                       repository::ExactSourceEditError>;
+
   GitRepositorySnapshotSource& m_snapshot_source;
   GitExactSourceReadPolicy m_read_policy;
 };

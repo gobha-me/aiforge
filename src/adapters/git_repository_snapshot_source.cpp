@@ -220,14 +220,37 @@ auto terminate_child(const pid_t child) noexcept -> void {
   }
   return 0;
 }
+
+[[nodiscard]] auto prepare_child_input(const int working_directory_descriptor,
+                                       const int input_descriptor) noexcept
+    -> bool {
+  if (working_directory_descriptor >= 0 &&
+      ::fchdir(working_directory_descriptor) != 0) {
+    return false;
+  }
+  return ::dup2(input_descriptor, STDIN_FILENO) >= 0;
+}
+
 #endif
+
+[[nodiscard]] auto git_root_argument(const std::string& root,
+                                     const int root_descriptor) -> std::string {
+  return root_descriptor >= 0 ? "." : root;
+}
+
+[[nodiscard]] auto git_submodule_argument(
+    const std::string& relative_path, const std::filesystem::path& full_path,
+    const int root_descriptor) -> std::string {
+  return root_descriptor >= 0 ? relative_path : full_path.string();
+}
 
 [[nodiscard]] auto run_command(const std::string& executable,
                                const std::vector<std::string>& arguments,
                                const std::string_view input,
                                const RepositorySnapshotLimits& limits,
                                const std::stop_token stop_token,
-                               const ObservationDeadline observation_deadline)
+                               const ObservationDeadline observation_deadline,
+                               const int working_directory_descriptor = -1)
     -> std::expected<CommandResult, RepositorySnapshotError> {
 #ifdef _WIN32
   static_cast<void>(executable);
@@ -236,6 +259,7 @@ auto terminate_child(const pid_t child) noexcept -> void {
   static_cast<void>(limits);
   static_cast<void>(stop_token);
   static_cast<void>(observation_deadline);
+  static_cast<void>(working_directory_descriptor);
   return failure(
       RepositorySnapshotErrorCode::vcs_failure,
       "repository command execution is unavailable on this platform");
@@ -267,7 +291,7 @@ auto terminate_child(const pid_t child) noexcept -> void {
   }
   if (child == 0) {
     static_cast<void>(::setpgid(0, 0));
-    if (::dup2(stdin_pipe[0], STDIN_FILENO) < 0 ||
+    if (!prepare_child_input(working_directory_descriptor, stdin_pipe[0]) ||
         ::dup2(stdout_pipe[1], STDOUT_FILENO) < 0 ||
         ::dup2(stderr_pipe[1], STDERR_FILENO) < 0) {
       _exit(126);
@@ -719,6 +743,23 @@ struct OpenDirectory {
   return result;
 }
 
+[[nodiscard]] auto open_exact_root_descriptor(const int root_descriptor)
+    -> std::expected<OpenDirectory, ExactError> {
+  OpenDirectory result{
+      OwnedDescriptor{::fcntl(root_descriptor, F_DUPFD_CLOEXEC, 0)}, {}, {}};
+  if (result.descriptor.get() < 0) {
+    return errno_exact_failure("duplicating exact-source root", true);
+  }
+  if (::fstat(result.descriptor.get(), &result.before) != 0) {
+    return errno_exact_failure("inspecting exact-source root", true);
+  }
+  if (!S_ISDIR(result.before.st_mode)) {
+    return exact_failure(ExactErrorCode::unsupported_entry,
+                         "exact-source root is not a directory");
+  }
+  return result;
+}
+
 [[nodiscard]] auto exact_root_unchanged(const OpenDirectory& root_anchor,
                                         const std::filesystem::path& root)
     -> std::expected<void, ExactError> {
@@ -731,6 +772,25 @@ struct OpenDirectory {
   if (!same_file_state(root_anchor.before, descriptor_state) ||
       !same_file_state(descriptor_state, path_state) ||
       !S_ISDIR(path_state.st_mode)) {
+    return exact_failure(ExactErrorCode::concurrent_change,
+                         "exact-source root changed during the read", {}, {},
+                         true);
+  }
+  return {};
+}
+
+[[nodiscard]] auto exact_root_descriptor_unchanged(
+    const OpenDirectory& root_anchor, const int root_descriptor)
+    -> std::expected<void, ExactError> {
+  struct stat anchor_state{};
+  struct stat root_state{};
+  if (::fstat(root_anchor.descriptor.get(), &anchor_state) != 0 ||
+      ::fstat(root_descriptor, &root_state) != 0) {
+    return errno_exact_failure("rechecking exact-source root", true);
+  }
+  if (!same_file_state(root_anchor.before, anchor_state) ||
+      !same_file_state(anchor_state, root_state) ||
+      !S_ISDIR(root_state.st_mode)) {
     return exact_failure(ExactErrorCode::concurrent_change,
                          "exact-source root changed during the read", {}, {},
                          true);
@@ -801,7 +861,8 @@ struct OpenExactPath {
 
 [[nodiscard]] auto exact_directory_unchanged(
     const std::vector<OpenDirectory>& directories, const std::size_t index,
-    const std::filesystem::path& root) -> std::expected<void, ExactError> {
+    const std::filesystem::path& root, const bool pinned_root)
+    -> std::expected<void, ExactError> {
   struct stat descriptor_state{};
   struct stat path_state{};
   if (::fstat(directories[index].descriptor.get(), &descriptor_state) != 0) {
@@ -812,6 +873,7 @@ struct OpenExactPath {
                          "exact-source path changed while being read", {}, {},
                          true);
   }
+  if (index == 0 && pinned_root) return {};
   if (index == 0) {
     if (::lstat(root.c_str(), &path_state) != 0) {
       return errno_exact_failure("rechecking exact-source root", true);
@@ -835,7 +897,8 @@ struct OpenExactPath {
     const repository::ExactSourceEditLimits& limits,
     const std::stop_token stop_token,
     const std::chrono::steady_clock::time_point deadline,
-    const OpenDirectory* supplied_root_anchor = nullptr)
+    const OpenDirectory* supplied_root_anchor = nullptr,
+    const bool pinned_root = false)
     -> std::expected<ExactFileRead, ExactError> {
   std::optional<OpenDirectory> local_root_anchor;
   if (supplied_root_anchor == nullptr) {
@@ -905,7 +968,8 @@ struct OpenExactPath {
                          true);
   }
   for (std::size_t index{}; index < directories.size(); ++index) {
-    auto stable = exact_directory_unchanged(directories, index, root);
+    auto stable =
+        exact_directory_unchanged(directories, index, root, pinned_root);
     if (!stable) return std::unexpected(std::move(stable.error()));
   }
   return ExactFileRead{std::move(content), before.st_mode, before.st_dev,
@@ -1079,11 +1143,12 @@ struct GitRepositorySnapshotSource::Impl {
                          const std::string_view input,
                          const RepositorySnapshotLimits& limits,
                          const std::stop_token stop_token,
-                         const ObservationDeadline deadline) const
+                         const ObservationDeadline deadline,
+                         const int root_descriptor = -1) const
       -> std::expected<CommandResult, RepositorySnapshotError> {
     if (command_policy == GitCommandPolicy::standard) {
       return run_command(git_executable, arguments, input, limits, stop_token,
-                         deadline);
+                         deadline, root_descriptor);
     }
     std::vector<std::string> isolated{"--no-pager", "--no-optional-locks",
                                       "-c",         "core.fsmonitor=false",
@@ -1092,18 +1157,19 @@ struct GitRepositorySnapshotSource::Impl {
                                       "-c",         "diff.external="};
     isolated.insert(isolated.end(), arguments.begin(), arguments.end());
     return run_command(git_executable, isolated, input, limits, stop_token,
-                       deadline);
+                       deadline, root_descriptor);
   }
 
   [[nodiscard]] auto tracked_regular_file(
       const std::string& root, const std::string& relative_path,
       const RepositorySnapshotLimits& limits, const std::stop_token stop_token,
-      const ObservationDeadline deadline) const
+      const ObservationDeadline deadline, const int root_descriptor = -1) const
       -> std::expected<std::optional<TrackedFileIdentity>,
                        RepositorySnapshotError> {
-    auto result = git({"-C", root, "--literal-pathspecs", "ls-files", "--stage",
-                       "-z", "--", relative_path},
-                      {}, limits, stop_token, deadline);
+    auto result =
+        git({"-C", root_descriptor >= 0 ? "." : root, "--literal-pathspecs",
+             "ls-files", "--stage", "-z", "--", relative_path},
+            {}, limits, stop_token, deadline, root_descriptor);
     if (!result) return std::unexpected(std::move(result.error()));
     if (result->exit_code != 0) {
       return failure(RepositorySnapshotErrorCode::vcs_failure,
@@ -1147,14 +1213,17 @@ struct GitRepositorySnapshotSource::Impl {
                                 const std::string& algorithm,
                                 const RepositorySnapshotLimits& limits,
                                 const std::stop_token stop_token,
-                                const ObservationDeadline deadline) const
+                                const ObservationDeadline deadline,
+                                const int root_descriptor = -1) const
       -> std::expected<ContentDigest, RepositorySnapshotError> {
     std::vector<std::string> arguments;
     if (root) {
-      arguments.insert(arguments.end(), {"-C", *root});
+      arguments.insert(arguments.end(),
+                       {"-C", root_descriptor >= 0 ? "." : *root});
     }
     arguments.insert(arguments.end(), {"hash-object", "--stdin"});
-    auto result = git(arguments, bytes, limits, stop_token, deadline);
+    auto result =
+        git(arguments, bytes, limits, stop_token, deadline, root_descriptor);
     if (!result) return std::unexpected(std::move(result.error()));
     if (result->exit_code != 0) {
       return failure(RepositorySnapshotErrorCode::vcs_failure,
@@ -1168,14 +1237,12 @@ struct GitRepositorySnapshotSource::Impl {
     return ContentDigest{algorithm, std::move(value), bytes.size()};
   }
 
-  [[nodiscard]] auto hash_path(const std::string& root,
-                               const std::string& relative_path,
-                               const RepositoryEntryKind kind,
-                               const std::string& algorithm,
-                               const RepositorySnapshotLimits& limits,
-                               std::uint64_t& total_bytes,
-                               const std::stop_token stop_token,
-                               const ObservationDeadline deadline) const
+  [[nodiscard]] auto hash_path(
+      const std::string& root, const std::string& relative_path,
+      const RepositoryEntryKind kind, const std::string& algorithm,
+      const RepositorySnapshotLimits& limits, std::uint64_t& total_bytes,
+      const std::stop_token stop_token, const ObservationDeadline deadline,
+      const int root_descriptor = -1) const
       -> std::expected<ContentDigest, RepositorySnapshotError> {
     if (stop_token.stop_requested()) {
       return failure(RepositorySnapshotErrorCode::cancelled,
@@ -1196,13 +1263,16 @@ struct GitRepositorySnapshotSource::Impl {
                        "repository content exceeds its byte budget");
       }
       auto digest = hash_bytes(target_bytes, root, algorithm, limits,
-                               stop_token, deadline);
+                               stop_token, deadline, root_descriptor);
       if (!digest) return std::unexpected(std::move(digest.error()));
       total_bytes += bytes;
       return digest;
-    } else if (kind == RepositoryEntryKind::submodule) {
-      auto revision = git({"-C", full_path.string(), "rev-parse", "HEAD"}, {},
-                          limits, stop_token, deadline);
+    }
+    if (kind == RepositoryEntryKind::submodule) {
+      const auto submodule_root =
+          git_submodule_argument(relative_path, full_path, root_descriptor);
+      auto revision = git({"-C", submodule_root, "rev-parse", "HEAD"}, {},
+                          limits, stop_token, deadline, root_descriptor);
       if (!revision) return std::unexpected(std::move(revision.error()));
       if (revision->exit_code != 0) {
         return failure(RepositorySnapshotErrorCode::vcs_failure,
@@ -1210,19 +1280,19 @@ struct GitRepositorySnapshotSource::Impl {
       }
       auto value = trim_record(std::move(revision->output));
       return ContentDigest{algorithm, std::move(value), 0};
-    } else {
-      bytes = std::filesystem::file_size(full_path, error);
-      if (error)
-        return error_for_path(error, "repository file size could not be read");
     }
+    bytes = std::filesystem::file_size(full_path, error);
+    if (error)
+      return error_for_path(error, "repository file size could not be read");
     if (bytes > limits.maximum_file_bytes ||
         bytes > limits.maximum_total_bytes - total_bytes) {
       return failure(RepositorySnapshotErrorCode::resource_exhausted,
                      "repository content exceeds its byte budget");
     }
-    auto result =
-        git({"-C", root, "hash-object", "--no-filters", "--", relative_path},
-            {}, limits, stop_token, deadline);
+    const auto command_root = git_root_argument(root, root_descriptor);
+    auto result = git({"-C", command_root, "hash-object", "--no-filters", "--",
+                       relative_path},
+                      {}, limits, stop_token, deadline, root_descriptor);
     if (!result) return std::unexpected(std::move(result.error()));
     if (result->exit_code != 0) {
       return failure(RepositorySnapshotErrorCode::io_failure,
@@ -1242,11 +1312,12 @@ struct GitRepositorySnapshotSource::Impl {
                                const std::string& algorithm,
                                const RepositorySnapshotLimits& limits,
                                const std::stop_token stop_token,
-                               const ObservationDeadline deadline) const
+                               const ObservationDeadline deadline,
+                               const int root_descriptor = -1) const
       -> std::expected<domain::RepositoryRootIdentity,
                        RepositorySnapshotError> {
     auto digest = hash_bytes(canonical_path, root, algorithm, limits,
-                             stop_token, deadline);
+                             stop_token, deadline, root_descriptor);
     if (!digest) return std::unexpected(std::move(digest.error()));
     auto id = domain::RepositoryId::from(algorithm + ":" + digest->value);
     if (!id) {
@@ -1256,10 +1327,11 @@ struct GitRepositorySnapshotSource::Impl {
     return domain::RepositoryRootIdentity{std::move(*id), canonical_path};
   }
 
-  [[nodiscard]] auto status_arguments(const std::string& root) const
+  [[nodiscard]] auto status_arguments(const std::string& root,
+                                      const int root_descriptor) const
       -> std::vector<std::string> {
     std::vector<std::string> arguments{"-C",
-                                       root,
+                                       root_descriptor >= 0 ? "." : root,
                                        "status",
                                        "--porcelain=v2",
                                        "--branch",
@@ -1271,14 +1343,18 @@ struct GitRepositorySnapshotSource::Impl {
     return arguments;
   }
 
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Ordered flow.
   [[nodiscard]] auto observe_git_once(const std::string& root,
+                                      const std::string& canonical_root,
                                       const std::string& object_format,
                                       const RepositorySnapshotLimits& limits,
                                       const std::stop_token stop_token,
-                                      const ObservationDeadline deadline) const
+                                      const ObservationDeadline deadline,
+                                      const int root_descriptor = -1) const
       -> std::expected<RepositorySnapshot, RepositorySnapshotError> {
     const std::string algorithm = "git-" + object_format;
-    auto status = git(status_arguments(root), {}, limits, stop_token, deadline);
+    auto status = git(status_arguments(root, root_descriptor), {}, limits,
+                      stop_token, deadline, root_descriptor);
     if (!status) return std::unexpected(std::move(status.error()));
     if (status->exit_code != 0) {
       return failure(RepositorySnapshotErrorCode::vcs_failure,
@@ -1400,9 +1476,9 @@ struct GitRepositorySnapshotSource::Impl {
         change.stage = stage_from_xy(xy);
       }
       if (exists) {
-        auto digest =
-            hash_path(root, change.relative_path, change.entry_kind, algorithm,
-                      limits, total_bytes, stop_token, deadline);
+        auto digest = hash_path(root, change.relative_path, change.entry_kind,
+                                algorithm, limits, total_bytes, stop_token,
+                                deadline, root_descriptor);
         if (!digest) return std::unexpected(std::move(digest.error()));
         change.worktree_digest = std::move(*digest);
       }
@@ -1425,11 +1501,11 @@ struct GitRepositorySnapshotSource::Impl {
       return failure(RepositorySnapshotErrorCode::resource_exhausted,
                      "repository manifest exceeds its byte budget");
     }
-    auto fingerprint =
-        hash_bytes(manifest, root, algorithm, limits, stop_token, deadline);
+    auto fingerprint = hash_bytes(manifest, root, algorithm, limits, stop_token,
+                                  deadline, root_descriptor);
     if (!fingerprint) return std::unexpected(std::move(fingerprint.error()));
-    auto identity =
-        make_root(root, root, algorithm, limits, stop_token, deadline);
+    auto identity = make_root(canonical_root, root, algorithm, limits,
+                              stop_token, deadline, root_descriptor);
     if (!identity) return std::unexpected(std::move(identity.error()));
     RepositorySnapshot snapshot{std::move(*identity),
                                 std::move(vcs),
@@ -1667,11 +1743,12 @@ auto GitRepositorySnapshotSource::observe(
     }
 
     auto observe_once = [&]() {
-      return object_format ? m_impl->observe_git_once(root, *object_format,
-                                                      request.limits,
-                                                      stop_token, deadline)
-                           : m_impl->observe_plain_once(root, request.limits,
-                                                        stop_token, deadline);
+      return object_format
+                 ? m_impl->observe_git_once(root, root, *object_format,
+                                            request.limits, stop_token,
+                                            deadline)
+                 : m_impl->observe_plain_once(root, request.limits, stop_token,
+                                              deadline);
     };
     auto first = observe_once();
     if (!first) return std::unexpected(std::move(first.error()));
@@ -1695,9 +1772,117 @@ auto GitRepositorySnapshotSource::observe(
   }
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Ordered flow.
+auto GitRepositorySnapshotSource::observe_pinned(
+    const int root_descriptor, std::string canonical_root,
+    const repository::RepositorySnapshotLimits limits,
+    const std::stop_token stop_token)
+    -> std::expected<RepositorySnapshot, RepositorySnapshotError> {
+  try {
+#ifdef _WIN32
+    static_cast<void>(root_descriptor);
+    static_cast<void>(canonical_root);
+    static_cast<void>(limits);
+    static_cast<void>(stop_token);
+    return failure(RepositorySnapshotErrorCode::vcs_failure,
+                   "pinned Git observation is unavailable on this platform");
+#else
+    constexpr repository::RepositorySnapshotLimits maximums;
+    const std::filesystem::path canonical_path{canonical_root};
+    struct stat root_state{};
+    if (root_descriptor < 0 || ::fstat(root_descriptor, &root_state) != 0 ||
+        !S_ISDIR(root_state.st_mode) || canonical_root.empty() ||
+        canonical_root.find('\0') != std::string::npos ||
+        !canonical_path.is_absolute() ||
+        canonical_path.lexically_normal() != canonical_path ||
+        limits.maximum_entries == 0 || limits.maximum_path_bytes == 0 ||
+        limits.maximum_file_bytes == 0 || limits.maximum_total_bytes == 0 ||
+        limits.maximum_command_output_bytes == 0 ||
+        limits.command_timeout <= std::chrono::milliseconds::zero() ||
+        limits.observation_timeout <= std::chrono::milliseconds::zero() ||
+        limits.maximum_entries > maximums.maximum_entries ||
+        limits.maximum_path_bytes > maximums.maximum_path_bytes ||
+        limits.maximum_file_bytes > maximums.maximum_file_bytes ||
+        limits.maximum_total_bytes > maximums.maximum_total_bytes ||
+        limits.maximum_command_output_bytes >
+            maximums.maximum_command_output_bytes ||
+        limits.command_timeout > maximums.command_timeout ||
+        limits.observation_timeout > maximums.observation_timeout ||
+        limits.command_timeout > limits.observation_timeout) {
+      return failure(RepositorySnapshotErrorCode::invalid_request,
+                     "pinned repository observation request is invalid");
+    }
+    const auto deadline =
+        std::chrono::steady_clock::now() + limits.observation_timeout;
+    if (stop_token.stop_requested()) {
+      return failure(RepositorySnapshotErrorCode::cancelled,
+                     "repository observation cancelled");
+    }
+    auto prefix = m_impl->git({"-C", ".", "rev-parse", "--show-prefix"}, {},
+                              limits, stop_token, deadline, root_descriptor);
+    if (!prefix) return std::unexpected(std::move(prefix.error()));
+    if (prefix->exit_code != 0 ||
+        !trim_record(std::move(prefix->output)).empty()) {
+      return failure(RepositorySnapshotErrorCode::vcs_failure,
+                     "pinned Git repository root could not be verified", true);
+    }
+    auto format =
+        m_impl->git({"-C", ".", "rev-parse", "--show-object-format"}, {},
+                    limits, stop_token, deadline, root_descriptor);
+    if (!format) return std::unexpected(std::move(format.error()));
+    if (format->exit_code != 0) {
+      return failure(RepositorySnapshotErrorCode::vcs_failure,
+                     "Git object format could not be determined");
+    }
+    auto object_format = trim_record(std::move(format->output));
+    if (object_format != "sha1" && object_format != "sha256") {
+      return failure(RepositorySnapshotErrorCode::vcs_failure,
+                     "Git repository uses an unsupported object format");
+    }
+    const auto root = "/proc/self/fd/" + std::to_string(root_descriptor);
+    auto observe_once = [&] {
+      return m_impl->observe_git_once(root, canonical_root, object_format,
+                                      limits, stop_token, deadline,
+                                      root_descriptor);
+    };
+    auto first = observe_once();
+    if (!first) return std::unexpected(std::move(first.error()));
+    auto second = observe_once();
+    if (!second) return std::unexpected(std::move(second.error()));
+    if (!domain::same_source_state(*first, *second) ||
+        first->vcs != second->vcs || first->changes != second->changes) {
+      return failure(RepositorySnapshotErrorCode::unstable,
+                     "repository changed while it was being observed", true);
+    }
+    second->observed_at =
+        std::chrono::time_point_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now());
+    return second;
+#endif
+  } catch (...) {
+    return failure(RepositorySnapshotErrorCode::internal_failure,
+                   "pinned repository observation failed internally");
+  }
+}
+
 auto GitExactSourceEditor::read(repository::ExactSourceReadRequest request,
                                 const std::stop_token stop_token)
+    -> std::expected<repository::ExactSourceReadResult,
+                     repository::ExactSourceEditError> {
+  return read_impl(std::move(request), stop_token, -1);
+}
+
+auto GitExactSourceEditor::read_pinned(
+    repository::ExactSourceReadRequest request, const int root_descriptor,
+    const std::stop_token stop_token)
+    -> std::expected<repository::ExactSourceReadResult,
+                     repository::ExactSourceEditError> {
+  return read_impl(std::move(request), stop_token, root_descriptor);
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Ordered flow.
+auto GitExactSourceEditor::read_impl(repository::ExactSourceReadRequest request,
+                                     const std::stop_token stop_token,
+                                     const int root_descriptor)
     -> std::expected<repository::ExactSourceReadResult,
                      repository::ExactSourceEditError> {
   try {
@@ -1717,23 +1902,36 @@ auto GitExactSourceEditor::read(repository::ExactSourceReadRequest request,
     return exact_failure(ExactErrorCode::io_failure,
                          "exact-source reads are unavailable on this platform");
 #else
+    const bool pinned = root_descriptor >= 0;
     const auto deadline =
         std::chrono::steady_clock::now() + request.limits.timeout;
     const auto snapshot_limits = exact_snapshot_limits(request.limits);
-    auto root_anchor = open_exact_root(request.baseline.root.canonical_path);
+    auto root_anchor =
+        pinned ? open_exact_root_descriptor(root_descriptor)
+               : open_exact_root(request.baseline.root.canonical_path);
     if (!root_anchor) {
       return std::unexpected(std::move(root_anchor.error()));
     }
     auto observe = [&]() -> std::expected<RepositorySnapshot, ExactError> {
-      auto result = m_snapshot_source.observe(
-          {request.baseline.root.canonical_path, snapshot_limits}, stop_token);
+      auto result =
+          pinned ? m_snapshot_source.observe_pinned(
+                       root_descriptor, request.baseline.root.canonical_path,
+                       snapshot_limits, stop_token)
+                 : m_snapshot_source.observe(
+                       {request.baseline.root.canonical_path, snapshot_limits},
+                       stop_token);
       if (!result) return std::unexpected(exact_error(result.error()));
       return std::move(*result);
     };
+    auto root_unchanged = [&]() {
+      return pinned ? exact_root_descriptor_unchanged(*root_anchor,
+                                                      root_descriptor)
+                    : exact_root_unchanged(
+                          *root_anchor, request.baseline.root.canonical_path);
+    };
     auto before = observe();
     if (!before) return std::unexpected(std::move(before.error()));
-    auto stable_root = exact_root_unchanged(
-        *root_anchor, request.baseline.root.canonical_path);
+    auto stable_root = root_unchanged();
     if (!stable_root) {
       return std::unexpected(std::move(stable_root.error()));
     }
@@ -1751,7 +1949,7 @@ auto GitExactSourceEditor::read(repository::ExactSourceReadRequest request,
       }
       auto tracked = m_snapshot_source.m_impl->tracked_regular_file(
           request.baseline.root.canonical_path, request.relative_path,
-          snapshot_limits, stop_token, deadline);
+          snapshot_limits, stop_token, deadline, root_descriptor);
       if (!tracked) return std::unexpected(exact_error(tracked.error()));
       if (!tracked->has_value()) {
         return exact_failure(
@@ -1760,27 +1958,28 @@ auto GitExactSourceEditor::read(repository::ExactSourceReadRequest request,
       }
       tracked_before = std::move(**tracked);
     }
-    auto file = read_exact_file(request.baseline.root.canonical_path,
-                                request.relative_path, request.limits,
-                                stop_token, deadline, &*root_anchor);
+    const auto access_root =
+        pinned ? "/proc/self/fd/" + std::to_string(root_descriptor)
+               : request.baseline.root.canonical_path;
+    auto file =
+        read_exact_file(access_root, request.relative_path, request.limits,
+                        stop_token, deadline, &*root_anchor, pinned);
     if (!file) return std::unexpected(std::move(file.error()));
 
     const auto algorithm = request.baseline.vcs
                                ? "git-" + request.baseline.vcs->object_format
                                : request.baseline.fingerprint.algorithm;
     const std::optional<std::string> hash_root =
-        request.baseline.vcs
-            ? std::optional<std::string>{request.baseline.root.canonical_path}
-            : std::nullopt;
+        request.baseline.vcs ? std::optional<std::string>{access_root}
+                             : std::nullopt;
     auto digest = m_snapshot_source.m_impl->hash_bytes(
         file->content, hash_root, algorithm, snapshot_limits, stop_token,
-        deadline);
+        deadline, root_descriptor);
     if (!digest) return std::unexpected(exact_error(digest.error()));
 
     auto after = observe();
     if (!after) return std::unexpected(std::move(after.error()));
-    stable_root = exact_root_unchanged(*root_anchor,
-                                       request.baseline.root.canonical_path);
+    stable_root = root_unchanged();
     if (!stable_root) {
       return std::unexpected(std::move(stable_root.error()));
     }
@@ -1792,7 +1991,7 @@ auto GitExactSourceEditor::read(repository::ExactSourceReadRequest request,
     if (m_read_policy == GitExactSourceReadPolicy::tracked_regular_files) {
       auto tracked = m_snapshot_source.m_impl->tracked_regular_file(
           request.baseline.root.canonical_path, request.relative_path,
-          snapshot_limits, stop_token, deadline);
+          snapshot_limits, stop_token, deadline, root_descriptor);
       if (!tracked) return std::unexpected(exact_error(tracked.error()));
       if (!tracked->has_value() || **tracked != *tracked_before) {
         return exact_failure(
@@ -1802,8 +2001,7 @@ auto GitExactSourceEditor::read(repository::ExactSourceReadRequest request,
             domain::snapshot_identity(*after), {}, true);
       }
     }
-    stable_root = exact_root_unchanged(*root_anchor,
-                                       request.baseline.root.canonical_path);
+    stable_root = root_unchanged();
     if (!stable_root) {
       return std::unexpected(std::move(stable_root.error()));
     }
