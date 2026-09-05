@@ -69,8 +69,8 @@ set-user-ID helpers, ambient capabilities, `CAP_SYS_ADMIN`, a privileged
 daemon, or a container runtime. `low` requires empty inheritable, permitted,
 effective, and ambient capability sets, a bounding set that never expands
 beyond the launch-time fingerprint, and failed namespace-creation and
-capability-regain attempts; those properties still require the schema-v3
-evidence in issue #209. `high`
+capability-regain attempts; those properties are measured by schema-v3
+`low_capability_nonescalation`. `high`
 additionally requires unprivileged user and mount namespaces
 whose mapping and mount operations succeed without host privilege. A host that
 disables those facilities reports the corresponding stable unavailable reason.

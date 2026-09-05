@@ -1,3 +1,4 @@
+#include "low_capability_v3.hpp"
 #include "probes_v3.hpp"
 
 #include <algorithm>
@@ -157,6 +158,16 @@ template <typename Visitor>
       {STDOUT_FILENO, STDERR_FILENO, 3, 5, 6, 7, 8});
 }
 
+[[nodiscard]] auto low_capability_payload_is_sanitized() -> bool {
+  struct stat outcome{};
+  if (!common_process_state() || ::fstat(3, &outcome) != 0 ||
+      !S_ISFIFO(outcome.st_mode))
+    return false;
+  errno = 0;
+  if (::fcntl(4, F_GETFD) != -1 || errno != EBADF) return false;
+  return descriptors_are_sanitized({STDOUT_FILENO, STDERR_FILENO, 3});
+}
+
 } // namespace
 
 auto main(const int argc, char* argv[]) -> int {
@@ -165,6 +176,13 @@ auto main(const int argc, char* argv[]) -> int {
         argv[2] != nullptr &&
         std::string_view{argv[1]} == "--direct-tree-payload") {
       return payload_is_sanitized() ? v3::run_direct_tree_payload(argv[2]) : 70;
+    }
+    if (argc == 4 && argv != nullptr && argv[1] != nullptr &&
+        argv[2] != nullptr && argv[3] != nullptr &&
+        std::string_view{argv[1]} == "--low-capability-payload") {
+      return low_capability_payload_is_sanitized()
+                 ? v3::run_low_capability_payload(argv[2], argv[3])
+                 : 70;
     }
     if (argc != 4 || argv == nullptr || argv[1] == nullptr ||
         argv[2] == nullptr || argv[3] == nullptr)

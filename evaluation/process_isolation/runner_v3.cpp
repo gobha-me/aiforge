@@ -251,10 +251,13 @@ auto terminate_child(const pid_t child, const int pidfd) noexcept -> void {
 }
 
 // NOLINTBEGIN(readability-function-cognitive-complexity) -- Bounded child IO.
-[[nodiscard]] auto launch_probe(
-    const ProbeId probe_id, const std::filesystem::path& state_directory,
-    const RunnerOptions& options, const int executable_descriptor,
-    CgroupBootstrap& cgroup, const std::stop_token stop_token) -> ProbeRecord {
+[[nodiscard]] auto launch_probe(const ProbeId probe_id,
+                                const std::filesystem::path& state_directory,
+                                const RunnerOptions& options,
+                                const int executable_descriptor,
+                                CgroupBootstrap* const cgroup,
+                                const std::stop_token stop_token)
+    -> ProbeRecord {
   int output_pipe[2]{};
   if (::pipe2(output_pipe, O_CLOEXEC | O_NONBLOCK) != 0)
     return closed_record(probe_id, ReasonCode::internal_error);
@@ -283,7 +286,8 @@ auto terminate_child(const pid_t child, const int pidfd) noexcept -> void {
                      options.child_argument_prefix.end());
     arguments.emplace_back(probe_id_name(probe_id));
     arguments.push_back(state_directory.string());
-    arguments.emplace_back("delegated-root-fd-4");
+    arguments.emplace_back(cgroup != nullptr ? "delegated-root-fd-4"
+                                             : "no-delegated-root");
     std::vector<char*> raw_arguments;
     raw_arguments.reserve(arguments.size() + 1);
     for (auto& argument : arguments)
@@ -295,11 +299,13 @@ auto terminate_child(const pid_t child, const int pidfd) noexcept -> void {
     if (executable_descriptor == 3 &&
         ::fcntl(executable_descriptor, F_SETFD, FD_CLOEXEC) != 0)
       ::_exit(126);
-    if (cgroup.descriptor() != 4 && ::dup3(cgroup.descriptor(), 4, 0) < 0)
-      ::_exit(126);
-    if (cgroup.descriptor() == 4 &&
-        ::fcntl(cgroup.descriptor(), F_SETFD, 0) != 0)
-      ::_exit(126);
+    if (cgroup != nullptr) {
+      if (cgroup->descriptor() != 4 && ::dup3(cgroup->descriptor(), 4, 0) < 0)
+        ::_exit(126);
+      if (cgroup->descriptor() == 4 &&
+          ::fcntl(cgroup->descriptor(), F_SETFD, 0) != 0)
+        ::_exit(126);
+    }
     char* environment[]{nullptr};
     if (!linux_support::close_descriptors_from(5)) ::_exit(126);
     ::fexecve(3, raw_arguments.data(), environment);
@@ -307,7 +313,7 @@ auto terminate_child(const pid_t child, const int pidfd) noexcept -> void {
   }
 
   static_cast<void>(::setpgid(child, child));
-  cgroup.remember_task_owner(child);
+  if (cgroup != nullptr) cgroup->remember_task_owner(child);
   static_cast<void>(::close(output_pipe[1]));
   auto child_pidfd = linux_support::pidfd_open(child);
   std::string output;
@@ -376,7 +382,8 @@ auto terminate_child(const pid_t child, const int pidfd) noexcept -> void {
     if (waited != child) wait_failed = true;
   }
   const bool descendants_cleaned = cleanup_descendants();
-  const bool cgroup_cleaned = cgroup.cleanup_task_owner(child);
+  const bool cgroup_cleaned =
+      cgroup == nullptr || cgroup->cleanup_task_owner(child);
   if (!descendants_cleaned || !cgroup_cleaned)
     return closed_record(probe_id, ReasonCode::cleanup_failed);
   if (cancelled || timed_out) {
@@ -486,10 +493,12 @@ auto run_evaluation(std::string source_sha, const RunnerOptions& options,
     for (const auto id : required_probe_ids()) {
       ProbeRecord record{id, ProbeState::unavailable,
                          ReasonCode::prerequisite_unavailable};
-      if (id == ProbeId::direct_process_tree_cgroup_nonescape) {
+      if (id == ProbeId::direct_process_tree_cgroup_nonescape ||
+          id == ProbeId::low_capability_nonescalation) {
         if (stop_token.stop_requested()) {
           record = closed_record(id, ReasonCode::cancelled);
-        } else if (cgroup_reason != ReasonCode::none) {
+        } else if (id == ProbeId::direct_process_tree_cgroup_nonescape &&
+                   cgroup_reason != ReasonCode::none) {
           record = cgroup_reason == ReasonCode::cleanup_failed ||
                            cgroup_reason == ReasonCode::internal_error
                        ? closed_record(id, cgroup_reason)
@@ -500,7 +509,10 @@ auto run_evaluation(std::string source_sha, const RunnerOptions& options,
               ::chmod(state.c_str(), S_IRWXU) == 0) {
             record =
                 launch_probe(id, state, options, executable_descriptor.get(),
-                             *active_cgroup, stop_token);
+                             id == ProbeId::direct_process_tree_cgroup_nonescape
+                                 ? &*active_cgroup
+                                 : nullptr,
+                             stop_token);
           } else {
             record = closed_record(id, ReasonCode::internal_error);
           }

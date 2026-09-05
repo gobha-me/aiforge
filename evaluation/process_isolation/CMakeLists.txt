@@ -79,6 +79,7 @@ target_link_libraries(aiforge_process_isolation_evaluation_v2_support
 )
 
 add_library(aiforge_process_isolation_evaluation_v3_support STATIC
+  low_capability_v3.cpp
   probes_v3.cpp
   runner_v3.cpp
 )

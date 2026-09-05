@@ -5,6 +5,7 @@
 #include "probes_v3.hpp"
 
 #include "linux_support.hpp"
+#include "low_capability_v3.hpp"
 
 #include <algorithm>
 #include <array>
@@ -887,6 +888,8 @@ auto run_probe(const ProbeId probe_id,
   try {
     if (!valid_state_directory(state_directory))
       return {probe_id, ProbeState::probe_error, ReasonCode::internal_error};
+    if (probe_id == ProbeId::low_capability_nonescalation)
+      return run_low_capability_probe(state_directory);
     if (probe_id != probe)
       return {probe_id, ProbeState::unavailable,
               ReasonCode::prerequisite_unavailable};

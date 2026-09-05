@@ -59,10 +59,11 @@ An evidence artifact is not a runtime capability cache. ADR 0018 selects the
 Linux mechanism conjunctions for each restriction level. Review of the v1/v2
 evidence found supplemental direct-tree, capability, and external same-UID
 execution proof gaps tracked by issue #209. Schema v3 now measures the narrow
-direct process-tree cgroup property; capability rows remain unavailable until
-their probes exist, and arbitrary same-UID broker confinement remains a
-separate unproven conjunct. Until every applicable conjunct exists, retained
-evidence leaves every restricted level incomplete.
+direct process-tree cgroup property and low's capability non-escalation
+property; high's post-private-root capability row remains unavailable, and
+arbitrary same-UID broker confinement remains a separate unproven conjunct.
+Until every applicable conjunct exists, retained evidence leaves every
+restricted level incomplete.
 Production must still re-establish support at application launch and fail
 closed without downgrade.
 
@@ -174,8 +175,8 @@ complete restriction level while the separate same-UID broker conjunct is
 unproven. V3's direct-tree row addresses only path, borrowed-descriptor, and
 `clone3(CLONE_INTO_CGROUP)` cgroup escape by the launched process tree. It does
 not prove denial or containment of execution requested from a same-UID broker.
-Complete payload capability non-escalation and high's post-private-root
-capability discard also remain unavailable until their v3 probes exist.
+High's post-private-root capability discard remains unavailable until its v3
+probe exists.
 The medium conjunction uses `combined_setup_order`, whose filesystem setup
 excludes private-root construction. High separately requires
 `private_root_combined_setup_order`. Its descriptor-entered fixed helper proves
@@ -183,12 +184,13 @@ private-root construction precedes full-root confinement, network denial,
 setup-descriptor closure, and the payload-ready marker; it does not claim a
 second descriptor-relative execution after private-root setup.
 
-## Evidence v3 direct-tree probe
+## Evidence v3 supplemental probes
 
 The separately versioned `aiforge_process_isolation_evaluation_v3` executable
 emits the immutable three-row supplemental schema. This slice implements only
-`direct_process_tree_cgroup_nonescape`; the capability rows truthfully report
-`unavailable/prerequisite_unavailable`.
+`direct_process_tree_cgroup_nonescape` and
+`low_capability_nonescalation`; the private-root capability row truthfully
+reports `unavailable/prerequisite_unavailable`.
 
 Capture v3 with the same exclusive delegated-cgroup contract as v2:
 
@@ -215,3 +217,14 @@ This row proves direct kernel-mediated containment of that launched process
 tree only. It never claims that an arbitrary external same-UID service,
 service manager, D-Bus peer, Unix-socket broker, or compromised peer cannot
 independently execute elsewhere.
+
+The low-capability row does not require cgroup delegation. It records the
+launch bounding-set fingerprint, establishes no-new-privileges, clears the
+inheritable, permitted, effective, and ambient sets, and installs an
+architecture-checked namespace-creation denial before descriptor-relative
+execution. After execution, and again in fork and legacy-clone descendants, it
+requires no-new-privileges, empty capability sets, an empty ambient set, and a
+bounding set that remains a subset of the launch fingerprint. Namespace
+creation and capability-regain attempts must remain denied. An unprivileged
+process is not required to empty its bounding set or lock securebits when it
+lacks `CAP_SETPCAP`.

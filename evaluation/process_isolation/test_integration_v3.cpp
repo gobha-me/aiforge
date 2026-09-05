@@ -67,12 +67,14 @@ TEST_CASE("Linux evidence v3 emits a complete bounded supplemental report",
         v3::ProbeId::direct_process_tree_cgroup_nonescape);
   CHECK(report->probes[0].state == isolation::ProbeState::unavailable);
   CHECK(report->probes[0].reason == v3::ReasonCode::missing_delegation);
-  for (const auto index : {1U, 2U}) {
-    CHECK(report->probes[index].probe_id == v3::required_probe_ids()[index]);
-    CHECK(report->probes[index].state == isolation::ProbeState::unavailable);
-    CHECK(report->probes[index].reason ==
-          v3::ReasonCode::prerequisite_unavailable);
-  }
+  CHECK(report->probes[1].probe_id ==
+        v3::ProbeId::low_capability_nonescalation);
+  CHECK(report->probes[1].state == isolation::ProbeState::enforced);
+  CHECK(report->probes[1].reason == v3::ReasonCode::none);
+  CHECK(report->probes[2].probe_id ==
+        v3::ProbeId::private_root_capability_discard);
+  CHECK(report->probes[2].state == isolation::ProbeState::unavailable);
+  CHECK(report->probes[2].reason == v3::ReasonCode::prerequisite_unavailable);
   CHECK(report->platform == "linux");
   CHECK(report->source_sha == std::string(40, 'a'));
   CHECK(std::filesystem::is_empty(temporary.path()));

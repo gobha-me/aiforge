@@ -3,6 +3,7 @@
 #include "evidence_v3.hpp"
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <string_view>
 
@@ -41,6 +42,20 @@ struct DirectTreeChecks {
   bool threads_contained{};
 };
 
+struct LowCapabilityChecks {
+  bool pre_exec_verified{};
+  bool descriptor_exec{};
+  bool setup_descriptors_closed{};
+  bool no_new_privileges{};
+  bool capability_sets_empty{};
+  bool ambient_empty{};
+  bool bounding_subset{};
+  bool namespace_creation_denied{};
+  bool capability_regain_denied{};
+  bool fork_descendant_rechecked{};
+  bool clone_descendant_rechecked{};
+};
+
 [[nodiscard]] auto direct_tree_outcome(const DirectTreeChecks& checks,
                                        bool cleanup_complete) -> ProbeRecord;
 [[nodiscard]] auto prerequisite_outcome(bool supported_architecture,
@@ -51,6 +66,19 @@ struct DirectTreeChecks {
     const std::array<int, 4>& path_errors,
     const std::array<int, 8>& descriptor_errors,
     const std::array<int, 4>& clone_errors) -> ProbeRecord;
+[[nodiscard]] auto low_capability_outcome(const LowCapabilityChecks& checks,
+                                          bool cleanup_complete) -> ProbeRecord;
+[[nodiscard]] auto capability_prerequisite_outcome(bool supported_architecture,
+                                                   bool cap_last_readable,
+                                                   bool cap_last_bounded)
+    -> ProbeRecord;
+[[nodiscard]] auto cap_last_outcome(std::string_view document) -> ProbeRecord;
+[[nodiscard]] auto bounding_subset_outcome(std::uint64_t launch,
+                                           std::uint64_t current)
+    -> ProbeRecord;
+[[nodiscard]] auto bounding_read_outcome(int error_number) -> ProbeRecord;
+[[nodiscard]] auto x32_namespace_outcome(long result, int error_number)
+    -> ProbeRecord;
 
 } // namespace test_support
 #endif
