@@ -217,7 +217,7 @@ class SubreaperGuard final {
   return result;
 }
 
-// NOLINTBEGIN(readability-function-cognitive-complexity) -- Bounded reap loop.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- bounded loops
 [[nodiscard]] auto cleanup_descendants() -> bool {
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds{2};
@@ -241,8 +241,6 @@ class SubreaperGuard final {
     static_cast<void>(::poll(nullptr, 0, 5));
   }
 }
-// NOLINTEND(readability-function-cognitive-complexity)
-
 auto terminate_child(const pid_t child, const int pidfd) noexcept -> void {
   if (child <= 0) return;
   static_cast<void>(::kill(-child, SIGKILL));
@@ -250,7 +248,7 @@ auto terminate_child(const pid_t child, const int pidfd) noexcept -> void {
   static_cast<void>(::kill(child, SIGKILL));
 }
 
-// NOLINTBEGIN(readability-function-cognitive-complexity) -- Bounded child IO.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- bounded child IO
 [[nodiscard]] auto launch_probe(const ProbeId probe_id,
                                 const std::filesystem::path& state_directory,
                                 const RunnerOptions& options,
@@ -404,8 +402,6 @@ auto terminate_child(const pid_t child, const int pidfd) noexcept -> void {
     return closed_record(probe_id, ReasonCode::malformed_protocol);
   return *parsed;
 }
-// NOLINTEND(readability-function-cognitive-complexity)
-
 auto mark_cleanup_failure(EvidenceReport& report) -> void {
   for (auto& record : report.probes) {
     record.state = ProbeState::probe_error;

@@ -123,6 +123,9 @@ target_compile_features(aiforge_process_isolation_probe_v3 PRIVATE cxx_std_23)
 target_link_libraries(aiforge_process_isolation_probe_v3
   PRIVATE aiforge_process_isolation_evaluation_v3_support
 )
+# The private-root row descriptor-executes this fixed helper after pivoting
+# into an otherwise empty tmpfs root, where no host dynamic loader is present.
+target_link_options(aiforge_process_isolation_probe_v3 PRIVATE -static)
 
 add_executable(aiforge_process_isolation_evaluation_v3
   main_v3.cpp

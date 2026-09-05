@@ -165,7 +165,9 @@ successful capture.
 ## Restriction-level evidence assessment
 
 `evidence_mapping.hpp` exposes the noninstalled ADR 0018 review helper. It
-accepts complete v1, v2, and v3 reports and the exact expected source revision.
+accepts complete v1, v2, and v3 reports plus an independently supplied exact
+source revision, kernel identity, and architecture. All three reports must
+match every expected identity field and each other.
 Missing, malformed, stale, conflicting, unavailable, or
 indeterminate evidence leaves the dependent level incomplete. Levels are
 cumulative and never downgrade. This result helps reviewers check retained
@@ -197,6 +199,18 @@ build-evidence/evaluation/process_isolation/aiforge_process_isolation_evaluation
   --output build-evidence/process-isolation-evidence-v3.json \
   --delegated-cgroup-root /sys/fs/cgroup/path-created-for-this-evaluator
 ```
+
+Hosted CI uses `tools/capture-process-isolation-evidence-v3.sh`, which delegates
+to the unchanged v2 transient-unit lifecycle rather than duplicating its
+security-sensitive cgroup setup and cleanup. The v3 verifier receives the
+workflow source SHA plus independently observed `uname -r` and `uname -m`
+values. It validates the complete canonical three-row report, requires the two
+low rows to be enforced, and rejects any indeterminate row. The high-only row
+may truthfully be unavailable on a host without private-root support; that
+result does not satisfy high. GCC and Clang each upload
+`process-isolation-evidence-v3-<compiler>-<exact-sha>` with
+`if-no-files-found: error`, including after a failed capture step so retained
+failure evidence is not hidden.
 
 Before descriptor-relative re-exec, the direct-tree payload applies Landlock
 write confinement and an architecture-checked seccomp denial of `clone3`.
@@ -231,9 +245,17 @@ root selected for high, makes mount propagation private, pivots into it, and
 detaches the old root. Only then, while namespace-scoped `CAP_SETPCAP` remains
 available, it empties the bounding set, locks securebits against root,
 set-user-ID, keep-capability, and ambient regain, and clears all capability
-sets. The fixed descriptor-entered payload and its fork and legacy-clone
-descendants recheck the empty bounding and capability sets, locked securebits,
-no-new-privileges, and denied namespace and capability-regain attempts. Hosts
-that cannot establish the unprivileged private root report a stable unavailable
-reason; success is not evidence of host capability or generic high
-availability.
+sets. The fixed helper is statically linked so its descriptor-relative exec
+does not reopen a host dynamic loader after the old root is detached. That
+payload and its fork and legacy-clone descendants recheck the empty bounding
+and capability sets, locked securebits, no-new-privileges, and denied namespace
+and capability-regain attempts. Hosts that cannot establish the unprivileged
+private root report a stable unavailable reason; success is not evidence of
+host capability or generic high availability.
+
+Even a report with all three v3 rows enforced cannot complete a restriction
+level. The separately named
+`same_uid_broker_execution_confinement` conjunct remains unproven for low and
+therefore for cumulative medium and high. Cleanup failure in any applicable
+v1, v2, or v3 row dominates another unmet conjunct during assessment, and
+retained reports never grant production launch authority.

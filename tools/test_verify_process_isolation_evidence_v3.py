@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 import pathlib
+import tempfile
 import unittest
 
 
@@ -111,7 +113,7 @@ class EvidenceVerifierV3Tests(unittest.TestCase):
                     )
 
     def test_every_required_row_rejects_unavailable_or_indeterminate(self) -> None:
-        for probe_id in VERIFIER.ALL_PROBES:
+        for probe_id in VERIFIER.LOW_REQUIRED_PROBES:
             index = VERIFIER.ALL_PROBES.index(probe_id)
             for state, reason in (
                 ("unavailable", "mechanism_absent"),
@@ -123,6 +125,20 @@ class EvidenceVerifierV3Tests(unittest.TestCase):
                     report["probes"][index]["reason"] = reason
                     with self.assertRaises(ValueError):
                         self.validate(report)
+
+    def test_truthful_unavailable_high_row_preserves_the_low_gate(self) -> None:
+        report = canonical_report()
+        high_index = VERIFIER.ALL_PROBES.index(
+            "private_root_capability_discard"
+        )
+        report["probes"][high_index]["state"] = "unavailable"
+        report["probes"][high_index]["reason"] = "permission_denied"
+        self.validate(report)
+
+        report["probes"][high_index]["state"] = "probe_error"
+        report["probes"][high_index]["reason"] = "cleanup_failed"
+        with self.assertRaises(ValueError):
+            self.validate(report)
 
     def test_duplicate_fields_and_catalog_mutations_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
@@ -153,6 +169,23 @@ class EvidenceVerifierV3Tests(unittest.TestCase):
             with self.subTest(report=report):
                 with self.assertRaises(ValueError):
                     self.validate(report)
+
+    def test_bounded_loader_rejects_empty_oversized_and_duplicate_json(self) -> None:
+        documents = (
+            b"",
+            b"x" * (VERIFIER.MAXIMUM_REPORT_BYTES + 1),
+            b'{"schema_version":3,"schema_version":3}',
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "report.json"
+            for document in documents:
+                with self.subTest(size=len(document)):
+                    path.write_bytes(document)
+                    with self.assertRaises(ValueError):
+                        VERIFIER.load_report(path)
+
+            path.write_text(json.dumps(canonical_report()), encoding="utf-8")
+            self.assertEqual(VERIFIER.load_report(path), canonical_report())
 
 
 if __name__ == "__main__":

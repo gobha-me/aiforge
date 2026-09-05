@@ -17,6 +17,7 @@ ALL_PROBES = (
     "low_capability_nonescalation",
     "private_root_capability_discard",
 )
+LOW_REQUIRED_PROBES = ALL_PROBES[:2]
 STATES = frozenset({"enforced", "unavailable", "probe_error"})
 UNAVAILABLE_REASONS = frozenset(
     {
@@ -130,11 +131,22 @@ def validate_report(
         by_id[probe_id] = row
     if tuple(by_id) != ALL_PROBES:
         raise ValueError("evidence probe catalog is incomplete, reordered, or unknown")
-    for probe_id in ALL_PROBES:
+    for probe_id in LOW_REQUIRED_PROBES:
         row = by_id[probe_id]
         if row.get("state") != "enforced" or row.get("reason") != "none":
-            raise ValueError(f"required supplemental evidence is not enforced: {probe_id}")
+            raise ValueError(f"required low evidence is not enforced: {probe_id}")
+    for probe_id in ALL_PROBES:
+        if by_id[probe_id].get("state") == "probe_error":
+            raise ValueError(f"supplemental evidence is indeterminate: {probe_id}")
     return by_id
+
+
+def load_report(path: pathlib.Path) -> object:
+    with path.open("rb") as source:
+        document = source.read(MAXIMUM_REPORT_BYTES + 1)
+    if not document or len(document) > MAXIMUM_REPORT_BYTES:
+        raise ValueError("evidence report is empty or oversized")
+    return json.loads(document, object_pairs_hook=reject_duplicates)
 
 
 def main() -> int:
@@ -149,14 +161,12 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    path = pathlib.Path(sys.argv[1])
-    with path.open("rb") as source:
-        document = source.read(MAXIMUM_REPORT_BYTES + 1)
-    if not document or len(document) > MAXIMUM_REPORT_BYTES:
-        raise ValueError("evidence report is empty or oversized")
-    report = json.loads(document, object_pairs_hook=reject_duplicates)
+    report = load_report(pathlib.Path(sys.argv[1]))
     validate_report(report, sys.argv[2], sys.argv[3], sys.argv[4])
-    print(f"verified {len(ALL_PROBES)} exact-revision, exact-host supplemental rows")
+    print(
+        f"verified {len(LOW_REQUIRED_PROBES)} low-required and "
+        f"{len(ALL_PROBES)} exact-revision, exact-host supplemental rows"
+    )
     return 0
 
 

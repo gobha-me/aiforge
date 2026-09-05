@@ -17,6 +17,17 @@ namespace v3 = aiforge::evaluation::process_isolation::v3;
 namespace {
 
 constexpr auto source_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+constexpr mapping::ExpectedEvidenceIdentity expected_identity{
+    source_sha, "6.8.0", "x86_64"};
+
+[[nodiscard]] auto assess(
+    const std::optional<std::string_view> schema_v1_document,
+    const std::optional<std::string_view> schema_v2_document,
+    const std::optional<std::string_view> schema_v3_document)
+    -> mapping::EvidenceAssessment {
+  return mapping::assess_linux_evidence(expected_identity, schema_v1_document,
+                                        schema_v2_document, schema_v3_document);
+}
 
 [[nodiscard]] auto complete_v1() -> isolation::EvidenceReport {
   isolation::EvidenceReport report{source_sha, "linux", "6.8.0", "x86_64", {}};
@@ -160,8 +171,7 @@ TEST_CASE("every selected evidence row retains cleanup-failure dominance",
                                          isolation::ProbeState::probe_error,
                                          isolation::ReasonCode::cleanup_failed};
     const auto encoded = documents(v1_report, v2_report, v3_report);
-    const auto assessment = mapping::assess_linux_evidence(
-        source_sha, encoded.v1, encoded.v2, encoded.v3);
+    const auto assessment = assess(encoded.v1, encoded.v2, encoded.v3);
     CAPTURE(isolation::probe_id_name(conjunct.probe));
     for (std::size_t index{}; index < assessment.levels.size(); ++index) {
       if (index < conjunct.first_incomplete_level) {
@@ -185,8 +195,7 @@ TEST_CASE("every selected evidence row retains cleanup-failure dominance",
                                          isolation::ProbeState::probe_error,
                                          v2::ReasonCode::cleanup_failed};
     const auto encoded = documents(v1_report, v2_report, v3_report);
-    const auto assessment = mapping::assess_linux_evidence(
-        source_sha, encoded.v1, encoded.v2, encoded.v3);
+    const auto assessment = assess(encoded.v1, encoded.v2, encoded.v3);
     CAPTURE(v2::probe_id_name(conjunct.probe));
     for (std::size_t index{}; index < assessment.levels.size(); ++index) {
       if (index < conjunct.first_incomplete_level) {
@@ -206,8 +215,7 @@ TEST_CASE("every selected evidence row retains cleanup-failure dominance",
 TEST_CASE("green v3 remains non-authoritative for same-uid broker execution",
           "[process-isolation][evidence-mapping][failure]") {
   const auto encoded = documents(complete_v1(), complete_v2(), complete_v3());
-  const auto assessment = mapping::assess_linux_evidence(
-      source_sha, encoded.v1, encoded.v2, encoded.v3);
+  const auto assessment = assess(encoded.v1, encoded.v2, encoded.v3);
   for (const auto& level : assessment.levels)
     check_broker_gap(level);
 }
@@ -221,12 +229,9 @@ TEST_CASE("restriction evidence rejects missing malformed stale and "
   auto encoded = documents(v1_report, v2_report, v3_report);
 
   for (const auto& assessment : {
-           mapping::assess_linux_evidence(source_sha, std::nullopt, encoded.v2,
-                                          encoded.v3),
-           mapping::assess_linux_evidence(source_sha, encoded.v1, std::nullopt,
-                                          encoded.v3),
-           mapping::assess_linux_evidence(source_sha, encoded.v1, encoded.v2,
-                                          std::nullopt),
+           assess(std::nullopt, encoded.v2, encoded.v3),
+           assess(encoded.v1, std::nullopt, encoded.v3),
+           assess(encoded.v1, encoded.v2, std::nullopt),
        }) {
     for (const auto& level : assessment.levels) {
       CHECK_FALSE(level.complete);
@@ -235,14 +240,13 @@ TEST_CASE("restriction evidence rejects missing malformed stale and "
   }
 
   for (const auto& assessment : {
-           mapping::assess_linux_evidence(source_sha, "{}", encoded.v2,
-                                          encoded.v3),
-           mapping::assess_linux_evidence(source_sha, encoded.v1, "{}",
-                                          encoded.v3),
-           mapping::assess_linux_evidence(source_sha, encoded.v1, encoded.v2,
-                                          "{}"),
-           mapping::assess_linux_evidence("not-a-source", encoded.v1,
-                                          encoded.v2, encoded.v3),
+           assess("{}", encoded.v2, encoded.v3),
+           assess(encoded.v1, "{}", encoded.v3),
+           assess(encoded.v1, encoded.v2, "{}"),
+           mapping::assess_linux_evidence({"not-a-source", "6.8.0", "x86_64"},
+                                          encoded.v1, encoded.v2, encoded.v3),
+           mapping::assess_linux_evidence({source_sha, "host/path", "x86_64"},
+                                          encoded.v1, encoded.v2, encoded.v3),
        }) {
     for (const auto& level : assessment.levels) {
       CHECK_FALSE(level.complete);
@@ -257,9 +261,7 @@ TEST_CASE("restriction evidence rejects missing malformed stale and "
       linux, std::string_view{"\"platform\":\"linux\""}.size(),
       "\"platform\":\"other\"");
   for (const auto& level :
-       mapping::assess_linux_evidence(source_sha, encoded.v1,
-                                      unsupported_platform, encoded.v3)
-           .levels) {
+       assess(encoded.v1, unsupported_platform, encoded.v3).levels) {
     CHECK_FALSE(level.complete);
     CHECK(level.reason == mapping::AssessmentReason::malformed_evidence);
   }
@@ -268,18 +270,14 @@ TEST_CASE("restriction evidence rejects missing malformed stale and "
   v2_report.source_sha = v1_report.source_sha;
   v3_report.source_sha = v1_report.source_sha;
   encoded = documents(v1_report, v2_report, v3_report);
-  for (const auto& level : mapping::assess_linux_evidence(
-                               source_sha, encoded.v1, encoded.v2, encoded.v3)
-                               .levels) {
+  for (const auto& level : assess(encoded.v1, encoded.v2, encoded.v3).levels) {
     CHECK_FALSE(level.complete);
     CHECK(level.reason == mapping::AssessmentReason::stale_evidence);
   }
 
   v2_report.source_sha = std::string(40, 'c');
   encoded = documents(v1_report, v2_report, v3_report);
-  for (const auto& level : mapping::assess_linux_evidence(
-                               source_sha, encoded.v1, encoded.v2, encoded.v3)
-                               .levels) {
+  for (const auto& level : assess(encoded.v1, encoded.v2, encoded.v3).levels) {
     CHECK_FALSE(level.complete);
     CHECK(level.reason == mapping::AssessmentReason::conflicting_evidence);
   }
@@ -289,9 +287,7 @@ TEST_CASE("restriction evidence rejects missing malformed stale and "
   v3_report = complete_v3();
   v2_report.kernel = "6.9.0";
   encoded = documents(v1_report, v2_report, v3_report);
-  for (const auto& level : mapping::assess_linux_evidence(
-                               source_sha, encoded.v1, encoded.v2, encoded.v3)
-                               .levels) {
+  for (const auto& level : assess(encoded.v1, encoded.v2, encoded.v3).levels) {
     CHECK_FALSE(level.complete);
     CHECK(level.reason == mapping::AssessmentReason::conflicting_evidence);
   }
@@ -299,11 +295,20 @@ TEST_CASE("restriction evidence rejects missing malformed stale and "
   v2_report = complete_v2();
   v3_report.architecture = "aarch64";
   encoded = documents(v1_report, v2_report, v3_report);
-  for (const auto& level : mapping::assess_linux_evidence(
-                               source_sha, encoded.v1, encoded.v2, encoded.v3)
-                               .levels) {
+  for (const auto& level : assess(encoded.v1, encoded.v2, encoded.v3).levels) {
     CHECK_FALSE(level.complete);
     CHECK(level.reason == mapping::AssessmentReason::conflicting_evidence);
+  }
+
+  v3_report = complete_v3();
+  encoded = documents(complete_v1(), complete_v2(), v3_report);
+  for (const auto& level :
+       mapping::assess_linux_evidence({source_sha, "6.9.0", "x86_64"},
+                                      encoded.v1, encoded.v2, encoded.v3)
+           .levels) {
+    CHECK_FALSE(level.complete);
+    CHECK(level.reason == mapping::AssessmentReason::stale_evidence);
+    CHECK(level.conjunct == "evidence host identity is stale");
   }
 }
 
@@ -358,8 +363,7 @@ TEST_CASE("restriction evidence rejects representative missing level conjuncts",
     record(v2_report, failure.probe) = {failure.probe, failure.state,
                                         failure.reason};
     const auto encoded = documents(v1_report, v2_report, v3_report);
-    const auto assessment = mapping::assess_linux_evidence(
-        source_sha, encoded.v1, encoded.v2, encoded.v3);
+    const auto assessment = assess(encoded.v1, encoded.v2, encoded.v3);
     const bool measured_failure_precedes_gap =
         failure.first_incomplete_level == 0 ||
         (failure.state == isolation::ProbeState::probe_error &&
@@ -406,8 +410,7 @@ TEST_CASE("v3 supplemental rows map cumulatively without downgrade",
       v3::ProbeId::direct_process_tree_cgroup_nonescape,
       isolation::ProbeState::unavailable, v3::ReasonCode::enforcement_failed};
   auto encoded = documents(v1_report, v2_report, v3_report);
-  auto assessment = mapping::assess_linux_evidence(source_sha, encoded.v1,
-                                                   encoded.v2, encoded.v3);
+  auto assessment = assess(encoded.v1, encoded.v2, encoded.v3);
   for (const auto& level : assessment.levels) {
     CHECK_FALSE(level.complete);
     CHECK(level.reason == mapping::AssessmentReason::unavailable_conjunct);
@@ -420,8 +423,7 @@ TEST_CASE("v3 supplemental rows map cumulatively without downgrade",
       v3::ProbeId::low_capability_nonescalation,
       isolation::ProbeState::probe_error, v3::ReasonCode::cleanup_failed};
   encoded = documents(v1_report, v2_report, v3_report);
-  assessment = mapping::assess_linux_evidence(source_sha, encoded.v1,
-                                              encoded.v2, encoded.v3);
+  assessment = assess(encoded.v1, encoded.v2, encoded.v3);
   for (const auto& level : assessment.levels) {
     CHECK_FALSE(level.complete);
     CHECK(level.reason == mapping::AssessmentReason::indeterminate_evidence);
@@ -434,8 +436,7 @@ TEST_CASE("v3 supplemental rows map cumulatively without downgrade",
       v3::ProbeId::private_root_capability_discard,
       isolation::ProbeState::probe_error, v3::ReasonCode::cleanup_failed};
   encoded = documents(v1_report, v2_report, v3_report);
-  assessment = mapping::assess_linux_evidence(source_sha, encoded.v1,
-                                              encoded.v2, encoded.v3);
+  assessment = assess(encoded.v1, encoded.v2, encoded.v3);
   check_broker_gap(assessment.levels[0]);
   check_broker_gap(assessment.levels[1]);
   CHECK_FALSE(assessment.levels[2].complete);
@@ -455,8 +456,7 @@ TEST_CASE("restriction evidence is conjunctive without downgrade",
       isolation::ProbeId::no_new_privileges, isolation::ProbeState::unavailable,
       isolation::ReasonCode::permission_denied};
   auto encoded = documents(v1_report, v2_report, v3_report);
-  auto assessment = mapping::assess_linux_evidence(source_sha, encoded.v1,
-                                                   encoded.v2, encoded.v3);
+  auto assessment = assess(encoded.v1, encoded.v2, encoded.v3);
   for (const auto& level : assessment.levels) {
     CHECK_FALSE(level.complete);
     CHECK(level.reason == mapping::AssessmentReason::unavailable_conjunct);
@@ -469,8 +469,7 @@ TEST_CASE("restriction evidence is conjunctive without downgrade",
       v2::ProbeId::landlock_read_confinement,
       isolation::ProbeState::unavailable, v2::ReasonCode::mechanism_absent};
   encoded = documents(v1_report, v2_report, v3_report);
-  assessment = mapping::assess_linux_evidence(source_sha, encoded.v1,
-                                              encoded.v2, encoded.v3);
+  assessment = assess(encoded.v1, encoded.v2, encoded.v3);
   for (const auto& level : assessment.levels)
     check_broker_gap(level);
 
@@ -479,8 +478,7 @@ TEST_CASE("restriction evidence is conjunctive without downgrade",
       v2::ProbeId::private_mount_propagation,
       isolation::ProbeState::unavailable, v2::ReasonCode::permission_denied};
   encoded = documents(v1_report, v2_report, v3_report);
-  assessment = mapping::assess_linux_evidence(source_sha, encoded.v1,
-                                              encoded.v2, encoded.v3);
+  assessment = assess(encoded.v1, encoded.v2, encoded.v3);
   for (const auto& level : assessment.levels)
     check_broker_gap(level);
 }
@@ -497,8 +495,7 @@ TEST_CASE("cleanup uncertainty makes dependent evidence indeterminate",
       v2::ProbeId::cgroup_cancellation_cleanup,
       isolation::ProbeState::probe_error, v2::ReasonCode::cleanup_failed};
   const auto encoded = documents(v1_report, v2_report, v3_report);
-  const auto assessment = mapping::assess_linux_evidence(
-      source_sha, encoded.v1, encoded.v2, encoded.v3);
+  const auto assessment = assess(encoded.v1, encoded.v2, encoded.v3);
   for (const auto& level : assessment.levels) {
     CHECK_FALSE(level.complete);
     CHECK(level.reason == mapping::AssessmentReason::indeterminate_evidence);
@@ -514,8 +511,8 @@ TEST_CASE("cleanup uncertainty makes dependent evidence indeterminate",
       v2::ProbeId::combined_setup_order, isolation::ProbeState::probe_error,
       v2::ReasonCode::cleanup_failed};
   const auto medium_encoded = documents(v1_report, v2_report, v3_report);
-  const auto medium_assessment = mapping::assess_linux_evidence(
-      source_sha, medium_encoded.v1, medium_encoded.v2, medium_encoded.v3);
+  const auto medium_assessment =
+      assess(medium_encoded.v1, medium_encoded.v2, medium_encoded.v3);
   check_broker_gap(medium_assessment.levels[0]);
   for (const auto index : {1U, 2U}) {
     CHECK_FALSE(medium_assessment.levels[index].complete);
@@ -533,8 +530,8 @@ TEST_CASE("cleanup uncertainty makes dependent evidence indeterminate",
       v2::ProbeId::private_root_combined_setup_order,
       isolation::ProbeState::probe_error, v2::ReasonCode::cleanup_failed};
   const auto high_encoded = documents(v1_report, v2_report, v3_report);
-  const auto high_assessment = mapping::assess_linux_evidence(
-      source_sha, high_encoded.v1, high_encoded.v2, high_encoded.v3);
+  const auto high_assessment =
+      assess(high_encoded.v1, high_encoded.v2, high_encoded.v3);
   check_broker_gap(high_assessment.levels[0]);
   check_broker_gap(high_assessment.levels[1]);
   CHECK_FALSE(high_assessment.levels[2].complete);
@@ -554,8 +551,7 @@ TEST_CASE("unselected rows do not hide the remaining broker boundary",
       isolation::ProbeId::user_namespace, isolation::ProbeState::unavailable,
       isolation::ReasonCode::permission_denied};
   const auto encoded = documents(v1_report, v2_report, v3_report);
-  const auto assessment = mapping::assess_linux_evidence(
-      source_sha, encoded.v1, encoded.v2, encoded.v3);
+  const auto assessment = assess(encoded.v1, encoded.v2, encoded.v3);
   REQUIRE(assessment.levels.size() == 3);
   for (const auto& level : assessment.levels)
     check_broker_gap(level);

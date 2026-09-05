@@ -81,12 +81,14 @@ payload execution; schemas v1 and v2 do not prove that transition.
 ### Evidence input
 
 The noninstalled evidence assessor accepts one complete document for each of
-schemas v1, v2, and v3 plus the expected evaluator source revision. It strictly
-validates every schema before examining the mapped rows. The documents must:
+schemas v1, v2, and v3 plus independently supplied expected source revision,
+kernel identity, and architecture. It strictly validates every schema before
+examining the mapped rows. The documents must:
 
 - contain the exact expected lowercase source revision;
 - identify Linux;
-- agree on source revision, kernel, and architecture; and
+- agree on source revision, kernel, and architecture and exactly match those
+  independent inputs; and
 - contain every required row exactly once in canonical order.
 
 Missing, malformed, stale, or conflicting documents make every assessed level
@@ -98,6 +100,16 @@ conjunct in the order defined below. After all mapped rows pass, the assessor
 still reports the separate same-UID broker-execution conjunct as unproven. It
 reviews retained engineering evidence only; it is not linked into installed
 targets and its answer is never runtime authority.
+
+CI captures v3 only through the same bounded transient systemd delegation and
+cleanup contract used by v2, without modifying either released schema. The
+strict v3 verifier requires the two low rows to be enforced, validates the
+high-only row in exact canonical position, and rejects every indeterminate row.
+A host that cannot construct the high private root may therefore retain a
+truthful `private_root_capability_discard/unavailable` report while high remains
+incomplete. Both compiler jobs retain the complete v3 report under an artifact
+name containing the exact source revision, even when capture or verification
+fails; absence of that report is itself a CI error.
 
 ### `low`
 

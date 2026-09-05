@@ -38,10 +38,17 @@ struct EvidenceAssessment {
   auto operator==(const EvidenceAssessment&) const -> bool = default;
 };
 
-// Reviews retained engineering evidence for the ADR 0018 conjunctions. This
+struct ExpectedEvidenceIdentity {
+  std::string_view source_sha;
+  std::string_view kernel;
+  std::string_view architecture;
+};
+
+// Reviews retained engineering evidence for the ADR 0018 conjunctions. The
+// expected identity must be supplied independently from the reports. This
 // result is non-authoritative and must never be reused as launch availability.
 [[nodiscard]] auto assess_linux_evidence(
-    std::string_view expected_source_sha,
+    ExpectedEvidenceIdentity expected_identity,
     std::optional<std::string_view> schema_v1_document,
     std::optional<std::string_view> schema_v2_document,
     std::optional<std::string_view> schema_v3_document) -> EvidenceAssessment;

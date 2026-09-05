@@ -719,8 +719,7 @@ struct DescendantArguments {
   }
 }
 
-// NOLINTBEGIN(readability-function-cognitive-complexity) -- Lifecycle
-// finalization.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- bounded flows
 [[nodiscard]] auto run_direct_tree_probe(const std::filesystem::path& state)
     -> ProbeRecord {
   if (!supported_architecture())
@@ -828,8 +827,6 @@ struct DescendantArguments {
   }
   return result;
 }
-// NOLINTEND(readability-function-cognitive-complexity)
-
 } // namespace
 
 auto run_direct_tree_payload(const std::string_view sibling_name) -> int {

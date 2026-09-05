@@ -82,6 +82,16 @@ constexpr std::array all_v3{
          });
 }
 
+[[nodiscard]] auto valid_host_metadata(const std::string_view value) -> bool {
+  return !value.empty() && value.size() <= maximum_platform_metadata_bytes &&
+         std::ranges::all_of(value, [](const unsigned char character) {
+           return (character >= 'a' && character <= 'z') ||
+                  (character >= 'A' && character <= 'Z') ||
+                  (character >= '0' && character <= '9') || character == '.' ||
+                  character == '_' || character == '-' || character == '+';
+         });
+}
+
 [[nodiscard]] auto unavailable(const EvidenceLevel level,
                                const AssessmentReason reason,
                                const std::string_view conjunct,
@@ -285,15 +295,17 @@ struct ValidatedReports {
 };
 
 [[nodiscard]] auto validate_reports(
-    const std::string_view expected_source_sha,
+    const ExpectedEvidenceIdentity expected_identity,
     const std::optional<std::string_view> schema_v1_document,
     const std::optional<std::string_view> schema_v2_document,
     const std::optional<std::string_view> schema_v3_document)
     -> std::expected<ValidatedReports, EvidenceAssessment> {
-  if (!valid_source_sha(expected_source_sha))
+  if (!valid_source_sha(expected_identity.source_sha) ||
+      !valid_host_metadata(expected_identity.kernel) ||
+      !valid_host_metadata(expected_identity.architecture))
     return std::unexpected(
         all_unavailable(AssessmentReason::malformed_evidence,
-                        "expected source revision is invalid"));
+                        "expected evidence identity is invalid"));
   if (!schema_v1_document)
     return std::unexpected(all_unavailable(AssessmentReason::missing_evidence,
                                            "schema-v1 evidence is missing"));
@@ -329,9 +341,13 @@ struct ValidatedReports {
     return std::unexpected(
         all_unavailable(AssessmentReason::conflicting_evidence,
                         "evidence host identities conflict"));
-  if (v1_report->source_sha != expected_source_sha)
+  if (v1_report->source_sha != expected_identity.source_sha)
     return std::unexpected(all_unavailable(
         AssessmentReason::stale_evidence, "evidence source revision is stale"));
+  if (v1_report->kernel != expected_identity.kernel ||
+      v1_report->architecture != expected_identity.architecture)
+    return std::unexpected(all_unavailable(AssessmentReason::stale_evidence,
+                                           "evidence host identity is stale"));
   return ValidatedReports{std::move(*v1_report), std::move(*v2_report),
                           std::move(*v3_report)};
 }
@@ -339,12 +355,12 @@ struct ValidatedReports {
 } // namespace
 
 auto assess_linux_evidence(
-    const std::string_view expected_source_sha,
+    const ExpectedEvidenceIdentity expected_identity,
     const std::optional<std::string_view> schema_v1_document,
     const std::optional<std::string_view> schema_v2_document,
     const std::optional<std::string_view> schema_v3_document)
     -> EvidenceAssessment {
-  const auto reports = validate_reports(expected_source_sha, schema_v1_document,
+  const auto reports = validate_reports(expected_identity, schema_v1_document,
                                         schema_v2_document, schema_v3_document);
   if (!reports) return reports.error();
   const auto& v1_report = reports->v1;

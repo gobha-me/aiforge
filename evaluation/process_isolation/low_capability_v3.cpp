@@ -1065,7 +1065,7 @@ auto run_private_root_capability_probe(
                                    cap_last_argument.data(), nullptr};
     char* environment[]{nullptr};
     ::fexecve(4, arguments.data(), environment);
-    private_setup_failed(ReasonCode::internal_error);
+    private_setup_failed(reason_from_errno(errno));
   }
   writer.reset();
   const auto wire = read_private_wire(observed.get());
