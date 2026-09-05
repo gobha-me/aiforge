@@ -314,6 +314,26 @@ namespace {
   return false;
 }
 
+[[nodiscard]] auto valid_unavailable_reason(
+    const ToolRestrictionUnavailableReason reason) noexcept -> bool {
+  switch (reason) {
+    case ToolRestrictionUnavailableReason::unsupported_platform:
+    case ToolRestrictionUnavailableReason::unsupported_architecture:
+    case ToolRestrictionUnavailableReason::unsupported_kernel:
+    case ToolRestrictionUnavailableReason::missing_delegation:
+    case ToolRestrictionUnavailableReason::missing_controller:
+    case ToolRestrictionUnavailableReason::permission_denied:
+    case ToolRestrictionUnavailableReason::privilege_changed:
+    case ToolRestrictionUnavailableReason::mechanism_absent:
+    case ToolRestrictionUnavailableReason::unsupported_combination:
+    case ToolRestrictionUnavailableReason::setup_race:
+    case ToolRestrictionUnavailableReason::enforcement_failed:
+    case ToolRestrictionUnavailableReason::cleanup_failed:
+    case ToolRestrictionUnavailableReason::internal_error: return true;
+  }
+  return false;
+}
+
 [[nodiscard]] auto add_policy_bytes(const std::size_t amount,
                                     const std::size_t maximum,
                                     std::size_t& total) -> bool {
@@ -322,12 +342,14 @@ namespace {
   return true;
 }
 
-[[nodiscard]] auto validate_policy_effects(const ToolPolicyProvenance& policy)
+[[nodiscard]] auto validate_policy_effects(const ToolPolicyProvenance& policy,
+                                           const bool legacy_v1)
     -> std::expected<std::set<Effect>, RunProvenanceError> {
   std::set<Effect> effects;
   for (const auto effect : policy.effect_ceiling) {
     if (!valid_effect(effect) ||
-        !effect_within_restriction(effect, policy.restriction_level) ||
+        (legacy_v1 &&
+         !effect_within_restriction(effect, policy.restriction_level)) ||
         !effects.insert(effect).second) {
       return failure(RunProvenanceErrorCode::invalid_tool_policy,
                      "the tool policy effect ceiling is invalid");
@@ -392,12 +414,54 @@ namespace {
   return {};
 }
 
+[[nodiscard]] auto has_inconsistent_policy_version_fields(
+    const ToolPolicyProvenance& policy, const bool legacy_v1,
+    const bool current_v2) -> bool {
+  return (legacy_v1 && policy.approval_mode != ToolApprovalMode::automatic &&
+          !policy.automatically_eligible_tools.empty()) ||
+         (legacy_v1 && (policy.achieved_restriction_level ||
+                        policy.restriction_unavailable_reason ||
+                        !policy.mechanism_identity.empty() ||
+                        !policy.mechanism_version.empty() ||
+                        policy.restriction_policy_identity ||
+                        policy.matcher_policy_identity)) ||
+         (current_v2 && !policy.automatically_eligible_tools.empty());
+}
+
+[[nodiscard]] auto has_inconsistent_v2_launch_policy_state(
+    const ToolPolicyProvenance& policy, const RunProvenanceLimits& limits)
+    -> bool {
+  return policy.achieved_restriction_level.has_value() ==
+             policy.restriction_unavailable_reason.has_value() ||
+         (policy.achieved_restriction_level &&
+          (!valid_restriction(*policy.achieved_restriction_level) ||
+           *policy.achieved_restriction_level != policy.restriction_level)) ||
+         (policy.restriction_unavailable_reason &&
+          !valid_unavailable_reason(*policy.restriction_unavailable_reason)) ||
+         !valid_identity(policy.mechanism_identity,
+                         limits.maximum_identity_bytes) ||
+         !valid_identity(policy.mechanism_version,
+                         limits.maximum_identity_bytes) ||
+         (policy.restriction_policy_identity &&
+          !valid_identity(*policy.restriction_policy_identity,
+                          limits.maximum_identity_bytes)) ||
+         (policy.achieved_restriction_level.has_value() !=
+          policy.restriction_policy_identity.has_value()) ||
+         (policy.matcher_policy_identity &&
+          !valid_identity(*policy.matcher_policy_identity,
+                          limits.maximum_identity_bytes)) ||
+         ((policy.approval_mode == ToolApprovalMode::automatic) !=
+          policy.matcher_policy_identity.has_value());
+}
+
 [[nodiscard]] auto validate_tool_policy_impl(
     const std::optional<ToolPolicyProvenance>& policy,
     const RunProvenanceLimits& limits)
     -> std::expected<void, RunProvenanceError> {
   if (!policy) return {};
-  if (policy->identity != "aiforge.tool-launch-policy.v1" ||
+  const bool legacy_v1 = policy->identity == "aiforge.tool-launch-policy.v1";
+  const bool current_v2 = policy->identity == "aiforge.tool-launch-policy.v2";
+  if ((!legacy_v1 && !current_v2) ||
       !valid_identity(policy->permission_profile_id.value(),
                       limits.maximum_identity_bytes) ||
       !valid_restriction(policy->restriction_level) ||
@@ -409,10 +473,13 @@ namespace {
     return failure(RunProvenanceErrorCode::invalid_tool_policy,
                    "the tool policy provenance is malformed or unbounded");
   }
-  if (policy->approval_mode != ToolApprovalMode::automatic &&
-      !policy->automatically_eligible_tools.empty()) {
+  if (has_inconsistent_policy_version_fields(*policy, legacy_v1, current_v2)) {
     return failure(RunProvenanceErrorCode::invalid_tool_policy,
-                   "automatic tool eligibility conflicts with approval mode");
+                   "tool policy version fields are inconsistent");
+  }
+  if (current_v2 && has_inconsistent_v2_launch_policy_state(*policy, limits)) {
+    return failure(RunProvenanceErrorCode::invalid_tool_policy,
+                   "the v2 launch policy state is inconsistent");
   }
   std::size_t total{};
   if (!add_policy_bytes(policy->identity.size(), limits.maximum_total_bytes,
@@ -422,7 +489,21 @@ namespace {
     return failure(RunProvenanceErrorCode::resource_exhausted,
                    "the tool policy provenance exceeds its total byte budget");
   }
-  auto effects = validate_policy_effects(*policy);
+  if (current_v2 &&
+      (!add_policy_bytes(policy->mechanism_identity.size(),
+                         limits.maximum_total_bytes, total) ||
+       !add_policy_bytes(policy->mechanism_version.size(),
+                         limits.maximum_total_bytes, total) ||
+       (policy->restriction_policy_identity &&
+        !add_policy_bytes(policy->restriction_policy_identity->size(),
+                          limits.maximum_total_bytes, total)) ||
+       (policy->matcher_policy_identity &&
+        !add_policy_bytes(policy->matcher_policy_identity->size(),
+                          limits.maximum_total_bytes, total)))) {
+    return failure(RunProvenanceErrorCode::resource_exhausted,
+                   "the tool policy provenance exceeds its total byte budget");
+  }
+  auto effects = validate_policy_effects(*policy, legacy_v1);
   if (!effects) return std::unexpected(effects.error());
   if (auto scopes = validate_policy_scopes(*policy, limits, *effects, total);
       !scopes) {
@@ -554,6 +635,13 @@ namespace {
   if (!policy) return 0;
   std::size_t total =
       policy->identity.size() + policy->permission_profile_id.value().size();
+  total += policy->mechanism_identity.size() + policy->mechanism_version.size();
+  if (policy->restriction_policy_identity) {
+    total += policy->restriction_policy_identity->size();
+  }
+  if (policy->matcher_policy_identity) {
+    total += policy->matcher_policy_identity->size();
+  }
   for (const auto& scope : policy->capability_ceiling) {
     total += scope.kind.size() + scope.value.size();
   }

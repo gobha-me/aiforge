@@ -261,8 +261,8 @@ struct NormalizedConfiguration {
                     "timeout_ms", "output_bytes"})},
       {"properties", std::move(properties)}};
 
-  std::vector<domain::Effect> effects{domain::Effect::execute,
-                                      domain::Effect::read};
+  std::vector<domain::Effect> effects{
+      domain::Effect::execute, domain::Effect::read, domain::Effect::network};
   if (!configuration.writable_roots.empty()) {
     effects.push_back(domain::Effect::write);
   }
@@ -279,6 +279,8 @@ struct NormalizedConfiguration {
   for (const auto& root : configuration.writable_roots) {
     scopes.push_back({domain::Effect::write, "filesystem.root", root});
   }
+  scopes.push_back(
+      {domain::Effect::network, "network.unrestricted", "new-sockets"});
   return {"run_process",
           "Run one executable with an argument vector under explicit process, "
           "filesystem, environment, time, and output bounds. No shell is used.",
@@ -496,8 +498,8 @@ class DuplicateJsonKey final : public std::exception {
 
 [[nodiscard]] auto required_effects(const ProcessRequest& request)
     -> std::vector<domain::Effect> {
-  std::vector<domain::Effect> result{domain::Effect::execute,
-                                     domain::Effect::read};
+  std::vector<domain::Effect> result{
+      domain::Effect::execute, domain::Effect::read, domain::Effect::network};
   if (!request.writable_roots.empty()) result.push_back(domain::Effect::write);
   return result;
 }
@@ -512,6 +514,8 @@ class DuplicateJsonKey final : public std::exception {
   for (const auto& root : request.writable_roots) {
     result.push_back({domain::Effect::write, "filesystem.root", root});
   }
+  result.push_back(
+      {domain::Effect::network, "network.unrestricted", "new-sockets"});
   return result;
 }
 

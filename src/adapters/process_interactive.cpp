@@ -127,32 +127,39 @@ constexpr std::size_t maximum_image_artifact_bytes =
   return std::unexpected("tool approval must be prompt, auto, or allow-all");
 }
 
-[[nodiscard]] auto tool_launch_profile_id(
-    const runtime::RestrictionLevel restriction,
-    const runtime::ApprovalMode approval)
+[[nodiscard]] auto tool_launch_profile_id()
     -> std::optional<domain::PermissionProfileId> {
-  const auto restriction_name = [restriction]() -> std::string_view {
-    switch (restriction) {
-      case runtime::RestrictionLevel::high: return "high";
-      case runtime::RestrictionLevel::medium: return "medium";
-      case runtime::RestrictionLevel::low: return "low";
-      case runtime::RestrictionLevel::none: return "none";
-    }
-    return "invalid";
-  }();
-  const auto approval_name = [approval]() -> std::string_view {
-    switch (approval) {
-      case runtime::ApprovalMode::prompt: return "prompt";
-      case runtime::ApprovalMode::automatic: return "auto";
-      case runtime::ApprovalMode::allow_all: return "allow-all";
-    }
-    return "invalid";
-  }();
-  auto profile = domain::PermissionProfileId::from(
-      "tools-" + std::string{restriction_name} + "-" +
-      std::string{approval_name} + "-v1");
+  auto profile = domain::PermissionProfileId::from("interactive-tools-v2");
   if (!profile) return std::nullopt;
   return std::move(*profile);
+}
+
+[[nodiscard]] auto application_launch_context(
+    const runtime::RestrictionLevel restriction,
+    const runtime::ApprovalMode approval,
+    std::optional<std::string> matcher_policy_identity)
+    -> std::expected<runtime::ApplicationLaunchContext, std::string> {
+  runtime::ApplicationLaunchContextConfiguration configuration;
+  configuration.selected_restriction = restriction;
+  configuration.achieved_restriction =
+      restriction == runtime::RestrictionLevel::none
+          ? std::optional{runtime::RestrictionLevel::none}
+          : std::nullopt;
+  configuration.unavailable_reason =
+      restriction == runtime::RestrictionLevel::none
+          ? std::nullopt
+          : std::optional{
+                runtime::RestrictionUnavailableReason::mechanism_absent};
+  configuration.restriction_policy_identity =
+      restriction == runtime::RestrictionLevel::none
+          ? std::optional<std::string>{"aiforge.posix-process.none.v1"}
+          : std::nullopt;
+  configuration.approval_mode = approval;
+  configuration.matcher_policy_identity = std::move(matcher_policy_identity);
+  auto context =
+      runtime::make_application_launch_context(std::move(configuration));
+  if (!context) return std::unexpected(context.error().message);
+  return std::move(*context);
 }
 
 [[nodiscard]] auto configured_source_name(
@@ -4703,8 +4710,7 @@ auto ProcessInteractiveCommand::execute(Request request,
       return failure(cli::CommandFailureKind::usage,
                      std::move(approval.error()));
     }
-    auto permission_profile_id =
-        tool_launch_profile_id(*restriction, *approval);
+    auto permission_profile_id = tool_launch_profile_id();
     if (!permission_profile_id) {
       return failure(cli::CommandFailureKind::runtime,
                      "tool launch policy identity is invalid");
@@ -4794,13 +4800,30 @@ auto ProcessInteractiveCommand::execute(Request request,
                      tool_snapshot.error().message);
     }
     tools = std::move(*tool_snapshot);
-    runtime::ToolLaunchPolicyConfiguration policy_configuration{
-        *permission_profile_id, *restriction, *approval, {}};
+    std::vector<std::string> automatically_eligible_tools;
     if (*approval == runtime::ApprovalMode::automatic &&
         tools.find("read_repository_file") != nullptr) {
-      policy_configuration.automatically_eligible_tools = {
-          "read_repository_file"};
+      automatically_eligible_tools = {"read_repository_file"};
     }
+    std::optional<std::string> matcher_policy_identity;
+    if (*approval == runtime::ApprovalMode::automatic) {
+      auto identity = runtime::exact_tool_allowlist_matcher_identity(
+          automatically_eligible_tools);
+      if (!identity) {
+        return failure(cli::CommandFailureKind::runtime,
+                       identity.error().message);
+      }
+      matcher_policy_identity = std::move(*identity);
+    }
+    auto launch_context = application_launch_context(
+        *restriction, *approval, std::move(matcher_policy_identity));
+    if (!launch_context) {
+      return failure(cli::CommandFailureKind::runtime,
+                     std::move(launch_context.error()));
+    }
+    runtime::ToolLaunchPolicyConfiguration policy_configuration{
+        *permission_profile_id, std::move(*launch_context),
+        std::move(automatically_eligible_tools)};
     auto tool_policy = runtime::make_tool_launch_policy(
         tools, std::move(policy_configuration));
     if (!tool_policy) {

@@ -6,6 +6,7 @@
 #include <aiforge/model/catalog.hpp>
 #include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/runtime/tool_launch_policy.hpp>
+#include <aiforge/testing/application_launch_context.hpp>
 #include <aiforge/testing/scripted_persona_editor.hpp>
 #include <aiforge/testing/scripted_persona_source.hpp>
 #include <aiforge/testing/scripted_tool_executor.hpp>
@@ -2867,8 +2868,8 @@ auto approval_factory() -> testing::TuiScenarioTargetFactory {
         make_id<domain::PermissionProfileId>("approval-scenario");
     auto policy = runtime::make_tool_launch_policy(
         *tools, {permission_profile,
-                 runtime::RestrictionLevel::medium,
-                 runtime::ApprovalMode::prompt,
+                 testing::available_application_launch_context(
+                     runtime::RestrictionLevel::medium),
                  {}});
     if (!policy) {
       return std::unexpected(testing::TuiScenarioError{

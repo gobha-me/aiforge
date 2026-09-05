@@ -1,4 +1,5 @@
 add_library(${PROJECT_NAME}_lib STATIC
+  application_launch_context.cpp
   ask_user_tool.cpp
   audio.cpp
   bootstrap.cpp

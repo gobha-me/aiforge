@@ -27,15 +27,17 @@ auto profile(std::string id = "custom", std::string name = "Custom",
 
 auto declaration(std::string name, const bool authority_bearing = false)
     -> backend::ToolDeclaration {
+  std::vector<domain::Effect> effects;
+  std::vector<domain::CapabilityScope> scopes;
+  if (authority_bearing) {
+    effects.push_back(domain::Effect::read);
+    scopes.push_back({domain::Effect::read, "filesystem.root", "/repo"});
+  }
   return {std::move(name),
           "A no-authority test tool",
           {"application/schema+json", R"({"type":"object"})"},
-          authority_bearing ? std::vector{domain::Effect::read}
-                            : std::vector<domain::Effect>{},
-          authority_bearing
-              ? std::vector{domain::CapabilityScope{domain::Effect::read,
-                                                    "filesystem.root", "/repo"}}
-              : std::vector<domain::CapabilityScope>{}};
+          std::move(effects),
+          std::move(scopes)};
 }
 
 auto register_tool(
@@ -59,8 +61,21 @@ auto launch_policy(
     -> std::shared_ptr<runtime::ToolPolicy> {
   auto permission_profile =
       domain::PermissionProfileId::from("test-launch-profile").value();
+  runtime::ApplicationLaunchContextConfiguration context_configuration;
+  context_configuration.selected_restriction = restriction;
+  context_configuration.achieved_restriction = restriction;
+  context_configuration.unavailable_reason.reset();
+  context_configuration.restriction_policy_identity = "test.process-policy.v1";
+  context_configuration.approval_mode = approval;
+  if (approval == runtime::ApprovalMode::automatic) {
+    context_configuration.matcher_policy_identity =
+        runtime::exact_tool_allowlist_matcher_identity(automatic).value();
+  }
+  auto context = runtime::make_application_launch_context(
+      std::move(context_configuration));
+  REQUIRE(context);
   auto policy = runtime::make_tool_launch_policy(
-      tools, {std::move(permission_profile), restriction, approval,
+      tools, {std::move(permission_profile), std::move(*context),
               std::move(automatic)});
   REQUIRE(policy);
   return std::move(*policy);
@@ -373,7 +388,7 @@ TEST_CASE(
           runtime::ToolProfileErrorCode::unknown_profile);
 }
 
-TEST_CASE("launch policy and explicit model support complete the intersection",
+TEST_CASE("authority profiles stay independent from containment and approval",
           "[tool-profile][narrowing][policy]") {
   runtime::ToolRegistry registry;
   static_cast<void>(register_tool(registry, "read_repository_file", true));
@@ -388,10 +403,8 @@ TEST_CASE("launch policy and explicit model support complete the intersection",
   const auto high = launch_policy(*snapshot, runtime::RestrictionLevel::high);
   auto resolved = runtime::resolve_tool_profile(*snapshot, selection, *high);
   REQUIRE(resolved);
-  REQUIRE(resolved->effective_tools.size() == 2);
-  REQUIRE(resolved->effective_tools.find("read_repository_file") == nullptr);
-  REQUIRE(resolved->tool_availability.back().reason ==
-          runtime::ToolProfileAvailabilityReason::launch_policy_denied);
+  REQUIRE(resolved->effective_tools.size() == 3);
+  REQUIRE(resolved->effective_tools.find("read_repository_file") != nullptr);
 
   const auto medium = launch_policy(*snapshot);
   resolved = runtime::resolve_tool_profile(*snapshot, selection, *medium);
@@ -403,8 +416,8 @@ TEST_CASE("launch policy and explicit model support complete the intersection",
                     runtime::ApprovalMode::automatic, {"ask_user"});
   resolved = runtime::resolve_tool_profile(*snapshot, selection, *automatic);
   REQUIRE(resolved);
-  REQUIRE(resolved->effective_tools.size() == 2);
-  REQUIRE(resolved->effective_tools.find("read_repository_file") == nullptr);
+  REQUIRE(resolved->effective_tools.size() == 3);
+  REQUIRE(resolved->effective_tools.find("read_repository_file") != nullptr);
 
   const auto fallback = runtime::default_tool_policy();
   resolved = runtime::resolve_tool_profile(*snapshot, selection, *fallback);
@@ -423,7 +436,7 @@ TEST_CASE("launch policy and explicit model support complete the intersection",
       }));
 }
 
-TEST_CASE("paid image tool requires media selection and complete authority",
+TEST_CASE("paid image tool requires media selection and authority ceilings",
           "[tool-profile][media][narrowing][policy][failure]") {
   runtime::ToolRegistry registry;
   static_cast<void>(register_tool(registry, "ask_user"));
@@ -454,10 +467,10 @@ TEST_CASE("paid image tool requires media selection and complete authority",
   const auto medium = launch_policy(*snapshot);
   resolved = runtime::resolve_tool_profile(*snapshot, selection, *medium);
   REQUIRE(resolved);
-  CHECK(resolved->effective_tools.find("generate_image") == nullptr);
+  CHECK(resolved->effective_tools.find("generate_image") != nullptr);
   REQUIRE(resolved->tool_availability.size() == 3);
   CHECK(resolved->tool_availability.back().reason ==
-        runtime::ToolProfileAvailabilityReason::launch_policy_denied);
+        runtime::ToolProfileAvailabilityReason::available);
 
   resolved = runtime::resolve_tool_profile(*snapshot, selection, *low);
   REQUIRE(resolved);

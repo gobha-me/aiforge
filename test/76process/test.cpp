@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <ranges>
 #include <set>
 #include <span>
 #include <stop_token>
@@ -200,9 +201,13 @@ TEST_CASE("process declaration and validation fail closed",
   REQUIRE(declaration);
   REQUIRE(declaration->name == "run_process");
   REQUIRE(declaration->effects ==
-          std::vector<domain::Effect>{domain::Effect::execute,
-                                      domain::Effect::read,
-                                      domain::Effect::write});
+          std::vector<domain::Effect>{
+              domain::Effect::execute, domain::Effect::read,
+              domain::Effect::network, domain::Effect::write});
+  REQUIRE(std::ranges::contains(declaration->capability_scopes,
+                                domain::CapabilityScope{domain::Effect::network,
+                                                        "network.unrestricted",
+                                                        "new-sockets"}));
 
   runtime::ToolRegistry registry;
   REQUIRE(adapters::register_process_tool(registry, artifacts, config));
@@ -214,6 +219,17 @@ TEST_CASE("process declaration and validation fail closed",
       "aiforge.adapters.run_process", "1"};
   REQUIRE(registration->executor_contract == process_contract);
   auto* executor = registration->executor.get();
+
+  const auto valid = executor->validate(
+      arguments(fixture(), temporary.path(), {}, {}, 1000, 128U * 1024U,
+                {temporary.path().generic_string()}));
+  REQUIRE(valid);
+  REQUIRE(std::ranges::contains(valid->required_scopes,
+                                domain::CapabilityScope{domain::Effect::network,
+                                                        "network.unrestricted",
+                                                        "new-sockets"}));
+  REQUIRE(
+      std::ranges::contains(valid->required_effects, domain::Effect::network));
 
   for (auto malformed :
        std::vector<domain::StructuredDataBlock>{{"text/plain", "{}"},
@@ -343,8 +359,13 @@ TEST_CASE("process execution preserves argv and isolates its environment",
   REQUIRE(result);
   REQUIRE(result->validated.required_effects ==
           std::vector<domain::Effect>{domain::Effect::execute,
-                                      domain::Effect::read});
-  REQUIRE(result->validated.required_scopes.size() == 2);
+                                      domain::Effect::read,
+                                      domain::Effect::network});
+  REQUIRE(result->validated.required_scopes.size() == 3);
+  REQUIRE(std::ranges::contains(result->validated.required_scopes,
+                                domain::CapabilityScope{domain::Effect::network,
+                                                        "network.unrestricted",
+                                                        "new-sockets"}));
   const auto value = result_json(result->result);
   REQUIRE(value.at("status") == "exited");
   REQUIRE(value.at("exit_code") == 7);

@@ -63,6 +63,12 @@ TEST_CASE("capability scopes reject ambiguity and preserve containment",
       {domain::Effect::execute, "network.host", "api.example.com"}));
   REQUIRE_FALSE(runtime::normalize_capability_scope(
       {domain::Effect::network, "network.host", "*.example.com"}));
+  REQUIRE(runtime::normalize_capability_scope(
+      {domain::Effect::network, "network.unrestricted", "new-sockets"}));
+  REQUIRE_FALSE(runtime::normalize_capability_scope(
+      {domain::Effect::network, "network.unrestricted", "all"}));
+  REQUIRE_FALSE(runtime::normalize_capability_scope(
+      {domain::Effect::communicate, "network.unrestricted", "new-sockets"}));
   REQUIRE_FALSE(runtime::capability_scope_covers(
       {domain::Effect::network, "network.host", "api.example.com"},
       {domain::Effect::network, "network.host", "attacker.example.com"}));

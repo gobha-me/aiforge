@@ -534,7 +534,13 @@ independently without blocking, and terminates descendants on cancellation,
 timeout, or output exhaustion. Small safe UTF-8 streams remain inline; binary
 or larger streams pass through a caller-supplied neutral `ArtifactStore` and
 enter the event stream as typed creation and reference records. No production
-artifact encoding is selected yet.
+artifact encoding is selected yet. This existing executor is the unrestricted
+`none` process contract: every invocation explicitly requests
+`network.unrestricted=new-sockets` because the child may create Internet or
+local sockets. The `low` contract uses the same explicit network authority;
+`medium` and `high` carry the closed `deny_new_sockets` contract marker. Their
+production launch mechanics and bounded file manifests are owned by follow-up
+work. No model-facing shell tool is registered.
 
 Filesystem roots are capability-policy authority and constrain the working
 directory; they are not an operating-system sandbox. The current one-shot
@@ -570,13 +576,19 @@ one-shot sessions do not advertise this approval- and artifact-bearing tool.
 Authority is fixed for the application lifetime with
 `--tool-restriction <none|low|medium|high>` and
 `--tool-approval <prompt|auto|allow-all>`. Defaults are `high` and `prompt`;
-`high` grants no effectful authority and `medium` admits bounded reads. Prompt
-mode shows the exact tool, effects, and normalized path scope and grants only
-that invocation. `auto` implicitly approves configured tool allow-list members;
-`allow-all` implicitly approves selected tools within the restriction and their
-declared capability ceilings. None of these modes supplies ambient authority,
-and durable pending work fails closed if its recorded policy or tool contracts
-do not match the current launch.
+until its production restriction launcher is installed, default `high` is
+recorded as unavailable and only process-category tools are withheld. The
+restriction level never removes authority from unrelated registered tools.
+Prompt mode shows the exact tool, effects, and normalized path scope and grants
+only that invocation. `auto` approves only explicit current-launch matcher
+members; `allow-all` is a separate explicit launch choice. Neither mode grants
+authority beyond the exact registered declarations. Durable v2 provenance
+records selected and achieved restriction state, closed unavailability,
+mechanism and restriction-policy identities, approval mode, and matcher-policy
+identity without raw matcher configuration, host paths, or environment data.
+V1 provenance remains readable. Restarted work re-evaluates the current launch
+policy, and an approval consumed before an interrupted start is requested
+again before execution.
 
 ## Structured user questions
 
