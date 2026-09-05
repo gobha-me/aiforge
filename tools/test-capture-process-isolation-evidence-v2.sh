@@ -101,15 +101,26 @@ if ((observed != 0)) || [[ $(<"$fixture/state") != absent ]] ||
 fi
 for preflight in \
   'systemd did not place the evaluator in its delegated subgroup' \
-  'delegated subgroup is absent' \
-  'delegated subgroup is not owned by the evaluator' \
-  'delegated subgroup controls are not writable' \
-  'delegated subgroup is not cgroup v2' \
-  'delegated subgroup is not a domain cgroup' \
+  'delegated unit root is absent' \
+  'delegated unit root is not owned by the evaluator' \
+  'delegated unit root controls are not writable' \
+  'delegated unit root is not cgroup v2' \
+  'delegated unit root is not a domain cgroup' \
+  'delegated supervisor is not owned by the evaluator' \
+  'delegated supervisor controls are not writable' \
+  'delegated supervisor is not cgroup v2' \
+  'delegated supervisor is not a domain cgroup' \
   'controller is unavailable' \
-  'delegated subgroup controllers are already enabled' \
-  'delegated subgroup does not exclusively contain the evaluator' \
-  'delegated subgroup already contains child cgroups'; do
+  'delegated unit root contains a process' \
+  'delegated unit root controllers are already enabled' \
+  'delegated supervisor controllers are already enabled' \
+  'required controllers could not be enabled' \
+  'required controllers were not enabled exactly' \
+  'controller was not enabled' \
+  'controller did not reach the supervisor' \
+  'delegated supervisor does not exclusively contain the evaluator' \
+  'delegated supervisor contains child cgroups' \
+  'delegated unit root contains an unexpected cgroup'; do
   if ! grep -Fq "$preflight" "$fixture/log"; then
     echo "error: delegated cgroup preflight diagnostic is missing" >&2
     exit 1

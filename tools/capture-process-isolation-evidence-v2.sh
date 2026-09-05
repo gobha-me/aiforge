@@ -80,10 +80,10 @@ if ! unit_is_absent; then
 fi
 
 # The transient service contains only the shell and then, via exec, the
-# evaluator itself. DelegateSubgroup places that process in a delegated leaf:
-# systemd retains ownership of the unit cgroup while the evaluator exclusively
-# owns the leaf subtree. The evaluator still validates ownership, emptiness,
-# controllers, placement, and rollback before accepting any row as enforced.
+# evaluator itself. DelegateSubgroup keeps that supervisor process out of the
+# delegated unit root. The shell enables the required controllers at that empty
+# root, making them available to the subgroup. The evaluator then performs its
+# existing pinned bootstrap inside the subgroup before accepting any rows.
 unit_may_exist=1
 # Preserve the embedded Bash program verbatim. systemd-run otherwise expands
 # its ${...} expressions in the manager before Bash can evaluate them.
@@ -118,30 +118,68 @@ timeout 300s sudo -n systemd-run --quiet --wait --pipe --collect \
     if [[ ${relative##*/} != aiforge-evaluator ]]; then
       fail_preflight "systemd did not place the evaluator in its delegated subgroup"
     fi
-    root="/sys/fs/cgroup${relative}"
-    [[ -d $root ]] || fail_preflight "delegated subgroup is absent"
-    [[ -O $root ]] || fail_preflight "delegated subgroup is not owned by the evaluator"
+    supervisor="/sys/fs/cgroup${relative}"
+    root=${supervisor%/*}
+    [[ $root != /sys/fs/cgroup && -d $root ]] ||
+      fail_preflight "delegated unit root is absent"
+    [[ -O $root ]] || fail_preflight "delegated unit root is not owned by the evaluator"
     [[ -w $root && -w $root/cgroup.procs &&
        -w $root/cgroup.subtree_control ]] ||
-      fail_preflight "delegated subgroup controls are not writable"
+      fail_preflight "delegated unit root controls are not writable"
     [[ $(stat -f -c %T -- "$root") == cgroup2fs ]] ||
-      fail_preflight "delegated subgroup is not cgroup v2"
+      fail_preflight "delegated unit root is not cgroup v2"
     type=$(<"$root/cgroup.type")
-    [[ $type == domain ]] || fail_preflight "delegated subgroup is not a domain cgroup"
+    [[ $type == domain ]] || fail_preflight "delegated unit root is not a domain cgroup"
+    [[ -d $supervisor && -O $supervisor ]] ||
+      fail_preflight "delegated supervisor is not owned by the evaluator"
+    [[ -w $supervisor && -w $supervisor/cgroup.procs &&
+       -w $supervisor/cgroup.subtree_control ]] ||
+      fail_preflight "delegated supervisor controls are not writable"
+    [[ $(stat -f -c %T -- "$supervisor") == cgroup2fs ]] ||
+      fail_preflight "delegated supervisor is not cgroup v2"
+    supervisor_type=$(<"$supervisor/cgroup.type")
+    [[ $supervisor_type == domain ]] ||
+      fail_preflight "delegated supervisor is not a domain cgroup"
     controllers=$(<"$root/cgroup.controllers")
     for controller in cpu memory pids; do
       [[ " $controllers " == *" $controller "* ]] ||
         fail_preflight "required $controller controller is unavailable"
     done
+    mapfile -t root_processes <"$root/cgroup.procs"
+    [[ ${#root_processes[@]} -eq 0 ]] ||
+      fail_preflight "delegated unit root contains a process"
     enabled=$(<"$root/cgroup.subtree_control")
-    [[ -z $enabled ]] || fail_preflight "delegated subgroup controllers are already enabled"
-    mapfile -t processes <"$root/cgroup.procs"
+    [[ -z $enabled ]] || fail_preflight "delegated unit root controllers are already enabled"
+    mapfile -t processes <"$supervisor/cgroup.procs"
     [[ ${#processes[@]} -eq 1 && ${processes[0]} == $$ ]] ||
-      fail_preflight "delegated subgroup does not exclusively contain the evaluator"
+      fail_preflight "delegated supervisor does not exclusively contain the evaluator"
+    supervisor_enabled=$(<"$supervisor/cgroup.subtree_control")
+    [[ -z $supervisor_enabled ]] ||
+      fail_preflight "delegated supervisor controllers are already enabled"
     shopt -s dotglob nullglob
-    children=("$root"/*/)
-    [[ ${#children[@]} -eq 0 ]] ||
-      fail_preflight "delegated subgroup already contains child cgroups"
+    supervisor_children=("$supervisor"/*/)
+    [[ ${#supervisor_children[@]} -eq 0 ]] ||
+      fail_preflight "delegated supervisor contains child cgroups"
+    root_children=("$root"/*/)
+    [[ ${#root_children[@]} -eq 1 &&
+       ${root_children[0]%/} == "$supervisor" ]] ||
+      fail_preflight "delegated unit root contains an unexpected cgroup"
+    if ! printf "%s" "+cpu +memory +pids" >"$root/cgroup.subtree_control"; then
+      fail_preflight "required controllers could not be enabled"
+    fi
+    enabled=$(<"$root/cgroup.subtree_control")
+    read -r -a enabled_controllers <<<"$enabled"
+    [[ ${#enabled_controllers[@]} -eq 3 ]] ||
+      fail_preflight "required controllers were not enabled exactly"
+    for controller in cpu memory pids; do
+      [[ " $enabled " == *" $controller "* ]] ||
+        fail_preflight "required $controller controller was not enabled"
+    done
+    supervisor_controllers=$(<"$supervisor/cgroup.controllers")
+    for controller in cpu memory pids; do
+      [[ " $supervisor_controllers " == *" $controller "* ]] ||
+        fail_preflight "required $controller controller did not reach the supervisor"
+    done
     exec "$1" --source-sha "$2" --output "$3" \
-      --delegated-cgroup-root "$root"
+      --delegated-cgroup-root "$supervisor"
   ' _ "$evaluator" "$source_sha" "$output"
