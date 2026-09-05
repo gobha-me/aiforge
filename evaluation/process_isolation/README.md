@@ -57,9 +57,12 @@ name.
 
 An evidence artifact is not a runtime capability cache. ADR 0018 selects the
 Linux mechanism conjunctions for each restriction level. Review of the v1/v2
-evidence found supplemental direct and brokered execution non-escape and
-capability-discard proofs that are tracked by issue #209 as schema v3. Until
-those proofs exist, v1/v2 alone leave every restricted level incomplete.
+evidence found supplemental direct-tree, capability, and external same-UID
+execution proof gaps tracked by issue #209. Schema v3 now measures the narrow
+direct process-tree cgroup property; capability rows remain unavailable until
+their probes exist, and arbitrary same-UID broker confinement remains a
+separate unproven conjunct. Until every applicable conjunct exists, retained
+evidence leaves every restricted level incomplete.
 Production must still re-establish support at application launch and fail
 closed without downgrade.
 
@@ -85,13 +88,14 @@ not attempt `cgroup.threads` migration, exercise
 `clone3(CLONE_INTO_CGROUP)` with its inherited delegated-root descriptor or
 another readable or `O_PATH` cgroup descriptor, or borrow a supervisor
 descriptor through another process. A denied `cgroup.procs` write is therefore
-not proof against those file-descriptor-based escape paths. The row also
-observes only direct payload or kernel-descendant migration. It does not prove
-that a payload
-permitted to create Unix sockets cannot ask a same-UID service manager, D-Bus
-broker, or other external broker to execute outside the task cgroup. Issue #209
-assigns a broader `payload_execution_nonescape` proof, covering direct and
-brokered execution, to schema v3.
+not proof against those file-descriptor-based escape paths. Schema v3's
+`direct_process_tree_cgroup_nonescape` row supplements that evidence for the
+launched process tree only; its other rows are
+`low_capability_nonescalation` and `private_root_capability_discard`. None of
+those rows proves that a payload permitted to create Unix sockets cannot ask a
+same-UID service manager, D-Bus broker, or other external broker to execute
+outside the task cgroup. That external-broker conjunct remains separately
+unproven and keeps `low`, `medium`, and `high` incomplete.
 
 Filesystem rows separately measure read, complete mutation, and execute
 confinement;
@@ -160,22 +164,54 @@ successful capture.
 ## Restriction-level evidence assessment
 
 `evidence_mapping.hpp` exposes the noninstalled ADR 0018 review helper. It
-accepts one complete v1 report, one complete v2 report, and the exact expected
-source revision. Missing, malformed, stale, conflicting, unavailable, or
+accepts complete v1, v2, and v3 reports and the exact expected source revision.
+Missing, malformed, stale, conflicting, unavailable, or
 indeterminate evidence leaves the dependent level incomplete. Levels are
 cumulative and never downgrade. This result helps reviewers check retained
 engineering evidence; it is deliberately not a launch-time availability API.
-The helper covers only the v1/v2 row mapping and cannot establish a complete
-restriction level while the supplemental schema-v3 proofs in issue #209 are
-absent. In particular, v1/v2 do not prove denial of
-`clone3(CLONE_INTO_CGROUP)` and borrowed-descriptor cgroup escape, complete
-denial or containment of same-UID brokered execution available through Unix
-sockets at `low`, complete payload capability non-escalation, or high's
-post-private-root capability discard before and across descriptor-relative
-execution.
+The helper requires the applicable schema-v3 rows but cannot establish a
+complete restriction level while the separate same-UID broker conjunct is
+unproven. V3's direct-tree row addresses only path, borrowed-descriptor, and
+`clone3(CLONE_INTO_CGROUP)` cgroup escape by the launched process tree. It does
+not prove denial or containment of execution requested from a same-UID broker.
+Complete payload capability non-escalation and high's post-private-root
+capability discard also remain unavailable until their v3 probes exist.
 The medium conjunction uses `combined_setup_order`, whose filesystem setup
 excludes private-root construction. High separately requires
 `private_root_combined_setup_order`. Its descriptor-entered fixed helper proves
 private-root construction precedes full-root confinement, network denial,
 setup-descriptor closure, and the payload-ready marker; it does not claim a
 second descriptor-relative execution after private-root setup.
+
+## Evidence v3 direct-tree probe
+
+The separately versioned `aiforge_process_isolation_evaluation_v3` executable
+emits the immutable three-row supplemental schema. This slice implements only
+`direct_process_tree_cgroup_nonescape`; the capability rows truthfully report
+`unavailable/prerequisite_unavailable`.
+
+Capture v3 with the same exclusive delegated-cgroup contract as v2:
+
+```sh
+build-evidence/evaluation/process_isolation/aiforge_process_isolation_evaluation_v3 \
+  --source-sha "$(git rev-parse HEAD)" \
+  --output build-evidence/process-isolation-evidence-v3.json \
+  --delegated-cgroup-root /sys/fs/cgroup/path-created-for-this-evaluator
+```
+
+Before descriptor-relative re-exec, the direct-tree payload applies Landlock
+write confinement and an architecture-checked seccomp denial of `clone3`.
+After re-exec it proves setup-descriptor closure, attempts parent and sibling
+`cgroup.procs` and `cgroup.threads` migration by path and through deliberately
+retained readable and `O_PATH` cgroup descriptors, and attempts
+`clone3(CLONE_INTO_CGROUP)` through every retained descriptor. Fork, legacy
+clone, raw clone-thread, session-leader, and reparented detached descendants
+must still be creatable and remain in the task cgroup; process descendants
+repeat the escape attempts before reporting ready. The evaluator pins PID
+identity, validates exact process and thread membership, and requires complete
+task-owned cleanup.
+
+This row proves direct kernel-mediated containment of that launched process
+tree only. It never claims that an arbitrary external same-UID service,
+service manager, D-Bus peer, Unix-socket broker, or compromised peer cannot
+independently execute elsewhere.
