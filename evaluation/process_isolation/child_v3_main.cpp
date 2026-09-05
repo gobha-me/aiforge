@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -180,51 +181,63 @@ template <typename Visitor>
       !S_ISFIFO(output.st_mode) || !S_ISCHR(error.st_mode) ||
       !S_ISFIFO(outcome.st_mode))
     return false;
-  for (const auto descriptor : {4, 5, 6, 7, 8, 9}) {
+  constexpr std::array closed_descriptors{4, 5, 6, 7, 8, 9};
+  return std::ranges::all_of(closed_descriptors, [](const auto descriptor) {
     errno = 0;
-    if (::fcntl(descriptor, F_GETFD) != -1 || errno != EBADF) return false;
-  }
-  return true;
+    return ::fcntl(descriptor, F_GETFD) == -1 && errno == EBADF;
+  });
+}
+
+[[nodiscard]] auto arguments_are_present(const int argc, char* argv[],
+                                         const int expected) -> bool {
+  if (argc != expected || argv == nullptr) return false;
+  const std::span arguments{argv, static_cast<std::size_t>(expected)};
+  return std::ranges::all_of(arguments.subspan(1), [](const auto* argument) {
+    return argument != nullptr;
+  });
+}
+
+[[nodiscard]] auto matches_command(const int argc, char* argv[],
+                                   const int expected,
+                                   const std::string_view command) -> bool {
+  return arguments_are_present(argc, argv, expected) &&
+         std::string_view{argv[1]} == command;
+}
+
+[[nodiscard]] auto run_probe_child(const int argc, char* argv[]) -> int {
+  if (!arguments_are_present(argc, argv, 4)) return 64;
+  const auto* probe_id = parse_probe_id(argv[1]);
+  if (probe_id == nullptr) return 64;
+  auto record = v3::ProbeRecord{*probe_id, isolation::ProbeState::probe_error,
+                                v3::ReasonCode::internal_error};
+  const std::string_view cgroup_mode{argv[3]};
+  const bool has_delegated_root = cgroup_mode == "delegated-root-fd-4";
+  if (!has_delegated_root && cgroup_mode != "no-delegated-root") return 64;
+  if (probe_is_sanitized(has_delegated_root))
+    record = v3::run_probe(*probe_id, argv[2], has_delegated_root);
+  const auto document = v3::serialize_child_record(record);
+  if (!document || !write_all(*document)) return 70;
+  return 0;
 }
 
 } // namespace
 
 auto main(const int argc, char* argv[]) -> int {
   try {
-    if (argc == 3 && argv != nullptr && argv[1] != nullptr &&
-        argv[2] != nullptr &&
-        std::string_view{argv[1]} == "--direct-tree-payload") {
+    if (matches_command(argc, argv, 3, "--direct-tree-payload")) {
       return payload_is_sanitized() ? v3::run_direct_tree_payload(argv[2]) : 70;
     }
-    if (argc == 4 && argv != nullptr && argv[1] != nullptr &&
-        argv[2] != nullptr && argv[3] != nullptr &&
-        std::string_view{argv[1]} == "--low-capability-payload") {
+    if (matches_command(argc, argv, 4, "--low-capability-payload")) {
       return low_capability_payload_is_sanitized()
                  ? v3::run_low_capability_payload(argv[2], argv[3])
                  : 70;
     }
-    if (argc == 3 && argv != nullptr && argv[1] != nullptr &&
-        argv[2] != nullptr &&
-        std::string_view{argv[1]} == "--private-root-capability-payload") {
+    if (matches_command(argc, argv, 3, "--private-root-capability-payload")) {
       return private_root_payload_is_sanitized()
                  ? v3::run_private_root_capability_payload(argv[2])
                  : 70;
     }
-    if (argc != 4 || argv == nullptr || argv[1] == nullptr ||
-        argv[2] == nullptr || argv[3] == nullptr)
-      return 64;
-    const auto* probe_id = parse_probe_id(argv[1]);
-    if (probe_id == nullptr) return 64;
-    auto record = v3::ProbeRecord{*probe_id, isolation::ProbeState::probe_error,
-                                  v3::ReasonCode::internal_error};
-    const std::string_view cgroup_mode{argv[3]};
-    const bool has_delegated_root = cgroup_mode == "delegated-root-fd-4";
-    if (!has_delegated_root && cgroup_mode != "no-delegated-root") return 64;
-    if (probe_is_sanitized(has_delegated_root))
-      record = v3::run_probe(*probe_id, argv[2], has_delegated_root);
-    const auto document = v3::serialize_child_record(record);
-    if (!document || !write_all(*document)) return 70;
-    return 0;
+    return run_probe_child(argc, argv);
   } catch (...) {
     return 70;
   }
