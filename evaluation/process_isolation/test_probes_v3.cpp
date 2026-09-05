@@ -2,6 +2,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <linux/securebits.h>
+
 #include <array>
 #include <cerrno>
 #include <cstdint>
@@ -23,6 +25,12 @@ namespace {
 [[nodiscard]] auto complete_capability_checks()
     -> v3::test_support::LowCapabilityChecks {
   return {true, true, true, true, true, true, true, true, true, true, true};
+}
+
+[[nodiscard]] auto complete_private_checks()
+    -> v3::test_support::PrivateCapabilityChecks {
+  return {true, true, true, true, true, true, true,
+          true, true, true, true, true, true};
 }
 
 } // namespace
@@ -273,4 +281,71 @@ TEST_CASE("x32 namespace alternatives cannot bypass the denial",
   const auto unexpected = v3::test_support::x32_namespace_outcome(-1, EACCES);
   CHECK(unexpected.state == isolation::ProbeState::probe_error);
   CHECK(unexpected.reason == v3::ReasonCode::internal_error);
+}
+
+TEST_CASE("every private-root capability phase fails closed independently",
+          "[process-isolation][evidence-v3][private-capability][failure]") {
+  using Checks = v3::test_support::PrivateCapabilityChecks;
+  constexpr std::array members{
+      &Checks::private_root_before_discard,
+      &Checks::namespace_setpcap_available,
+      &Checks::bounding_emptied,
+      &Checks::securebits_locked,
+      &Checks::capability_sets_empty,
+      &Checks::ambient_empty,
+      &Checks::no_new_privileges,
+      &Checks::namespace_creation_denied,
+      &Checks::capability_regain_denied,
+      &Checks::descriptor_exec,
+      &Checks::setup_descriptors_closed,
+      &Checks::fork_descendant_rechecked,
+      &Checks::clone_descendant_rechecked,
+  };
+  for (std::size_t index{}; index < members.size(); ++index) {
+    CAPTURE(index);
+    auto checks = complete_private_checks();
+    checks.*members[index] = false;
+    const auto result =
+        v3::test_support::private_capability_outcome(checks, true);
+    CHECK(result.probe_id == v3::ProbeId::private_root_capability_discard);
+    CHECK(result.state == isolation::ProbeState::unavailable);
+    CHECK(result.reason == v3::ReasonCode::enforcement_failed);
+  }
+}
+
+TEST_CASE("private-root partial cleanup uncertainty dominates every phase",
+          "[process-isolation][evidence-v3][private-capability][failure]") {
+  const auto result = v3::test_support::private_capability_outcome(
+      complete_private_checks(), false);
+  CHECK(result.state == isolation::ProbeState::probe_error);
+  CHECK(result.reason == v3::ReasonCode::cleanup_failed);
+}
+
+TEST_CASE("complete private-root capability ordering is evidence only",
+          "[process-isolation][evidence-v3][private-capability][smoke]") {
+  const auto result = v3::test_support::private_capability_outcome(
+      complete_private_checks(), true);
+  CHECK(result.state == isolation::ProbeState::enforced);
+  CHECK(result.reason == v3::ReasonCode::none);
+}
+
+TEST_CASE("private-root securebits require the exact locked state",
+          "[process-isolation][evidence-v3][private-capability][failure]") {
+  constexpr unsigned long required =
+      SECBIT_NOROOT | SECBIT_NOROOT_LOCKED | SECBIT_NO_SETUID_FIXUP |
+      SECBIT_NO_SETUID_FIXUP_LOCKED | SECBIT_KEEP_CAPS_LOCKED |
+      SECBIT_NO_CAP_AMBIENT_RAISE | SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED;
+  const auto exact = v3::test_support::securebits_outcome(required);
+  CHECK(exact.state == isolation::ProbeState::enforced);
+  for (unsigned int bit{}; bit < sizeof(required) * 8; ++bit) {
+    const auto mask = 1UL << bit;
+    if ((required & mask) == 0) continue;
+    const auto missing = v3::test_support::securebits_outcome(required & ~mask);
+    CHECK(missing.state == isolation::ProbeState::unavailable);
+    CHECK(missing.reason == v3::ReasonCode::enforcement_failed);
+  }
+  const auto keep_caps =
+      v3::test_support::securebits_outcome(required | SECBIT_KEEP_CAPS);
+  CHECK(keep_caps.state == isolation::ProbeState::unavailable);
+  CHECK(keep_caps.reason == v3::ReasonCode::enforcement_failed);
 }

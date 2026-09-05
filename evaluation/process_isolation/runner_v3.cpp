@@ -494,7 +494,8 @@ auto run_evaluation(std::string source_sha, const RunnerOptions& options,
       ProbeRecord record{id, ProbeState::unavailable,
                          ReasonCode::prerequisite_unavailable};
       if (id == ProbeId::direct_process_tree_cgroup_nonescape ||
-          id == ProbeId::low_capability_nonescalation) {
+          id == ProbeId::low_capability_nonescalation ||
+          id == ProbeId::private_root_capability_discard) {
         if (stop_token.stop_requested()) {
           record = closed_record(id, ReasonCode::cancelled);
         } else if (id == ProbeId::direct_process_tree_cgroup_nonescape &&

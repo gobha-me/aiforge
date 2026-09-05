@@ -60,8 +60,8 @@ Linux mechanism conjunctions for each restriction level. Review of the v1/v2
 evidence found supplemental direct-tree, capability, and external same-UID
 execution proof gaps tracked by issue #209. Schema v3 now measures the narrow
 direct process-tree cgroup property and low's capability non-escalation
-property; high's post-private-root capability row remains unavailable, and
-arbitrary same-UID broker confinement remains a separate unproven conjunct.
+property and high's post-private-root capability-discard property. Arbitrary
+same-UID broker confinement remains a separate unproven conjunct.
 Until every applicable conjunct exists, retained evidence leaves every
 restricted level incomplete.
 Production must still re-establish support at application launch and fail
@@ -175,8 +175,7 @@ complete restriction level while the separate same-UID broker conjunct is
 unproven. V3's direct-tree row addresses only path, borrowed-descriptor, and
 `clone3(CLONE_INTO_CGROUP)` cgroup escape by the launched process tree. It does
 not prove denial or containment of execution requested from a same-UID broker.
-High's post-private-root capability discard remains unavailable until its v3
-probe exists.
+The capability rows remain engineering evidence rather than launch authority.
 The medium conjunction uses `combined_setup_order`, whose filesystem setup
 excludes private-root construction. High separately requires
 `private_root_combined_setup_order`. Its descriptor-entered fixed helper proves
@@ -187,10 +186,8 @@ second descriptor-relative execution after private-root setup.
 ## Evidence v3 supplemental probes
 
 The separately versioned `aiforge_process_isolation_evaluation_v3` executable
-emits the immutable three-row supplemental schema. This slice implements only
-`direct_process_tree_cgroup_nonescape` and
-`low_capability_nonescalation`; the private-root capability row truthfully
-reports `unavailable/prerequisite_unavailable`.
+emits the immutable three-row supplemental schema and implements each row
+without claiming a restriction level.
 
 Capture v3 with the same exclusive delegated-cgroup contract as v2:
 
@@ -228,3 +225,15 @@ bounding set that remains a subset of the launch fingerprint. Namespace
 creation and capability-regain attempts must remain denied. An unprivileged
 process is not required to empty its bounding set or lock securebits when it
 lacks `CAP_SETPCAP`.
+
+The private-root capability row first constructs the same owner-only tmpfs
+root selected for high, makes mount propagation private, pivots into it, and
+detaches the old root. Only then, while namespace-scoped `CAP_SETPCAP` remains
+available, it empties the bounding set, locks securebits against root,
+set-user-ID, keep-capability, and ambient regain, and clears all capability
+sets. The fixed descriptor-entered payload and its fork and legacy-clone
+descendants recheck the empty bounding and capability sets, locked securebits,
+no-new-privileges, and denied namespace and capability-regain attempts. Hosts
+that cannot establish the unprivileged private root report a stable unavailable
+reason; success is not evidence of host capability or generic high
+availability.

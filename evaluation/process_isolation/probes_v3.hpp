@@ -56,6 +56,22 @@ struct LowCapabilityChecks {
   bool clone_descendant_rechecked{};
 };
 
+struct PrivateCapabilityChecks {
+  bool private_root_before_discard{};
+  bool namespace_setpcap_available{};
+  bool bounding_emptied{};
+  bool securebits_locked{};
+  bool capability_sets_empty{};
+  bool ambient_empty{};
+  bool no_new_privileges{};
+  bool namespace_creation_denied{};
+  bool capability_regain_denied{};
+  bool descriptor_exec{};
+  bool setup_descriptors_closed{};
+  bool fork_descendant_rechecked{};
+  bool clone_descendant_rechecked{};
+};
+
 [[nodiscard]] auto direct_tree_outcome(const DirectTreeChecks& checks,
                                        bool cleanup_complete) -> ProbeRecord;
 [[nodiscard]] auto prerequisite_outcome(bool supported_architecture,
@@ -79,6 +95,10 @@ struct LowCapabilityChecks {
 [[nodiscard]] auto bounding_read_outcome(int error_number) -> ProbeRecord;
 [[nodiscard]] auto x32_namespace_outcome(long result, int error_number)
     -> ProbeRecord;
+[[nodiscard]] auto private_capability_outcome(
+    const PrivateCapabilityChecks& checks, bool cleanup_complete)
+    -> ProbeRecord;
+[[nodiscard]] auto securebits_outcome(unsigned long observed) -> ProbeRecord;
 
 } // namespace test_support
 #endif

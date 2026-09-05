@@ -92,7 +92,7 @@ TEST_CASE("v3 cleanup uncertainty dominates any direct-tree result",
   }
 }
 
-TEST_CASE("v3 low-capability helper protocol failure is closed and cleaned",
+TEST_CASE("v3 capability helper protocol failures are closed and cleaned",
           "[process-isolation][evidence-v3][capability][failure]") {
   TemporaryDirectory temporary;
   v3::RunnerOptions options;
@@ -105,6 +105,10 @@ TEST_CASE("v3 low-capability helper protocol failure is closed and cleaned",
         v3::ProbeId::low_capability_nonescalation);
   CHECK(result->probes[1].state == isolation::ProbeState::probe_error);
   CHECK(result->probes[1].reason == v3::ReasonCode::malformed_protocol);
+  CHECK(result->probes[2].probe_id ==
+        v3::ProbeId::private_root_capability_discard);
+  CHECK(result->probes[2].state == isolation::ProbeState::probe_error);
+  CHECK(result->probes[2].reason == v3::ReasonCode::malformed_protocol);
   CHECK(std::filesystem::is_empty(temporary.path()));
 }
 

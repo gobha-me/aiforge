@@ -73,8 +73,18 @@ TEST_CASE("Linux evidence v3 emits a complete bounded supplemental report",
   CHECK(report->probes[1].reason == v3::ReasonCode::none);
   CHECK(report->probes[2].probe_id ==
         v3::ProbeId::private_root_capability_discard);
-  CHECK(report->probes[2].state == isolation::ProbeState::unavailable);
-  CHECK(report->probes[2].reason == v3::ReasonCode::prerequisite_unavailable);
+  if (report->probes[2].state == isolation::ProbeState::enforced) {
+    CHECK(report->probes[2].reason == v3::ReasonCode::none);
+  } else {
+    CHECK(report->probes[2].state == isolation::ProbeState::unavailable);
+    CHECK(
+        (report->probes[2].reason == v3::ReasonCode::unsupported_kernel ||
+         report->probes[2].reason == v3::ReasonCode::unsupported_architecture ||
+         report->probes[2].reason == v3::ReasonCode::permission_denied ||
+         report->probes[2].reason == v3::ReasonCode::mechanism_absent ||
+         report->probes[2].reason == v3::ReasonCode::prerequisite_unavailable ||
+         report->probes[2].reason == v3::ReasonCode::enforcement_failed));
+  }
   CHECK(report->platform == "linux");
   CHECK(report->source_sha == std::string(40, 'a'));
   CHECK(std::filesystem::is_empty(temporary.path()));

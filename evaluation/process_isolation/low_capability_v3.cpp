@@ -18,18 +18,24 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <fcntl.h>
 #include <linux/audit.h>
 #include <linux/capability.h>
 #include <linux/filter.h>
+#include <linux/magic.h>
 #include <linux/sched.h>
 #include <linux/seccomp.h>
+#include <linux/securebits.h>
 #include <poll.h>
 #include <sched.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/vfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -44,6 +50,10 @@ constexpr std::uint32_t wire_version = 1;
 constexpr int outcome_descriptor = 3;
 constexpr int executable_descriptor = 4;
 constexpr unsigned int maximum_capability = 63;
+constexpr unsigned long required_securebits =
+    SECBIT_NOROOT | SECBIT_NOROOT_LOCKED | SECBIT_NO_SETUID_FIXUP |
+    SECBIT_NO_SETUID_FIXUP_LOCKED | SECBIT_KEEP_CAPS_LOCKED |
+    SECBIT_NO_CAP_AMBIENT_RAISE | SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED;
 constexpr std::uint32_t x32_syscall_bit = 0x40000000U;
 #if defined(__x86_64__)
 constexpr std::uint32_t filtered_x32_syscall_bit = x32_syscall_bit;
@@ -62,6 +72,7 @@ struct CapabilityObservation {
   bool bounding_subset{};
   bool namespace_creation_denied{};
   bool capability_regain_denied{};
+  bool securebits_locked{};
   bool classified{};
 };
 
@@ -241,22 +252,30 @@ enum class Attempt { denied, escaped, unexpected };
   return Attempt::unexpected;
 }
 
-[[nodiscard]] auto namespace_attempts() -> std::array<Attempt, 5> {
+[[nodiscard]] auto namespace_attempts(const bool check_setns)
+    -> std::array<Attempt, 5> {
   std::array<Attempt, 5> results{};
   errno = 0;
   const auto unshare_result = ::unshare(CLONE_NEWUSER);
   const auto unshare_error = errno;
   results[0] = classify_denial(unshare_result, unshare_error);
 
-  const Descriptor own_namespace{
-      ::open("/proc/self/ns/mnt", O_RDONLY | O_CLOEXEC)};
-  if (own_namespace.get() < 0) {
-    results[1] = Attempt::unexpected;
-  } else {
+  if (!check_setns) {
     errno = 0;
-    const auto setns_result = ::setns(own_namespace.get(), CLONE_NEWNS);
+    const auto setns_result = ::setns(-1, CLONE_NEWNS);
     const auto setns_error = errno;
     results[1] = classify_denial(setns_result, setns_error);
+  } else {
+    const Descriptor own_namespace{
+        ::open("/proc/self/ns/mnt", O_RDONLY | O_CLOEXEC)};
+    if (own_namespace.get() < 0) {
+      results[1] = Attempt::unexpected;
+    } else {
+      errno = 0;
+      const auto setns_result = ::setns(own_namespace.get(), CLONE_NEWNS);
+      const auto setns_error = errno;
+      results[1] = classify_denial(setns_result, setns_error);
+    }
   }
 
 #if defined(SYS_clone3)
@@ -309,8 +328,8 @@ enum class Attempt { denied, escaped, unexpected };
   return results;
 }
 
-[[nodiscard]] auto capability_regain_attempts() -> std::array<Attempt, 2> {
-  std::array<Attempt, 2> results{};
+[[nodiscard]] auto capability_regain_attempts() -> std::array<Attempt, 3> {
+  std::array<Attempt, 3> results{};
 #if defined(SYS_capset)
   __user_cap_header_struct header{_LINUX_CAPABILITY_VERSION_3, 0};
   std::array<__user_cap_data_struct, 2> data{};
@@ -342,6 +361,17 @@ enum class Attempt { denied, escaped, unexpected };
 #else
   results[1] = Attempt::unexpected;
 #endif
+#if defined(__x86_64__) && defined(SYS_prctl)
+  errno = 0;
+  const auto x32_result =
+      ::syscall(static_cast<long>(static_cast<std::uint32_t>(SYS_prctl) |
+                                  x32_syscall_bit),
+                PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, CAP_CHOWN, 0, 0);
+  const auto x32_error = errno;
+  results[2] = classify_x32_denial(x32_result, x32_error);
+#else
+  results[2] = Attempt::denied;
+#endif
   return results;
 }
 
@@ -353,7 +383,8 @@ template <std::size_t Size>
 }
 
 [[nodiscard]] auto observe_capability_state(const unsigned int cap_last,
-                                            const std::uint64_t launch_bounding)
+                                            const std::uint64_t launch_bounding,
+                                            const bool check_setns = true)
     -> CapabilityObservation {
   CapabilityObservation observation;
   errno = 0;
@@ -361,7 +392,7 @@ template <std::size_t Size>
   const auto capabilities = capability_sets_are_empty();
   const auto ambient = ambient_set_is_empty(cap_last);
   const auto current_bounding = bounding_fingerprint(cap_last);
-  const auto namespace_results = namespace_attempts();
+  const auto namespace_results = namespace_attempts(check_setns);
   const auto regain_results = capability_regain_attempts();
   observation.no_new_privileges = no_new_privileges == 1;
   observation.capability_sets_empty = capabilities.value_or(false);
@@ -372,6 +403,9 @@ template <std::size_t Size>
       all_attempts(namespace_results, Attempt::denied);
   observation.capability_regain_denied =
       all_attempts(regain_results, Attempt::denied);
+  const auto securebits = ::prctl(PR_GET_SECUREBITS, 0, 0, 0, 0);
+  observation.securebits_locked =
+      std::cmp_equal(securebits, required_securebits);
   observation.classified =
       (no_new_privileges == 0 || no_new_privileges == 1) && capabilities &&
       ambient && current_bounding &&
@@ -385,11 +419,13 @@ template <std::size_t Size>
 }
 
 [[nodiscard]] auto observation_enforced(
-    const CapabilityObservation& observation) -> bool {
+    const CapabilityObservation& observation,
+    const bool require_locked_securebits = false) -> bool {
   return observation.classified && observation.no_new_privileges &&
          observation.capability_sets_empty && observation.ambient_empty &&
          observation.bounding_subset && observation.namespace_creation_denied &&
-         observation.capability_regain_denied;
+         observation.capability_regain_denied &&
+         (!require_locked_securebits || observation.securebits_locked);
 }
 
 [[nodiscard]] auto clear_capability_sets() -> bool {
@@ -505,15 +541,21 @@ struct DescendantArguments {
   unsigned int cap_last{};
   std::uint64_t launch_bounding{};
   int result_descriptor{-1};
+  bool require_locked_securebits{};
+  bool check_setns{true};
 };
 
 [[nodiscard]] auto descendant_body(void* opaque) -> int {
   const auto& arguments = *static_cast<DescendantArguments*>(opaque);
-  const auto observation =
-      observe_capability_state(arguments.cap_last, arguments.launch_bounding);
-  const char result = !observation.classified
-                          ? 'E'
-                          : (observation_enforced(observation) ? 'R' : 'F');
+  const auto observation = observe_capability_state(
+      arguments.cap_last, arguments.launch_bounding, arguments.check_setns);
+  const char result =
+      !observation.classified
+          ? 'E'
+          : (observation_enforced(observation,
+                                  arguments.require_locked_securebits)
+                 ? 'R'
+                 : 'F');
   return ::write(arguments.result_descriptor, &result, 1) == 1 && result == 'R'
              ? 0
              : 1;
@@ -547,14 +589,18 @@ struct DescendantArguments {
 }
 
 [[nodiscard]] auto verify_fork_descendant(const unsigned int cap_last,
-                                          const std::uint64_t launch_bounding)
+                                          const std::uint64_t launch_bounding,
+                                          const bool require_locked = false,
+                                          const bool check_setns = true)
     -> std::optional<bool> {
   int result_pipe[2]{};
   if (::pipe2(result_pipe, O_CLOEXEC) != 0) return std::nullopt;
   const auto child = ::fork();
   if (child == 0) {
     static_cast<void>(::close(result_pipe[0]));
-    DescendantArguments arguments{cap_last, launch_bounding, result_pipe[1]};
+    DescendantArguments arguments{cap_last, launch_bounding, result_pipe[1],
+                                  require_locked};
+    arguments.check_setns = check_setns;
     ::_exit(descendant_body(&arguments));
   }
   static_cast<void>(::close(result_pipe[1]));
@@ -568,7 +614,9 @@ struct DescendantArguments {
 }
 
 [[nodiscard]] auto verify_clone_descendant(const unsigned int cap_last,
-                                           const std::uint64_t launch_bounding)
+                                           const std::uint64_t launch_bounding,
+                                           const bool require_locked = false,
+                                           const bool check_setns = true)
     -> std::optional<bool> {
   int result_pipe[2]{};
   if (::pipe2(result_pipe, O_CLOEXEC) != 0) return std::nullopt;
@@ -580,7 +628,9 @@ struct DescendantArguments {
     static_cast<void>(::close(result_pipe[1]));
     return std::nullopt;
   }
-  DescendantArguments arguments{cap_last, launch_bounding, result_pipe[1]};
+  DescendantArguments arguments{cap_last, launch_bounding, result_pipe[1],
+                                require_locked};
+  arguments.check_setns = check_setns;
   auto* stack = static_cast<std::byte*>(allocation) + clone_stack_bytes;
   const auto child = ::clone(descendant_body, stack, SIGCHLD, &arguments);
   static_cast<void>(::close(result_pipe[1]));
@@ -764,6 +814,290 @@ auto run_low_capability_probe(const std::filesystem::path& state_directory)
   return result_from_wire(*wire);
 }
 
+namespace {
+
+constexpr auto private_probe = ProbeId::private_root_capability_discard;
+
+struct PrivateCapabilityWire {
+  std::uint32_t magic{0x33504641U};
+  std::uint32_t version{wire_version};
+  std::int32_t setup_reason{static_cast<std::int32_t>(ReasonCode::none)};
+  std::int32_t private_root_before_discard{};
+  std::int32_t namespace_setpcap_available{};
+  std::int32_t bounding_emptied{};
+  std::int32_t securebits_locked{};
+  std::int32_t capability_sets_empty{};
+  std::int32_t ambient_empty{};
+  std::int32_t no_new_privileges{};
+  std::int32_t namespace_creation_denied{};
+  std::int32_t capability_regain_denied{};
+  std::int32_t descriptor_exec{};
+  std::int32_t setup_descriptors_closed{};
+  std::int32_t fork_descendant_rechecked{};
+  std::int32_t clone_descendant_rechecked{};
+};
+
+[[nodiscard]] auto private_unavailable(const ReasonCode reason) -> ProbeRecord {
+  return {private_probe, ProbeState::unavailable, reason};
+}
+[[nodiscard]] auto private_error(const ReasonCode reason) -> ProbeRecord {
+  return {private_probe, ProbeState::probe_error, reason};
+}
+
+[[nodiscard]] auto write_private_wire(const PrivateCapabilityWire& wire)
+    -> bool {
+  return write_all(outcome_descriptor,
+                   {reinterpret_cast<const char*>(&wire), sizeof(wire)});
+}
+
+[[noreturn]] auto private_setup_failed(const ReasonCode reason) -> void {
+  PrivateCapabilityWire wire;
+  wire.setup_reason = static_cast<std::int32_t>(reason);
+  static_cast<void>(write_private_wire(wire));
+  ::_exit(0);
+}
+
+[[nodiscard]] auto write_control_path(const char* path,
+                                      const std::string_view value) -> bool {
+  const Descriptor descriptor{::open(path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW)};
+  return descriptor.get() >= 0 && write_all(descriptor.get(), value);
+}
+
+[[nodiscard]] auto establish_private_root(
+    const std::filesystem::path& state_directory) -> ReasonCode {
+  const auto outer_uid = ::geteuid();
+  const auto outer_gid = ::getegid();
+  if (::unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0)
+    return reason_from_errno(errno);
+  static_cast<void>(write_control_path("/proc/self/setgroups", "deny"));
+  const auto uid_map = "0 " + std::to_string(outer_uid) + " 1";
+  const auto gid_map = "0 " + std::to_string(outer_gid) + " 1";
+  if (!write_control_path("/proc/self/uid_map", uid_map) ||
+      !write_control_path("/proc/self/gid_map", gid_map) ||
+      ::mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr) != 0)
+    return reason_from_errno(errno);
+  const auto root = state_directory / "root";
+  const auto old = root / "old";
+  if (::mkdir(root.c_str(), S_IRWXU) != 0 ||
+      ::mount("tmpfs", root.c_str(), "tmpfs", MS_NODEV | MS_NOSUID,
+              "size=1048576,mode=0700") != 0 ||
+      ::mkdir(old.c_str(), S_IRWXU) != 0 || ::chdir(root.c_str()) != 0)
+    return reason_from_errno(errno);
+#if defined(SYS_pivot_root)
+  if (::syscall(SYS_pivot_root, ".", "old") != 0 || ::chdir("/") != 0 ||
+      ::umount2("/old", MNT_DETACH) != 0 || ::rmdir("/old") != 0)
+    return reason_from_errno(errno);
+#else
+  return ReasonCode::mechanism_absent;
+#endif
+  return ReasonCode::none;
+}
+
+[[nodiscard]] auto has_effective_setpcap() -> std::optional<bool> {
+#if defined(SYS_capget)
+  __user_cap_header_struct header{_LINUX_CAPABILITY_VERSION_3, 0};
+  std::array<__user_cap_data_struct, 2> data{};
+  if (::syscall(SYS_capget, &header, data.data()) != 0) return std::nullopt;
+  return (data[CAP_SETPCAP / 32].effective &
+          (1U << static_cast<unsigned int>(CAP_SETPCAP % 32))) != 0;
+#else
+  return std::nullopt;
+#endif
+}
+
+[[nodiscard]] auto empty_bounding_set(const unsigned int cap_last)
+    -> std::expected<bool, ReasonCode> {
+  for (unsigned int capability{}; capability <= cap_last; ++capability) {
+    if (::prctl(PR_CAPBSET_DROP, capability, 0, 0, 0) != 0)
+      return std::unexpected(reason_from_errno(errno));
+  }
+  const auto fingerprint = bounding_fingerprint(cap_last);
+  if (!fingerprint) return std::unexpected(fingerprint.error());
+  return *fingerprint == 0;
+}
+
+[[nodiscard]] auto lock_securebits() -> bool {
+  return ::prctl(PR_SET_SECUREBITS, required_securebits, 0, 0, 0) == 0;
+}
+
+[[nodiscard]] auto private_root_is_active() -> bool {
+  struct statfs root{};
+  errno = 0;
+  const Descriptor escaped{::open("/etc/passwd", O_RDONLY | O_CLOEXEC)};
+  return escaped.get() < 0 && errno == ENOENT && ::statfs("/", &root) == 0 &&
+         static_cast<unsigned long>(root.f_type) == TMPFS_MAGIC;
+}
+
+[[nodiscard]] auto private_checks_complete(const PrivateCapabilityWire& wire)
+    -> bool {
+  return wire.private_root_before_discard == 1 &&
+         wire.namespace_setpcap_available == 1 && wire.bounding_emptied == 1 &&
+         wire.securebits_locked == 1 && wire.capability_sets_empty == 1 &&
+         wire.ambient_empty == 1 && wire.no_new_privileges == 1 &&
+         wire.namespace_creation_denied == 1 &&
+         wire.capability_regain_denied == 1 && wire.descriptor_exec == 1 &&
+         wire.setup_descriptors_closed == 1 &&
+         wire.fork_descendant_rechecked == 1 &&
+         wire.clone_descendant_rechecked == 1;
+}
+
+[[nodiscard]] auto read_private_wire(const int descriptor)
+    -> std::optional<PrivateCapabilityWire> {
+  PrivateCapabilityWire wire;
+  auto* output = reinterpret_cast<std::byte*>(&wire);
+  std::size_t offset{};
+  const auto deadline = std::chrono::steady_clock::now() + observation_timeout;
+  while (offset < sizeof(wire)) {
+    const auto count =
+        ::read(descriptor, output + offset, sizeof(wire) - offset);
+    if (count > 0) {
+      offset += static_cast<std::size_t>(count);
+      continue;
+    }
+    if (count < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
+      return std::nullopt;
+    if (std::chrono::steady_clock::now() >= deadline) return std::nullopt;
+    pollfd value{descriptor, POLLIN | POLLHUP, 0};
+    static_cast<void>(::poll(&value, 1, 5));
+  }
+  return wire.magic == 0x33504641U && wire.version == wire_version
+             ? std::optional{wire}
+             : std::nullopt;
+}
+
+} // namespace
+
+auto run_private_root_capability_payload(
+    const std::string_view cap_last_document) -> int {
+  unsigned int cap_last{};
+  if (!parse_unsigned(cap_last_document, 10, cap_last) ||
+      cap_last > maximum_capability)
+    return 70;
+  PrivateCapabilityWire wire;
+  wire.private_root_before_discard = private_root_is_active() ? 1 : 0;
+  wire.namespace_setpcap_available = 1;
+  wire.bounding_emptied = 1;
+  wire.descriptor_exec = 1;
+  wire.setup_descriptors_closed = 1;
+  const auto observation = observe_capability_state(cap_last, 0, false);
+  if (!observation.classified) {
+    wire.setup_reason = static_cast<std::int32_t>(ReasonCode::internal_error);
+    return write_private_wire(wire) ? 0 : 70;
+  }
+  wire.securebits_locked = observation.securebits_locked ? 1 : 0;
+  wire.capability_sets_empty = observation.capability_sets_empty ? 1 : 0;
+  wire.ambient_empty = observation.ambient_empty ? 1 : 0;
+  wire.no_new_privileges = observation.no_new_privileges ? 1 : 0;
+  wire.namespace_creation_denied =
+      observation.namespace_creation_denied ? 1 : 0;
+  wire.capability_regain_denied = observation.capability_regain_denied ? 1 : 0;
+  const auto fork_recheck = verify_fork_descendant(cap_last, 0, true, false);
+  const auto clone_recheck = verify_clone_descendant(cap_last, 0, true, false);
+  if (!fork_recheck || !clone_recheck) {
+    wire.setup_reason = static_cast<std::int32_t>(ReasonCode::internal_error);
+  } else {
+    wire.fork_descendant_rechecked = *fork_recheck ? 1 : 0;
+    wire.clone_descendant_rechecked = *clone_recheck ? 1 : 0;
+  }
+  return write_private_wire(wire) ? 0 : 70;
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Bounded setup.
+auto run_private_root_capability_probe(
+    const std::filesystem::path& state_directory) -> ProbeRecord {
+  if (!supported_architecture())
+    return private_unavailable(ReasonCode::unsupported_architecture);
+  const auto cap_last = read_cap_last();
+  if (!cap_last)
+    return cap_last.error() == ReasonCode::internal_error
+               ? private_error(cap_last.error())
+               : private_unavailable(cap_last.error());
+  const Descriptor executable{::open("/proc/self/exe", O_PATH | O_CLOEXEC)};
+  int outcome[2]{};
+  if (executable.get() < 0 || ::pipe2(outcome, O_CLOEXEC | O_NONBLOCK) != 0)
+    return private_error(ReasonCode::internal_error);
+  const Descriptor observed{outcome[0]};
+  Descriptor writer{outcome[1]};
+  const auto child = ::fork();
+  if (child < 0) return private_error(ReasonCode::internal_error);
+  if (child == 0) {
+    const Descriptor pinned_executable{
+        ::fcntl(executable.get(), F_DUPFD_CLOEXEC, 8)};
+    const Descriptor pinned_writer{::fcntl(writer.get(), F_DUPFD_CLOEXEC, 9)};
+    if (pinned_executable.get() < 0 || pinned_writer.get() < 0 ||
+        ::dup3(pinned_writer.get(), 3, 0) < 0 ||
+        ::dup3(pinned_executable.get(), 4, O_CLOEXEC) < 0 ||
+        !close_descriptors_from(5))
+      private_setup_failed(ReasonCode::internal_error);
+    if (::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+      private_setup_failed(reason_from_errno(errno));
+    if (const auto reason = establish_private_root(state_directory);
+        reason != ReasonCode::none)
+      private_setup_failed(reason);
+    if (!private_root_is_active())
+      private_setup_failed(ReasonCode::enforcement_failed);
+    const auto namespace_setpcap = has_effective_setpcap();
+    if (!namespace_setpcap) private_setup_failed(ReasonCode::internal_error);
+    if (!*namespace_setpcap)
+      private_setup_failed(ReasonCode::enforcement_failed);
+    const auto bounding_empty = empty_bounding_set(*cap_last);
+    if (!bounding_empty) private_setup_failed(bounding_empty.error());
+    if (!*bounding_empty) private_setup_failed(ReasonCode::enforcement_failed);
+    if (!lock_securebits()) private_setup_failed(reason_from_errno(errno));
+    if (!clear_capability_sets())
+      private_setup_failed(reason_from_errno(errno));
+    if (!install_namespace_denial())
+      private_setup_failed(reason_from_errno(errno));
+    const auto before_exec = observe_capability_state(*cap_last, 0, false);
+    if (!before_exec.classified)
+      private_setup_failed(ReasonCode::internal_error);
+    if (!observation_enforced(before_exec, true))
+      private_setup_failed(ReasonCode::enforcement_failed);
+    std::array<char, 4> cap_last_argument{};
+    const auto encoded = std::to_chars(cap_last_argument.data(),
+                                       cap_last_argument.data() + 4, *cap_last);
+    if (encoded.ec != std::errc{})
+      private_setup_failed(ReasonCode::internal_error);
+    *encoded.ptr = '\0';
+    std::array<char, 39> name{"aiforge_process_isolation_probe_v3"};
+    std::array<char, 36> mode{"--private-root-capability-payload"};
+    std::array<char*, 4> arguments{name.data(), mode.data(),
+                                   cap_last_argument.data(), nullptr};
+    char* environment[]{nullptr};
+    ::fexecve(4, arguments.data(), environment);
+    private_setup_failed(ReasonCode::internal_error);
+  }
+  writer.reset();
+  const auto wire = read_private_wire(observed.get());
+  if (!wire) static_cast<void>(::kill(child, SIGKILL));
+  int status{};
+  pid_t waited{};
+  do {
+    waited = ::waitpid(child, &status, 0);
+  } while (waited < 0 && errno == EINTR);
+  if (waited != child) return private_error(ReasonCode::cleanup_failed);
+  if (!wire) return private_error(ReasonCode::setup_race);
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    return private_error(ReasonCode::internal_error);
+  const auto reason = static_cast<ReasonCode>(wire->setup_reason);
+  switch (reason) {
+    case ReasonCode::none: break;
+    case ReasonCode::unsupported_kernel:
+    case ReasonCode::unsupported_architecture:
+    case ReasonCode::permission_denied:
+    case ReasonCode::mechanism_absent:
+    case ReasonCode::enforcement_failed:
+    case ReasonCode::prerequisite_unavailable:
+    case ReasonCode::unsupported_combination:
+      return private_unavailable(reason);
+    default: return private_error(ReasonCode::internal_error);
+  }
+  return private_checks_complete(*wire)
+             ? ProbeRecord{private_probe, ProbeState::enforced,
+                           ReasonCode::none}
+             : private_unavailable(ReasonCode::enforcement_failed);
+}
+
 #if defined(AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT)
 namespace test_support {
 
@@ -824,6 +1158,37 @@ auto x32_namespace_outcome(const long result, const int error_number)
   return attempt == Attempt::escaped
              ? unavailable(ReasonCode::enforcement_failed)
              : probe_error(ReasonCode::internal_error);
+}
+
+auto private_capability_outcome(const PrivateCapabilityChecks& checks,
+                                const bool cleanup_complete) -> ProbeRecord {
+  if (!cleanup_complete)
+    return {private_probe, ProbeState::probe_error, ReasonCode::cleanup_failed};
+  PrivateCapabilityWire wire;
+  wire.private_root_before_discard = checks.private_root_before_discard ? 1 : 0;
+  wire.namespace_setpcap_available = checks.namespace_setpcap_available ? 1 : 0;
+  wire.bounding_emptied = checks.bounding_emptied ? 1 : 0;
+  wire.securebits_locked = checks.securebits_locked ? 1 : 0;
+  wire.capability_sets_empty = checks.capability_sets_empty ? 1 : 0;
+  wire.ambient_empty = checks.ambient_empty ? 1 : 0;
+  wire.no_new_privileges = checks.no_new_privileges ? 1 : 0;
+  wire.namespace_creation_denied = checks.namespace_creation_denied ? 1 : 0;
+  wire.capability_regain_denied = checks.capability_regain_denied ? 1 : 0;
+  wire.descriptor_exec = checks.descriptor_exec ? 1 : 0;
+  wire.setup_descriptors_closed = checks.setup_descriptors_closed ? 1 : 0;
+  wire.fork_descendant_rechecked = checks.fork_descendant_rechecked ? 1 : 0;
+  wire.clone_descendant_rechecked = checks.clone_descendant_rechecked ? 1 : 0;
+  return private_checks_complete(wire)
+             ? ProbeRecord{private_probe, ProbeState::enforced,
+                           ReasonCode::none}
+             : private_unavailable(ReasonCode::enforcement_failed);
+}
+
+auto securebits_outcome(const unsigned long observed) -> ProbeRecord {
+  return observed == required_securebits
+             ? ProbeRecord{private_probe, ProbeState::enforced,
+                           ReasonCode::none}
+             : private_unavailable(ReasonCode::enforcement_failed);
 }
 
 } // namespace test_support

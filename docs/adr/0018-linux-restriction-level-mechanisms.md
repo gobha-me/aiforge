@@ -233,10 +233,10 @@ must never be inferred safe from these rows.
    second descriptor-relative execution after private-root setup.
 7. Capabilities required to construct the private root are discarded after the
    final namespace and mount operation and before the payload-ready boundary.
-   Empty capability sets, locked securebits, failed regain attempts, and their
-   persistence across descriptor-relative execution and descendants require
-   the supplemental schema-v3 evidence in issue #209; no v1 or v2 row proves
-   this ordering.
+   Schema-v3 `private_root_capability_discard` measures empty capability and
+   bounding sets, locked securebits, failed regain attempts, and their
+   persistence across descriptor-relative execution and descendants; no v1 or
+   v2 row proves this ordering.
 
 The additional evidence conjunction is v1 `disposable_workspace`; v2
 `private_root_construction`, `private_mount_propagation`,

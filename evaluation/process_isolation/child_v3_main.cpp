@@ -168,6 +168,25 @@ template <typename Visitor>
   return descriptors_are_sanitized({STDOUT_FILENO, STDERR_FILENO, 3});
 }
 
+[[nodiscard]] auto private_root_payload_is_sanitized() -> bool {
+  struct stat output{};
+  struct stat error{};
+  struct stat outcome{};
+  if (::environ != nullptr && ::environ[0] != nullptr) return false;
+  errno = 0;
+  if (::fcntl(STDIN_FILENO, F_GETFD) != -1 || errno != EBADF) return false;
+  if (::fstat(STDOUT_FILENO, &output) != 0 ||
+      ::fstat(STDERR_FILENO, &error) != 0 || ::fstat(3, &outcome) != 0 ||
+      !S_ISFIFO(output.st_mode) || !S_ISCHR(error.st_mode) ||
+      !S_ISFIFO(outcome.st_mode))
+    return false;
+  for (const auto descriptor : {4, 5, 6, 7, 8, 9}) {
+    errno = 0;
+    if (::fcntl(descriptor, F_GETFD) != -1 || errno != EBADF) return false;
+  }
+  return true;
+}
+
 } // namespace
 
 auto main(const int argc, char* argv[]) -> int {
@@ -182,6 +201,13 @@ auto main(const int argc, char* argv[]) -> int {
         std::string_view{argv[1]} == "--low-capability-payload") {
       return low_capability_payload_is_sanitized()
                  ? v3::run_low_capability_payload(argv[2], argv[3])
+                 : 70;
+    }
+    if (argc == 3 && argv != nullptr && argv[1] != nullptr &&
+        argv[2] != nullptr &&
+        std::string_view{argv[1]} == "--private-root-capability-payload") {
+      return private_root_payload_is_sanitized()
+                 ? v3::run_private_root_capability_payload(argv[2])
                  : 70;
     }
     if (argc != 4 || argv == nullptr || argv[1] == nullptr ||

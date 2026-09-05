@@ -890,6 +890,8 @@ auto run_probe(const ProbeId probe_id,
       return {probe_id, ProbeState::probe_error, ReasonCode::internal_error};
     if (probe_id == ProbeId::low_capability_nonescalation)
       return run_low_capability_probe(state_directory);
+    if (probe_id == ProbeId::private_root_capability_discard)
+      return run_private_root_capability_probe(state_directory);
     if (probe_id != probe)
       return {probe_id, ProbeState::unavailable,
               ReasonCode::prerequisite_unavailable};
