@@ -439,6 +439,19 @@ auto append_field(std::string& canonical, const std::string_view value)
           static_cast<std::uint64_t>(canonical.size())};
 }
 
+[[nodiscard]] auto bounded_generation_price(const model::CatalogEntry& entry)
+    -> const domain::DecimalAmount* {
+  if (!entry.pricing) return nullptr;
+  const auto& pricing = *entry.pricing;
+  if (!pricing.generation) return nullptr;
+  const auto& generation = *pricing.generation;
+  if (!generation.usd) return nullptr;
+  const auto& generation_usd = *generation.usd;
+  if (generation_usd.coefficient() == 0 || !microunits(generation_usd))
+    return nullptr;
+  return &generation_usd;
+}
+
 } // namespace
 
 auto resolve_image_tool_configuration(
@@ -481,26 +494,12 @@ auto resolve_image_tool_configuration(
       return registry_error(
           "configured generate_image model is unavailable or unsupported");
     }
-    if (!entry->pricing) {
+    const auto* generation_usd = bounded_generation_price(*entry);
+    if (generation_usd == nullptr) {
       return registry_error(
           "configured generate_image model has no bounded USD price");
     }
-    const auto& pricing = *entry->pricing;
-    if (!pricing.generation) {
-      return registry_error(
-          "configured generate_image model has no bounded USD price");
-    }
-    const auto& generation = *pricing.generation;
-    if (!generation.usd) {
-      return registry_error(
-          "configured generate_image model has no bounded USD price");
-    }
-    const auto& generation_usd = *generation.usd;
-    if (generation_usd.coefficient() == 0 || !microunits(generation_usd)) {
-      return registry_error(
-          "configured generate_image model has no bounded USD price");
-    }
-    auto maximum = domain::MonetaryAmount::create("USD", generation_usd);
+    auto maximum = domain::MonetaryAmount::create("USD", *generation_usd);
     if (!maximum) {
       return registry_error(
           "configured generate_image model has no bounded USD price");
@@ -508,7 +507,7 @@ auto resolve_image_tool_configuration(
     ImageToolConfiguration result{
         configured_model,
         {std::move(*maximum), domain::ToolSpendEstimateBasis::catalog_estimate,
-         price_evidence_digest(snapshot, *entry, generation_usd), valid_until},
+         price_evidence_digest(snapshot, *entry, *generation_usd), valid_until},
         std::move(artifact_root),
         std::move(network_host)};
     if (!domain::valid_tool_spend_quote(result.spend_quote) ||
