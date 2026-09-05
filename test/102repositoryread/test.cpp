@@ -1,5 +1,6 @@
 #include <aiforge/runtime/repository_read_tool.hpp>
 #include <aiforge/runtime/tool_launch_policy.hpp>
+#include <aiforge/testing/application_launch_context.hpp>
 #include <aiforge/testing/scripted_exact_source_editor.hpp>
 #include <aiforge/testing/scripted_repository_snapshot_source.hpp>
 
@@ -496,8 +497,8 @@ TEST_CASE("repository-read prompt exposes only the requested file scope") {
       id<domain::PermissionProfileId>("repository-read-prompt-v1");
   auto policy = runtime::make_tool_launch_policy(
       *registered, {profile,
-                    runtime::RestrictionLevel::medium,
-                    runtime::ApprovalMode::prompt,
+                    testing::available_application_launch_context(
+                        runtime::RestrictionLevel::medium),
                     {}});
   REQUIRE(policy);
   auto resolution = (*policy)->evaluate(

@@ -45,6 +45,9 @@ template <typename Value>
     return effect == domain::Effect::network ||
            effect == domain::Effect::communicate;
   }
+  if (kind == "network.unrestricted") {
+    return effect == domain::Effect::network;
+  }
   if (kind == "process.command") return effect == domain::Effect::execute;
   if (kind == "cluster.resource") {
     return effect == domain::Effect::read || effect == domain::Effect::write ||
@@ -269,6 +272,13 @@ namespace {
     normalized = normalize_path(std::move(scope.value));
   } else if (scope.kind == "network.host") {
     normalized = normalize_host(std::move(scope.value));
+  } else if (scope.kind == "network.unrestricted") {
+    if (scope.value != "new-sockets") {
+      return std::unexpected(
+          error(ToolPolicyErrorCode::invalid_request,
+                "unrestricted network capability is invalid"));
+    }
+    normalized = std::move(scope.value);
   } else if (scope.kind == "spend.microunits") {
     if (!parse_microunits(scope.value)) {
       return std::unexpected(error(ToolPolicyErrorCode::invalid_request,

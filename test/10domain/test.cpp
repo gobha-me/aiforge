@@ -610,6 +610,50 @@ TEST_CASE("run provenance bounds exact launch policy authority",
   automatic.tool_policy->automatically_eligible_tools = {"read"};
   REQUIRE(validate_run_provenance(automatic));
 
+  auto current = value;
+  current.tool_policy->identity = "aiforge.tool-launch-policy.v2";
+  current.tool_policy->effect_ceiling.push_back(Effect::write);
+  current.tool_policy->capability_ceiling.push_back(
+      {Effect::write, "filesystem.root", "/repo"});
+  current.tool_policy->achieved_restriction_level =
+      ToolRestrictionLevel::medium;
+  current.tool_policy->mechanism_identity = "aiforge.linux-restriction-levels";
+  current.tool_policy->mechanism_version = "0018";
+  current.tool_policy->restriction_policy_identity = "test.process-policy.v1";
+  REQUIRE(validate_run_provenance(current));
+
+  malformed = current;
+  malformed.tool_policy->restriction_unavailable_reason =
+      ToolRestrictionUnavailableReason::mechanism_absent;
+  REQUIRE(validate_run_provenance(malformed).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  malformed = current;
+  malformed.tool_policy->achieved_restriction_level = ToolRestrictionLevel::low;
+  REQUIRE(validate_run_provenance(malformed).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  malformed = current;
+  malformed.tool_policy->mechanism_identity = "host path";
+  REQUIRE(validate_run_provenance(malformed).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  malformed = current;
+  malformed.tool_policy->restriction_policy_identity.reset();
+  REQUIRE(validate_run_provenance(malformed).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  malformed = current;
+  malformed.tool_policy->restriction_policy_identity = "/sys/fs/cgroup/task";
+  REQUIRE(validate_run_provenance(malformed).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  malformed = current;
+  malformed.tool_policy->automatically_eligible_tools = {"read"};
+  REQUIRE(validate_run_provenance(malformed).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  malformed = current;
+  malformed.tool_policy->approval_mode = ToolApprovalMode::automatic;
+  REQUIRE(validate_run_provenance(malformed).error().code ==
+          RunProvenanceErrorCode::invalid_tool_policy);
+  malformed.tool_policy->matcher_policy_identity = "matcher.v1";
+  REQUIRE(validate_run_provenance(malformed));
+
   RunProvenanceLimits bounded;
   bounded.maximum_policy_scopes = 1;
   malformed = value;

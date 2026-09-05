@@ -254,6 +254,26 @@ auto run_provenance() -> domain::RunProvenance {
   return result;
 }
 
+auto run_provenance_v2() -> domain::RunProvenance {
+  auto result = run_provenance();
+  result.tool_policy = domain::ToolPolicyProvenance{
+      "aiforge.tool-launch-policy.v2",
+      make_id<domain::PermissionProfileId>("interactive-tools-v2"),
+      domain::ToolRestrictionLevel::medium,
+      domain::ToolApprovalMode::automatic,
+      {domain::Effect::read},
+      {{domain::Effect::read, "filesystem.root", "/workspace"}},
+      {}};
+  result.tool_policy->achieved_restriction_level =
+      domain::ToolRestrictionLevel::medium;
+  result.tool_policy->mechanism_identity = "aiforge.linux-restriction-levels";
+  result.tool_policy->mechanism_version = "0018";
+  result.tool_policy->restriction_policy_identity = "test.process-policy.v1";
+  result.tool_policy->matcher_policy_identity =
+      "aiforge.exact-tool-allowlist.v1";
+  return result;
+}
+
 auto pricing_observation() -> domain::PricingObservation {
   domain::TextPricing pricing;
   pricing.base.input =
@@ -1566,6 +1586,76 @@ TEST_CASE(
   const auto wrong_shape = store->replay_events(session);
   REQUIRE_FALSE(wrong_shape);
   REQUIRE(wrong_shape.error().code == storage::SessionStoreErrorCode::corrupt);
+}
+
+TEST_CASE("v2 launch provenance rejects corrupted or secret-bearing state",
+          "[storage][sqlite][codec][provenance][tool-policy][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "session", 100);
+  REQUIRE(store->append_events(
+      session,
+      std::array{event(1, started(), "start"),
+                 event(2, domain::RunProvenanceRecorded{run_provenance_v2()},
+                       "policy")}));
+
+  auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  const auto* recorded =
+      std::get_if<domain::RunProvenanceRecorded>(&replayed->at(1).payload);
+  REQUIRE(recorded != nullptr);
+  REQUIRE(recorded->provenance == run_provenance_v2());
+  store.reset();
+
+  SECTION("selected and achieved restriction disagree") {
+    execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                      "'$.provenance.tool_policy.achieved_restriction_level',"
+                      "'low') WHERE event_id='policy'");
+  }
+  SECTION("achieved and unavailable states are both present") {
+    execute_sql(path,
+                "UPDATE events SET payload_json=json_set(payload_json,"
+                "'$.provenance.tool_policy.restriction_unavailable_reason',"
+                "'mechanism_absent') WHERE event_id='policy'");
+  }
+  SECTION("automatic mode loses matcher identity") {
+    execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                      "'$.provenance.tool_policy.matcher_policy_identity',"
+                      "NULL) WHERE event_id='policy'");
+  }
+  SECTION("achieved restriction loses its policy identity") {
+    execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                      "'$.provenance.tool_policy.restriction_policy_identity',"
+                      "NULL) WHERE event_id='policy'");
+  }
+  SECTION("raw restriction path is forbidden") {
+    execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                      "'$.provenance.tool_policy.restriction_policy_identity',"
+                      "'/sys/fs/cgroup/task') WHERE event_id='policy'");
+  }
+  SECTION("unknown unavailable reason") {
+    execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                      "'$.provenance.tool_policy.achieved_restriction_level',"
+                      "NULL,'$.provenance.tool_policy."
+                      "restriction_unavailable_reason','host_text') "
+                      "WHERE event_id='policy'");
+  }
+  SECTION("delegation path is forbidden") {
+    execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                      "'$.provenance.tool_policy.delegation_path','/secret') "
+                      "WHERE event_id='policy'");
+  }
+  SECTION("raw matcher configuration is forbidden") {
+    execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                      "'$.provenance.tool_policy.automatically_eligible_tools',"
+                      "json('[\"read\"]')) WHERE event_id='policy'");
+  }
+
+  store = open_store(path);
+  replayed = store->replay_events(session);
+  REQUIRE_FALSE(replayed);
+  REQUIRE(replayed.error().code == storage::SessionStoreErrorCode::corrupt);
 }
 
 TEST_CASE("bounded SQLite writer contention is retryable",

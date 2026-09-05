@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -18,6 +19,7 @@
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/runtime/tool_launch_policy.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
+#include <aiforge/testing/application_launch_context.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
 #include <aiforge/testing/scripted_policy_grant_store.hpp>
 #include <aiforge/testing/scripted_session_store.hpp>
@@ -296,6 +298,7 @@ class MemoryStore final : public storage::SessionStore {
   bool fail_next_paid_terminal_append{};
   bool commit_failed_paid_terminal_append{};
   std::size_t paid_terminal_failures{};
+  bool fail_next_tool_started_append{};
 
   auto create_session(storage::SessionCreate session, std::stop_token)
       -> std::expected<void, storage::SessionStoreError> override {
@@ -349,6 +352,15 @@ class MemoryStore final : public storage::SessionStore {
       return std::unexpected(storage::SessionStoreError{
           storage::SessionStoreErrorCode::io_failure,
           "simulated paid terminal append failure", true});
+    }
+    if (fail_next_tool_started_append &&
+        std::ranges::any_of(additions, [](const auto& event) {
+          return std::holds_alternative<domain::ToolStarted>(event.payload);
+        })) {
+      fail_next_tool_started_append = false;
+      return std::unexpected(storage::SessionStoreError{
+          storage::SessionStoreErrorCode::io_failure,
+          "simulated tool start append failure", true});
     }
     events.insert(events.end(), additions.begin(), additions.end());
     return {};
@@ -474,6 +486,36 @@ class RecordingPolicy final : public runtime::ToolPolicy {
   }
 
   std::vector<runtime::ToolPolicyRequest> requests;
+};
+
+class CountingPolicy final : public runtime::ToolPolicy {
+ public:
+  explicit CountingPolicy(std::shared_ptr<runtime::ToolPolicy> delegate)
+      : m_delegate(std::move(delegate)) {}
+
+  auto evaluate(const runtime::ToolPolicyRequest& request)
+      -> std::expected<runtime::ToolPolicyResolution,
+                       runtime::ToolPolicyError> override {
+    ++evaluations;
+    return m_delegate->evaluate(request);
+  }
+
+  auto approve(const runtime::ToolPolicyRequest& request,
+               runtime::ToolPolicyApproval approval)
+      -> std::expected<runtime::ToolPolicyResolution,
+                       runtime::ToolPolicyError> override {
+    return m_delegate->approve(request, std::move(approval));
+  }
+
+  [[nodiscard]] auto provenance() const noexcept
+      -> const domain::ToolPolicyProvenance* override {
+    return m_delegate->provenance();
+  }
+
+  std::size_t evaluations{};
+
+ private:
+  std::shared_ptr<runtime::ToolPolicy> m_delegate;
 };
 
 template <typename Payload>
@@ -1575,11 +1617,11 @@ TEST_CASE("durable pending approval is reconstructed without execution",
       runtime::ToolExecutorContract{"test.lookup", "1"}));
   const auto tools = snapshot_of(registry);
   const auto make_policy = [&] {
-    return runtime::make_tool_launch_policy(tools,
-                                            {profile,
-                                             runtime::RestrictionLevel::medium,
-                                             runtime::ApprovalMode::prompt,
-                                             {}});
+    return runtime::make_tool_launch_policy(
+        tools, {profile,
+                testing::available_application_launch_context(
+                    runtime::RestrictionLevel::medium),
+                {}});
   };
   auto policy = make_policy();
   REQUIRE(policy);
@@ -1635,6 +1677,197 @@ TEST_CASE("durable pending approval is reconstructed without execution",
   REQUIRE((*replayed)->cancel_run(make_id<domain::RunId>("run"), "cleanup"));
 }
 
+TEST_CASE("durable consumed approval is renewed before restart execution",
+          "[tools][policy][storage][replay][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("call");
+  const auto profile =
+      make_id<domain::PermissionProfileId>("tools-none-prompt-v2");
+  auto executor = std::make_shared<CountingExecutor>();
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      declaration(), executor, {},
+      runtime::ToolExecutorContract{"test.lookup", "1"}));
+  const auto tools = snapshot_of(registry);
+  const auto make_policy = [&] {
+    return runtime::make_tool_launch_policy(
+        tools, {profile,
+                testing::available_application_launch_context(
+                    runtime::RestrictionLevel::none),
+                {}});
+  };
+  auto policy = make_policy();
+  REQUIRE(policy);
+  auto initial = request("inference-1", "assistant-1", tools.declarations());
+  testing::ScriptedBackend backend{{
+      {initial, tool_call_script(invocation)},
+  }};
+  MemoryStore store;
+  WakeCounter wake;
+  auto kernel = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::create, store.created},
+      store, backend, &wake, {}, {}, tools, *policy);
+  REQUIRE(kernel);
+  auto start = run_start(initial);
+  start.attributes.permission_profile_id = profile;
+  start.provenance = provenance();
+  REQUIRE((*kernel)->start(std::move(start)));
+  drain_to_inference_boundary(**kernel, wake);
+  REQUIRE((*kernel)->pending_tool_approval());
+
+  store.fail_next_tool_started_append = true;
+  auto interrupted = (*kernel)->decide_approval(
+      make_id<domain::RunId>("run"), invocation,
+      {domain::ApprovalDecision::approved,
+       {{domain::Effect::read, "filesystem.root", "/repo"}},
+       domain::ApprovalGrantLifetime::invocation});
+  REQUIRE_FALSE(interrupted);
+  REQUIRE(interrupted.error().code ==
+          runtime::RunKernelErrorCode::storage_failure);
+  REQUIRE(executor->starts == 0);
+  kernel->reset();
+
+  auto replay_policy = make_policy();
+  REQUIRE(replay_policy);
+  testing::ScriptedBackend replay_backend{{}};
+  WakeCounter replay_wake;
+  auto replayed = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::resume, store.created},
+      store, replay_backend, &replay_wake, {}, {}, tools, *replay_policy);
+  REQUIRE(replayed);
+  REQUIRE((*replayed)->pending_tool_approval());
+  REQUIRE((*replayed)->projection(make_id<domain::RunId>("run"))->status() ==
+          domain::RunStatus::awaiting_approval);
+  REQUIRE(executor->starts == 0);
+
+  const auto approvals_requested =
+      std::ranges::count_if(store.events, [](const auto& event) {
+        return std::holds_alternative<domain::ToolApprovalRequested>(
+            event.payload);
+      });
+  const auto approvals_decided =
+      std::ranges::count_if(store.events, [](const auto& event) {
+        return std::holds_alternative<domain::ToolApprovalDecided>(
+            event.payload);
+      });
+  REQUIRE(approvals_requested == 2);
+  REQUIRE(approvals_decided == 1);
+
+  REQUIRE((*replayed)->decide_approval(
+      make_id<domain::RunId>("run"), invocation,
+      {domain::ApprovalDecision::approved,
+       {{domain::Effect::read, "filesystem.root", "/repo"}},
+       domain::ApprovalGrantLifetime::invocation}));
+  replay_wake.wait_for_change(0);
+  REQUIRE(executor->starts == 1);
+  REQUIRE(std::ranges::count_if(store.events, [](const auto& event) {
+            return std::holds_alternative<domain::ToolApprovalDecided>(
+                event.payload);
+          }) == 2);
+}
+
+TEST_CASE("durable implicit approval is revalidated before restart execution",
+          "[tools][policy][storage][replay][failure]") {
+  const auto approval = GENERATE(runtime::ApprovalMode::automatic,
+                                 runtime::ApprovalMode::allow_all);
+  CAPTURE(approval);
+  const auto invocation = make_id<domain::InvocationId>("call");
+  const auto profile =
+      make_id<domain::PermissionProfileId>("tools-none-implicit-v2");
+  auto executor = std::make_shared<CountingExecutor>();
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      declaration(), executor, {},
+      runtime::ToolExecutorContract{"test.lookup", "1"}));
+  const auto tools = snapshot_of(registry);
+  const std::vector<std::string> automatic_tools =
+      approval == runtime::ApprovalMode::automatic
+          ? std::vector<std::string>{"lookup"}
+          : std::vector<std::string>{};
+  const auto make_policy = [&] {
+    std::optional<std::string> matcher_identity;
+    if (approval == runtime::ApprovalMode::automatic) {
+      matcher_identity =
+          runtime::exact_tool_allowlist_matcher_identity(automatic_tools)
+              .value();
+    }
+    auto policy = runtime::make_tool_launch_policy(
+        tools, {profile,
+                testing::available_application_launch_context(
+                    runtime::RestrictionLevel::none, approval,
+                    std::move(matcher_identity)),
+                automatic_tools});
+    REQUIRE(policy);
+    return std::make_shared<CountingPolicy>(std::move(*policy));
+  };
+
+  auto policy = make_policy();
+  auto initial = request("inference-1", "assistant-1", tools.declarations());
+  testing::ScriptedBackend backend{{
+      {initial, tool_call_script(invocation)},
+  }};
+  MemoryStore store;
+  store.fail_next_tool_started_append = true;
+  WakeCounter wake;
+  auto kernel = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::create, store.created},
+      store, backend, &wake, {}, {}, tools, policy);
+  REQUIRE(kernel);
+  auto start = run_start(initial);
+  start.attributes.permission_profile_id = profile;
+  start.provenance = provenance();
+  REQUIRE((*kernel)->start(std::move(start)));
+
+  std::optional<runtime::RunKernelError> interruption;
+  std::size_t observed{};
+  for (int attempt = 0; attempt < 100 && !interruption; ++attempt) {
+    auto drained = (*kernel)->drain();
+    if (!drained) {
+      interruption = std::move(drained.error());
+      break;
+    }
+    if ((*kernel)->active_inference_id()) wake.wait_for_change(observed);
+    observed = wake.count();
+  }
+  REQUIRE(interruption);
+  REQUIRE(interruption->code == runtime::RunKernelErrorCode::storage_failure);
+  REQUIRE(policy->evaluations == 1);
+  REQUIRE(executor->validations == 1);
+  REQUIRE(executor->starts == 0);
+  REQUIRE(std::ranges::count_if(store.events, [](const auto& event) {
+            return std::holds_alternative<domain::ToolPolicyDecided>(
+                event.payload);
+          }) == 1);
+  REQUIRE(std::ranges::none_of(store.events, [](const auto& event) {
+    return std::holds_alternative<domain::ToolStarted>(event.payload);
+  }));
+  kernel->reset();
+
+  auto replay_policy = make_policy();
+  testing::ScriptedBackend replay_backend{{}};
+  WakeCounter replay_wake;
+  auto replayed = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::resume, store.created},
+      store, replay_backend, &replay_wake, {}, {}, tools, replay_policy);
+  REQUIRE(replayed);
+  REQUIRE(replay_policy->evaluations == 1);
+  REQUIRE(executor->validations == 1);
+  REQUIRE(executor->starts == 0);
+  REQUIRE_FALSE((*replayed)->pending_tool_approval());
+  REQUIRE(std::ranges::none_of(store.events, [](const auto& event) {
+    return std::holds_alternative<domain::ToolStarted>(event.payload);
+  }));
+
+  auto resumed = (*replayed)->drain();
+  REQUIRE(resumed);
+  REQUIRE(std::ranges::any_of(*resumed, [](const auto& event) {
+    return std::holds_alternative<domain::ToolStarted>(event.payload);
+  }));
+  replay_wake.wait_for_change(0);
+  REQUIRE(replay_policy->evaluations == 1);
+  REQUIRE(executor->validations == 1);
+  REQUIRE(executor->starts == 1);
+}
+
 TEST_CASE("durable paid approval replay invokes no executor methods",
           "[tools][policy][storage][replay][spend][failure]") {
   const auto invocation = make_id<domain::InvocationId>("paid-call");
@@ -1651,11 +1884,11 @@ TEST_CASE("durable paid approval replay invokes no executor methods",
       runtime::ToolExecutorContract{"test.generate-image", "1"}));
   const auto tools = snapshot_of(registry);
   const auto make_policy = [&] {
-    return runtime::make_tool_launch_policy(tools,
-                                            {profile,
-                                             runtime::RestrictionLevel::low,
-                                             runtime::ApprovalMode::prompt,
-                                             {}});
+    return runtime::make_tool_launch_policy(
+        tools, {profile,
+                testing::available_application_launch_context(
+                    runtime::RestrictionLevel::low),
+                {}});
   };
   auto policy = make_policy();
   REQUIRE(policy);
@@ -1730,11 +1963,11 @@ TEST_CASE("durable paid approval reuses normalized arguments and raw history",
       runtime::ToolExecutorContract{"test.generate-image", "1"}));
   const auto tools = snapshot_of(registry);
   const auto make_policy = [&] {
-    return runtime::make_tool_launch_policy(tools,
-                                            {profile,
-                                             runtime::RestrictionLevel::low,
-                                             runtime::ApprovalMode::prompt,
-                                             {}});
+    return runtime::make_tool_launch_policy(
+        tools, {profile,
+                testing::available_application_launch_context(
+                    runtime::RestrictionLevel::low),
+                {}});
   };
   auto policy = make_policy();
   REQUIRE(policy);
@@ -1828,11 +2061,11 @@ TEST_CASE("durable paid replay rejects malformed normalized arguments",
       runtime::ToolExecutorContract{"test.generate-image", "1"}));
   const auto tools = snapshot_of(registry);
   const auto make_policy = [&] {
-    return runtime::make_tool_launch_policy(tools,
-                                            {profile,
-                                             runtime::RestrictionLevel::low,
-                                             runtime::ApprovalMode::prompt,
-                                             {}});
+    return runtime::make_tool_launch_policy(
+        tools, {profile,
+                testing::available_application_launch_context(
+                    runtime::RestrictionLevel::low),
+                {}});
   };
   auto policy = make_policy();
   REQUIRE(policy);

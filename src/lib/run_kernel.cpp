@@ -852,6 +852,7 @@ struct RunKernel::Impl {
     std::optional<domain::ChildRunDescriptor> child_run;
     std::size_t reasoning_text_bytes{};
     ToolRegistrySnapshot tools;
+    bool recovered_tool_launch_pending{};
   };
 
   struct Transaction {
@@ -3034,12 +3035,44 @@ auto RunKernel::open_durable(DurableSessionOpen session,
         events->insert(events->end(), recovery.begin(), recovery.end());
       }
 
+      std::map<domain::RunId, std::set<domain::InvocationId>>
+          unstarted_authority;
+      for (const auto& event : *events) {
+        if (const auto* decided =
+                std::get_if<domain::ToolPolicyDecided>(&event.payload);
+            decided != nullptr &&
+            decided->decision == domain::PolicyDecision::allow) {
+          unstarted_authority[event.metadata.run_id].insert(
+              decided->invocation_id);
+        } else if (const auto* decided =
+                       std::get_if<domain::ToolApprovalDecided>(&event.payload);
+                   decided != nullptr &&
+                   decided->decision == domain::ApprovalDecision::approved) {
+          unstarted_authority[event.metadata.run_id].insert(
+              decided->invocation_id);
+        } else if (const auto invocation_id = tool_invocation_id(event.payload);
+                   invocation_id &&
+                   (std::holds_alternative<domain::ToolStarted>(
+                        event.payload) ||
+                    std::holds_alternative<domain::ToolResultRecorded>(
+                        event.payload) ||
+                    std::holds_alternative<domain::ToolErrored>(
+                        event.payload))) {
+          unstarted_authority[event.metadata.run_id].erase(*invocation_id);
+        }
+      }
+
       std::optional<domain::RunId> awaiting_run;
       std::optional<domain::RunId> awaiting_plan_run;
       bool awaiting_tool_approval{};
+      bool recovering_unstarted_authority{};
       for (const auto& [run_id, projection] : projections) {
+        const bool recoverable_authority =
+            projection.status() == domain::RunStatus::running &&
+            !unstarted_authority[run_id].empty();
         if (projection.status() == domain::RunStatus::awaiting_input ||
-            projection.status() == domain::RunStatus::awaiting_approval) {
+            projection.status() == domain::RunStatus::awaiting_approval ||
+            recoverable_authority) {
           if (awaiting_run || awaiting_plan_run) {
             return std::unexpected(kernel_error(
                 RunKernelErrorCode::replay_rejected,
@@ -3048,6 +3081,7 @@ auto RunKernel::open_durable(DurableSessionOpen session,
           awaiting_run = run_id;
           awaiting_tool_approval =
               projection.status() == domain::RunStatus::awaiting_approval;
+          recovering_unstarted_authority = recoverable_authority;
         } else if (projection.status() ==
                        domain::RunStatus::awaiting_plan_decision ||
                    projection.status() ==
@@ -3143,15 +3177,28 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                          std::get_if<domain::ToolApprovalRequested>(
                              &event.payload)) {
             const auto policy = policy_decisions.find(value->invocation_id);
+            const auto prior_request =
+                approval_requests.find(value->invocation_id);
+            const bool renewing_consumed_approval =
+                prior_request != approval_requests.end() &&
+                approval_decisions.contains(value->invocation_id) &&
+                approval_decisions.at(value->invocation_id) ==
+                    domain::ApprovalDecision::approved;
             if (!proposals.contains(value->invocation_id) ||
                 policy == policy_decisions.end() ||
                 policy->second != domain::PolicyDecision::require_approval ||
-                !approval_requests
-                     .emplace(value->invocation_id, value->requested_scopes)
-                     .second) {
+                (prior_request != approval_requests.end() &&
+                 !renewing_consumed_approval)) {
               return std::unexpected(kernel_error(
                   RunKernelErrorCode::replay_rejected,
                   "queued tool history repeats or misorders approval"));
+            }
+            approval_requests.insert_or_assign(value->invocation_id,
+                                               value->requested_scopes);
+            if (renewing_consumed_approval) {
+              approval_decisions.erase(value->invocation_id);
+              approval_scopes.erase(value->invocation_id);
+              approval_lifetimes.erase(value->invocation_id);
             }
           } else if (const auto* value =
                          std::get_if<domain::ToolApprovalDecided>(
@@ -3199,12 +3246,13 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             question_invocation_id = event.metadata.invocation_id;
           }
         }
-        if (!started || (!awaiting_tool_approval && !question_invocation_id)) {
+        if (!started || (!awaiting_tool_approval && !question_invocation_id &&
+                         !recovering_unstarted_authority)) {
           return std::unexpected(
               kernel_error(RunKernelErrorCode::replay_rejected,
                            "awaiting tool history lacks runtime identity"));
         }
-        if (!awaiting_tool_approval &&
+        if (question_invocation_id &&
             (!proposals.contains(*question_invocation_id) ||
              !tool_started.contains(*question_invocation_id) ||
              tool_terminal.contains(*question_invocation_id) ||
@@ -3269,6 +3317,8 @@ auto RunKernel::open_durable(DurableSessionOpen session,
         auto active_tools = std::move(*selected_tools);
         std::map<domain::InvocationId, Impl::PendingInvocation> invocations;
         std::size_t pending_approval_count{};
+        std::vector<domain::InvocationId> renewed_approval_ids;
+        bool recovered_tool_launch_pending{};
         for (const auto& current_id : current_batch) {
           const auto proposed = proposals.find(current_id);
           if (proposed == proposals.end()) {
@@ -3427,6 +3477,25 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             return std::unexpected(kernel_error(
                 RunKernelErrorCode::replay_rejected,
                 "queued tool history has an unterminated execution"));
+          } else if (recovering_unstarted_authority &&
+                     unstarted_authority[*awaiting_run].contains(current_id) &&
+                     policy_decisions.contains(current_id) &&
+                     policy_decisions.at(current_id) ==
+                         domain::PolicyDecision::require_approval &&
+                     approval_decisions.contains(current_id) &&
+                     approval_decisions.at(current_id) ==
+                         domain::ApprovalDecision::approved) {
+            state = Impl::InvocationState::awaiting_approval;
+            ++pending_approval_count;
+            renewed_approval_ids.push_back(current_id);
+            policy_request =
+                ToolPolicyRequest{event_log.session_id(),
+                                  *awaiting_run,
+                                  current_id,
+                                  started->permission_profile_id,
+                                  proposed->second.tool_name,
+                                  proposed->second.declared_effects,
+                                  proposed->second.requested_scopes};
           } else if (approval_decisions.contains(current_id) &&
                      approval_decisions.at(current_id) ==
                          domain::ApprovalDecision::approved) {
@@ -3459,6 +3528,11 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             return std::unexpected(
                 kernel_error(RunKernelErrorCode::replay_rejected,
                              "queued tool history has no resumable state"));
+          }
+          if (recovering_unstarted_authority &&
+              unstarted_authority[*awaiting_run].contains(current_id) &&
+              state == Impl::InvocationState::allowed) {
+            recovered_tool_launch_pending = true;
           }
 
           auto result_message_id = proposed->second.result_message_id;
@@ -3523,6 +3597,53 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                                                  std::nullopt,
                                                  0,
                                                  std::move(active_tools)};
+        kernel->m_impl->active->recovered_tool_launch_pending =
+            recovered_tool_launch_pending;
+        if (!renewed_approval_ids.empty()) {
+          std::vector<domain::RunEvent> recovery;
+          recovery.reserve(renewed_approval_ids.size());
+          for (const auto& invocation_id : renewed_approval_ids) {
+            if (event_log.last_sequence() ==
+                std::numeric_limits<std::uint64_t>::max()) {
+              return std::unexpected(
+                  kernel_error(RunKernelErrorCode::event_sequence_overflow,
+                               "approval recovery sequence overflowed"));
+            }
+            const auto sequence = event_log.last_sequence() + 1;
+            auto event_id =
+                domain::EventId::from("event-" + std::to_string(sequence));
+            if (!event_id) {
+              return std::unexpected(
+                  kernel_error(RunKernelErrorCode::replay_rejected,
+                               "approval recovery identity is invalid"));
+            }
+            const auto& invocation =
+                kernel->m_impl->active->invocations.at(invocation_id);
+            domain::RunEvent event{
+                {std::move(*event_id), *awaiting_run, sequence, 1,
+                 kernel->m_impl->timestamp(), std::nullopt, std::nullopt,
+                 invocation_id},
+                domain::ToolApprovalRequested{
+                    invocation_id, invocation.requested_scopes,
+                    std::string{"Fresh approval is required after restart"}}};
+            auto projection = projections.at(*awaiting_run);
+            if (!projection.apply(event) || !event_log.append(event)) {
+              return std::unexpected(
+                  kernel_error(RunKernelErrorCode::replay_rejected,
+                               "fresh approval recovery was rejected"));
+            }
+            projections.insert_or_assign(*awaiting_run, std::move(projection));
+            recovery.push_back(std::move(event));
+          }
+          auto persisted = store.append_events(session.session_id, recovery);
+          if (!persisted) {
+            return std::unexpected(
+                kernel_error(RunKernelErrorCode::storage_failure,
+                             "fresh approval recovery could not be persisted",
+                             persisted.error().retryable));
+          }
+          events->insert(events->end(), recovery.begin(), recovery.end());
+        }
       }
       if (awaiting_plan_run) {
         std::optional<domain::RunStarted> started;
@@ -5171,6 +5292,19 @@ auto RunKernel::drain()
           RunKernelErrorCode::storage_failure,
           "run kernel is unavailable after a persistence failure"));
     }
+    std::vector<domain::RunEvent> committed;
+    if (m_impl->active && m_impl->active->recovered_tool_launch_pending) {
+      m_impl->active->recovered_tool_launch_pending = false;
+      const auto before_launch = m_impl->event_log.events().size();
+      if (auto launched = m_impl->launch_next_tool(); !launched) {
+        return std::unexpected(std::move(launched.error()));
+      }
+      const auto& after_launch = m_impl->event_log.events();
+      for (std::size_t index = before_launch; index < after_launch.size();
+           ++index) {
+        committed.push_back(after_launch[index]);
+      }
+    }
     std::deque<WorkerUpdate> updates;
     {
       std::lock_guard lock(m_impl->queue_mutex);
@@ -5178,7 +5312,6 @@ auto RunKernel::drain()
     }
     m_impl->queue_space.notify_all();
 
-    std::vector<domain::RunEvent> committed;
     std::optional<RunKernelError> first_error;
     for (auto& update : updates) {
       auto transaction = m_impl->transaction();

@@ -9,6 +9,7 @@ add_executable(86scenario-test
 
 target_include_directories(86scenario-test
   PUBLIC ${PROJECT_SOURCE_DIR}/include
+  PUBLIC ${PROJECT_SOURCE_DIR}/test/include
 )
 
 target_link_libraries(86scenario-test

@@ -2654,29 +2654,134 @@ template <typename IdType>
                            {"allow_all", Mode::allow_all}});
 }
 
+[[nodiscard]] auto tool_restriction_unavailable_reason_name(
+    const domain::ToolRestrictionUnavailableReason value) -> std::string_view {
+  using Reason = domain::ToolRestrictionUnavailableReason;
+  switch (value) {
+    case Reason::unsupported_platform: return "unsupported_platform";
+    case Reason::unsupported_architecture: return "unsupported_architecture";
+    case Reason::unsupported_kernel: return "unsupported_kernel";
+    case Reason::missing_delegation: return "missing_delegation";
+    case Reason::missing_controller: return "missing_controller";
+    case Reason::permission_denied: return "permission_denied";
+    case Reason::privilege_changed: return "privilege_changed";
+    case Reason::mechanism_absent: return "mechanism_absent";
+    case Reason::unsupported_combination: return "unsupported_combination";
+    case Reason::setup_race: return "setup_race";
+    case Reason::enforcement_failed: return "enforcement_failed";
+    case Reason::cleanup_failed: return "cleanup_failed";
+    case Reason::internal_error: return "internal_error";
+  }
+  throw CodecFailure{"invalid tool restriction unavailable reason"};
+}
+
+[[nodiscard]] auto parse_tool_restriction_unavailable_reason(const Json& value)
+    -> domain::ToolRestrictionUnavailableReason {
+  using Reason = domain::ToolRestrictionUnavailableReason;
+  return enum_value<Reason>(
+      value.get<std::string>(),
+      {{"unsupported_platform", Reason::unsupported_platform},
+       {"unsupported_architecture", Reason::unsupported_architecture},
+       {"unsupported_kernel", Reason::unsupported_kernel},
+       {"missing_delegation", Reason::missing_delegation},
+       {"missing_controller", Reason::missing_controller},
+       {"permission_denied", Reason::permission_denied},
+       {"privilege_changed", Reason::privilege_changed},
+       {"mechanism_absent", Reason::mechanism_absent},
+       {"unsupported_combination", Reason::unsupported_combination},
+       {"setup_race", Reason::setup_race},
+       {"enforcement_failed", Reason::enforcement_failed},
+       {"cleanup_failed", Reason::cleanup_failed},
+       {"internal_error", Reason::internal_error}});
+}
+
 [[nodiscard]] auto tool_policy_provenance_json(
     const domain::ToolPolicyProvenance& policy) -> Json {
+  if (policy.identity == "aiforge.tool-launch-policy.v1") {
+    return {
+        {"identity", policy.identity},
+        {"permission_profile_id", id_text(policy.permission_profile_id)},
+        {"restriction_level", tool_restriction_name(policy.restriction_level)},
+        {"approval_mode", tool_approval_mode_name(policy.approval_mode)},
+        {"effect_ceiling", effects_json(policy.effect_ceiling)},
+        {"capability_ceiling", scopes_json(policy.capability_ceiling)},
+        {"automatically_eligible_tools", policy.automatically_eligible_tools}};
+  }
   return {
       {"identity", policy.identity},
       {"permission_profile_id", id_text(policy.permission_profile_id)},
       {"restriction_level", tool_restriction_name(policy.restriction_level)},
+      {"achieved_restriction_level",
+       policy.achieved_restriction_level
+           ? Json(tool_restriction_name(*policy.achieved_restriction_level))
+           : Json(nullptr)},
+      {"restriction_unavailable_reason",
+       policy.restriction_unavailable_reason
+           ? Json(tool_restriction_unavailable_reason_name(
+                 *policy.restriction_unavailable_reason))
+           : Json(nullptr)},
+      {"mechanism_identity", policy.mechanism_identity},
+      {"mechanism_version", policy.mechanism_version},
+      {"restriction_policy_identity",
+       policy.restriction_policy_identity
+           ? Json(*policy.restriction_policy_identity)
+           : Json(nullptr)},
       {"approval_mode", tool_approval_mode_name(policy.approval_mode)},
       {"effect_ceiling", effects_json(policy.effect_ceiling)},
       {"capability_ceiling", scopes_json(policy.capability_ceiling)},
-      {"automatically_eligible_tools", policy.automatically_eligible_tools}};
+      {"matcher_policy_identity", policy.matcher_policy_identity
+                                      ? Json(*policy.matcher_policy_identity)
+                                      : Json(nullptr)}};
+}
+
+auto parse_v2_tool_policy_fields(const Json& value,
+                                 domain::ToolPolicyProvenance& policy) -> void {
+  if (!value.at("achieved_restriction_level").is_null()) {
+    policy.achieved_restriction_level =
+        parse_tool_restriction(value.at("achieved_restriction_level"));
+  }
+  if (!value.at("restriction_unavailable_reason").is_null()) {
+    policy.restriction_unavailable_reason =
+        parse_tool_restriction_unavailable_reason(
+            value.at("restriction_unavailable_reason"));
+  }
+  policy.mechanism_identity = value.at("mechanism_identity").get<std::string>();
+  policy.mechanism_version = value.at("mechanism_version").get<std::string>();
+  if (!value.at("restriction_policy_identity").is_null()) {
+    policy.restriction_policy_identity =
+        value.at("restriction_policy_identity").get<std::string>();
+  }
+  if (!value.at("matcher_policy_identity").is_null()) {
+    policy.matcher_policy_identity =
+        value.at("matcher_policy_identity").get<std::string>();
+  }
 }
 
 [[nodiscard]] auto parse_tool_policy_provenance(const Json& value)
     -> domain::ToolPolicyProvenance {
-  if (!value.is_object() || value.size() != 7 || !value.contains("identity") ||
+  if (!value.is_object() || !value.contains("identity") ||
+      !value.at("identity").is_string()) {
+    throw CodecFailure{"tool policy provenance is invalid"};
+  }
+  auto identity = value.at("identity").get<std::string>();
+  const bool legacy_v1 = identity == "aiforge.tool-launch-policy.v1";
+  const bool current_v2 = identity == "aiforge.tool-launch-policy.v2";
+  const auto expected_size = legacy_v1 ? std::size_t{7} : std::size_t{12};
+  if ((!legacy_v1 && !current_v2) || value.size() != expected_size ||
       !value.contains("permission_profile_id") ||
       !value.contains("restriction_level") ||
       !value.contains("approval_mode") || !value.contains("effect_ceiling") ||
       !value.contains("capability_ceiling") ||
-      !value.contains("automatically_eligible_tools") ||
       !value.at("effect_ceiling").is_array() ||
       !value.at("capability_ceiling").is_array() ||
-      !value.at("automatically_eligible_tools").is_array()) {
+      (legacy_v1 && (!value.contains("automatically_eligible_tools") ||
+                     !value.at("automatically_eligible_tools").is_array())) ||
+      (current_v2 && (!value.contains("achieved_restriction_level") ||
+                      !value.contains("restriction_unavailable_reason") ||
+                      !value.contains("mechanism_identity") ||
+                      !value.contains("mechanism_version") ||
+                      !value.contains("restriction_policy_identity") ||
+                      !value.contains("matcher_policy_identity")))) {
     throw CodecFailure{"tool policy provenance is invalid"};
   }
   for (const auto& scope : value.at("capability_ceiling")) {
@@ -2686,16 +2791,20 @@ template <typename IdType>
     }
   }
   domain::ToolPolicyProvenance policy{
-      value.at("identity").get<std::string>(),
+      std::move(identity),
       parse_id<domain::PermissionProfileId>(value.at("permission_profile_id")),
       parse_tool_restriction(value.at("restriction_level")),
       parse_tool_approval_mode(value.at("approval_mode")),
       parse_effects(value.at("effect_ceiling")),
       parse_scopes(value.at("capability_ceiling")),
       {}};
-  for (const auto& name : value.at("automatically_eligible_tools")) {
-    policy.automatically_eligible_tools.push_back(name.get<std::string>());
+  if (legacy_v1) {
+    for (const auto& name : value.at("automatically_eligible_tools")) {
+      policy.automatically_eligible_tools.push_back(name.get<std::string>());
+    }
+    return policy;
   }
+  parse_v2_tool_policy_fields(value, policy);
   return policy;
 }
 

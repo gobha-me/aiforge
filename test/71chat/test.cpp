@@ -2,6 +2,7 @@
 #include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/runtime/tool_launch_policy.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
+#include <aiforge/testing/application_launch_context.hpp>
 #include <aiforge/testing/scripted_persona_editor.hpp>
 #include <aiforge/testing/scripted_persona_source.hpp>
 #include <aiforge/testing/scripted_tool_executor.hpp>
@@ -984,8 +985,8 @@ TEST_CASE("recovered approvals cannot bypass global snapshot validation",
             make_id<domain::PermissionProfileId>("tools-medium-prompt-v1");
         auto policy = runtime::make_tool_launch_policy(
             *tools, {permission,
-                     runtime::RestrictionLevel::medium,
-                     runtime::ApprovalMode::prompt,
+                     testing::available_application_launch_context(
+                         runtime::RestrictionLevel::medium),
                      {}});
         REQUIRE(policy);
         testing::ScriptedUserGlobalInstructionSource create_source{{

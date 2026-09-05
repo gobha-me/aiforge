@@ -153,11 +153,6 @@ namespace {
     const domain::ToolPolicyProvenance* policy) noexcept -> bool {
   if (declaration.effects.empty()) return declaration.capability_scopes.empty();
   if (policy == nullptr) return false;
-  if (policy->approval_mode == domain::ToolApprovalMode::automatic &&
-      !std::ranges::contains(policy->automatically_eligible_tools,
-                             declaration.name)) {
-    return false;
-  }
   if (std::ranges::any_of(declaration.effects, [&](const auto effect) {
         return !std::ranges::contains(policy->effect_ceiling, effect);
       })) {
@@ -248,6 +243,12 @@ struct CheckedSelection {
   }
   if (!*checked.selection.model_tool_calling_support) {
     return ToolProfileAvailabilityReason::model_tool_calling_unsupported;
+  }
+  if (registered->category == ToolCategory::process &&
+      checked.policy != nullptr &&
+      checked.policy->identity == "aiforge.tool-launch-policy.v2" &&
+      !checked.policy->achieved_restriction_level) {
+    return ToolProfileAvailabilityReason::launch_policy_denied;
   }
   if (!policy_allows_declaration(registered->declaration, checked.policy)) {
     return ToolProfileAvailabilityReason::launch_policy_denied;

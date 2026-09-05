@@ -14,6 +14,7 @@
 #include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/runtime/tool_launch_policy.hpp>
+#include <aiforge/testing/application_launch_context.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
 #include <aiforge/testing/scripted_tool_executor.hpp>
 
@@ -641,11 +642,11 @@ TEST_CASE("ask_user blocks a queued tool until the question resolves",
   const auto profile =
       id<domain::PermissionProfileId>("tools-medium-prompt-v1");
   const auto make_policy = [&] {
-    return runtime::make_tool_launch_policy(*tools,
-                                            {profile,
-                                             runtime::RestrictionLevel::medium,
-                                             runtime::ApprovalMode::prompt,
-                                             {}});
+    return runtime::make_tool_launch_policy(
+        *tools, {profile,
+                 testing::available_application_launch_context(
+                     runtime::RestrictionLevel::medium),
+                 {}});
   };
   auto policy = make_policy();
   REQUIRE(policy);
@@ -687,11 +688,11 @@ TEST_CASE("ask_user blocks a queued tool until the question resolves",
   MemoryStore store;
   store.events = kernel.event_log().events();
 
-  auto drift_policy =
-      runtime::make_tool_launch_policy(*tools, {profile,
-                                                runtime::RestrictionLevel::high,
-                                                runtime::ApprovalMode::prompt,
-                                                {}});
+  auto drift_policy = runtime::make_tool_launch_policy(
+      *tools, {profile,
+               testing::available_application_launch_context(
+                   runtime::RestrictionLevel::high),
+               {}});
   REQUIRE(drift_policy);
   testing::ScriptedBackend drift_backend{{}};
   Wake drift_wake;
@@ -788,11 +789,11 @@ TEST_CASE("ask_user blocks a queued tool until the question resolves",
   REQUIRE((*resumed)->pending_question_input());
   REQUIRE(queued_executor->recorded_invocations().empty());
 
-  auto approved_drift_policy =
-      runtime::make_tool_launch_policy(*tools, {profile,
-                                                runtime::RestrictionLevel::high,
-                                                runtime::ApprovalMode::prompt,
-                                                {}});
+  auto approved_drift_policy = runtime::make_tool_launch_policy(
+      *tools, {profile,
+               testing::available_application_launch_context(
+                   runtime::RestrictionLevel::high),
+               {}});
   REQUIRE(approved_drift_policy);
   testing::ScriptedBackend approved_drift_backend{{}};
   Wake approved_drift_wake;

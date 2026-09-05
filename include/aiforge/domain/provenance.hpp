@@ -126,17 +126,44 @@ enum class ToolApprovalMode {
   allow_all,
 };
 
+enum class ToolRestrictionUnavailableReason {
+  unsupported_platform,
+  unsupported_architecture,
+  unsupported_kernel,
+  missing_delegation,
+  missing_controller,
+  permission_denied,
+  privilege_changed,
+  mechanism_absent,
+  unsupported_combination,
+  setup_race,
+  enforcement_failed,
+  cleanup_failed,
+  internal_error,
+};
+
 // The identity versions the interpretation of the closed fields. Tool
 // registration provenance separately binds the exact per-run declarations;
 // this record binds the application-lifetime ceiling that constrained them.
 struct ToolPolicyProvenance {
   std::string identity;
   PermissionProfileId permission_profile_id;
+  // In v1 this was also interpreted as an authority filter. In v2 it is only
+  // the selected process-containment contract.
   ToolRestrictionLevel restriction_level{ToolRestrictionLevel::high};
   ToolApprovalMode approval_mode{ToolApprovalMode::prompt};
   std::vector<Effect> effect_ceiling;
   std::vector<CapabilityScope> capability_ceiling;
+  // Retained only so completed v1 runs remain readable. V2 records the
+  // matcher-policy identity and never serializes raw matcher configuration.
   std::vector<std::string> automatically_eligible_tools;
+  std::optional<ToolRestrictionLevel> achieved_restriction_level{};
+  std::optional<ToolRestrictionUnavailableReason>
+      restriction_unavailable_reason{};
+  std::string mechanism_identity{};
+  std::string mechanism_version{};
+  std::optional<std::string> restriction_policy_identity{};
+  std::optional<std::string> matcher_policy_identity{};
   auto operator==(const ToolPolicyProvenance&) const -> bool = default;
 };
 
