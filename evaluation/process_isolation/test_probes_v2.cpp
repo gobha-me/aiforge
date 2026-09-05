@@ -163,24 +163,49 @@ TEST_CASE("write confinement requires every mutation class to be denied",
 
 TEST_CASE("combined setup never reports partial setup as enforcement",
           "[process-isolation][evidence-v2][failure]") {
-  for (std::size_t missing{}; missing < 8; ++missing) {
-    std::array setup{true, true, true, true, true, true, true, true};
-    setup[missing] = false;
-    const auto partial = v2::test_support::setup_order_outcome(
-        setup[0], setup[1], setup[2], setup[3], setup[4], setup[5], setup[6],
-        setup[7], false, false);
-    CHECK(partial.state == isolation::ProbeState::unavailable);
-    CHECK(partial.reason == v2::ReasonCode::unsupported_combination);
+  for (const auto id : {v2::ProbeId::combined_setup_order,
+                        v2::ProbeId::private_root_combined_setup_order}) {
+    for (std::size_t missing{}; missing < 8; ++missing) {
+      std::array setup{true, true, true, true, true, true, true, true};
+      setup[missing] = false;
+      const auto partial = v2::test_support::setup_order_outcome(
+          id, setup[0], setup[1], setup[2], setup[3], setup[4], setup[5],
+          setup[6], setup[7], false, false);
+      CHECK(partial.probe_id == id);
+      CHECK(partial.state == isolation::ProbeState::unavailable);
+      CHECK(partial.reason == v2::ReasonCode::unsupported_combination);
+    }
   }
   const auto race = v2::test_support::setup_order_outcome(
-      true, true, true, true, true, true, true, true, false, true);
+      v2::ProbeId::combined_setup_order, true, true, true, true, true, true,
+      true, true, false, true);
   CHECK(race.state == isolation::ProbeState::probe_error);
   CHECK(race.reason == v2::ReasonCode::setup_race);
   const auto exited = v2::test_support::setup_order_outcome(
-      true, true, true, true, true, true, true, true, true, false);
+      v2::ProbeId::combined_setup_order, true, true, true, true, true, true,
+      true, true, true, false);
   CHECK(exited.state == isolation::ProbeState::probe_error);
   CHECK(exited.reason == v2::ReasonCode::setup_race);
-  CHECK(v2::test_support::setup_order_outcome(true, true, true, true, true,
-                                              true, true, true, true, true)
+  CHECK(v2::test_support::setup_order_outcome(
+            v2::ProbeId::private_root_combined_setup_order, true, true, true,
+            true, true, true, true, true, true, true)
             .state == isolation::ProbeState::enforced);
+}
+
+TEST_CASE("combined setup preserves row identity and exact failure class",
+          "[process-isolation][evidence-v2][failure]") {
+  const auto id = v2::ProbeId::private_root_combined_setup_order;
+  for (const auto& expected : {
+           std::pair{EACCES, v2::ReasonCode::permission_denied},
+           std::pair{ENOSYS, v2::ReasonCode::mechanism_absent},
+           std::pair{EIO, v2::ReasonCode::internal_error},
+       }) {
+    const auto result =
+        v2::test_support::combined_setup_errno_outcome(id, expected.first);
+    CHECK(result.probe_id == id);
+    CHECK(result.reason == expected.second);
+    CHECK(result.state == (expected.first == EIO
+                               ? isolation::ProbeState::probe_error
+                               : isolation::ProbeState::unavailable));
+  }
 }

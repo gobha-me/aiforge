@@ -61,9 +61,11 @@ auto require_non_cgroup_closed(const v2::EvidenceReport& report,
   REQUIRE(report.probes.size() == v2::required_probe_ids().size());
   for (const auto& record : report.probes) {
     const auto name = v2::probe_id_name(record.probe_id);
-    const bool cgroup = name.starts_with("cgroup_") ||
-                        record.probe_id == v2::ProbeId::combined_setup_order ||
-                        record.probe_id == v2::ProbeId::partial_setup_cleanup;
+    const bool cgroup =
+        name.starts_with("cgroup_") ||
+        record.probe_id == v2::ProbeId::combined_setup_order ||
+        record.probe_id == v2::ProbeId::private_root_combined_setup_order ||
+        record.probe_id == v2::ProbeId::partial_setup_cleanup;
     CHECK(record.state == (cgroup ? isolation::ProbeState::unavailable
                                   : isolation::ProbeState::probe_error));
     CHECK(record.reason ==
@@ -297,9 +299,11 @@ TEST_CASE("evidence v2 runner accepts only the matching typed row",
   REQUIRE(result->probes.size() == v2::required_probe_ids().size());
   for (const auto& record : result->probes) {
     const auto name = v2::probe_id_name(record.probe_id);
-    const bool cgroup = name.starts_with("cgroup_") ||
-                        record.probe_id == v2::ProbeId::combined_setup_order ||
-                        record.probe_id == v2::ProbeId::partial_setup_cleanup;
+    const bool cgroup =
+        name.starts_with("cgroup_") ||
+        record.probe_id == v2::ProbeId::combined_setup_order ||
+        record.probe_id == v2::ProbeId::private_root_combined_setup_order ||
+        record.probe_id == v2::ProbeId::partial_setup_cleanup;
     CHECK(record.state == (cgroup ? isolation::ProbeState::unavailable
                                   : isolation::ProbeState::enforced));
     CHECK(record.reason ==

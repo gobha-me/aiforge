@@ -61,6 +61,16 @@ constexpr int assertion_limit_not_triggered = 25;
 constexpr auto observation_timeout = std::chrono::seconds{2};
 constexpr std::size_t maximum_control_bytes = 64UZ * 1024UZ;
 
+[[nodiscard]] constexpr auto combined_probe_id(const CombinedSetupMode mode)
+    -> ProbeId {
+  switch (mode) {
+    case CombinedSetupMode::confined: return ProbeId::combined_setup_order;
+    case CombinedSetupMode::private_root:
+      return ProbeId::private_root_combined_setup_order;
+  }
+  return ProbeId::combined_setup_order;
+}
+
 [[nodiscard]] auto apply_landlock(
     const std::filesystem::path& state, std::uint64_t handled,
     std::span<const std::filesystem::path> additional_roots = {}) -> int;
@@ -168,20 +178,19 @@ constexpr std::size_t maximum_control_bytes = 64UZ * 1024UZ;
 }
 
 [[nodiscard]] auto setup_order_observation(
-    const bool limits_applied, const bool placed, const bool staged_descriptors,
-    const bool descriptor_launched, const bool private_root_applied,
-    const bool filesystem_applied, const bool internet_denied,
-    const bool unix_denied, const bool payload_reached,
-    const bool target_waiting_for_cleanup) -> ProbeRecord {
+    const ProbeId id, const bool limits_applied, const bool placed,
+    const bool staged_descriptors, const bool descriptor_launched,
+    const bool setup_descriptors_closed, const bool filesystem_applied,
+    const bool internet_denied, const bool unix_denied,
+    const bool payload_reached, const bool target_waiting_for_cleanup)
+    -> ProbeRecord {
   if (!limits_applied || !placed || !staged_descriptors ||
-      !descriptor_launched || !private_root_applied || !filesystem_applied ||
-      !internet_denied || !unix_denied)
-    return unavailable(ProbeId::combined_setup_order,
-                       ReasonCode::unsupported_combination);
+      !descriptor_launched || !setup_descriptors_closed ||
+      !filesystem_applied || !internet_denied || !unix_denied)
+    return unavailable(id, ReasonCode::unsupported_combination);
   return payload_reached && target_waiting_for_cleanup
-             ? enforced(ProbeId::combined_setup_order)
-             : probe_error(ProbeId::combined_setup_order,
-                           ReasonCode::setup_race);
+             ? enforced(id)
+             : probe_error(id, ReasonCode::setup_race);
 }
 
 [[nodiscard]] auto confinement_denied(const int error_number) -> bool {
@@ -661,13 +670,11 @@ class Cgroup final {
 #endif
 }
 
-[[nodiscard]] auto atomic_combined_payload(const int cgroup_descriptor,
-                                           const int readiness_descriptor,
-                                           const int executable_descriptor,
-                                           const int input_descriptor,
-                                           const int output_descriptor,
-                                           const std::filesystem::path& state)
-    -> std::expected<pid_t, ReasonCode> {
+[[nodiscard]] auto atomic_combined_payload(
+    const int cgroup_descriptor, const int readiness_descriptor,
+    const int executable_descriptor, const int input_descriptor,
+    const int output_descriptor, const std::filesystem::path& state,
+    const CombinedSetupMode mode) -> std::expected<pid_t, ReasonCode> {
 #if defined(SYS_clone3) && defined(CLONE_INTO_CGROUP)
   const std::array sources{readiness_descriptor, executable_descriptor,
                            input_descriptor, output_descriptor};
@@ -680,7 +687,10 @@ class Cgroup final {
   }
   std::array<std::string, 3> arguments{
       std::string{"aiforge_process_isolation_probe_v2"},
-      std::string{"--combined-setup-payload"}, state.string()};
+      mode == CombinedSetupMode::private_root
+          ? std::string{"--private-root-combined-setup-payload"}
+          : std::string{"--combined-setup-payload"},
+      state.string()};
   std::array<char*, 4> raw_arguments{arguments[0].data(), arguments[1].data(),
                                      arguments[2].data(), nullptr};
   clone_args clone_arguments{};
@@ -714,6 +724,7 @@ class Cgroup final {
   static_cast<void>(input_descriptor);
   static_cast<void>(output_descriptor);
   static_cast<void>(state);
+  static_cast<void>(mode);
   return std::unexpected(ReasonCode::unsupported_kernel);
 #endif
 }
@@ -1779,9 +1790,21 @@ auto kill_and_reap(const pid_t child, int& status) -> void {
          write_control(cgroup_descriptor, "pids.max", "16");
 }
 
-[[nodiscard]] auto combined_setup_probe(const ProbeId id,
+[[nodiscard]] auto process_descriptor_closed(const pid_t process,
+                                             const int descriptor)
+    -> std::optional<bool> {
+  const auto path = std::filesystem::path{"/proc"} / std::to_string(process) /
+                    "fd" / std::to_string(descriptor);
+  struct stat status{};
+  if (::lstat(path.c_str(), &status) == 0) return false;
+  if (errno == ENOENT) return true;
+  return std::nullopt;
+}
+
+[[nodiscard]] auto combined_setup_probe(const CombinedSetupMode mode,
                                         const std::filesystem::path& state)
     -> ProbeRecord {
+  const auto id = combined_probe_id(mode);
   auto cgroup = required_cgroup_or_record(id);
   if (!cgroup) return cgroup.error();
   const bool limits_applied = apply_combined_limits(cgroup->child());
@@ -1824,7 +1847,7 @@ auto kill_and_reap(const pid_t child, int& status) -> void {
                                probe_error(id, ReasonCode::internal_error));
   const auto child =
       atomic_combined_payload(cgroup->child(), readiness[1], executable.get(),
-                              input.get(), output.get(), state);
+                              input.get(), output.get(), state, mode);
   static_cast<void>(::close(readiness[1]));
   const Descriptor ready{readiness[0]};
   if (!child) {
@@ -1849,12 +1872,17 @@ auto kill_and_reap(const pid_t child, int& status) -> void {
   const bool staged_descriptors =
       ::lseek(output.get(), 0, SEEK_SET) == 0 &&
       ::read(output.get(), &output_marker, 1) == 1 && output_marker == 'O';
+  const auto input_closed = process_descriptor_closed(*child, 5);
+  const auto output_closed = process_descriptor_closed(*child, 6);
   const auto processes = cgroup->processes();
   const bool target_waiting_for_cleanup =
       processes && std::ranges::find(*processes, *child) != processes->end();
-  auto result = setup_order_observation(
-      limits_applied, true, staged_descriptors, true, true, true, true, true,
-      payload_reached, target_waiting_for_cleanup);
+  auto result = input_closed && output_closed
+                    ? setup_order_observation(
+                          id, limits_applied, true, staged_descriptors, true,
+                          *input_closed && *output_closed, true, true, true,
+                          payload_reached, target_waiting_for_cleanup)
+                    : probe_error(id, ReasonCode::internal_error);
   const auto termination = terminate_cgroup_tree(id, *cgroup, false, 1);
   if (termination.state != ProbeState::enforced) result = termination;
   return finish_cgroup_probe(id, *cgroup, result);
@@ -1881,31 +1909,38 @@ auto kill_and_reap(const pid_t child, int& status) -> void {
 
 } // namespace
 
-auto run_combined_setup_payload(const std::filesystem::path& state_directory)
-    -> int {
+auto run_combined_setup_payload(const std::filesystem::path& state_directory,
+                                const CombinedSetupMode mode) -> int {
   if (!valid_state_directory(state_directory)) return assertion_internal_error;
   char input{};
   char trailing{};
   if (::read(5, &input, 1) != 1 || input != 'I' || ::read(5, &trailing, 1) != 0)
     return assertion_internal_error;
-  const auto root = establish_private_root(state_directory);
-  if (root != assertion_enforced) return root;
+  if (mode == CombinedSetupMode::private_root) {
+    const auto root = establish_private_root(state_directory);
+    if (root != assertion_enforced) return root;
+  }
   const auto filesystem_access = complete_landlock_access();
   if (!filesystem_access) return assertion_mechanism_absent;
-  if (apply_landlock("/", *filesystem_access) != assertion_enforced)
-    return assertion_prerequisite_unavailable;
-  if (install_seccomp_family_filter(true) != assertion_enforced ||
-      install_seccomp_family_filter(false) != assertion_enforced)
-    return assertion_prerequisite_unavailable;
+  const auto landlock_root = mode == CombinedSetupMode::private_root
+                                 ? std::filesystem::path{"/"}
+                                 : state_directory;
+  const auto landlock = apply_landlock(landlock_root, *filesystem_access);
+  if (landlock != assertion_enforced) return landlock;
+  const auto internet_filter = install_seccomp_family_filter(true);
+  if (internet_filter != assertion_enforced) return internet_filter;
+  const auto unix_filter = install_seccomp_family_filter(false);
+  if (unix_filter != assertion_enforced) return unix_filter;
   for (const auto family : {AF_INET, AF_INET6, AF_UNIX}) {
     errno = 0;
     const Descriptor denied{::socket(family, SOCK_STREAM | SOCK_CLOEXEC, 0)};
     if (denied.get() >= 0 || errno != EPERM) return assertion_failed;
   }
-  if (!write_all(6, "O") || !write_all(3, "R")) return assertion_internal_error;
-  static_cast<void>(::close(3));
+  if (!write_all(6, "O")) return assertion_internal_error;
   static_cast<void>(::close(5));
   static_cast<void>(::close(6));
+  if (!write_all(3, "R")) return assertion_internal_error;
+  static_cast<void>(::close(3));
   for (;;)
     ::pause();
 }
@@ -1981,7 +2016,11 @@ auto run_probe(const ProbeId probe_id,
       case ProbeId::staged_output_identity:
         return staged_output_probe(probe_id, state_directory);
       case ProbeId::combined_setup_order:
-        return combined_setup_probe(probe_id, state_directory);
+        return combined_setup_probe(CombinedSetupMode::confined,
+                                    state_directory);
+      case ProbeId::private_root_combined_setup_order:
+        return combined_setup_probe(CombinedSetupMode::private_root,
+                                    state_directory);
       case ProbeId::partial_setup_cleanup:
         return partial_setup_cleanup_probe(probe_id);
     }
@@ -2065,18 +2104,23 @@ auto pid_identity_outcome(const bool pidfd_opened, const bool identity_stable)
                            ReasonCode::pid_reuse);
 }
 
-auto setup_order_outcome(const bool limits_applied, const bool placed,
-                         const bool staged_descriptors,
+auto combined_setup_errno_outcome(const ProbeId id, const int error_number)
+    -> ProbeRecord {
+  return assertion_result(id, assertion_exit_for_errno(error_number));
+}
+
+auto setup_order_outcome(const ProbeId id, const bool limits_applied,
+                         const bool placed, const bool staged_descriptors,
                          const bool descriptor_launched,
-                         const bool private_root_applied,
+                         const bool setup_descriptors_closed,
                          const bool filesystem_applied,
                          const bool internet_denied, const bool unix_denied,
                          const bool payload_reached,
                          const bool target_waiting_for_cleanup) -> ProbeRecord {
   return setup_order_observation(
-      limits_applied, placed, staged_descriptors, descriptor_launched,
-      private_root_applied, filesystem_applied, internet_denied, unix_denied,
-      payload_reached, target_waiting_for_cleanup);
+      id, limits_applied, placed, staged_descriptors, descriptor_launched,
+      setup_descriptors_closed, filesystem_applied, internet_denied,
+      unix_denied, payload_reached, target_waiting_for_cleanup);
 }
 
 } // namespace test_support

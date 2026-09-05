@@ -157,9 +157,15 @@ auto main(const int argc, char* argv[]) -> int {
   try {
     if (argc == 3 && argv != nullptr && argv[1] != nullptr &&
         argv[2] != nullptr &&
-        std::string_view{argv[1]} == "--combined-setup-payload") {
+        (std::string_view{argv[1]} == "--combined-setup-payload" ||
+         std::string_view{argv[1]} ==
+             "--private-root-combined-setup-payload")) {
+      const auto mode =
+          std::string_view{argv[1]} == "--private-root-combined-setup-payload"
+              ? v2::CombinedSetupMode::private_root
+              : v2::CombinedSetupMode::confined;
       return combined_payload_is_sanitized()
-                 ? v2::run_combined_setup_payload(argv[2])
+                 ? v2::run_combined_setup_payload(argv[2], mode)
                  : 70;
     }
     if (argc != 4 || argv == nullptr || argv[1] == nullptr ||

@@ -100,6 +100,21 @@ class EvidenceVerifierTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     VERIFIER.validate_report(report, SOURCE_SHA)
 
+    def test_private_root_combined_unavailable_preserves_medium_gate(self) -> None:
+        report = canonical_report()
+        private_root_index = VERIFIER.ALL_PROBES.index(
+            "private_root_combined_setup_order"
+        )
+        report["probes"][private_root_index]["state"] = "unavailable"
+        report["probes"][private_root_index]["reason"] = "permission_denied"
+        VERIFIER.validate_report(report, SOURCE_SHA)
+
+        medium_index = VERIFIER.ALL_PROBES.index("combined_setup_order")
+        report["probes"][medium_index]["state"] = "unavailable"
+        report["probes"][medium_index]["reason"] = "permission_denied"
+        with self.assertRaises(ValueError):
+            VERIFIER.validate_report(report, SOURCE_SHA)
+
     def test_duplicate_json_fields_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
             VERIFIER.reject_duplicates([("state", "enforced"), ("state", "enforced")])

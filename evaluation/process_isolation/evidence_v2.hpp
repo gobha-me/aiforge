@@ -45,6 +45,7 @@ enum class ProbeId {
   staged_input_identity,
   staged_output_identity,
   combined_setup_order,
+  private_root_combined_setup_order,
   partial_setup_cleanup,
 };
 

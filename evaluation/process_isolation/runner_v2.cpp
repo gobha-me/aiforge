@@ -85,6 +85,7 @@ constexpr std::size_t maximum_cgroup_depth{8};
     case ProbeId::cgroup_memory_limit_termination:
     case ProbeId::cgroup_pids_limit_enforcement:
     case ProbeId::combined_setup_order:
+    case ProbeId::private_root_combined_setup_order:
     case ProbeId::partial_setup_cleanup: return true;
     case ProbeId::landlock_read_confinement:
     case ProbeId::landlock_write_confinement:

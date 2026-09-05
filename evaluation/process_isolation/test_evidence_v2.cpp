@@ -41,6 +41,7 @@ constexpr std::array expected_probe_names{
     std::string_view{"staged_input_identity"},
     std::string_view{"staged_output_identity"},
     std::string_view{"combined_setup_order"},
+    std::string_view{"private_root_combined_setup_order"},
     std::string_view{"partial_setup_cleanup"},
 };
 

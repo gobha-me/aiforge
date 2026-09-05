@@ -6,6 +6,8 @@
 
 namespace aiforge::evaluation::process_isolation::v2 {
 
+enum class CombinedSetupMode { confined, private_root };
+
 [[nodiscard]] auto run_probe(ProbeId probe_id,
                              const std::filesystem::path& state_directory,
                              bool has_delegated_cgroup_root) -> ProbeRecord;
@@ -13,7 +15,8 @@ namespace aiforge::evaluation::process_isolation::v2 {
 // Internal entry point used only by the fixed evaluator helper after a
 // descriptor-relative re-exec. It never becomes a production launch surface.
 [[nodiscard]] auto run_combined_setup_payload(
-    const std::filesystem::path& state_directory) -> int;
+    const std::filesystem::path& state_directory, CombinedSetupMode mode)
+    -> int;
 
 #if defined(AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT)
 namespace test_support {
@@ -48,9 +51,11 @@ namespace test_support {
                                              bool rename_denied) -> ProbeRecord;
 [[nodiscard]] auto pid_identity_outcome(bool pidfd_opened, bool identity_stable)
     -> ProbeRecord;
+[[nodiscard]] auto combined_setup_errno_outcome(ProbeId id, int error_number)
+    -> ProbeRecord;
 [[nodiscard]] auto setup_order_outcome(
-    bool limits_applied, bool placed, bool staged_descriptors,
-    bool descriptor_launched, bool private_root_applied,
+    ProbeId id, bool limits_applied, bool placed, bool staged_descriptors,
+    bool descriptor_launched, bool setup_descriptors_closed,
     bool filesystem_applied, bool internet_denied, bool unix_denied,
     bool payload_reached, bool target_waiting_for_cleanup) -> ProbeRecord;
 

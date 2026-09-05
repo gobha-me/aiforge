@@ -44,6 +44,7 @@ constexpr std::array probe_ids{
     ProbeId::staged_input_identity,
     ProbeId::staged_output_identity,
     ProbeId::combined_setup_order,
+    ProbeId::private_root_combined_setup_order,
     ProbeId::partial_setup_cleanup,
 };
 
@@ -75,6 +76,7 @@ constexpr std::array probe_names{
     std::string_view{"staged_input_identity"},
     std::string_view{"staged_output_identity"},
     std::string_view{"combined_setup_order"},
+    std::string_view{"private_root_combined_setup_order"},
     std::string_view{"partial_setup_cleanup"},
 };
 

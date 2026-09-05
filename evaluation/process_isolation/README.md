@@ -83,13 +83,16 @@ and staged input/output identity. Network evidence deliberately reports
 internet families (`AF_INET` and `AF_INET6`) separately from `AF_UNIX`. The
 combined-order row descriptor-reexecs the fixed helper and reaches its marker
 only after cgroup resource limits, atomic placement, staged input/output
-descriptors, private-root construction, complete Landlock handling, and both
-internet-family and Unix-socket denial. Its target then remains alive until
-whole-tree cleanup. The cancellation row requires an explicit stop request
-after a fan-out tree is ready. The partial-setup row measures cleanup after a
-later setup step is rejected. These are mechanism observations only: ADR 0013
-reserves any production mechanism or policy mapping for a later accepted
-decision.
+descriptors, complete Landlock handling, and both internet-family and
+Unix-socket denial. The private-root combined-order row observes the same
+composition with private-root construction before Landlock. Each target then
+remains alive until whole-tree cleanup. The private-root row is retained as
+truthful candidate evidence when that construction is unavailable; neither row
+claims a restriction level. The cancellation row requires an explicit stop
+request after a fan-out tree is ready. The partial-setup row measures cleanup
+after a later setup step is rejected. These are mechanism observations only:
+ADR 0013 reserves any production mechanism or policy mapping for a later
+accepted decision.
 
 Capture v2 independently of v1:
 
@@ -129,9 +132,10 @@ runs as the sole process and exclusive manager of that leaf. Before execution,
 the capture wrapper verifies the leaf identity, ownership, cgroup-v2 type,
 writable delegation controls, domain type, required controllers, empty
 subtree-control state, sole process, and absence of child cgroups. It then
-verifies that every required cgroup and combined-order row is `enforced` for
-the exact source SHA. A hosted runner without that explicit delegation fails
-the evidence step; an `unavailable` row is retained evidence but cannot satisfy
-this acceptance gate. Exit and signal handling stop, if necessary kill, and
-verify removal of the exact transient unit; incomplete unit cleanup dominates
-a successful capture.
+verifies that every required cgroup row and the non-private-root combined-order
+row are `enforced` for the exact source SHA. The private-root combined-order row
+remains mandatory in the report but may truthfully be `unavailable` without
+weakening that strict gate. A hosted runner without explicit delegation fails
+the evidence step. Exit and signal handling stop, if necessary kill, and verify
+removal of the exact transient unit; incomplete unit cleanup dominates a
+successful capture.
