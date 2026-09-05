@@ -107,6 +107,15 @@ auto request(domain::ConstructedContext built = context())
                                  {0.5, 64, 7, {}, {}}};
 }
 
+auto sse_stream(const std::vector<nlohmann::json>& frames) -> std::string {
+  std::string result;
+  for (const auto& frame : frames) {
+    result += "data: " + frame.dump() + "\n\n";
+  }
+  result += "data: [DONE]\n\n";
+  return result;
+}
+
 class LocalServer final {
  public:
   explicit LocalServer(std::optional<std::string> echoed_error = std::nullopt,
@@ -114,11 +123,13 @@ class LocalServer final {
                        std::string cost_value = "0.0645375",
                        const bool duplicate_finish = false,
                        const bool omit_finish = false,
-                       const bool reasoning_state = false)
+                       const bool reasoning_state = false,
+                       std::optional<std::string> custom_stream = std::nullopt)
       : m_echoed_error(std::move(echoed_error)),
         m_duplicate_cost(duplicate_cost), m_duplicate_finish(duplicate_finish),
         m_omit_finish(omit_finish), m_reasoning_state(reasoning_state),
-        m_cost_value(std::move(cost_value)) {
+        m_cost_value(std::move(cost_value)),
+        m_custom_stream(std::move(custom_stream)) {
     m_server.Get("/api/v1/models", [this](const httplib::Request& request,
                                           httplib::Response& response) {
       {
@@ -141,6 +152,10 @@ class LocalServer final {
             response.status = 401;
             response.set_content("provider echoed " + *m_echoed_error,
                                  "text/plain");
+            return;
+          }
+          if (m_custom_stream) {
+            response.set_content(*m_custom_stream, "text/event-stream");
             return;
           }
           std::string stream =
@@ -240,6 +255,7 @@ class LocalServer final {
   bool m_omit_finish{};
   bool m_reasoning_state{};
   std::string m_cost_value;
+  std::optional<std::string> m_custom_stream;
 };
 
 struct CharacterReply {
@@ -1985,8 +2001,439 @@ TEST_CASE("Venice adapter terminates after trailing response accounting",
   const auto sent = nlohmann::json::parse(server.body());
   REQUIRE(sent.at("model") == "test-model");
   REQUIRE(sent.at("messages").at(0).at("content") == "hello");
+  REQUIRE_FALSE(sent.contains("venice_parameters"));
   REQUIRE(server.authorization() == "Bearer test-secret");
   REQUIRE(server.body().find("test-secret") == std::string::npos);
+}
+
+TEST_CASE("Venice adapter emits one bounded ordered citation snapshot",
+          "[adapter][venice][citations]") {
+  const auto citations = nlohmann::json::array(
+      {{{"title", "First"},
+        {"url", "https://example.test/first"},
+        {"content", "adapter-private content"},
+        {"date", "2026-09-04"}},
+       {{"title", "First"}, {"url", "https://example.test/first"}},
+       {{"title", ""}, {"url", "http://example.test/untitled"}}});
+  const auto citation_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices", nlohmann::json::array()},
+      {"venice_parameters", {{"web_search_citations", citations}}}};
+  const auto content_frame = nlohmann::json{
+      {"id", "response"}, {"choices", {{{"delta", {{"content", "hello"}}}}}}};
+  const auto finish_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices",
+       {{{"delta", nlohmann::json::object()}, {"finish_reason", "stop"}}}}};
+  const auto usage_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices", nlohmann::json::array()},
+      {"usage",
+       {{"prompt_tokens", 2}, {"completion_tokens", 1}, {"total_tokens", 3}}}};
+  LocalServer server{std::nullopt,
+                     false,
+                     "0.0645375",
+                     false,
+                     false,
+                     false,
+                     sse_stream({citation_frame, content_frame, citation_frame,
+                                 finish_frame, usage_frame})};
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 16}};
+  auto started = backend.start(request(), {});
+  REQUIRE(started);
+
+  std::vector<backend::BackendEvent> events;
+  for (;;) {
+    auto next = (*started)->next({});
+    REQUIRE(next);
+    if (!*next) break;
+    events.push_back(std::move(**next));
+  }
+
+  REQUIRE(events.size() == 7);
+  REQUIRE(std::holds_alternative<backend::ResponseStarted>(events[0]));
+  REQUIRE(std::get<backend::CitationObserved>(events[1]).citation ==
+          (domain::CitationBlock{"https://example.test/first", "First"}));
+  REQUIRE(std::get<backend::CitationObserved>(events[2]).citation ==
+          (domain::CitationBlock{"https://example.test/first", "First"}));
+  REQUIRE(
+      std::get<backend::CitationObserved>(events[3]).citation ==
+      (domain::CitationBlock{"http://example.test/untitled", std::nullopt}));
+  REQUIRE(std::holds_alternative<backend::ContentDelta>(events[4]));
+  REQUIRE(std::holds_alternative<backend::UsageObserved>(events[5]));
+  REQUIRE(std::holds_alternative<backend::ResponseFinished>(events[6]));
+}
+
+TEST_CASE(
+    "Venice adapter accepts a first citation snapshot at stream boundaries",
+    "[adapter][venice][citations]") {
+  const auto citation = nlohmann::json::array(
+      {{{"title", "Source"}, {"url", "https://example.test/source"}}});
+  const auto citation_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices", nlohmann::json::array()},
+      {"venice_parameters", {{"web_search_citations", citation}}}};
+  const auto content_frame = nlohmann::json{
+      {"id", "response"}, {"choices", {{{"delta", {{"content", "hello"}}}}}}};
+  const auto usage_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices", nlohmann::json::array()},
+      {"usage",
+       {{"prompt_tokens", 2}, {"completion_tokens", 1}, {"total_tokens", 3}}}};
+  const auto finish_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices",
+       {{{"delta", nlohmann::json::object()}, {"finish_reason", "stop"}}}}};
+  auto final_with_citation = finish_frame;
+  final_with_citation["venice_parameters"] = {
+      {"web_search_citations", citation}};
+
+  const std::array streams{
+      sse_stream({citation_frame, content_frame, finish_frame}),
+      sse_stream({content_frame, usage_frame, citation_frame, finish_frame}),
+      sse_stream({content_frame, final_with_citation})};
+  for (const auto& stream : streams) {
+    LocalServer server{std::nullopt, false, "0.0645375", false,
+                       false,        false, stream};
+    adapters::VeniceBackend backend{secret("test-secret"),
+                                    {server.base_url(), 1s, 1s, 1s, 8}};
+    auto started = backend.start(request(), {});
+    REQUIRE(started);
+    std::size_t observed{};
+    for (;;) {
+      auto next = (*started)->next({});
+      REQUIRE(next);
+      if (!*next) break;
+      if (const auto* value = std::get_if<backend::CitationObserved>(&**next)) {
+        ++observed;
+        REQUIRE(
+            value->citation ==
+            (domain::CitationBlock{"https://example.test/source", "Source"}));
+      }
+    }
+    REQUIRE(observed == 1);
+  }
+}
+
+TEST_CASE("Venice adapter distinguishes an explicit empty citation snapshot",
+          "[adapter][venice][citations]") {
+  const auto citation_frame =
+      nlohmann::json{{"id", "response"},
+                     {"choices", nlohmann::json::array()},
+                     {"venice_parameters",
+                      {{"web_search_citations", nlohmann::json::array()}}}};
+  const auto finish_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices",
+       {{{"delta", nlohmann::json::object()}, {"finish_reason", "stop"}}}}};
+  LocalServer server{
+      std::nullopt,
+      false,
+      "0.0645375",
+      false,
+      false,
+      false,
+      sse_stream({citation_frame, citation_frame, finish_frame})};
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
+  auto started = backend.start(request(), {});
+  REQUIRE(started);
+  std::size_t observed{};
+  for (;;) {
+    auto next = (*started)->next({});
+    REQUIRE(next);
+    if (!*next) break;
+    observed +=
+        std::holds_alternative<backend::CitationObserved>(**next) ? 1U : 0U;
+  }
+  REQUIRE(observed == 0);
+}
+
+TEST_CASE("Venice adapter cancellation preserves observed citations",
+          "[adapter][venice][citations][cancellation]") {
+  auto citations = nlohmann::json::array();
+  for (std::size_t index{}; index < 256; ++index) {
+    citations.push_back(
+        {{"title", "Source"},
+         {"url", "https://example.test/source/" + std::to_string(index)}});
+  }
+  const auto citation_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices", nlohmann::json::array()},
+      {"venice_parameters", {{"web_search_citations", citations}}}};
+  const auto finish_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices",
+       {{{"delta", nlohmann::json::object()}, {"finish_reason", "stop"}}}}};
+  LocalServer server{std::nullopt,
+                     false,
+                     "0.0645375",
+                     false,
+                     false,
+                     false,
+                     sse_stream({citation_frame, finish_frame})};
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 1}};
+  auto started = backend.start(request(), {});
+  REQUIRE(started);
+
+  auto response_started = (*started)->next({});
+  REQUIRE(response_started);
+  REQUIRE(*response_started);
+  REQUIRE(std::holds_alternative<backend::ResponseStarted>(**response_started));
+  auto first_citation = (*started)->next({});
+  REQUIRE(first_citation);
+  REQUIRE(*first_citation);
+  REQUIRE(std::get<backend::CitationObserved>(**first_citation).citation ==
+          (domain::CitationBlock{"https://example.test/source/0", "Source"}));
+
+  std::stop_source cancellation;
+  cancellation.request_stop();
+  bool cancelled{};
+  std::size_t observed{1};
+  for (;;) {
+    auto next = (*started)->next(cancellation.get_token());
+    if (!next) {
+      cancelled = true;
+      REQUIRE(next.error().kind == backend::BackendErrorKind::cancelled);
+      break;
+    }
+    REQUIRE(*next);
+    observed +=
+        std::holds_alternative<backend::CitationObserved>(**next) ? 1U : 0U;
+  }
+  REQUIRE(cancelled);
+  REQUIRE(observed >= 1);
+  REQUIRE(observed < citations.size());
+}
+
+TEST_CASE("Destroying a Venice stream stops citation callback emission",
+          "[adapter][venice][citations][cancellation]") {
+  auto citations = nlohmann::json::array();
+  for (std::size_t index{}; index < 256; ++index) {
+    citations.push_back(
+        {{"title", "Source"},
+         {"url", "https://example.test/source/" + std::to_string(index)}});
+  }
+  const auto citation_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices", nlohmann::json::array()},
+      {"venice_parameters", {{"web_search_citations", citations}}}};
+  const auto finish_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices",
+       {{{"delta", nlohmann::json::object()}, {"finish_reason", "stop"}}}}};
+  LocalServer server{std::nullopt,
+                     false,
+                     "0.0645375",
+                     false,
+                     false,
+                     false,
+                     sse_stream({citation_frame, finish_frame})};
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 1}};
+  auto started = backend.start(request(), {});
+  REQUIRE(started);
+  auto response_started = (*started)->next({});
+  REQUIRE(response_started);
+  REQUIRE(*response_started);
+  REQUIRE(std::holds_alternative<backend::ResponseStarted>(**response_started));
+  auto first_citation = (*started)->next({});
+  REQUIRE(first_citation);
+  REQUIRE(*first_citation);
+  REQUIRE(std::holds_alternative<backend::CitationObserved>(**first_citation));
+
+  const auto before = std::chrono::steady_clock::now();
+  started->reset();
+  REQUIRE(std::chrono::steady_clock::now() - before < 1s);
+}
+
+TEST_CASE("Venice adapter rejects citations when web search is disabled",
+          "[adapter][venice][citations][failure]") {
+  const auto citation_frame =
+      nlohmann::json{{"id", "response"},
+                     {"choices", nlohmann::json::array()},
+                     {"venice_parameters",
+                      {{"web_search_citations",
+                        nlohmann::json::array(
+                            {{{"title", "Unexpected"},
+                              {"url", "https://example.test/unexpected"}}})}}}};
+  const auto finish_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices",
+       {{{"delta", nlohmann::json::object()}, {"finish_reason", "stop"}}}}};
+  LocalServer server{std::nullopt,
+                     false,
+                     "0.0645375",
+                     false,
+                     false,
+                     false,
+                     sse_stream({citation_frame, finish_frame})};
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
+  auto value = request();
+  value.options.extensions.emplace(
+      std::string{adapters::venice_web_search_extension},
+      domain::StructuredDataBlock{"application/json", R"("off")"});
+  auto started = backend.start(std::move(value), {});
+  REQUIRE(started);
+  bool failed{};
+  for (;;) {
+    auto next = (*started)->next({});
+    if (!next) {
+      failed = true;
+      REQUIRE(next.error().kind == backend::BackendErrorKind::protocol);
+      break;
+    }
+    if (!*next) break;
+    REQUIRE_FALSE(std::holds_alternative<backend::CitationObserved>(**next));
+  }
+  REQUIRE(failed);
+  const auto sent = nlohmann::json::parse(server.body());
+  REQUIRE_FALSE(
+      sent.at("venice_parameters").at("enable_web_citations").get<bool>());
+  REQUIRE_FALSE(sent.at("venice_parameters")
+                    .at("include_search_results_in_stream")
+                    .get<bool>());
+}
+
+TEST_CASE("Venice adapter accepts exact citation count and text boundaries",
+          "[adapter][venice][citations][boundary]") {
+  std::string maximum_uri{"https://"};
+  maximum_uri.append(4096 - maximum_uri.size(), 'u');
+  auto citations = nlohmann::json::array(
+      {{{"title", std::string(1024, 't')}, {"url", maximum_uri}}});
+  for (std::size_t index{1}; index < 256; ++index) {
+    citations.push_back(
+        {{"title", "Source"}, {"url", "https://example.test/source"}});
+  }
+  const auto citation_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices", nlohmann::json::array()},
+      {"venice_parameters", {{"web_search_citations", citations}}}};
+  const auto finish_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices",
+       {{{"delta", nlohmann::json::object()}, {"finish_reason", "stop"}}}}};
+  LocalServer server{std::nullopt,
+                     false,
+                     "0.0645375",
+                     false,
+                     false,
+                     false,
+                     sse_stream({citation_frame, finish_frame})};
+  adapters::VeniceBackend backend{secret("test-secret"),
+                                  {server.base_url(), 1s, 1s, 1s, 8}};
+  auto started = backend.start(request(), {});
+  REQUIRE(started);
+  std::vector<domain::CitationBlock> observed;
+  for (;;) {
+    auto next = (*started)->next({});
+    REQUIRE(next);
+    if (!*next) break;
+    if (auto* citation = std::get_if<backend::CitationObserved>(&**next)) {
+      observed.push_back(std::move(citation->citation));
+    }
+  }
+  REQUIRE(observed.size() == 256);
+  REQUIRE(observed.front().uri == maximum_uri);
+  REQUIRE(observed.front().title == std::string(1024, 't'));
+}
+
+TEST_CASE("Venice adapter rejects incompatible or malformed citations",
+          "[adapter][venice][citations][failure]") {
+  const auto citation_frame = [](nlohmann::json citations) {
+    return nlohmann::json{{"id", "response"},
+                          {"choices", nlohmann::json::array()},
+                          {"venice_parameters",
+                           {{"web_search_citations", std::move(citations)}}}};
+  };
+  const auto finish_frame = nlohmann::json{
+      {"id", "response"},
+      {"choices",
+       {{{"delta", nlohmann::json::object()}, {"finish_reason", "stop"}}}}};
+  const auto valid = nlohmann::json::array(
+      {{{"title", "Source"}, {"url", "https://example.test/source"}}});
+  auto many = nlohmann::json::array();
+  for (std::size_t index{}; index < 257; ++index) {
+    many.push_back({{"title", "Many"}, {"url", "https://example.test/many"}});
+  }
+  auto excessive_bytes = nlohmann::json::array();
+  for (std::size_t index{}; index < 64; ++index) {
+    excessive_bytes.push_back({{"title", std::string(1024, 't')},
+                               {"url", "https://" + std::string(4088, 'u')}});
+  }
+  const std::vector streams{
+      sse_stream({citation_frame(valid),
+                  citation_frame(nlohmann::json::array(
+                      {{{"title", "Changed"},
+                        {"url", "https://example.test/changed"}}})),
+                  finish_frame}),
+      sse_stream({citation_frame(nlohmann::json::array(
+                      {{{"url", "https://example.test/missing-title"}}})),
+                  finish_frame}),
+      sse_stream({citation_frame(nlohmann::json::array(
+                      {{{"title", "Unsafe"}, {"url", "javascript:alert(1)"}}})),
+                  finish_frame}),
+      sse_stream({citation_frame(nlohmann::json::array(
+                      {{{"title", "Unsafe"},
+                        {"url", "https://example.test/bad path"}}})),
+                  finish_frame}),
+      sse_stream(
+          {citation_frame(nlohmann::json::array(
+               {{{"title", "Unsafe"}, {"url", "https:///missing-host"}}})),
+           finish_frame}),
+      sse_stream(
+          {citation_frame(nlohmann::json::array(
+               {{{"title", "Unsafe"}, {"url", "https://?missing-host"}}})),
+           finish_frame}),
+      sse_stream(
+          {citation_frame(nlohmann::json::array(
+               {{{"title", "Unsafe"}, {"url", "https://#missing-host"}}})),
+           finish_frame}),
+      sse_stream({citation_frame(nlohmann::json::array(
+                      {{{"title", "unsafe\ntext"},
+                        {"url", "https://example.test/control"}}})),
+                  finish_frame}),
+      sse_stream({citation_frame(nlohmann::json::array(
+                      {{{"title", std::string(1025, 'x')},
+                        {"url", "https://example.test/large"}}})),
+                  finish_frame}),
+      sse_stream(
+          {citation_frame(nlohmann::json::array(
+               {{{"title", "Large"},
+                 {"url", "https://example.test/" + std::string(4096, 'x')}}})),
+           finish_frame}),
+      sse_stream({citation_frame(std::move(many)), finish_frame}),
+      sse_stream({citation_frame(std::move(excessive_bytes)), finish_frame})};
+
+  for (std::size_t index{}; index < streams.size(); ++index) {
+    CAPTURE(index);
+    LocalServer server{std::nullopt, false, "0.0645375",   false,
+                       false,        false, streams[index]};
+    adapters::VeniceBackend backend{secret("test-secret"),
+                                    {server.base_url(), 1s, 1s, 1s, 8}};
+    auto started = backend.start(request(), {});
+    REQUIRE(started);
+    bool failed{};
+    std::size_t observed{};
+    for (;;) {
+      auto next = (*started)->next({});
+      if (!next) {
+        failed = true;
+        REQUIRE(next.error().kind == backend::BackendErrorKind::protocol);
+        REQUIRE(next.error().redacted_message.find("example.test") ==
+                std::string::npos);
+        break;
+      }
+      if (!*next) break;
+      observed +=
+          std::holds_alternative<backend::CitationObserved>(**next) ? 1U : 0U;
+    }
+    REQUIRE(failed);
+    REQUIRE(observed == (index == 0 ? 1U : 0U));
+  }
 }
 
 TEST_CASE("Venice adapter maps bounded web-search extensions exactly",
@@ -2014,6 +2461,11 @@ TEST_CASE("Venice adapter maps bounded web-search extensions exactly",
     }
     const auto sent = nlohmann::json::parse(server.body());
     REQUIRE(sent.at("venice_parameters").at("enable_web_search") == mode);
+    REQUIRE(sent.at("venice_parameters").at("enable_web_citations") ==
+            (mode != "off"));
+    REQUIRE(
+        sent.at("venice_parameters").at("include_search_results_in_stream") ==
+        (mode != "off"));
   }
 }
 

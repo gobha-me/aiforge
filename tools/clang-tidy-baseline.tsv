@@ -196,9 +196,9 @@ src/adapters/tui_scenario.cpp	readability-function-cognitive-complexity	625ce5bf
 src/adapters/tui_scenario.cpp	readability-function-cognitive-complexity	925bcfd14e4ae1024c91	function 'validate' has cognitive complexity of 30 (threshold 20)
 src/adapters/tui_scenario.cpp	readability-function-cognitive-complexity	e82c1a4d46fe5b3c0c26	function 'observe_frame' has cognitive complexity of 22 (threshold 20)
 src/adapters/venice_backend.cpp	bugprone-empty-catch	02415e7f513deb2cacc4	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
-src/adapters/venice_backend.cpp	readability-function-cognitive-complexity	48d574fcbb063c0c94df	function 'produce' has cognitive complexity of 109 (threshold 20)
+src/adapters/venice_backend.cpp	readability-function-cognitive-complexity	4937f19556d12a3d0309	function 'produce' has cognitive complexity of 112 (threshold 20)
 src/adapters/venice_backend.cpp	readability-function-cognitive-complexity	5c8f3eee03102f5ff861	function 'apply_continuation_state' has cognitive complexity of 46 (threshold 20)
-src/adapters/venice_backend.cpp	readability-function-cognitive-complexity	c1cfccb1e2b508a7f4ec	lambda has cognitive complexity of 70 (threshold 20)
+src/adapters/venice_backend.cpp	readability-function-cognitive-complexity	f8364764bb21cf51d37c	lambda has cognitive complexity of 71 (threshold 20)
 src/adapters/venice_model_catalog_source.cpp	performance-move-const-arg	19ba18206b7921916733	std::move of the expression of the trivially-copyable type 'aiforge::model::PriceTier' has no effect; remove std::move()
 src/adapters/venice_model_catalog_source.cpp	performance-move-const-arg	2430cc4826c11286b00d	std::move of the expression of the trivially-copyable type 'std::optional<aiforge::model::Price>' has no effect; remove std::move()
 src/adapters/venice_model_catalog_source.cpp	performance-move-const-arg	8a5fd4e8f6c3f0317c5c	std::move of the expression of the trivially-copyable type 'aiforge::model::Price' has no effect

@@ -42,10 +42,10 @@ TermForge and venice-cpp; consumed core-only builds may set
 `aiforge_BUILD_ADAPTERS=OFF`. Their fallbacks are pinned to compatible stable
 baselines: TermForge v0.57.22 for the existing interactive seams plus visible
 fallback cursors, bounded input, output-refusal, resize, and image-route
-hardening; and venice-cpp v0.29.16
+hardening; and venice-cpp v0.29.17
 for the existing chat, model-catalogue, character, and owned-media seams plus
 redirect, header-injection, multipart-metadata, and receive-time response-size
-guards. RasterForge v0.5.0 supplies
+guards and typed streaming Chat citations. RasterForge v0.5.0 supplies
 bounded static PNG, JPEG, and WebP validation for generated-image artifacts. It
 is active with the process adapters through `${PROJECT_NAME}_DEPS`.
 Top-level Linux builds also enable the private RtAudio 6.0.1 ALSA playback and
