@@ -416,6 +416,42 @@ class RepositoryReadExecutor final : public ToolExecutor {
 
 } // namespace
 
+auto make_repository_read_approval_rule(
+    std::shared_ptr<const DescriptorRelativePathAuthority> root,
+    std::string allowed_relative_path,
+    AutomaticApprovalRuleConstraints constraints)
+    -> std::expected<AutomaticApprovalRule, AutomaticApprovalMatcherError> {
+  try {
+    constexpr std::string_view digest_prefix{"sha256:"};
+    if (!root) {
+      return std::unexpected(AutomaticApprovalMatcherError{
+          AutomaticApprovalMatcherErrorCode::invalid_configuration,
+          "repository-read automatic approval rule is invalid"});
+    }
+    const std::string root_identity{root->identity()};
+    if (root_identity.size() != digest_prefix.size() + 64U ||
+        !root_identity.starts_with(digest_prefix) ||
+        std::ranges::any_of(root_identity.substr(digest_prefix.size()),
+                            [](const unsigned char character) {
+                              return !((character >= '0' && character <= '9') ||
+                                       (character >= 'a' && character <= 'f'));
+                            }) ||
+        (!allowed_relative_path.empty() &&
+         !valid_relative_path(allowed_relative_path, 4096U))) {
+      return std::unexpected(AutomaticApprovalMatcherError{
+          AutomaticApprovalMatcherErrorCode::invalid_configuration,
+          "repository-read automatic approval rule is invalid"});
+    }
+    return AutomaticApprovalRule{RepositoryReadPathApprovalRule{
+        std::move(root), std::move(allowed_relative_path),
+        std::move(constraints)}};
+  } catch (...) {
+    return std::unexpected(AutomaticApprovalMatcherError{
+        AutomaticApprovalMatcherErrorCode::internal_failure,
+        "repository-read automatic approval rule failed internally"});
+  }
+}
+
 auto repository_read_tool_declaration(
     const RepositoryReadToolConfiguration& configuration)
     -> std::expected<backend::ToolDeclaration, ToolRegistryError> {

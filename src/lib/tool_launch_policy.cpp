@@ -1,22 +1,15 @@
 #include <aiforge/runtime/tool_launch_policy.hpp>
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
-#include <cstdint>
 #include <functional>
 #include <iterator>
 #include <ranges>
-#include <set>
 #include <string_view>
 #include <utility>
 
-#include <aiforge/detail/sha256.hpp>
-
 namespace aiforge::runtime {
 namespace {
-
-constexpr std::size_t kMaximumAutomaticTools{256};
 
 [[nodiscard]] auto error(const ToolPolicyErrorCode code, std::string message)
     -> ToolPolicyError {
@@ -36,25 +29,6 @@ constexpr std::size_t kMaximumAutomaticTools{256};
     case domain::Effect::change_privileges: return true;
   }
   return false;
-}
-
-[[nodiscard]] auto valid_tool_name(const std::string_view value) -> bool {
-  return !value.empty() && value.size() <= 128U &&
-         std::ranges::none_of(value, [](const unsigned char character) {
-           return character < 0x20U || character == 0x7fU;
-         });
-}
-
-auto append_matcher_field(detail::Sha256& digest, const std::string_view value)
-    -> void {
-  std::array<std::byte, 8> length{};
-  const auto size = static_cast<std::uint64_t>(value.size());
-  for (std::size_t index{}; index < length.size(); ++index) {
-    const auto shift = static_cast<unsigned>((length.size() - index - 1U) * 8U);
-    length[index] = static_cast<std::byte>((size >> shift) & 0xffU);
-  }
-  digest.update(length);
-  digest.update(std::as_bytes(std::span{value.data(), value.size()}));
 }
 
 template <typename Value>
@@ -279,10 +253,26 @@ class LaunchPolicy final : public ToolPolicy {
               "the invocation requires explicit user approval",
               domain::PolicyDecisionSource::permission_profile};
         case ApprovalMode::automatic:
-          if (!m_automatic_tools.contains(checked->request.tool_name)) {
+          if (!checked->request.canonical_arguments ||
+              !checked->request.selected_restriction ||
+              !m_configuration.automatic_matcher) {
             return denied();
           }
-          break;
+          {
+            const auto matched = m_configuration.automatic_matcher->match(
+                {checked->request.session_id, checked->request.run_id,
+                 checked->request.invocation_id, checked->request.tool_name,
+                 *checked->request.canonical_arguments,
+                 *checked->request.selected_restriction,
+                 checked->request.effects, checked->request.scopes});
+            if (!matched || !matched->has_value()) return denied();
+            return ToolPolicyResolution{
+                domain::PolicyDecision::allow,
+                std::move(checked->request.scopes),
+                "allowed by a bounded automatic approval rule",
+                domain::PolicyDecisionSource::automatic_matcher,
+                std::move(**matched)};
+          }
         case ApprovalMode::allow_all: break;
       }
       return ToolPolicyResolution{
@@ -334,13 +324,14 @@ class LaunchPolicy final : public ToolPolicy {
     }
   }
 
-  void set_automatic_tools(std::set<std::string, std::less<>> tools) {
-    m_automatic_tools = std::move(tools);
-  }
-
   [[nodiscard]] auto provenance() const noexcept
       -> const domain::ToolPolicyProvenance* override {
     return &m_provenance;
+  }
+
+  [[nodiscard]] auto selected_restriction() const noexcept
+      -> std::optional<RestrictionLevel> override {
+    return m_configuration.launch_context.selected_restriction();
   }
 
  private:
@@ -350,6 +341,11 @@ class LaunchPolicy final : public ToolPolicy {
         m_configuration.permission_profile_id) {
       return std::unexpected(error(ToolPolicyErrorCode::invalid_profile,
                                    "permission profile is invalid"));
+    }
+    if (request.selected_restriction &&
+        *request.selected_restriction !=
+            m_configuration.launch_context.selected_restriction()) {
+      return CheckedRequest{request, false};
     }
     if (request.tool_name.empty() || !unique(request.effects)) {
       return std::unexpected(error(ToolPolicyErrorCode::invalid_request,
@@ -418,55 +414,20 @@ class LaunchPolicy final : public ToolPolicy {
   ToolRegistrySnapshot m_registered_tools;
   ToolLaunchPolicyConfiguration m_configuration;
   domain::ToolPolicyProvenance m_provenance;
-  std::set<std::string, std::less<>> m_automatic_tools;
 };
 
 } // namespace
-
-auto exact_tool_allowlist_matcher_identity(
-    const std::span<const std::string> tool_names)
-    -> std::expected<std::string, ToolPolicyError> {
-  try {
-    if (tool_names.size() > kMaximumAutomaticTools ||
-        std::ranges::any_of(tool_names, [](const auto& name) {
-          return !valid_tool_name(name);
-        })) {
-      return std::unexpected(error(ToolPolicyErrorCode::invalid_profile,
-                                   "automatic tool allowlist is invalid"));
-    }
-    std::set<std::string, std::less<>> canonical{tool_names.begin(),
-                                                 tool_names.end()};
-    if (canonical.size() != tool_names.size()) {
-      return std::unexpected(error(ToolPolicyErrorCode::invalid_profile,
-                                   "automatic tool allowlist is invalid"));
-    }
-    detail::Sha256 digest;
-    append_matcher_field(digest, "aiforge.exact-tool-allowlist.v1");
-    for (const auto& name : canonical)
-      append_matcher_field(digest, name);
-    return "aiforge.exact-tool-allowlist.v1.sha256:" + digest.finish();
-  } catch (...) {
-    return std::unexpected(
-        error(ToolPolicyErrorCode::internal_failure,
-              "automatic tool allowlist identity failed internally"));
-  }
-}
 
 auto make_tool_launch_policy(const ToolRegistrySnapshot& registered_tools,
                              ToolLaunchPolicyConfiguration configuration)
     -> std::expected<std::shared_ptr<ToolPolicy>, ToolPolicyError> {
   try {
-    if (configuration.automatically_eligible_tools.size() >
-        kMaximumAutomaticTools) {
-      return std::unexpected(error(ToolPolicyErrorCode::invalid_profile,
-                                   "automatic tool allowlist is too large"));
-    }
-    if (configuration.launch_context.approval_mode() !=
-            ApprovalMode::automatic &&
-        !configuration.automatically_eligible_tools.empty()) {
+    const bool automatic =
+        configuration.launch_context.approval_mode() == ApprovalMode::automatic;
+    if (automatic != static_cast<bool>(configuration.automatic_matcher)) {
       return std::unexpected(
           error(ToolPolicyErrorCode::invalid_profile,
-                "automatic tools require automatic approval mode"));
+                "automatic approval mode requires one compiled matcher"));
     }
     if (std::ranges::any_of(
             registered_tools.declarations(), [&](const auto& declaration) {
@@ -480,33 +441,27 @@ auto make_tool_launch_policy(const ToolRegistrySnapshot& registered_tools,
                 "process registration does not match the launch restriction"));
     }
 
-    std::set<std::string, std::less<>> automatic_tools;
-    for (const auto& tool_name : configuration.automatically_eligible_tools) {
-      if (registered_tools.find(tool_name) == nullptr ||
-          !automatic_tools.insert(tool_name).second) {
-        return std::unexpected(
-            error(ToolPolicyErrorCode::invalid_profile,
-                  "automatic tools must be unique registered tool names"));
-      }
+    if (automatic && (!configuration.launch_context.matcher_policy_identity() ||
+                      *configuration.launch_context.matcher_policy_identity() !=
+                          configuration.automatic_matcher->identity())) {
+      return std::unexpected(
+          error(ToolPolicyErrorCode::invalid_profile,
+                "automatic matcher identity does not match its policy"));
     }
-    if (configuration.launch_context.approval_mode() ==
-        ApprovalMode::automatic) {
-      std::vector<std::string> canonical{automatic_tools.begin(),
-                                         automatic_tools.end()};
-      auto matcher = exact_tool_allowlist_matcher_identity(canonical);
-      if (!matcher ||
-          configuration.launch_context.matcher_policy_identity() != *matcher) {
-        return std::unexpected(
-            error(ToolPolicyErrorCode::invalid_profile,
-                  "automatic matcher identity does not match its policy"));
-      }
+    if (automatic && std::ranges::any_of(
+                         configuration.automatic_matcher->tool_names(),
+                         [&](const auto& tool_name) {
+                           return registered_tools.find(tool_name) == nullptr;
+                         })) {
+      return std::unexpected(
+          error(ToolPolicyErrorCode::invalid_profile,
+                "automatic approval rules require registered tools"));
     }
 
     auto provenance = make_provenance(registered_tools, configuration);
     if (!provenance) return std::unexpected(std::move(provenance.error()));
     auto policy = std::make_shared<LaunchPolicy>(
         registered_tools, std::move(configuration), std::move(*provenance));
-    policy->set_automatic_tools(std::move(automatic_tools));
     return std::shared_ptr<ToolPolicy>{std::move(policy)};
   } catch (...) {
     return std::unexpected(

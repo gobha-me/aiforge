@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include <aiforge/runtime/automatic_approval_matcher.hpp>
 #include <aiforge/storage/policy_grant_store.hpp>
 
 namespace aiforge::runtime {
@@ -42,6 +43,8 @@ struct ToolPolicyRequest {
   std::string tool_name;
   std::vector<domain::Effect> effects;
   std::vector<domain::CapabilityScope> scopes;
+  std::optional<CanonicalToolArguments> canonical_arguments{};
+  std::optional<RestrictionLevel> selected_restriction{};
   auto operator==(const ToolPolicyRequest&) const -> bool = default;
 };
 
@@ -50,6 +53,7 @@ struct ToolPolicyResolution {
   std::vector<domain::CapabilityScope> scopes;
   std::optional<std::string> redacted_reason;
   domain::PolicyDecisionSource source{domain::PolicyDecisionSource::fallback};
+  std::optional<domain::AutomaticApprovalEvidence> automatic_approval{};
   auto operator==(const ToolPolicyResolution&) const -> bool = default;
 };
 
@@ -78,6 +82,11 @@ class ToolPolicy {
   [[nodiscard]] virtual auto provenance() const noexcept
       -> const domain::ToolPolicyProvenance* {
     return nullptr;
+  }
+
+  [[nodiscard]] virtual auto selected_restriction() const noexcept
+      -> std::optional<RestrictionLevel> {
+    return std::nullopt;
   }
 };
 

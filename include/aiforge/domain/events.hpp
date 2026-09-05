@@ -1,5 +1,6 @@
 #pragma once
 
+#include <aiforge/domain/automatic_approval.hpp>
 #include <aiforge/domain/child_run.hpp>
 #include <aiforge/domain/content.hpp>
 #include <aiforge/domain/events_fwd.hpp>
@@ -191,6 +192,7 @@ enum class PolicyDecision {
 enum class PolicyDecisionSource {
   fallback,
   permission_profile,
+  automatic_matcher,
   session_grant,
   saved_grant,
   user_approval,
@@ -202,6 +204,7 @@ struct ToolPolicyDecided {
   std::vector<CapabilityScope> scopes;
   std::optional<std::string> reason;
   PolicyDecisionSource source{PolicyDecisionSource::fallback};
+  std::optional<AutomaticApprovalEvidence> automatic_approval{};
   auto operator==(const ToolPolicyDecided&) const -> bool = default;
 };
 

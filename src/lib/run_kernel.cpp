@@ -702,6 +702,19 @@ using WorkerUpdate =
   return false;
 }
 
+[[nodiscard]] auto valid_policy_decision_source(
+    const domain::PolicyDecisionSource source) -> bool {
+  switch (source) {
+    case domain::PolicyDecisionSource::fallback:
+    case domain::PolicyDecisionSource::permission_profile:
+    case domain::PolicyDecisionSource::automatic_matcher:
+    case domain::PolicyDecisionSource::session_grant:
+    case domain::PolicyDecisionSource::saved_grant:
+    case domain::PolicyDecisionSource::user_approval: return true;
+  }
+  return false;
+}
+
 [[nodiscard]] auto valid_approval_decision(
     const domain::ApprovalDecision decision) -> bool {
   switch (decision) {
@@ -1289,15 +1302,19 @@ struct RunKernel::Impl {
         std::get<domain::ChildRunCreated>(payload).descriptor.has_value();
     const auto* child_payload = std::get_if<domain::ChildRunCreated>(&payload);
     const auto* proposed_tool = std::get_if<domain::ToolProposed>(&payload);
+    const auto policy_decided =
+        std::holds_alternative<domain::ToolPolicyDecided>(payload);
     const std::uint32_t schema_version =
         enriched_child
             ? (child_payload->descriptor->review_receipt_id ? 4U : 3U)
-            : (proposed_tool != nullptr && proposed_tool->spend_quote
+            : (policy_decided
                    ? 2U
-                   : (std::holds_alternative<domain::PlanRevisionProposed>(
-                          payload)
+                   : (proposed_tool != nullptr && proposed_tool->spend_quote
                           ? 2U
-                          : 1U));
+                          : (std::holds_alternative<
+                                 domain::PlanRevisionProposed>(payload)
+                                 ? 2U
+                                 : 1U)));
     std::optional<domain::RunId> parent_run_id;
     const auto child = transaction.active_children.find(run_id);
     if (child != transaction.active_children.end() && child->second.child_run) {
@@ -2292,6 +2309,11 @@ struct RunKernel::Impl {
           invocation.terminal_event_seen) {
         continue;
       }
+      std::optional<CanonicalToolArguments> canonical_arguments;
+      if (auto canonical = canonicalize_validated_tool_arguments(
+              invocation.arguments.value, limits.tool_argument_bytes)) {
+        canonical_arguments = std::move(*canonical);
+      }
       invocation.policy_request =
           ToolPolicyRequest{transaction.event_log.session_id(),
                             transaction.active->run_id,
@@ -2299,7 +2321,9 @@ struct RunKernel::Impl {
                             transaction.active->permission_profile_id,
                             invocation.declaration.name,
                             invocation.requested_effects,
-                            invocation.requested_scopes};
+                            invocation.requested_scopes,
+                            std::move(canonical_arguments),
+                            policy->selected_restriction()};
 
       std::expected<ToolPolicyResolution, ToolPolicyError> resolution =
           std::unexpected(ToolPolicyError{
@@ -2326,10 +2350,21 @@ struct RunKernel::Impl {
         continue;
       }
       if (!valid_policy_decision(resolution->decision) ||
+          !valid_policy_decision_source(resolution->source) ||
           (resolution->redacted_reason &&
            (resolution->redacted_reason->size() > 4096 ||
             has_control_character(*resolution->redacted_reason))) ||
-          !scopes_are_unique(resolution->scopes)) {
+          !scopes_are_unique(resolution->scopes) ||
+          ((resolution->source ==
+            domain::PolicyDecisionSource::automatic_matcher) !=
+           resolution->automatic_approval.has_value()) ||
+          (resolution->automatic_approval &&
+           (resolution->decision != domain::PolicyDecision::allow ||
+            policy->provenance() == nullptr ||
+            policy->provenance()->matcher_policy_identity !=
+                resolution->automatic_approval->policy_identity ||
+            !domain::valid_automatic_approval_evidence(
+                *resolution->automatic_approval)))) {
         return fail_live_run(transaction, protocol_domain_error());
       }
       if (resolution->decision != domain::PolicyDecision::deny) {
@@ -2348,7 +2383,8 @@ struct RunKernel::Impl {
                                      invocation.invocation_id,
                                      resolution->decision, resolution->scopes,
                                      std::move(resolution->redacted_reason),
-                                     resolution->source},
+                                     resolution->source,
+                                     std::move(resolution->automatic_approval)},
                                  transaction, invocation.invocation_id);
           !recorded) {
         return recorded;
@@ -3114,6 +3150,9 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             policy_scopes;
         std::map<domain::InvocationId, domain::PolicyDecisionSource>
             policy_sources;
+        std::map<domain::InvocationId,
+                 std::optional<domain::AutomaticApprovalEvidence>>
+            policy_automatic_approvals;
         std::map<domain::InvocationId, domain::ApprovalDecision>
             approval_decisions;
         std::map<domain::InvocationId, std::vector<domain::CapabilityScope>>
@@ -3144,6 +3183,7 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             policy_decisions.clear();
             policy_scopes.clear();
             policy_sources.clear();
+            policy_automatic_approvals.clear();
             approval_decisions.clear();
             approval_scopes.clear();
             approval_lifetimes.clear();
@@ -3168,6 +3208,9 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                 !policy_scopes.emplace(value->invocation_id, value->scopes)
                      .second ||
                 !policy_sources.emplace(value->invocation_id, value->source)
+                     .second ||
+                !policy_automatic_approvals
+                     .emplace(value->invocation_id, value->automatic_approval)
                      .second) {
               return std::unexpected(kernel_error(
                   RunKernelErrorCode::replay_rejected,
@@ -3382,9 +3425,21 @@ auto RunKernel::open_durable(DurableSessionOpen session,
           if (policy != policy_decisions.end()) {
             const auto& scopes = policy_scopes.at(current_id);
             if (!valid_policy_decision(policy->second) ||
+                !valid_policy_decision_source(policy_sources.at(current_id)) ||
                 (policy->second == domain::PolicyDecision::deny
                      ? !scopes.empty()
-                     : !scopes_match_request(scopes))) {
+                     : !scopes_match_request(scopes)) ||
+                ((policy_sources.at(current_id) ==
+                  domain::PolicyDecisionSource::automatic_matcher) !=
+                 policy_automatic_approvals.at(current_id).has_value()) ||
+                (policy_automatic_approvals.at(current_id) &&
+                 (policy->second != domain::PolicyDecision::allow ||
+                  !provenance_policy ||
+                  provenance_policy->matcher_policy_identity !=
+                      policy_automatic_approvals.at(current_id)
+                          ->policy_identity ||
+                  !domain::valid_automatic_approval_evidence(
+                      *policy_automatic_approvals.at(current_id))))) {
               return std::unexpected(kernel_error(
                   RunKernelErrorCode::replay_rejected,
                   "queued tool policy scopes are invalid during replay"));
@@ -3400,6 +3455,14 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                                "invalid during replay"));
             }
           }
+          std::optional<CanonicalToolArguments> canonical_arguments;
+          if (!tool_terminal.contains(current_id)) {
+            auto canonical = canonicalize_validated_tool_arguments(
+                proposed->second.validated_arguments.value_or(
+                    proposed->second.arguments),
+                kernel->m_impl->limits.tool_argument_bytes);
+            if (canonical) canonical_arguments = std::move(*canonical);
+          }
           if (!tool_terminal.contains(current_id) &&
               !proposed->second.declared_effects.empty()) {
             if (policy == policy_decisions.end()) {
@@ -3412,12 +3475,14 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                     ToolPolicyErrorCode::internal_failure,
                     "tool policy replay validation failed internally", false});
             try {
-              current_resolution = kernel->m_impl->policy->evaluate(
-                  ToolPolicyRequest{event_log.session_id(), *awaiting_run,
-                                    current_id, started->permission_profile_id,
-                                    proposed->second.tool_name,
-                                    proposed->second.declared_effects,
-                                    proposed->second.requested_scopes});
+              current_resolution =
+                  kernel->m_impl->policy->evaluate(ToolPolicyRequest{
+                      event_log.session_id(), *awaiting_run, current_id,
+                      started->permission_profile_id,
+                      proposed->second.tool_name,
+                      proposed->second.declared_effects,
+                      proposed->second.requested_scopes, canonical_arguments,
+                      kernel->m_impl->policy->selected_restriction()});
             } catch (...) {
               current_resolution = std::unexpected(ToolPolicyError{
                   ToolPolicyErrorCode::internal_failure,
@@ -3426,7 +3491,9 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             if (!current_resolution ||
                 current_resolution->decision != policy->second ||
                 current_resolution->scopes != policy_scopes.at(current_id) ||
-                current_resolution->source != policy_sources.at(current_id)) {
+                current_resolution->source != policy_sources.at(current_id) ||
+                current_resolution->automatic_approval !=
+                    policy_automatic_approvals.at(current_id)) {
               return std::unexpected(kernel_error(
                   RunKernelErrorCode::replay_rejected,
                   "queued tool policy decision changed during replay"));
@@ -3488,14 +3555,16 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             state = Impl::InvocationState::awaiting_approval;
             ++pending_approval_count;
             renewed_approval_ids.push_back(current_id);
-            policy_request =
-                ToolPolicyRequest{event_log.session_id(),
-                                  *awaiting_run,
-                                  current_id,
-                                  started->permission_profile_id,
-                                  proposed->second.tool_name,
-                                  proposed->second.declared_effects,
-                                  proposed->second.requested_scopes};
+            policy_request = ToolPolicyRequest{
+                event_log.session_id(),
+                *awaiting_run,
+                current_id,
+                started->permission_profile_id,
+                proposed->second.tool_name,
+                proposed->second.declared_effects,
+                proposed->second.requested_scopes,
+                canonical_arguments,
+                kernel->m_impl->policy->selected_restriction()};
           } else if (approval_decisions.contains(current_id) &&
                      approval_decisions.at(current_id) ==
                          domain::ApprovalDecision::approved) {
@@ -3516,14 +3585,16 @@ auto RunKernel::open_durable(DurableSessionOpen session,
             }
             state = Impl::InvocationState::awaiting_approval;
             ++pending_approval_count;
-            policy_request =
-                ToolPolicyRequest{event_log.session_id(),
-                                  *awaiting_run,
-                                  current_id,
-                                  started->permission_profile_id,
-                                  proposed->second.tool_name,
-                                  proposed->second.declared_effects,
-                                  proposed->second.requested_scopes};
+            policy_request = ToolPolicyRequest{
+                event_log.session_id(),
+                *awaiting_run,
+                current_id,
+                started->permission_profile_id,
+                proposed->second.tool_name,
+                proposed->second.declared_effects,
+                proposed->second.requested_scopes,
+                canonical_arguments,
+                kernel->m_impl->policy->selected_restriction()};
           } else {
             return std::unexpected(
                 kernel_error(RunKernelErrorCode::replay_rejected,

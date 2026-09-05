@@ -1,5 +1,7 @@
 add_library(${PROJECT_NAME}_lib STATIC
   application_launch_context.cpp
+  automatic_approval.cpp
+  automatic_approval_matcher.cpp
   ask_user_tool.cpp
   audio.cpp
   bootstrap.cpp

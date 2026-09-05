@@ -590,6 +590,10 @@ V1 provenance remains readable. Restarted work re-evaluates the current launch
 policy, and an approval consumed before an interrupted start is requested
 again before execution.
 
+No production implicit-approval rules are installed by default. Selecting
+`auto` without an explicit bounded per-tool rule therefore denies every
+authority-bearing invocation without falling back to a prompt.
+
 ## Structured user questions
 
 `ask_user` is a no-authority model-facing tool for one or more bounded single-

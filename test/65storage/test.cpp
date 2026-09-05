@@ -796,6 +796,91 @@ TEST_CASE("legacy review payload shapes remain canonical",
   REQUIRE(*replayed == events);
 }
 
+TEST_CASE("automatic approval evidence is schema-v2 bounded and strict",
+          "[storage][sqlite][codec][tool-policy][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "automatic-policy", 100);
+  const auto invocation = make_id<domain::InvocationId>("automatic-call");
+  auto decided = event(
+      1,
+      domain::ToolPolicyDecided{
+          invocation,
+          domain::PolicyDecision::allow,
+          {{domain::Effect::read, "filesystem.root", "/repo"}},
+          std::string{"allowed by a bounded automatic approval rule"},
+          domain::PolicyDecisionSource::automatic_matcher,
+          domain::AutomaticApprovalEvidence{
+              "aiforge.auto-policy.v1.sha256:" + std::string(64, 'a'),
+              "aiforge.auto-rule.exact.v1.sha256:" + std::string(64, 'b')}},
+      "automatic-policy-decision");
+  decided.metadata.schema_version = 2;
+  decided.metadata.invocation_id = invocation;
+  REQUIRE(store->append_events(session, std::array{decided}));
+  const auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  REQUIRE(*replayed == std::vector<domain::RunEvent>{decided});
+  store.reset();
+
+  SECTION("evidence is missing") {
+    execute_sql(path, "UPDATE events SET payload_json=json_remove(payload_json,"
+                      "'$.automatic_approval') WHERE event_id="
+                      "'automatic-policy-decision'");
+  }
+  SECTION("evidence contains a raw identity") {
+    execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                      "'$.automatic_approval.rule_identity','/secret/rule') "
+                      "WHERE event_id='automatic-policy-decision'");
+  }
+  SECTION("policy identity is secret-like alphanumeric text") {
+    execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                      "'$.automatic_approval.policy_identity',"
+                      "'SecretLikePolicyToken123') WHERE event_id="
+                      "'automatic-policy-decision'");
+  }
+  SECTION("rule identity is secret-like alphanumeric text") {
+    execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                      "'$.automatic_approval.rule_identity',"
+                      "'SecretLikeRuleToken456') WHERE event_id="
+                      "'automatic-policy-decision'");
+  }
+  SECTION("digest uses uppercase hexadecimal") {
+    execute_sql(path,
+                "UPDATE events SET payload_json=json_set(payload_json,"
+                "'$.automatic_approval.rule_identity',"
+                "'aiforge.auto-rule.exact.v1.sha256:BBBBBBBBBBBBBBBBBBBBBBBB"
+                "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB') WHERE event_id="
+                "'automatic-policy-decision'");
+  }
+  SECTION("decision source contradicts evidence") {
+    execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                      "'$.source','permission_profile') WHERE event_id="
+                      "'automatic-policy-decision'");
+  }
+  SECTION("evidence has an unknown field") {
+    execute_sql(path,
+                "UPDATE events SET payload_json=json_set(payload_json,"
+                "'$.automatic_approval.raw_rule','secret') WHERE event_id="
+                "'automatic-policy-decision'");
+  }
+  store = open_store(path);
+  const auto corrupted = store->replay_events(session);
+  REQUIRE_FALSE(corrupted);
+  REQUIRE(corrupted.error().code == storage::SessionStoreErrorCode::corrupt);
+  store.reset();
+
+  TemporaryDirectory legacy_temporary;
+  store = open_store(legacy_temporary.path() / "aiforge" / "sessions.sqlite3");
+  const auto legacy_session = create(*store, "legacy-automatic-policy", 100);
+  decided.metadata.schema_version = 1;
+  const auto legacy_append =
+      store->append_events(legacy_session, std::array{decided});
+  REQUIRE_FALSE(legacy_append);
+  REQUIRE(legacy_append.error().code ==
+          storage::SessionStoreErrorCode::invalid_argument);
+}
+
 TEST_CASE("malformed persisted reported cost fails replay explicitly",
           "[storage][sqlite][cost][corrupt][failure]") {
   TemporaryDirectory temporary;

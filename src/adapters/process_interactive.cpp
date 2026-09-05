@@ -4800,20 +4800,16 @@ auto ProcessInteractiveCommand::execute(Request request,
                      tool_snapshot.error().message);
     }
     tools = std::move(*tool_snapshot);
-    std::vector<std::string> automatically_eligible_tools;
-    if (*approval == runtime::ApprovalMode::automatic &&
-        tools.find("read_repository_file") != nullptr) {
-      automatically_eligible_tools = {"read_repository_file"};
-    }
+    std::shared_ptr<runtime::AutomaticApprovalMatcher> automatic_matcher;
     std::optional<std::string> matcher_policy_identity;
     if (*approval == runtime::ApprovalMode::automatic) {
-      auto identity = runtime::exact_tool_allowlist_matcher_identity(
-          automatically_eligible_tools);
-      if (!identity) {
+      auto compiled = runtime::compile_automatic_approval_matcher({});
+      if (!compiled) {
         return failure(cli::CommandFailureKind::runtime,
-                       identity.error().message);
+                       compiled.error().message);
       }
-      matcher_policy_identity = std::move(*identity);
+      automatic_matcher = std::move(*compiled);
+      matcher_policy_identity = std::string{automatic_matcher->identity()};
     }
     auto launch_context = application_launch_context(
         *restriction, *approval, std::move(matcher_policy_identity));
@@ -4823,7 +4819,7 @@ auto ProcessInteractiveCommand::execute(Request request,
     }
     runtime::ToolLaunchPolicyConfiguration policy_configuration{
         *permission_profile_id, std::move(*launch_context),
-        std::move(automatically_eligible_tools)};
+        std::move(automatic_matcher)};
     auto tool_policy = runtime::make_tool_launch_policy(
         tools, std::move(policy_configuration));
     if (!tool_policy) {
