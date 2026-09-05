@@ -125,10 +125,15 @@ jobs:
           if-no-files-found: error
 
       - name: Capture process-isolation evidence v2
-        run: >-
-          "${{ matrix.build_dir }}/evaluation/process_isolation/aiforge_process_isolation_evaluation_v2"
-          --source-sha "$GITHUB_SHA"
-          --output "${{ matrix.build_dir }}/process-isolation-evidence-v2.json"
+        run: |
+          python3 tools/test_verify_process_isolation_evidence_v2.py
+          bash tools/test-capture-process-isolation-evidence-v2.sh
+          evaluator="$GITHUB_WORKSPACE/${{ matrix.build_dir }}/evaluation/process_isolation/aiforge_process_isolation_evaluation_v2"
+          report="$GITHUB_WORKSPACE/${{ matrix.build_dir }}/process-isolation-evidence-v2.json"
+          bash tools/capture-process-isolation-evidence-v2.sh \
+            "$evaluator" "$GITHUB_SHA" "$report"
+          python3 tools/verify-process-isolation-evidence-v2.py \
+            "$report" "$GITHUB_SHA"
 
       - name: Upload exact-SHA process-isolation evidence v2
         if: always()

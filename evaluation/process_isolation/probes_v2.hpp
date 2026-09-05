@@ -10,6 +10,11 @@ namespace aiforge::evaluation::process_isolation::v2 {
                              const std::filesystem::path& state_directory,
                              bool has_delegated_cgroup_root) -> ProbeRecord;
 
+// Internal entry point used only by the fixed evaluator helper after a
+// descriptor-relative re-exec. It never becomes a production launch surface.
+[[nodiscard]] auto run_combined_setup_payload(
+    const std::filesystem::path& state_directory) -> int;
+
 #if defined(AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT)
 namespace test_support {
 
@@ -30,13 +35,24 @@ namespace test_support {
                                              bool visible_in_parent,
                                              bool cleanup_complete)
     -> ProbeRecord;
+[[nodiscard]] auto cancellation_cleanup_outcome(bool tree_ready,
+                                                bool cancellation_requested,
+                                                bool tree_terminated,
+                                                bool cleanup_complete)
+    -> ProbeRecord;
+[[nodiscard]] auto write_confinement_outcome(bool allowed_write_succeeded,
+                                             bool existing_write_denied,
+                                             bool truncation_denied,
+                                             bool removal_denied,
+                                             bool creation_denied,
+                                             bool rename_denied) -> ProbeRecord;
 [[nodiscard]] auto pid_identity_outcome(bool pidfd_opened, bool identity_stable)
     -> ProbeRecord;
-[[nodiscard]] auto setup_order_outcome(bool placed, bool filesystem_applied,
-                                       bool network_applied,
-                                       bool payload_reached,
-                                       bool target_waiting_for_cleanup)
-    -> ProbeRecord;
+[[nodiscard]] auto setup_order_outcome(
+    bool limits_applied, bool placed, bool staged_descriptors,
+    bool descriptor_launched, bool private_root_applied,
+    bool filesystem_applied, bool internet_denied, bool unix_denied,
+    bool payload_reached, bool target_waiting_for_cleanup) -> ProbeRecord;
 
 } // namespace test_support
 #endif

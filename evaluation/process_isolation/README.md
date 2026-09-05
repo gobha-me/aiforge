@@ -76,15 +76,20 @@ controller's limit behavior. PID observations are bound to pidfds; an
 unavailable identity proof fails closed rather than relying on a reusable
 numeric PID.
 
-Filesystem rows separately measure read, write, and execute confinement;
+Filesystem rows separately measure read, complete mutation, and execute
+confinement;
 private-root and mount-propagation construction; descriptor-relative launch;
 and staged input/output identity. Network evidence deliberately reports
 internet families (`AF_INET` and `AF_INET6`) separately from `AF_UNIX`. The
-combined-order row reaches its marker only after atomic cgroup placement,
-filesystem confinement, and network filtering. The partial-setup row measures
-cleanup after a later setup step is rejected. These are mechanism observations
-only: ADR 0013 reserves any production mechanism or policy mapping for a later
-accepted decision.
+combined-order row descriptor-reexecs the fixed helper and reaches its marker
+only after cgroup resource limits, atomic placement, staged input/output
+descriptors, private-root construction, complete Landlock handling, and both
+internet-family and Unix-socket denial. Its target then remains alive until
+whole-tree cleanup. The cancellation row requires an explicit stop request
+after a fan-out tree is ready. The partial-setup row measures cleanup after a
+later setup step is rejected. These are mechanism observations only: ADR 0013
+reserves any production mechanism or policy mapping for a later accepted
+decision.
 
 Capture v2 independently of v1:
 
@@ -117,3 +122,11 @@ empty, and removes it; incomplete rollback dominates the report as
 This path is trusted input to the opt-in evaluator only. It is not a production
 configuration seam, capability cache, or runtime authority, and the evaluator
 never infers a delegation root from its current cgroup or from `..`.
+
+CI creates a disposable systemd service with `Delegate=yes`, executes the
+evaluator as the service's sole process, and verifies that every required
+cgroup and combined-order row is `enforced` for the exact source SHA. A hosted
+runner without that explicit delegation fails the evidence step; an
+`unavailable` row is retained evidence but cannot satisfy this acceptance gate.
+Exit and signal handling stop, if necessary kill, and verify removal of the
+exact transient unit; incomplete unit cleanup dominates a successful capture.

@@ -2,6 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <chrono>
 #include <expected>
 #include <filesystem>
@@ -114,6 +115,37 @@ TEST_CASE("evidence v2 runner rejects unsafe bounds",
     result = v2::run_evaluation(std::string(40, 'a'), options);
     REQUIRE_FALSE(result);
     CHECK(result.error().code == v2::RunnerErrorCode::invalid_options);
+  }
+}
+
+TEST_CASE("early runner failures preserve temporary-root cleanup dominance",
+          "[process-isolation][evidence-v2][failure]") {
+  TemporaryDirectory temporary;
+  struct Case {
+    v2::EarlyRunnerFailure failure;
+    std::string_view error;
+  };
+  for (const auto& test_case : {
+           Case{v2::EarlyRunnerFailure::descendant_scan,
+                "process-isolation v2 runner requires no child processes"},
+           Case{v2::EarlyRunnerFailure::subreaper_setup,
+                "process-isolation v2 cleanup cannot be established"},
+       }) {
+    auto options = shell_options(temporary, "exit 0");
+    options.early_failure = test_case.failure;
+    auto result = v2::run_evaluation(std::string(40, 'a'), options);
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == v2::RunnerErrorCode::internal_error);
+    CHECK(result.error().message == test_case.error);
+    CHECK(std::filesystem::is_empty(temporary.path()));
+
+    options.force_temporary_root_cleanup_failure = true;
+    result = v2::run_evaluation(std::string(40, 'a'), options);
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == v2::RunnerErrorCode::internal_error);
+    CHECK(result.error().message ==
+          "process-isolation v2 temporary root cleanup failed");
+    CHECK(std::filesystem::is_empty(temporary.path()));
   }
 }
 
@@ -237,6 +269,21 @@ TEST_CASE("cgroup cleanup dominates interrupted probe outcomes",
       v2::test_support::owns_task_cgroup(123, "aiforge-evidence-v2-1234"));
   CHECK_FALSE(v2::test_support::owns_task_cgroup(
       123, "aiforge-evidence-v2-supervisor-123"));
+}
+
+TEST_CASE("every runner finalization stage fails closed",
+          "[process-isolation][evidence-v2][failure]") {
+  const v2::ProbeRecord enforced{v2::ProbeId::cgroup_kill,
+                                 isolation::ProbeState::enforced,
+                                 v2::ReasonCode::none};
+  for (std::size_t missing{}; missing < 3; ++missing) {
+    std::array cleanup{true, true, true};
+    cleanup[missing] = false;
+    const auto result = v2::test_support::cleanup_outcome(
+        enforced, cleanup[0] && cleanup[1] && cleanup[2]);
+    CHECK(result.state == isolation::ProbeState::probe_error);
+    CHECK(result.reason == v2::ReasonCode::cleanup_failed);
+  }
 }
 
 TEST_CASE("evidence v2 runner accepts only the matching typed row",

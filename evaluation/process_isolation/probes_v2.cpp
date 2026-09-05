@@ -22,6 +22,7 @@
 #include <optional>
 #include <ranges>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -138,6 +139,81 @@ constexpr std::size_t maximum_control_bytes = 64U * 1024U;
              ? enforced(ProbeId::private_mount_propagation)
              : unavailable(ProbeId::private_mount_propagation,
                            ReasonCode::enforcement_failed);
+}
+
+[[nodiscard]] auto cancellation_cleanup_observation(
+    const bool tree_ready, const bool cancellation_requested,
+    const bool tree_terminated, const bool cleanup_complete) -> ProbeRecord {
+  if (!cleanup_complete)
+    return probe_error(ProbeId::cgroup_cancellation_cleanup,
+                       ReasonCode::cleanup_failed);
+  if (!tree_ready || !cancellation_requested)
+    return probe_error(ProbeId::cgroup_cancellation_cleanup,
+                       ReasonCode::setup_race);
+  return tree_terminated ? enforced(ProbeId::cgroup_cancellation_cleanup)
+                         : probe_error(ProbeId::cgroup_cancellation_cleanup,
+                                       ReasonCode::cleanup_failed);
+}
+
+[[nodiscard]] auto write_confinement_observation(
+    const bool allowed_write_succeeded, const bool existing_write_denied,
+    const bool truncation_denied, const bool removal_denied,
+    const bool creation_denied, const bool rename_denied) -> ProbeRecord {
+  return allowed_write_succeeded && existing_write_denied &&
+                 truncation_denied && removal_denied && creation_denied &&
+                 rename_denied
+             ? enforced(ProbeId::landlock_write_confinement)
+             : unavailable(ProbeId::landlock_write_confinement,
+                           ReasonCode::enforcement_failed);
+}
+
+[[nodiscard]] auto setup_order_observation(
+    const bool limits_applied, const bool placed, const bool staged_descriptors,
+    const bool descriptor_launched, const bool private_root_applied,
+    const bool filesystem_applied, const bool internet_denied,
+    const bool unix_denied, const bool payload_reached,
+    const bool target_waiting_for_cleanup) -> ProbeRecord {
+  if (!limits_applied || !placed || !staged_descriptors ||
+      !descriptor_launched || !private_root_applied || !filesystem_applied ||
+      !internet_denied || !unix_denied)
+    return unavailable(ProbeId::combined_setup_order,
+                       ReasonCode::unsupported_combination);
+  return payload_reached && target_waiting_for_cleanup
+             ? enforced(ProbeId::combined_setup_order)
+             : probe_error(ProbeId::combined_setup_order,
+                           ReasonCode::setup_race);
+}
+
+[[nodiscard]] auto confinement_denied(const int error_number) -> bool {
+  return error_number == EACCES || error_number == EPERM;
+}
+
+[[nodiscard]] auto complete_landlock_access() -> std::optional<std::uint64_t> {
+#if defined(LANDLOCK_ACCESS_FS_EXECUTE) &&                                     \
+    defined(LANDLOCK_ACCESS_FS_WRITE_FILE) &&                                  \
+    defined(LANDLOCK_ACCESS_FS_READ_FILE) &&                                   \
+    defined(LANDLOCK_ACCESS_FS_READ_DIR) &&                                    \
+    defined(LANDLOCK_ACCESS_FS_REMOVE_DIR) &&                                  \
+    defined(LANDLOCK_ACCESS_FS_REMOVE_FILE) &&                                 \
+    defined(LANDLOCK_ACCESS_FS_MAKE_CHAR) &&                                   \
+    defined(LANDLOCK_ACCESS_FS_MAKE_DIR) &&                                    \
+    defined(LANDLOCK_ACCESS_FS_MAKE_REG) &&                                    \
+    defined(LANDLOCK_ACCESS_FS_MAKE_SOCK) &&                                   \
+    defined(LANDLOCK_ACCESS_FS_MAKE_FIFO) &&                                   \
+    defined(LANDLOCK_ACCESS_FS_MAKE_BLOCK) &&                                  \
+    defined(LANDLOCK_ACCESS_FS_MAKE_SYM) &&                                    \
+    defined(LANDLOCK_ACCESS_FS_REFER) && defined(LANDLOCK_ACCESS_FS_TRUNCATE)
+  return LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE |
+         LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR |
+         LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
+         LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR |
+         LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK |
+         LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+         LANDLOCK_ACCESS_FS_MAKE_SYM | LANDLOCK_ACCESS_FS_REFER |
+         LANDLOCK_ACCESS_FS_TRUNCATE;
+#else
+  return std::nullopt;
+#endif
 }
 
 [[nodiscard]] auto unavailable_from_errno(const ProbeId id,
@@ -586,6 +662,63 @@ class Cgroup final {
 #endif
 }
 
+[[nodiscard]] auto atomic_combined_payload(const int cgroup_descriptor,
+                                           const int readiness_descriptor,
+                                           const int executable_descriptor,
+                                           const int input_descriptor,
+                                           const int output_descriptor,
+                                           const std::filesystem::path& state)
+    -> std::expected<pid_t, ReasonCode> {
+#if defined(SYS_clone3) && defined(CLONE_INTO_CGROUP)
+  const std::array sources{readiness_descriptor, executable_descriptor,
+                           input_descriptor, output_descriptor};
+  std::array<Descriptor, 4> pinned;
+  for (std::size_t index{}; index < sources.size(); ++index) {
+    pinned[index].reset(
+        ::fcntl(sources[index], F_DUPFD_CLOEXEC, 16 + static_cast<int>(index)));
+    if (pinned[index].get() < 0)
+      return std::unexpected(ReasonCode::internal_error);
+  }
+  std::array<std::string, 3> arguments{
+      std::string{"aiforge_process_isolation_probe_v2"},
+      std::string{"--combined-setup-payload"}, state.string()};
+  std::array<char*, 4> raw_arguments{arguments[0].data(), arguments[1].data(),
+                                     arguments[2].data(), nullptr};
+  clone_args clone_arguments{};
+  clone_arguments.flags = CLONE_INTO_CGROUP;
+  clone_arguments.exit_signal = SIGCHLD;
+  clone_arguments.cgroup = static_cast<std::uint64_t>(cgroup_descriptor);
+  const auto result = static_cast<pid_t>(
+      ::syscall(SYS_clone3, &clone_arguments, sizeof(clone_arguments)));
+  if (result == 0) {
+    for (std::size_t index{}; index < pinned.size(); ++index) {
+      const auto target = 3 + static_cast<int>(index);
+      const auto flags = index == 1 ? O_CLOEXEC : 0;
+      if (::dup3(pinned[index].get(), target, flags) < 0)
+        ::_exit(assertion_internal_error);
+    }
+    if (!close_descriptors_from(7)) ::_exit(assertion_internal_error);
+    char* environment[]{nullptr};
+    ::fexecve(4, raw_arguments.data(), environment);
+    ::_exit(assertion_exit_for_errno(errno));
+  }
+  if (result > 0) return result;
+  if (errno == ENOSYS || errno == EINVAL || errno == E2BIG)
+    return std::unexpected(ReasonCode::unsupported_kernel);
+  if (errno == EACCES || errno == EPERM)
+    return std::unexpected(ReasonCode::permission_denied);
+  return std::unexpected(ReasonCode::prerequisite_unavailable);
+#else
+  static_cast<void>(cgroup_descriptor);
+  static_cast<void>(readiness_descriptor);
+  static_cast<void>(executable_descriptor);
+  static_cast<void>(input_descriptor);
+  static_cast<void>(output_descriptor);
+  static_cast<void>(state);
+  return std::unexpected(ReasonCode::unsupported_kernel);
+#endif
+}
+
 [[nodiscard]] auto wait_for_byte(const int descriptor) -> bool {
   pollfd ready{descriptor, POLLIN | POLLHUP, 0};
   int result{};
@@ -737,7 +870,8 @@ enum class TreeShape {
 
 [[nodiscard]] auto tree_probe(const ProbeId id, const TreeShape shape,
                               const std::size_t minimum_processes = 1,
-                              const bool require_kill_file = true)
+                              const bool require_kill_file = true,
+                              const bool cancellation_probe = false)
     -> ProbeRecord {
   auto cgroup = required_cgroup_or_record(id);
   if (!cgroup) return std::move(cgroup.error());
@@ -749,19 +883,35 @@ enum class TreeShape {
   int readiness{-1};
   const auto leader = spawn_tree(*cgroup, shape, readiness);
   if (!leader) {
-    if (previous_subreaper == 0)
-      static_cast<void>(::prctl(PR_SET_CHILD_SUBREAPER, 0));
-    return unavailable(id, leader.error());
+    const bool cgroup_cleanup_complete = cgroup->cleanup();
+    const bool subreaper_restored =
+        previous_subreaper != 0 || ::prctl(PR_SET_CHILD_SUBREAPER, 0) == 0;
+    return cgroup_cleanup_complete && subreaper_restored
+               ? unavailable(id, leader.error())
+               : probe_error(id, ReasonCode::cleanup_failed);
   }
   const Descriptor ready{readiness};
-  auto result = wait_for_byte(ready.get())
-                    ? terminate_cgroup_tree(id, *cgroup, require_kill_file,
-                                            minimum_processes)
-                    : probe_error(id, ReasonCode::setup_race);
-  if (!cgroup->cleanup() ||
-      (previous_subreaper == 0 && ::prctl(PR_SET_CHILD_SUBREAPER, 0) != 0)) {
+  const bool tree_ready = wait_for_byte(ready.get());
+  std::stop_source cancellation;
+  if (tree_ready && cancellation_probe) cancellation.request_stop();
+  auto termination =
+      tree_ready && (!cancellation_probe || cancellation.stop_requested())
+          ? terminate_cgroup_tree(id, *cgroup, require_kill_file,
+                                  minimum_processes)
+          : probe_error(id, ReasonCode::setup_race);
+  const bool cgroup_cleanup_complete = cgroup->cleanup();
+  const bool subreaper_restored =
+      previous_subreaper != 0 || ::prctl(PR_SET_CHILD_SUBREAPER, 0) == 0;
+  const bool cleanup_complete = cgroup_cleanup_complete && subreaper_restored;
+  auto result =
+      cancellation_probe
+          ? cancellation_cleanup_observation(
+                tree_ready, cancellation.stop_requested(),
+                termination.state == ProbeState::enforced, cleanup_complete)
+          : std::move(termination);
+  if (!cancellation_probe && !cleanup_complete)
     result = probe_error(id, ReasonCode::cleanup_failed);
-  }
+  result.probe_id = id;
   return result;
 }
 
@@ -820,8 +970,10 @@ enum class TreeShape {
   auto cgroup = required_cgroup_or_record(id);
   if (!cgroup) return std::move(cgroup.error());
   int readiness[2]{};
-  if (::pipe2(readiness, O_CLOEXEC) != 0)
-    return probe_error(id, ReasonCode::internal_error);
+  if (::pipe2(readiness, O_CLOEXEC) != 0) {
+    return cgroup->cleanup() ? probe_error(id, ReasonCode::internal_error)
+                             : probe_error(id, ReasonCode::cleanup_failed);
+  }
   const auto child = atomic_child(
       cgroup->child(),
       [] {
@@ -836,8 +988,8 @@ enum class TreeShape {
   static_cast<void>(::close(readiness[1]));
   const Descriptor ready{readiness[0]};
   if (!child) {
-    static_cast<void>(cgroup->cleanup());
-    return unavailable(id, child.error());
+    return cgroup->cleanup() ? unavailable(id, child.error())
+                             : probe_error(id, ReasonCode::cleanup_failed);
   }
   auto result = probe_error(id, ReasonCode::setup_race);
   if (wait_for_byte(ready.get())) {
@@ -866,8 +1018,13 @@ enum class TreeShape {
     return result;
   }
   int outcome[2]{};
-  if (::pipe2(outcome, O_CLOEXEC) != 0)
-    return probe_error(id, ReasonCode::internal_error);
+  if (::pipe2(outcome, O_CLOEXEC) != 0) {
+    const bool sibling_cleanup_complete = sibling->cleanup();
+    const bool cgroup_cleanup_complete = cgroup->cleanup();
+    return sibling_cleanup_complete && cgroup_cleanup_complete
+               ? probe_error(id, ReasonCode::internal_error)
+               : probe_error(id, ReasonCode::cleanup_failed);
+  }
   const auto sibling_name = std::string{sibling->name()};
   const auto child = atomic_child(
       cgroup->child(),
@@ -911,9 +1068,11 @@ enum class TreeShape {
   static_cast<void>(::close(outcome[1]));
   const Descriptor observed{outcome[0]};
   if (!child) {
-    static_cast<void>(sibling->cleanup());
-    static_cast<void>(cgroup->cleanup());
-    return unavailable(id, child.error());
+    const bool sibling_cleanup_complete = sibling->cleanup();
+    const bool cgroup_cleanup_complete = cgroup->cleanup();
+    return sibling_cleanup_complete && cgroup_cleanup_complete
+               ? unavailable(id, child.error())
+               : probe_error(id, ReasonCode::cleanup_failed);
   }
   pollfd ready{observed.get(), POLLIN | POLLHUP, 0};
   std::array error_numbers{-1, -1, -1};
@@ -979,8 +1138,8 @@ enum class TreeShape {
       asm volatile("" ::: "memory");
   });
   if (!child) {
-    static_cast<void>(cgroup->cleanup());
-    return unavailable(id, child.error());
+    return cgroup->cleanup() ? unavailable(id, child.error())
+                             : probe_error(id, ReasonCode::cleanup_failed);
   }
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds{500};
@@ -1031,8 +1190,8 @@ enum class TreeShape {
     return assertion_limit_not_triggered;
   });
   if (!child) {
-    static_cast<void>(cgroup->cleanup());
-    return unavailable(id, child.error());
+    return cgroup->cleanup() ? unavailable(id, child.error())
+                             : probe_error(id, ReasonCode::cleanup_failed);
   }
   int status{};
   bool reaped{};
@@ -1072,8 +1231,10 @@ enum class TreeShape {
     return result;
   }
   const auto finish = [&](ProbeRecord result) {
-    if (!cgroup->cleanup() ||
-        (previous_subreaper == 0 && ::prctl(PR_SET_CHILD_SUBREAPER, 0) != 0))
+    const bool cgroup_cleanup_complete = cgroup->cleanup();
+    const bool subreaper_restored =
+        previous_subreaper != 0 || ::prctl(PR_SET_CHILD_SUBREAPER, 0) == 0;
+    if (!cgroup_cleanup_complete || !subreaper_restored)
       return probe_error(id, ReasonCode::cleanup_failed);
     return result;
   };
@@ -1186,22 +1347,75 @@ enum class TreeShape {
                                         const std::filesystem::path& state)
     -> ProbeRecord {
 #if defined(LANDLOCK_ACCESS_FS_WRITE_FILE) &&                                  \
-    defined(LANDLOCK_ACCESS_FS_MAKE_REG)
-  const auto outside = state.parent_path() / "landlock-v2-denied-write";
-  return landlock_access_probe(
-      id, state, LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_MAKE_REG,
-      [&] {
-        const auto allowed = state / "allowed-write";
-        const Descriptor accepted{::open(
-            allowed.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, S_IRUSR)};
-        if (accepted.get() < 0) return assertion_failed;
-        errno = 0;
-        const Descriptor denied{::open(
-            outside.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, S_IRUSR)};
-        return denied.get() < 0 && (errno == EACCES || errno == EPERM)
-                   ? assertion_enforced
-                   : assertion_failed;
-      });
+    defined(LANDLOCK_ACCESS_FS_MAKE_REG) &&                                    \
+    defined(LANDLOCK_ACCESS_FS_REMOVE_FILE) &&                                 \
+    defined(LANDLOCK_ACCESS_FS_MAKE_DIR) &&                                    \
+    defined(LANDLOCK_ACCESS_FS_REFER) && defined(LANDLOCK_ACCESS_FS_TRUNCATE)
+  const auto access = complete_landlock_access();
+  if (!access) return unavailable(id, ReasonCode::mechanism_absent);
+  const auto outside_existing =
+      state.parent_path() / "landlock-v2-existing-write";
+  const auto outside_created =
+      state.parent_path() / "landlock-v2-denied-create";
+  const auto outside_directory =
+      state.parent_path() / "landlock-v2-denied-directory";
+  const auto outside_renamed =
+      state.parent_path() / "landlock-v2-denied-rename";
+  const auto inside_rename = state / "rename-source";
+  {
+    const Descriptor existing{
+        ::open(outside_existing.c_str(),
+               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+               S_IRUSR | S_IWUSR)};
+    const Descriptor rename_source{
+        ::open(inside_rename.c_str(),
+               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+               S_IRUSR | S_IWUSR)};
+    if (existing.get() < 0 || rename_source.get() < 0)
+      return probe_error(id, ReasonCode::internal_error);
+  }
+  return landlock_access_probe(id, state, *access, [&] {
+    const auto allowed = state / "allowed-write";
+    const Descriptor accepted{::open(
+        allowed.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, S_IRUSR)};
+
+    errno = 0;
+    const Descriptor existing{
+        ::open(outside_existing.c_str(), O_WRONLY | O_CLOEXEC | O_NOFOLLOW)};
+    const auto existing_error = errno;
+    errno = 0;
+    const Descriptor truncated{::open(
+        outside_existing.c_str(), O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW)};
+    const auto truncation_error = errno;
+    errno = 0;
+    const bool removed = ::unlink(outside_existing.c_str()) == 0;
+    const auto removal_error = errno;
+    errno = 0;
+    const Descriptor created{
+        ::open(outside_created.c_str(),
+               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, S_IRUSR)};
+    const auto creation_error = errno;
+    errno = 0;
+    const bool directory_created =
+        ::mkdir(outside_directory.c_str(), S_IRWXU) == 0;
+    const auto directory_error = errno;
+    errno = 0;
+    const bool renamed =
+        ::rename(inside_rename.c_str(), outside_renamed.c_str()) == 0;
+    const auto rename_error = errno;
+
+    const auto observation = write_confinement_observation(
+        accepted.get() >= 0,
+        existing.get() < 0 && confinement_denied(existing_error),
+        truncated.get() < 0 && confinement_denied(truncation_error),
+        !removed && confinement_denied(removal_error),
+        created.get() < 0 && confinement_denied(creation_error) &&
+            !directory_created && confinement_denied(directory_error),
+        !renamed &&
+            (confinement_denied(rename_error) || rename_error == EXDEV));
+    return observation.state == ProbeState::enforced ? assertion_enforced
+                                                     : assertion_failed;
+  });
 #else
   static_cast<void>(state);
   return unavailable(id, ReasonCode::mechanism_absent);
@@ -1350,30 +1564,33 @@ enum class TreeShape {
   return assertion_enforced;
 }
 
+[[nodiscard]] auto establish_private_root(const std::filesystem::path& state)
+    -> int {
+  const auto setup = establish_private_mount_namespace();
+  if (setup != assertion_enforced) return setup;
+  const auto root = state / "root";
+  const auto old = root / "old";
+  if (::mkdir(root.c_str(), S_IRWXU) != 0 ||
+      ::mount("tmpfs", root.c_str(), "tmpfs", MS_NODEV | MS_NOSUID,
+              "size=1048576,mode=0700") != 0 ||
+      ::mkdir(old.c_str(), S_IRWXU) != 0 || ::chdir(root.c_str()) != 0)
+    return assertion_exit_for_errno(errno);
+#if defined(SYS_pivot_root)
+  if (::syscall(SYS_pivot_root, ".", "old") != 0 || ::chdir("/") != 0 ||
+      ::umount2("/old", MNT_DETACH) != 0 || ::rmdir("/old") != 0)
+    return assertion_exit_for_errno(errno);
+#else
+  return assertion_mechanism_absent;
+#endif
+  const Descriptor escaped{::open("/etc/passwd", O_RDONLY | O_CLOEXEC)};
+  return escaped.get() < 0 && errno == ENOENT ? assertion_enforced
+                                              : assertion_failed;
+}
+
 [[nodiscard]] auto private_root_probe(const ProbeId id,
                                       const std::filesystem::path& state)
     -> ProbeRecord {
-  return isolated_assertion(id, [&] {
-    const auto setup = establish_private_mount_namespace();
-    if (setup != assertion_enforced) return setup;
-    const auto root = state / "root";
-    const auto old = root / "old";
-    if (::mkdir(root.c_str(), S_IRWXU) != 0 ||
-        ::mount("tmpfs", root.c_str(), "tmpfs", MS_NODEV | MS_NOSUID,
-                "size=1048576,mode=0700") != 0 ||
-        ::mkdir(old.c_str(), S_IRWXU) != 0 || ::chdir(root.c_str()) != 0)
-      return assertion_exit_for_errno(errno);
-#if defined(SYS_pivot_root)
-    if (::syscall(SYS_pivot_root, ".", "old") != 0 || ::chdir("/") != 0 ||
-        ::umount2("/old", MNT_DETACH) != 0 || ::rmdir("/old") != 0)
-      return assertion_exit_for_errno(errno);
-#else
-    return assertion_mechanism_absent;
-#endif
-    const Descriptor escaped{::open("/etc/passwd", O_RDONLY | O_CLOEXEC)};
-    return escaped.get() < 0 && errno == ENOENT ? assertion_enforced
-                                                : assertion_failed;
-  });
+  return isolated_assertion(id, [&] { return establish_private_root(state); });
 }
 
 [[nodiscard]] auto mount_propagation_probe(const ProbeId id,
@@ -1487,47 +1704,85 @@ enum class TreeShape {
     -> ProbeRecord {
   auto cgroup = required_cgroup_or_record(id);
   if (!cgroup) return std::move(cgroup.error());
+  const auto finish = [&](ProbeRecord result) {
+    if (!cgroup->cleanup()) return probe_error(id, ReasonCode::cleanup_failed);
+    return result;
+  };
+  const bool limits_applied =
+      write_control(cgroup->child(), "cpu.max", "50000 100000") &&
+      write_control(cgroup->child(), "memory.max", "67108864") &&
+      write_control(cgroup->child(), "memory.swap.max", "0") &&
+      write_control(cgroup->child(), "memory.oom.group", "1") &&
+      write_control(cgroup->child(), "pids.max", "16");
+  if (!limits_applied) return finish(unavailable_from_errno(id, errno));
+
+  const auto input_path = state / "combined-input";
+  const auto opened_input_path = state / "combined-input-opened";
+  const auto output_path = state / "combined-output";
+  const auto opened_output_path = state / "combined-output-opened";
+  const Descriptor input{::open(
+      input_path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+      S_IRUSR | S_IWUSR)};
+  const Descriptor output{::open(
+      output_path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+      S_IRUSR | S_IWUSR)};
+  const Descriptor executable{::open("/proc/self/exe", O_PATH | O_CLOEXEC)};
+  if (input.get() < 0 || output.get() < 0 || executable.get() < 0 ||
+      !write_all(input.get(), "I") || ::lseek(input.get(), 0, SEEK_SET) != 0 ||
+      ::rename(input_path.c_str(), opened_input_path.c_str()) != 0 ||
+      ::rename(output_path.c_str(), opened_output_path.c_str()) != 0) {
+    return finish(probe_error(id, ReasonCode::internal_error));
+  }
+  const Descriptor replacement_input{::open(
+      input_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+      S_IRUSR | S_IWUSR)};
+  const Descriptor replacement_output{::open(
+      output_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+      S_IRUSR | S_IWUSR)};
+  if (replacement_input.get() < 0 || replacement_output.get() < 0 ||
+      !write_all(replacement_input.get(), "X")) {
+    return finish(probe_error(id, ReasonCode::internal_error));
+  }
+
   int readiness[2]{};
   if (::pipe2(readiness, O_CLOEXEC) != 0)
-    return probe_error(id, ReasonCode::internal_error);
-  const auto child = atomic_child(
-      cgroup->child(),
-      [&state] {
-        constexpr int write = 3;
-#if defined(LANDLOCK_ACCESS_FS_EXECUTE) &&                                     \
-    defined(LANDLOCK_ACCESS_FS_WRITE_FILE) &&                                  \
-    defined(LANDLOCK_ACCESS_FS_READ_FILE) &&                                   \
-    defined(LANDLOCK_ACCESS_FS_READ_DIR) &&                                    \
-    defined(LANDLOCK_ACCESS_FS_MAKE_REG)
-        constexpr std::uint64_t filesystem_access =
-            LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE |
-            LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR |
-            LANDLOCK_ACCESS_FS_MAKE_REG;
-        if (apply_landlock(state, filesystem_access) != assertion_enforced)
-          return assertion_prerequisite_unavailable;
-        if (install_seccomp_family_filter(true) != assertion_enforced)
-          return assertion_prerequisite_unavailable;
-        if (!write_all(write, "R")) return assertion_internal_error;
-        static_cast<void>(::close(write));
-        for (;;)
-          ::pause();
-#else
-        static_cast<void>(state);
-        return assertion_prerequisite_unavailable;
-#endif
-      },
-      readiness[1]);
+    return finish(probe_error(id, ReasonCode::internal_error));
+  const auto child =
+      atomic_combined_payload(cgroup->child(), readiness[1], executable.get(),
+                              input.get(), output.get(), state);
   static_cast<void>(::close(readiness[1]));
   const Descriptor ready{readiness[0]};
   if (!child) {
-    static_cast<void>(cgroup->cleanup());
-    return unavailable(id, child.error());
+    return finish(unavailable(id, child.error()));
   }
-  auto result = wait_for_byte(ready.get())
-                    ? terminate_cgroup_tree(id, *cgroup, false, 1)
-                    : unavailable(id, ReasonCode::unsupported_combination);
-  if (!cgroup->cleanup()) result = probe_error(id, ReasonCode::cleanup_failed);
-  return result;
+  const bool payload_reached = wait_for_byte(ready.get());
+  if (!payload_reached) {
+    const bool cgroup_cleanup = cgroup->cleanup();
+    int status{};
+    pid_t waited{};
+    do {
+      waited = ::waitpid(*child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    const bool reaped = reap_all_children();
+    if (!cgroup_cleanup || waited != *child || !reaped)
+      return probe_error(id, ReasonCode::cleanup_failed);
+    return WIFEXITED(status) ? assertion_result(id, WEXITSTATUS(status))
+                             : probe_error(id, ReasonCode::setup_race);
+  }
+
+  char output_marker{};
+  const bool staged_descriptors =
+      ::lseek(output.get(), 0, SEEK_SET) == 0 &&
+      ::read(output.get(), &output_marker, 1) == 1 && output_marker == 'O';
+  const auto processes = cgroup->processes();
+  const bool target_waiting_for_cleanup =
+      processes && std::ranges::find(*processes, *child) != processes->end();
+  auto result = setup_order_observation(
+      limits_applied, true, staged_descriptors, true, true, true, true, true,
+      payload_reached, target_waiting_for_cleanup);
+  const auto termination = terminate_cgroup_tree(id, *cgroup, false, 1);
+  if (termination.state != ProbeState::enforced) result = termination;
+  return finish(std::move(result));
 }
 
 [[nodiscard]] auto partial_setup_cleanup_probe(const ProbeId id)
@@ -1542,14 +1797,43 @@ enum class TreeShape {
   }
   errno = 0;
   if (write_control(cgroup->child(), "memory.max", "invalid")) {
-    static_cast<void>(cgroup->cleanup());
-    return unavailable(id, ReasonCode::enforcement_failed);
+    return cgroup->cleanup() ? unavailable(id, ReasonCode::enforcement_failed)
+                             : probe_error(id, ReasonCode::cleanup_failed);
   }
   return cgroup->cleanup() ? enforced(id)
                            : probe_error(id, ReasonCode::cleanup_failed);
 }
 
 } // namespace
+
+auto run_combined_setup_payload(const std::filesystem::path& state_directory)
+    -> int {
+  if (!valid_state_directory(state_directory)) return assertion_internal_error;
+  char input{};
+  char trailing{};
+  if (::read(5, &input, 1) != 1 || input != 'I' || ::read(5, &trailing, 1) != 0)
+    return assertion_internal_error;
+  const auto root = establish_private_root(state_directory);
+  if (root != assertion_enforced) return root;
+  const auto filesystem_access = complete_landlock_access();
+  if (!filesystem_access) return assertion_mechanism_absent;
+  if (apply_landlock("/", *filesystem_access) != assertion_enforced)
+    return assertion_prerequisite_unavailable;
+  if (install_seccomp_family_filter(true) != assertion_enforced ||
+      install_seccomp_family_filter(false) != assertion_enforced)
+    return assertion_prerequisite_unavailable;
+  for (const auto family : {AF_INET, AF_INET6, AF_UNIX}) {
+    errno = 0;
+    const Descriptor denied{::socket(family, SOCK_STREAM | SOCK_CLOEXEC, 0)};
+    if (denied.get() >= 0 || errno != EPERM) return assertion_failed;
+  }
+  if (!write_all(6, "O") || !write_all(3, "R")) return assertion_internal_error;
+  static_cast<void>(::close(3));
+  static_cast<void>(::close(5));
+  static_cast<void>(::close(6));
+  for (;;)
+    ::pause();
+}
 
 auto run_probe(const ProbeId probe_id,
                const std::filesystem::path& state_directory,
@@ -1588,7 +1872,7 @@ auto run_probe(const ProbeId probe_id,
       case ProbeId::cgroup_leader_exit_containment:
         return tree_probe(probe_id, TreeShape::leader_exit, 1, false);
       case ProbeId::cgroup_cancellation_cleanup:
-        return tree_probe(probe_id, TreeShape::fanout, 5, false);
+        return tree_probe(probe_id, TreeShape::fanout, 5, false, true);
       case ProbeId::cgroup_cpu_limit_enforcement:
         return cpu_limit_probe(probe_id);
       case ProbeId::cgroup_memory_limit_termination:
@@ -1678,6 +1962,25 @@ auto mount_propagation_outcome(const bool child_mount_established,
                                        visible_in_parent, cleanup_complete);
 }
 
+auto cancellation_cleanup_outcome(const bool tree_ready,
+                                  const bool cancellation_requested,
+                                  const bool tree_terminated,
+                                  const bool cleanup_complete) -> ProbeRecord {
+  return cancellation_cleanup_observation(tree_ready, cancellation_requested,
+                                          tree_terminated, cleanup_complete);
+}
+
+auto write_confinement_outcome(const bool allowed_write_succeeded,
+                               const bool existing_write_denied,
+                               const bool truncation_denied,
+                               const bool removal_denied,
+                               const bool creation_denied,
+                               const bool rename_denied) -> ProbeRecord {
+  return write_confinement_observation(
+      allowed_write_succeeded, existing_write_denied, truncation_denied,
+      removal_denied, creation_denied, rename_denied);
+}
+
 auto pid_identity_outcome(const bool pidfd_opened, const bool identity_stable)
     -> ProbeRecord {
   return pidfd_opened && identity_stable
@@ -1686,16 +1989,18 @@ auto pid_identity_outcome(const bool pidfd_opened, const bool identity_stable)
                            ReasonCode::pid_reuse);
 }
 
-auto setup_order_outcome(const bool placed, const bool filesystem_applied,
-                         const bool network_applied, const bool payload_reached,
+auto setup_order_outcome(const bool limits_applied, const bool placed,
+                         const bool staged_descriptors,
+                         const bool descriptor_launched,
+                         const bool private_root_applied,
+                         const bool filesystem_applied,
+                         const bool internet_denied, const bool unix_denied,
+                         const bool payload_reached,
                          const bool target_waiting_for_cleanup) -> ProbeRecord {
-  if (!placed || !filesystem_applied || !network_applied)
-    return unavailable(ProbeId::combined_setup_order,
-                       ReasonCode::unsupported_combination);
-  return payload_reached && target_waiting_for_cleanup
-             ? enforced(ProbeId::combined_setup_order)
-             : probe_error(ProbeId::combined_setup_order,
-                           ReasonCode::setup_race);
+  return setup_order_observation(
+      limits_applied, placed, staged_descriptors, descriptor_launched,
+      private_root_applied, filesystem_applied, internet_denied, unix_denied,
+      payload_reached, target_waiting_for_cleanup);
 }
 
 } // namespace test_support

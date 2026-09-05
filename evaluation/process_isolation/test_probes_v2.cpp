@@ -122,26 +122,65 @@ TEST_CASE("mount propagation requires an isolated child mount observation",
         isolation::ProbeState::enforced);
 }
 
-TEST_CASE("combined setup never reports partial setup as enforcement",
+TEST_CASE("cgroup cancellation evidence requires a requested cancellation",
           "[process-isolation][evidence-v2][failure]") {
   for (const auto& input : {
-           std::array{false, true, true, false},
-           std::array{true, false, true, false},
-           std::array{true, true, false, false},
+           std::array{false, true, true, true},
+           std::array{true, false, true, true},
        }) {
+    const auto result = v2::test_support::cancellation_cleanup_outcome(
+        input[0], input[1], input[2], input[3]);
+    CHECK(result.state == isolation::ProbeState::probe_error);
+    CHECK(result.reason == v2::ReasonCode::setup_race);
+  }
+  const auto survived =
+      v2::test_support::cancellation_cleanup_outcome(true, true, false, true);
+  CHECK(survived.state == isolation::ProbeState::probe_error);
+  CHECK(survived.reason == v2::ReasonCode::cleanup_failed);
+  const auto uncertain =
+      v2::test_support::cancellation_cleanup_outcome(true, true, true, false);
+  CHECK(uncertain.state == isolation::ProbeState::probe_error);
+  CHECK(uncertain.reason == v2::ReasonCode::cleanup_failed);
+  CHECK(v2::test_support::cancellation_cleanup_outcome(true, true, true, true)
+            .state == isolation::ProbeState::enforced);
+}
+
+TEST_CASE("write confinement requires every mutation class to be denied",
+          "[process-isolation][evidence-v2][failure]") {
+  for (std::size_t missing{}; missing < 6; ++missing) {
+    std::array observations{true, true, true, true, true, true};
+    observations[missing] = false;
+    const auto result = v2::test_support::write_confinement_outcome(
+        observations[0], observations[1], observations[2], observations[3],
+        observations[4], observations[5]);
+    CHECK(result.state == isolation::ProbeState::unavailable);
+    CHECK(result.reason == v2::ReasonCode::enforcement_failed);
+  }
+  CHECK(v2::test_support::write_confinement_outcome(true, true, true, true,
+                                                    true, true)
+            .state == isolation::ProbeState::enforced);
+}
+
+TEST_CASE("combined setup never reports partial setup as enforcement",
+          "[process-isolation][evidence-v2][failure]") {
+  for (std::size_t missing{}; missing < 8; ++missing) {
+    std::array setup{true, true, true, true, true, true, true, true};
+    setup[missing] = false;
     const auto partial = v2::test_support::setup_order_outcome(
-        input[0], input[1], input[2], input[3], false);
+        setup[0], setup[1], setup[2], setup[3], setup[4], setup[5], setup[6],
+        setup[7], false, false);
     CHECK(partial.state == isolation::ProbeState::unavailable);
     CHECK(partial.reason == v2::ReasonCode::unsupported_combination);
   }
-  const auto race =
-      v2::test_support::setup_order_outcome(true, true, true, false, true);
+  const auto race = v2::test_support::setup_order_outcome(
+      true, true, true, true, true, true, true, true, false, true);
   CHECK(race.state == isolation::ProbeState::probe_error);
   CHECK(race.reason == v2::ReasonCode::setup_race);
-  const auto exited =
-      v2::test_support::setup_order_outcome(true, true, true, true, false);
+  const auto exited = v2::test_support::setup_order_outcome(
+      true, true, true, true, true, true, true, true, true, false);
   CHECK(exited.state == isolation::ProbeState::probe_error);
   CHECK(exited.reason == v2::ReasonCode::setup_race);
-  CHECK(v2::test_support::setup_order_outcome(true, true, true, true, true)
+  CHECK(v2::test_support::setup_order_outcome(true, true, true, true, true,
+                                              true, true, true, true, true)
             .state == isolation::ProbeState::enforced);
 }

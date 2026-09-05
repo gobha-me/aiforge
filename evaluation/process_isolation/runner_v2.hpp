@@ -13,6 +13,14 @@
 
 namespace aiforge::evaluation::process_isolation::v2 {
 
+#if defined(AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT)
+enum class EarlyRunnerFailure {
+  none,
+  descendant_scan,
+  subreaper_setup,
+};
+#endif
+
 struct RunnerOptions {
   std::filesystem::path child_executable;
   std::vector<std::string> child_argument_prefix;
@@ -20,6 +28,10 @@ struct RunnerOptions {
   std::filesystem::path delegated_cgroup_root;
   std::chrono::milliseconds child_timeout{std::chrono::seconds{5}};
   std::size_t maximum_child_output_bytes{maximum_child_record_bytes};
+#if defined(AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT)
+  EarlyRunnerFailure early_failure{EarlyRunnerFailure::none};
+  bool force_temporary_root_cleanup_failure{};
+#endif
 };
 
 enum class RunnerErrorCode {

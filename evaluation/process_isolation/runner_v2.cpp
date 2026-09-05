@@ -604,6 +604,47 @@ class SubreaperGuard {
   return std::filesystem::path{created};
 }
 
+[[nodiscard]] auto cleanup_temporary_root(const std::filesystem::path& root,
+                                          const RunnerOptions& options) noexcept
+    -> bool {
+  std::error_code cleanup_error;
+  static_cast<void>(std::filesystem::remove_all(root, cleanup_error));
+  std::error_code existence_error;
+  const bool removed = !cleanup_error &&
+                       !std::filesystem::exists(root, existence_error) &&
+                       !existence_error;
+#if defined(AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT)
+  return removed && !options.force_temporary_root_cleanup_failure;
+#else
+  static_cast<void>(options);
+  return removed;
+#endif
+}
+
+[[nodiscard]] auto direct_descendants() -> std::optional<std::vector<pid_t>>;
+
+[[nodiscard]] auto direct_descendants_for_run(const RunnerOptions& options)
+    -> std::optional<std::vector<pid_t>> {
+#if defined(AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT)
+  if (options.early_failure == EarlyRunnerFailure::descendant_scan)
+    return std::nullopt;
+#else
+  static_cast<void>(options);
+#endif
+  return direct_descendants();
+}
+
+[[nodiscard]] auto subreaper_for_run(const RunnerOptions& options)
+    -> std::optional<SubreaperGuard> {
+#if defined(AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT)
+  if (options.early_failure == EarlyRunnerFailure::subreaper_setup)
+    return std::nullopt;
+#else
+  static_cast<void>(options);
+#endif
+  return SubreaperGuard::create();
+}
+
 [[nodiscard]] auto close_unrelated_descriptors(
     const unsigned int first) noexcept -> bool {
 #ifdef SYS_close_range
@@ -912,6 +953,9 @@ auto mark_cleanup_failure(EvidenceReport& report) -> void {
 auto run_evaluation(std::string source_sha, const RunnerOptions& options,
                     const std::stop_token stop_token)
     -> std::expected<EvidenceReport, RunnerError> {
+  std::optional<SubreaperGuard> active_subreaper;
+  std::optional<CgroupBootstrap> active_cgroup;
+  std::optional<std::filesystem::path> active_root;
   try {
     const auto executable = options.child_executable.native();
     const auto arguments_are_safe =
@@ -938,17 +982,6 @@ auto run_evaluation(std::string source_sha, const RunnerOptions& options,
       return runner_error(RunnerErrorCode::invalid_options,
                           "delegated cgroup root path is invalid");
     }
-    const auto existing_children = direct_descendants();
-    if (!existing_children || !existing_children->empty()) {
-      return runner_error(
-          RunnerErrorCode::internal_error,
-          "process-isolation v2 runner requires no child processes");
-    }
-    auto subreaper = SubreaperGuard::create();
-    if (!subreaper) {
-      return runner_error(RunnerErrorCode::internal_error,
-                          "process-isolation v2 cleanup cannot be established");
-    }
     auto report = platform_report(std::move(source_sha));
     if (!report) return std::unexpected(std::move(report.error()));
     auto temporary_parent = options.temporary_parent;
@@ -961,18 +994,44 @@ auto run_evaluation(std::string source_sha, const RunnerOptions& options,
       return runner_error(RunnerErrorCode::invalid_options,
                           "temporary parent is unavailable");
     }
-    CgroupBootstrap cgroup_bootstrap;
-    const auto cgroup_reason =
-        cgroup_bootstrap.start(options.delegated_cgroup_root);
     const auto root = make_temporary_root(temporary_parent);
     report->probes.reserve(required_probe_ids().size());
     if (!root) {
       for (const auto probe_id : required_probe_ids())
         report->probes.push_back(
             closed_record(probe_id, ReasonCode::internal_error));
-      if (!cgroup_bootstrap.cleanup()) mark_cleanup_failure(*report);
       return std::move(*report);
     }
+    active_root = *root;
+    const auto existing_children = direct_descendants_for_run(options);
+    if (!existing_children || !existing_children->empty()) {
+      const bool root_removed = cleanup_temporary_root(*active_root, options);
+      active_root.reset();
+      if (!root_removed) {
+        return runner_error(
+            RunnerErrorCode::internal_error,
+            "process-isolation v2 temporary root cleanup failed");
+      }
+      return runner_error(
+          RunnerErrorCode::internal_error,
+          "process-isolation v2 runner requires no child processes");
+    }
+    auto subreaper = subreaper_for_run(options);
+    if (!subreaper) {
+      const bool root_removed = cleanup_temporary_root(*active_root, options);
+      active_root.reset();
+      if (!root_removed) {
+        return runner_error(
+            RunnerErrorCode::internal_error,
+            "process-isolation v2 temporary root cleanup failed");
+      }
+      return runner_error(RunnerErrorCode::internal_error,
+                          "process-isolation v2 cleanup cannot be established");
+    }
+    active_subreaper.emplace(std::move(*subreaper));
+    active_cgroup.emplace();
+    const auto cgroup_reason =
+        active_cgroup->start(options.delegated_cgroup_root);
     for (const auto probe_id : required_probe_ids()) {
       const auto state = *root / std::string{probe_id_name(probe_id)};
       ProbeRecord record = closed_record(probe_id, ReasonCode::internal_error);
@@ -988,7 +1047,7 @@ auto run_evaluation(std::string source_sha, const RunnerOptions& options,
                  ::chmod(state.c_str(), S_IRWXU) == 0) {
         record = launch_probe(
             probe_id, state, options, executable_descriptor.get(),
-            requires_delegated_cgroup(probe_id) ? &cgroup_bootstrap : nullptr,
+            requires_delegated_cgroup(probe_id) ? &*active_cgroup : nullptr,
             stop_token);
       }
       std::error_code cleanup_error;
@@ -1000,18 +1059,29 @@ auto run_evaluation(std::string source_sha, const RunnerOptions& options,
       }
       report->probes.push_back(record);
     }
-    if (!cgroup_bootstrap.cleanup()) mark_cleanup_failure(*report);
-    std::error_code cleanup_error;
-    static_cast<void>(std::filesystem::remove_all(*root, cleanup_error));
-    std::error_code existence_error;
-    if (cleanup_error || std::filesystem::exists(*root, existence_error) ||
-        existence_error || !subreaper->restore()) {
+    if (!active_cgroup->cleanup()) mark_cleanup_failure(*report);
+    active_cgroup.reset();
+    const bool root_removed = cleanup_temporary_root(*root, options);
+    const bool subreaper_restored = active_subreaper->restore();
+    if (!root_removed || !subreaper_restored) {
       mark_cleanup_failure(*report);
     }
+    active_root.reset();
+    active_subreaper.reset();
     return std::move(*report);
   } catch (...) {
-    return runner_error(RunnerErrorCode::internal_error,
-                        "process-isolation v2 evaluation failed internally");
+    bool cleanup_complete{true};
+    if (active_cgroup && !active_cgroup->cleanup()) cleanup_complete = false;
+    if (active_root) {
+      if (!cleanup_temporary_root(*active_root, options))
+        cleanup_complete = false;
+    }
+    if (active_subreaper && !active_subreaper->restore())
+      cleanup_complete = false;
+    return runner_error(
+        RunnerErrorCode::internal_error,
+        cleanup_complete ? "process-isolation v2 evaluation failed internally"
+                         : "process-isolation v2 evaluation cleanup failed");
   }
 }
 
