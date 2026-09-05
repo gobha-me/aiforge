@@ -85,7 +85,10 @@ fi
 # owns the leaf subtree. The evaluator still validates ownership, emptiness,
 # controllers, placement, and rollback before accepting any row as enforced.
 unit_may_exist=1
+# Preserve the embedded Bash program verbatim. systemd-run otherwise expands
+# its ${...} expressions in the manager before Bash can evaluate them.
 timeout 300s sudo -n systemd-run --quiet --wait --pipe --collect \
+  --expand-environment=no \
   --unit="$unit" \
   --service-type=exec \
   --property=Delegate=yes \

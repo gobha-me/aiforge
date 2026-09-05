@@ -87,9 +87,13 @@ run_capture() {
 
 run_capture 0 0 0
 if ((observed != 0)) || [[ $(<"$fixture/state") != absent ]] ||
+  ! grep -Fq -- '--expand-environment=no' "$fixture/log" ||
   ! grep -Fq -- '--property=Delegate=yes' "$fixture/log" ||
   ! grep -Fq -- '--property=DelegateSubgroup=aiforge-evaluator' \
     "$fixture/log" ||
+  ! grep -Fq -- '${relative##*/}' "$fixture/log" ||
+  ! grep -Fq -- '$root/cgroup.procs' "$fixture/log" ||
+  ! grep -Fq -- '${processes[0]} == $$' "$fixture/log" ||
   ! grep -Eq '^systemctl stop aiforge-evidence-v2-[0-9]+\.service$' \
     "$fixture/log"; then
   echo "error: accepted capture did not remove its exact transient unit" >&2
