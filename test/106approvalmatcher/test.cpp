@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include <aiforge/config/config.hpp>
 #include <aiforge/runtime/automatic_approval_matcher.hpp>
 #include <aiforge/runtime/repository_read_tool.hpp>
 
@@ -83,6 +84,13 @@ auto exact_rule(std::string tool_name, const std::string_view json,
                     constraints()) -> runtime::AutomaticApprovalRule {
   return runtime::ExactToolArgumentsApprovalRule{
       std::move(tool_name), canonical(json), std::move(rule_constraints)};
+}
+
+auto process_rule(std::string executable,
+                  runtime::AutomaticApprovalRuleConstraints rule_constraints =
+                      constraints()) -> runtime::AutomaticApprovalRule {
+  return runtime::ProcessExecutableApprovalRule{std::move(executable),
+                                                std::move(rule_constraints)};
 }
 
 auto request(std::string invocation, std::string tool_name,
@@ -161,6 +169,107 @@ TEST_CASE("automatic approval matcher rejects malformed and overbound rules",
 
   REQUIRE_FALSE(runtime::compile_automatic_approval_matcher({exact_rule(
       "read_repository_file", R"({"relative_path":"src/main.cpp"})")}));
+
+  REQUIRE_FALSE(runtime::compile_automatic_approval_matcher(
+      {process_rule("usr/bin/git")}));
+  REQUIRE_FALSE(runtime::compile_automatic_approval_matcher(
+      {process_rule("/usr/bin/../bin/git")}));
+  limits = {};
+  limits.maximum_process_executable_bytes = 4;
+  REQUIRE_FALSE(runtime::compile_automatic_approval_matcher(
+      {process_rule("/bin/sh")}, {}, limits));
+}
+
+TEST_CASE("process executable rules vary argv but stay exact and quota bounded",
+          "[approval-matcher][process][failure]") {
+  auto matcher = runtime::compile_automatic_approval_matcher(
+      {process_rule("/usr/bin/git", constraints(2))});
+  REQUIRE(matcher);
+  REQUIRE((*matcher)->tool_names().size() == 1);
+  REQUIRE((*matcher)->tool_names().front() == "run_process");
+
+  auto first = (*matcher)->match(
+      request("process-1", "run_process",
+              R"({"argv":["status"],"executable":"/usr/bin/git"})"));
+  auto second = (*matcher)->match(
+      request("process-2", "run_process",
+              R"({"argv":["diff","--stat"],"executable":"/usr/bin/git"})"));
+  REQUIRE(first);
+  REQUIRE(first->has_value());
+  REQUIRE(second);
+  REQUIRE(second->has_value());
+  REQUIRE(first->value().rule_identity.starts_with(
+      "aiforge.auto-rule.process-executable.v1.sha256:"));
+  REQUIRE_FALSE(
+      (*matcher)
+          ->match(request("process-3", "run_process",
+                          R"({"argv":[],"executable":"/usr/bin/git"})"))
+          .value());
+  REQUIRE_FALSE((*matcher)
+                    ->match(request("wrong-executable", "run_process",
+                                    R"({"argv":[],"executable":"/bin/sh"})"))
+                    .value());
+  REQUIRE_FALSE(
+      (*matcher)
+          ->match(request("wrong-tool", "other",
+                          R"({"argv":[],"executable":"/usr/bin/git"})"))
+          .value());
+  REQUIRE_FALSE((*matcher)
+                    ->match(request("wrong-field", "run_process",
+                                    R"({"path":"/usr/bin/git"})"))
+                    .value());
+}
+
+TEST_CASE("exact process invocation outranks executable-wide approval",
+          "[approval-matcher][process][precedence]") {
+  auto matcher = runtime::compile_automatic_approval_matcher(
+      {process_rule("/usr/bin/git", constraints(2, 999)),
+       exact_rule("run_process",
+                  R"({"argv":["status"],"executable":"/usr/bin/git"})",
+                  constraints(1, 0))});
+  REQUIRE(matcher);
+  const auto matched = (*matcher)->match(
+      request("exact-process", "run_process",
+              R"({"argv":["status"],"executable":"/usr/bin/git"})"));
+  REQUIRE(matched);
+  REQUIRE(matched->has_value());
+  REQUIRE(matched->value().rule_identity.starts_with(
+      "aiforge.auto-rule.exact.v1.sha256:"));
+
+  auto ambiguous = runtime::compile_automatic_approval_matcher(
+      {process_rule("/usr/bin/git", constraints(1, 4)),
+       process_rule("/usr/bin/git", constraints(2, 4))});
+  REQUIRE(ambiguous);
+  REQUIRE_FALSE(
+      (*ambiguous)
+          ->match(request("ambiguous-process", "run_process",
+                          R"({"argv":[],"executable":"/usr/bin/git"})"))
+          .value());
+}
+
+TEST_CASE("configured matcher appends runtime process rules fail closed",
+          "[approval-matcher][process][configuration][failure]") {
+  const config::AutomaticApprovalRulesConfig configured{};
+  auto appended = runtime::compile_configured_automatic_approval_matcher(
+      configured, {}, {}, {}, {process_rule("/usr/bin/git", constraints(1))});
+  REQUIRE(appended);
+  REQUIRE((*appended)->tool_names().size() == 1);
+  REQUIRE((*appended)->tool_names().front() == "run_process");
+
+  auto ambiguous = runtime::compile_configured_automatic_approval_matcher(
+      configured, {}, {}, {},
+      {process_rule("/usr/bin/git", constraints(1, 3)),
+       process_rule("/usr/bin/git", constraints(2, 3))});
+  REQUIRE(ambiguous);
+  REQUIRE_FALSE(
+      (*ambiguous)
+          ->match(request("configured-ambiguous", "run_process",
+                          R"({"argv":[],"executable":"/usr/bin/git"})"))
+          .value());
+
+  const auto duplicate = process_rule("/usr/bin/git", constraints(1));
+  REQUIRE_FALSE(runtime::compile_configured_automatic_approval_matcher(
+      configured, {}, {}, {}, {duplicate, duplicate}));
 }
 
 TEST_CASE("matcher identities are deterministic and semantic",
@@ -556,6 +665,16 @@ TEST_CASE("automatic approval evidence uses closed digest identities",
       "aiforge.auto-rule.repository.v1.sha256:" + std::string(64, 'c');
   REQUIRE(domain::valid_automatic_approval_evidence(exact));
   REQUIRE(domain::valid_automatic_approval_evidence(repository));
+  auto process = exact;
+  process.rule_identity =
+      "aiforge.auto-rule.process-executable.v1.sha256:" + std::string(64, 'd');
+  REQUIRE(domain::valid_automatic_approval_evidence(process));
+  REQUIRE(domain::automatic_approval_rule_kind(exact) ==
+          domain::AutomaticApprovalRuleKind::exact_arguments);
+  REQUIRE(domain::automatic_approval_rule_kind(repository) ==
+          domain::AutomaticApprovalRuleKind::repository_read_path);
+  REQUIRE(domain::automatic_approval_rule_kind(process) ==
+          domain::AutomaticApprovalRuleKind::process_executable);
 
   auto invalid = exact;
   invalid.policy_identity = "SecretLikePolicyToken123";
@@ -566,6 +685,7 @@ TEST_CASE("automatic approval evidence uses closed digest identities",
   invalid = exact;
   invalid.rule_identity.back() = 'F';
   REQUIRE_FALSE(domain::valid_automatic_approval_evidence(invalid));
+  REQUIRE_FALSE(domain::automatic_approval_rule_kind(invalid));
 }
 
 TEST_CASE("empty automatic approval policy is valid and denies every request",

@@ -50,6 +50,7 @@ struct AutomaticApprovalMatcherLimits {
   std::size_t maximum_identity_bytes{128};
   std::size_t maximum_canonical_argument_bytes{std::size_t{64U} * 1024U};
   std::size_t maximum_relative_path_bytes{4096};
+  std::size_t maximum_process_executable_bytes{4096};
   std::size_t maximum_total_rule_bytes{std::size_t{1024U} * 1024U};
   std::uint64_t maximum_total_matches{1'000'000};
   std::chrono::milliseconds maximum_expiry{std::chrono::hours{24 * 365}};
@@ -108,8 +109,18 @@ struct RepositoryReadPathApprovalRule {
   AutomaticApprovalRuleConstraints constraints;
 };
 
-using AutomaticApprovalRule = std::variant<ExactToolArgumentsApprovalRule,
-                                           RepositoryReadPathApprovalRule>;
+// Grants only exact `run_process` executable identity. The remaining validated
+// canonical arguments, including argv, may vary within the launch policy's
+// separately enforced effects, scopes, and limits.
+struct ProcessExecutableApprovalRule {
+  std::string executable;
+  AutomaticApprovalRuleConstraints constraints;
+  auto operator==(const ProcessExecutableApprovalRule&) const -> bool = default;
+};
+
+using AutomaticApprovalRule =
+    std::variant<ExactToolArgumentsApprovalRule, RepositoryReadPathApprovalRule,
+                 ProcessExecutableApprovalRule>;
 
 struct AutomaticApprovalMatchRequest {
   domain::SessionId session_id;
@@ -174,7 +185,8 @@ class AutomaticApprovalMatcher final {
     std::shared_ptr<const DescriptorRelativePathAuthority>
         repository_read_root = {},
     AutomaticApprovalClock clock = {},
-    AutomaticApprovalMatcherLimits limits = {})
+    AutomaticApprovalMatcherLimits limits = {},
+    std::vector<AutomaticApprovalRule> additional_rules = {})
     -> std::expected<std::shared_ptr<AutomaticApprovalMatcher>,
                      AutomaticApprovalMatcherError>;
 

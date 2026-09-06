@@ -192,6 +192,72 @@ auto decision(runtime::ToolPolicy& policy, std::string tool,
 
 } // namespace
 
+TEST_CASE("automatic rules may name declared unavailable tools but not typos",
+          "[tool-launch-policy][automatic][failure]") {
+  runtime::ToolRegistry catalog;
+  REQUIRE(catalog.declare_unavailable_tool(
+      "run_process",
+      {runtime::ToolUnavailableReason::restriction_unavailable,
+       runtime::ToolRestrictionUnavailability{
+           runtime::RestrictionLevel::high,
+           runtime::RestrictionUnavailableReason::mechanism_absent}},
+      runtime::ToolCategory::process));
+  const auto snapshot = catalog.snapshot().value();
+
+  auto process_matcher = runtime::compile_automatic_approval_matcher(
+      {runtime::ProcessExecutableApprovalRule{
+          "/usr/bin/git",
+          {{runtime::RestrictionLevel::high}, 4, std::nullopt, 0}}});
+  REQUIRE(process_matcher);
+  runtime::ApplicationLaunchContextConfiguration context_configuration;
+  context_configuration.selected_restriction = runtime::RestrictionLevel::high;
+  context_configuration.achieved_restriction.reset();
+  context_configuration.unavailable_reason =
+      runtime::RestrictionUnavailableReason::mechanism_absent;
+  context_configuration.approval_mode = runtime::ApprovalMode::automatic;
+  context_configuration.matcher_policy_identity =
+      std::string{(*process_matcher)->identity()};
+  auto context = runtime::make_application_launch_context(
+      std::move(context_configuration));
+  REQUIRE(context);
+  auto policy = runtime::make_tool_launch_policy(
+      snapshot, {id<domain::PermissionProfileId>("launch"), std::move(*context),
+                 std::move(*process_matcher)});
+  REQUIRE(policy);
+  const auto unavailable_decision =
+      (*policy)->evaluate(request("run_process", {}));
+  REQUIRE(unavailable_decision);
+  REQUIRE(unavailable_decision->decision == domain::PolicyDecision::deny);
+  REQUIRE_FALSE(unavailable_decision->automatic_approval);
+
+  auto typo_matcher = runtime::compile_automatic_approval_matcher(
+      {runtime::ExactToolArgumentsApprovalRule{
+          "run_proces",
+          runtime::canonicalize_validated_tool_arguments(
+              {"application/json", "{}"})
+              .value(),
+          {{runtime::RestrictionLevel::high}, 1, std::nullopt, 0}}});
+  REQUIRE(typo_matcher);
+  runtime::ApplicationLaunchContextConfiguration typo_context_configuration;
+  typo_context_configuration.selected_restriction =
+      runtime::RestrictionLevel::high;
+  typo_context_configuration.achieved_restriction.reset();
+  typo_context_configuration.unavailable_reason =
+      runtime::RestrictionUnavailableReason::mechanism_absent;
+  typo_context_configuration.approval_mode = runtime::ApprovalMode::automatic;
+  typo_context_configuration.matcher_policy_identity =
+      std::string{(*typo_matcher)->identity()};
+  auto typo_context = runtime::make_application_launch_context(
+      std::move(typo_context_configuration));
+  REQUIRE(typo_context);
+  auto typo_policy = runtime::make_tool_launch_policy(
+      snapshot, {id<domain::PermissionProfileId>("launch"),
+                 std::move(*typo_context), std::move(*typo_matcher)});
+  REQUIRE_FALSE(typo_policy);
+  REQUIRE(typo_policy.error().code ==
+          runtime::ToolPolicyErrorCode::invalid_profile);
+}
+
 TEST_CASE("application launch context rejects ambiguous or unsafe state",
           "[launch-policy][context][failure]") {
   runtime::ApplicationLaunchContextConfiguration configured;

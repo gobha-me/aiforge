@@ -21,6 +21,7 @@ constexpr std::size_t kMaximumDescriptionBytes{std::size_t{16} * 1024U};
 constexpr std::size_t kMaximumSchemaBytes{std::size_t{1024} * 1024U};
 constexpr std::size_t kMaximumScopeBytes{std::size_t{16} * 1024U};
 constexpr std::size_t kMaximumSubsetTools{256};
+constexpr std::size_t kMaximumCatalogTools{256};
 constexpr std::size_t kMaximumExecutorContractBytes{128};
 constexpr std::array kToolCategories{
     ToolCategory::interaction, ToolCategory::memory, ToolCategory::repository,
@@ -81,9 +82,39 @@ constexpr std::array kToolCategories{
   return false;
 }
 
+[[nodiscard]] auto valid_restriction_level(
+    const RestrictionLevel value) noexcept -> bool {
+  switch (value) {
+    case RestrictionLevel::high:
+    case RestrictionLevel::medium:
+    case RestrictionLevel::low:
+    case RestrictionLevel::none: return true;
+  }
+  return false;
+}
+
+[[nodiscard]] auto valid_restriction_unavailable_reason(
+    const RestrictionUnavailableReason value) noexcept -> bool {
+  switch (value) {
+    case RestrictionUnavailableReason::unsupported_platform:
+    case RestrictionUnavailableReason::unsupported_architecture:
+    case RestrictionUnavailableReason::unsupported_kernel:
+    case RestrictionUnavailableReason::missing_delegation:
+    case RestrictionUnavailableReason::missing_controller:
+    case RestrictionUnavailableReason::permission_denied:
+    case RestrictionUnavailableReason::privilege_changed:
+    case RestrictionUnavailableReason::mechanism_absent:
+    case RestrictionUnavailableReason::unsupported_combination:
+    case RestrictionUnavailableReason::setup_race:
+    case RestrictionUnavailableReason::enforcement_failed:
+    case RestrictionUnavailableReason::cleanup_failed:
+    case RestrictionUnavailableReason::internal_error: return true;
+  }
+  return false;
+}
+
 [[nodiscard]] auto valid_declaration(
-    const backend::ToolDeclaration& declaration,
-    const ToolExecutionLimits& limits)
+    const backend::ToolDeclaration& declaration)
     -> std::expected<void, ToolRegistryError> {
   if (declaration.name.empty() ||
       declaration.name.size() > kMaximumToolNameBytes ||
@@ -107,10 +138,6 @@ constexpr std::array kToolCategories{
   if (schema.is_discarded() || !schema.is_object()) {
     return invalid("tool input schema must contain a valid JSON object");
   }
-  if (!valid_limits(limits)) {
-    return invalid("tool execution limits must be positive");
-  }
-
   std::set<domain::Effect> effects;
   for (const auto effect : declaration.effects) {
     if (!valid_effect(effect) || !effects.insert(effect).second) {
@@ -175,6 +202,26 @@ auto all_tool_categories() noexcept -> std::span<const ToolCategory> {
   return kToolCategories;
 }
 
+auto tool_unavailable_reason_text(const ToolUnavailableReason reason) noexcept
+    -> std::string_view {
+  switch (reason) {
+    case ToolUnavailableReason::not_configured: return "not-configured";
+    case ToolUnavailableReason::durable_session_required:
+      return "durable-session-required";
+    case ToolUnavailableReason::unrestricted_network_required:
+      return "unrestricted-network-required";
+    case ToolUnavailableReason::restriction_unavailable:
+      return "restriction-unavailable";
+    case ToolUnavailableReason::unsupported_platform:
+      return "unsupported-platform";
+    case ToolUnavailableReason::runtime_dependency_or_path_unavailable:
+      return "runtime-dependency-or-path-unavailable";
+    case ToolUnavailableReason::shell_unimplemented:
+      return "shell-unimplemented";
+  }
+  return "tool unavailable";
+}
+
 auto ToolRegistrySnapshot::declarations() const noexcept
     -> const std::vector<backend::ToolDeclaration>& {
   return m_declarations;
@@ -186,6 +233,20 @@ auto ToolRegistrySnapshot::find(const std::string_view name) const noexcept
     return std::string_view{tool.declaration.name};
   });
   return found == m_tools.end() ? nullptr : &*found;
+}
+
+auto ToolRegistrySnapshot::find_unavailable(
+    const std::string_view name) const noexcept -> const UnavailableTool* {
+  const auto found =
+      std::ranges::find(m_unavailable_tools, name, [](const auto& tool) {
+        return std::string_view{tool.name};
+      });
+  return found == m_unavailable_tools.end() ? nullptr : &*found;
+}
+
+auto ToolRegistrySnapshot::unavailable_tools() const noexcept
+    -> std::span<const UnavailableTool> {
+  return m_unavailable_tools;
 }
 
 auto ToolRegistrySnapshot::subset(const std::span<const std::string> names)
@@ -215,7 +276,7 @@ auto ToolRegistrySnapshot::subset(const std::span<const std::string> names)
     if (tools.size() != selected.size()) {
       return invalid("tool subset contains an unknown name");
     }
-    return ToolRegistrySnapshot{std::move(tools), std::move(declarations)};
+    return ToolRegistrySnapshot{std::move(tools), std::move(declarations), {}};
   } catch (...) {
     return std::unexpected(
         ToolRegistryError{ToolRegistryErrorCode::internal_failure,
@@ -234,8 +295,11 @@ auto ToolRegistry::register_tool(
           ToolRegistryError{ToolRegistryErrorCode::missing_executor,
                             "tool registration requires an executor"});
     }
-    if (auto checked = valid_declaration(declaration, limits); !checked) {
+    if (auto checked = valid_declaration(declaration); !checked) {
       return checked;
+    }
+    if (!valid_limits(limits)) {
+      return invalid("tool execution limits must be positive");
     }
     if (executor_contract && !valid_executor_contract(*executor_contract)) {
       return invalid("tool executor contract identity or version is invalid");
@@ -243,8 +307,15 @@ auto ToolRegistry::register_tool(
     if (!valid_category(category)) {
       return invalid("tool category is invalid");
     }
-    if (std::ranges::any_of(m_tools, [&](const auto& tool) {
-          return tool.declaration.name == declaration.name;
+    if (m_tools.size() + m_unavailable_tools.size() >= kMaximumCatalogTools) {
+      return invalid("tool catalog contains too many entries");
+    }
+    if (std::ranges::any_of(m_tools,
+                            [&](const auto& tool) {
+                              return tool.declaration.name == declaration.name;
+                            }) ||
+        std::ranges::any_of(m_unavailable_tools, [&](const auto& tool) {
+          return tool.name == declaration.name;
         })) {
       return std::unexpected(
           ToolRegistryError{ToolRegistryErrorCode::duplicate_name,
@@ -261,6 +332,62 @@ auto ToolRegistry::register_tool(
   }
 }
 
+auto ToolRegistry::declare_unavailable_tool(std::string name,
+                                            ToolUnavailability unavailability,
+                                            const ToolCategory category)
+    -> std::expected<void, ToolRegistryError> {
+  try {
+    if (name.empty() || name.size() > kMaximumToolNameBytes ||
+        has_control_character(name)) {
+      return invalid(
+          "tool name is empty, oversized, or contains control characters");
+    }
+    if (!valid_category(category)) return invalid("tool category is invalid");
+    const bool has_restriction = unavailability.restriction.has_value();
+    if ((unavailability.reason ==
+         ToolUnavailableReason::restriction_unavailable) != has_restriction) {
+      return invalid("restriction-unavailable metadata is inconsistent");
+    }
+    if (has_restriction &&
+        (!valid_restriction_level(
+             unavailability.restriction->selected_restriction) ||
+         !valid_restriction_unavailable_reason(
+             unavailability.restriction->reason))) {
+      return invalid("restriction-unavailable metadata is invalid");
+    }
+    switch (unavailability.reason) {
+      case ToolUnavailableReason::not_configured:
+      case ToolUnavailableReason::durable_session_required:
+      case ToolUnavailableReason::unrestricted_network_required:
+      case ToolUnavailableReason::restriction_unavailable:
+      case ToolUnavailableReason::unsupported_platform:
+      case ToolUnavailableReason::runtime_dependency_or_path_unavailable:
+      case ToolUnavailableReason::shell_unimplemented: break;
+      default: return invalid("tool unavailability reason is invalid");
+    }
+    if (m_tools.size() + m_unavailable_tools.size() >= kMaximumCatalogTools) {
+      return invalid("tool catalog contains too many entries");
+    }
+    if (std::ranges::any_of(
+            m_tools,
+            [&](const auto& tool) { return tool.declaration.name == name; }) ||
+        std::ranges::any_of(m_unavailable_tools, [&](const auto& tool) {
+          return tool.name == name;
+        })) {
+      return std::unexpected(
+          ToolRegistryError{ToolRegistryErrorCode::duplicate_name,
+                            "tool name is already declared"});
+    }
+    m_unavailable_tools.push_back(
+        UnavailableTool{std::move(name), category, std::move(unavailability)});
+    return {};
+  } catch (...) {
+    return std::unexpected(
+        ToolRegistryError{ToolRegistryErrorCode::internal_failure,
+                          "unavailable tool declaration failed internally"});
+  }
+}
+
 auto ToolRegistry::snapshot() const
     -> std::expected<ToolRegistrySnapshot, ToolRegistryError> {
   try {
@@ -268,7 +395,8 @@ auto ToolRegistry::snapshot() const
     declarations.reserve(m_tools.size());
     for (const auto& tool : m_tools)
       declarations.push_back(tool.declaration);
-    return ToolRegistrySnapshot{m_tools, std::move(declarations)};
+    return ToolRegistrySnapshot{m_tools, std::move(declarations),
+                                m_unavailable_tools};
   } catch (...) {
     return std::unexpected(
         ToolRegistryError{ToolRegistryErrorCode::internal_failure,

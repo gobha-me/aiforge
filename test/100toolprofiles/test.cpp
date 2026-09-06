@@ -3,6 +3,7 @@
 #include <aiforge/testing/scripted_tool_executor.hpp>
 
 #include <algorithm>
+#include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <memory>
 #include <optional>
@@ -99,7 +100,7 @@ TEST_CASE("built-in tool profiles have explicit bounded membership",
           "[tool-profile]") {
   const auto profiles = runtime::builtin_tool_profiles();
   REQUIRE(runtime::validate_tool_profiles(profiles));
-  REQUIRE(profiles.size() == 4);
+  REQUIRE(profiles.size() == 5);
   REQUIRE(profiles[0].profile_id == profile_id("essentials"));
   REQUIRE(profiles[0].name == "Essentials");
   REQUIRE(profiles[0].tool_names ==
@@ -109,17 +110,140 @@ TEST_CASE("built-in tool profiles have explicit bounded membership",
   REQUIRE(profiles[1].tool_names ==
           std::vector<std::string>{"ask_user", "propose_memory",
                                    "read_repository_file"});
-  REQUIRE(profiles[2].profile_id == profile_id("media"));
-  REQUIRE(profiles[2].name == "Media");
+  REQUIRE(profiles[2].profile_id == profile_id("process"));
+  REQUIRE(profiles[2].name == "Process");
   REQUIRE(profiles[2].tool_names == std::vector<std::string>{"ask_user",
                                                              "propose_memory",
+                                                             "run_process"});
+  REQUIRE_FALSE(std::ranges::contains(profiles[2].tool_names, "run_shell"));
+  REQUIRE(profiles[3].profile_id == profile_id("media"));
+  REQUIRE(profiles[3].name == "Media");
+  REQUIRE(profiles[3].tool_names == std::vector<std::string>{"ask_user",
+                                                             "propose_memory",
                                                              "generate_image"});
-  REQUIRE(profiles[3].profile_id == profile_id("off"));
-  REQUIRE(profiles[3].name == "Off");
-  REQUIRE(profiles[3].tool_names.empty());
+  REQUIRE(profiles[4].profile_id == profile_id("off"));
+  REQUIRE(profiles[4].name == "Off");
+  REQUIRE(profiles[4].tool_names.empty());
   REQUIRE(runtime::tool_profile_availability_reason_text(
               runtime::ToolProfileAvailabilityReason::tool_not_registered) ==
           "tool is not registered in this runtime");
+}
+
+TEST_CASE("unavailable tool catalog is typed bounded and never callable",
+          "[tool-profile][tool-registry][failure]") {
+  REQUIRE(runtime::tool_unavailable_reason_text(
+              runtime::ToolUnavailableReason::not_configured) ==
+          "not-configured");
+  REQUIRE(runtime::tool_unavailable_reason_text(
+              runtime::ToolUnavailableReason::durable_session_required) ==
+          "durable-session-required");
+  REQUIRE(runtime::tool_unavailable_reason_text(
+              runtime::ToolUnavailableReason::unrestricted_network_required) ==
+          "unrestricted-network-required");
+  REQUIRE(runtime::tool_unavailable_reason_text(
+              runtime::ToolUnavailableReason::restriction_unavailable) ==
+          "restriction-unavailable");
+  REQUIRE(runtime::tool_unavailable_reason_text(
+              runtime::ToolUnavailableReason::unsupported_platform) ==
+          "unsupported-platform");
+  REQUIRE(runtime::tool_unavailable_reason_text(
+              runtime::ToolUnavailableReason::
+                  runtime_dependency_or_path_unavailable) ==
+          "runtime-dependency-or-path-unavailable");
+  REQUIRE(runtime::tool_unavailable_reason_text(
+              runtime::ToolUnavailableReason::shell_unimplemented) ==
+          "shell-unimplemented");
+
+  runtime::ToolRegistry registry;
+  const runtime::ToolUnavailability unavailable{
+      runtime::ToolUnavailableReason::restriction_unavailable,
+      runtime::ToolRestrictionUnavailability{
+          runtime::RestrictionLevel::high,
+          runtime::RestrictionUnavailableReason::mechanism_absent}};
+  REQUIRE(registry.declare_unavailable_tool("run_process", unavailable,
+                                            runtime::ToolCategory::process));
+
+  auto duplicate = registry.declare_unavailable_tool(
+      "run_process", {runtime::ToolUnavailableReason::not_configured},
+      runtime::ToolCategory::process);
+  REQUIRE_FALSE(duplicate);
+  REQUIRE(duplicate.error().code ==
+          runtime::ToolRegistryErrorCode::duplicate_name);
+
+  auto executable_collision =
+      registry.register_tool(declaration("run_process"),
+                             std::make_shared<testing::ScriptedToolExecutor>(
+                                 std::vector<testing::ScriptedToolExchange>{}));
+  REQUIRE_FALSE(executable_collision);
+  REQUIRE(executable_collision.error().code ==
+          runtime::ToolRegistryErrorCode::duplicate_name);
+
+  REQUIRE_FALSE(registry.declare_unavailable_tool(
+      "bad", {runtime::ToolUnavailableReason::restriction_unavailable}));
+  REQUIRE_FALSE(registry.declare_unavailable_tool(
+      "bad2", {runtime::ToolUnavailableReason::not_configured,
+               runtime::ToolRestrictionUnavailability{
+                   runtime::RestrictionLevel::none,
+                   runtime::RestrictionUnavailableReason::mechanism_absent}}));
+  REQUIRE_FALSE(registry.declare_unavailable_tool(
+      std::string(129, 'x'),
+      {runtime::ToolUnavailableReason::unsupported_platform}));
+
+  auto snapshot = registry.snapshot();
+  REQUIRE(snapshot);
+  REQUIRE(snapshot->empty());
+  REQUIRE(snapshot->size() == 0);
+  REQUIRE(snapshot->declarations().empty());
+  REQUIRE(snapshot->find("run_process") == nullptr);
+  REQUIRE(snapshot->find_unavailable("run_process") != nullptr);
+  REQUIRE(snapshot->find_unavailable("run_process")->unavailability ==
+          unavailable);
+  REQUIRE(snapshot->unavailable_tools().size() == 1);
+  REQUIRE_FALSE(snapshot->subset(std::array{std::string{"run_process"}}));
+
+  runtime::ToolRegistry bounded;
+  for (std::size_t index{}; index < 256; ++index) {
+    REQUIRE(bounded.declare_unavailable_tool(
+        "unavailable_" + std::to_string(index),
+        {runtime::ToolUnavailableReason::not_configured}));
+  }
+  REQUIRE_FALSE(bounded.declare_unavailable_tool(
+      "overbound", {runtime::ToolUnavailableReason::not_configured}));
+}
+
+TEST_CASE("process profile presents typed unavailability without authority",
+          "[tool-profile][failure]") {
+  runtime::ToolRegistry registry;
+  register_tool(registry, "ask_user");
+  register_tool(registry, "propose_memory");
+  REQUIRE(registry.declare_unavailable_tool(
+      "run_process",
+      {runtime::ToolUnavailableReason::restriction_unavailable,
+       runtime::ToolRestrictionUnavailability{
+           runtime::RestrictionLevel::medium,
+           runtime::RestrictionUnavailableReason::mechanism_absent}},
+      runtime::ToolCategory::process));
+  REQUIRE(registry.declare_unavailable_tool(
+      "run_shell", {runtime::ToolUnavailableReason::shell_unimplemented},
+      runtime::ToolCategory::process));
+  const auto snapshot = registry.snapshot().value();
+
+  auto resolved =
+      runtime::resolve_tool_profile(snapshot, profile_id("process"), true);
+  REQUIRE(resolved);
+  REQUIRE(resolved->effective_tools.size() == 2);
+  REQUIRE(resolved->tool_availability[2].tool_name == "run_process");
+  REQUIRE(resolved->tool_availability[2].reason ==
+          runtime::ToolProfileAvailabilityReason::declared_unavailable);
+  REQUIRE(resolved->tool_availability[2].unavailability ==
+          snapshot.find_unavailable("run_process")->unavailability);
+  REQUIRE(std::ranges::none_of(
+      resolved->selected_profile.tool_names,
+      [](const auto& name) { return name == "run_shell"; }));
+
+  const auto process_members = runtime::tool_profile_category_members(
+      snapshot, profile_id("process"), runtime::ToolCategory::process);
+  REQUIRE(process_members == std::vector<std::string>{"run_process"});
 }
 
 TEST_CASE(

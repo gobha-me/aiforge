@@ -448,14 +448,16 @@ auto make_tool_launch_policy(const ToolRegistrySnapshot& registered_tools,
           error(ToolPolicyErrorCode::invalid_profile,
                 "automatic matcher identity does not match its policy"));
     }
-    if (automatic && std::ranges::any_of(
-                         configuration.automatic_matcher->tool_names(),
-                         [&](const auto& tool_name) {
-                           return registered_tools.find(tool_name) == nullptr;
-                         })) {
+    if (automatic &&
+        std::ranges::any_of(
+            configuration.automatic_matcher->tool_names(),
+            [&](const auto& tool_name) {
+              return registered_tools.find(tool_name) == nullptr &&
+                     registered_tools.find_unavailable(tool_name) == nullptr;
+            })) {
       return std::unexpected(
           error(ToolPolicyErrorCode::invalid_profile,
-                "automatic approval rules require registered tools"));
+                "automatic approval rules require exact declared tool names"));
     }
 
     auto provenance = make_provenance(registered_tools, configuration);

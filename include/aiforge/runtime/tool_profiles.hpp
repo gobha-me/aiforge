@@ -6,6 +6,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <aiforge/domain/ids.hpp>
@@ -50,6 +51,7 @@ struct ToolProfileError {
 enum class ToolProfileAvailabilityReason {
   available,
   tool_not_registered,
+  declared_unavailable,
   profile_contract_mismatch,
   session_tool_disabled,
   model_profile_limit,
@@ -66,6 +68,13 @@ struct ToolProfileToolAvailability {
   std::string tool_name;
   ToolProfileAvailabilityReason reason{
       ToolProfileAvailabilityReason::tool_not_registered};
+  std::optional<ToolUnavailability> unavailability;
+  ToolProfileToolAvailability() = default;
+  ToolProfileToolAvailability(
+      std::string name, ToolProfileAvailabilityReason availability_reason,
+      std::optional<ToolUnavailability> unavailable = {})
+      : tool_name(std::move(name)), reason(availability_reason),
+        unavailability(std::move(unavailable)) {}
   auto operator==(const ToolProfileToolAvailability&) const -> bool = default;
 };
 
