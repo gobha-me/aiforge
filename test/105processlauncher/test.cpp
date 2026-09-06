@@ -34,6 +34,8 @@ auto request(std::string secret = "fake-secret")
           "working-directory-identity",
           {{"/workspace", "root-identity",
             runtime::ProcessFilesystemAccess::read_write}},
+          {{"/workspace", "root-identity",
+            runtime::ProcessFilesystemAccess::read_write}},
           {{"SAFE_NAME", std::move(secret)}},
           {1s, 1024, 64, 20ms}};
 }
@@ -104,11 +106,11 @@ TEST_CASE("process launch requests reject malformed or widened authority",
   REQUIRE_FALSE(runtime::validate_process_launch_request(invalid));
 
   invalid = request();
-  invalid.roots.push_back(invalid.roots.front());
+  invalid.configured_roots.push_back(invalid.configured_roots.front());
   REQUIRE_FALSE(runtime::validate_process_launch_request(invalid));
 
   invalid = request();
-  invalid.roots.front().access =
+  invalid.requested_roots.front().access =
       static_cast<runtime::ProcessFilesystemAccess>(255);
   REQUIRE_FALSE(runtime::validate_process_launch_request(invalid));
 
@@ -143,6 +145,37 @@ TEST_CASE("process launch requests reject malformed or widened authority",
   bounds = {};
   bounds.maximum_wall_time = 121s;
   REQUIRE_FALSE(runtime::validate_process_launch_bounds(bounds));
+}
+
+TEST_CASE("process launch root bounds preserve the independent tool ceilings",
+          "[process-launcher][validation][bounds][failure]") {
+  auto boundary = request();
+  boundary.configured_roots.clear();
+  boundary.requested_roots.clear();
+  constexpr auto hard_maximum = runtime::ProcessLaunchBounds{}.maximum_roots;
+  static_assert(hard_maximum == 128);
+  boundary.configured_roots.reserve(hard_maximum + 1U);
+  boundary.requested_roots.reserve(hard_maximum + 1U);
+  for (std::size_t index{}; index < hard_maximum; ++index) {
+    boundary.configured_roots.push_back(
+        {"/root/" + std::to_string(index),
+         "root-identity-" + std::to_string(index),
+         runtime::ProcessFilesystemAccess::read_only});
+    boundary.requested_roots.push_back(
+        {"/requested/" + std::to_string(index),
+         "requested-root-identity-" + std::to_string(index),
+         runtime::ProcessFilesystemAccess::read_only});
+  }
+  REQUIRE(runtime::validate_process_launch_request(boundary));
+
+  auto tighter = runtime::ProcessLaunchBounds{};
+  tighter.maximum_roots = 64;
+  REQUIRE_FALSE(runtime::validate_process_launch_request(boundary, tighter));
+
+  boundary.configured_roots.push_back(
+      {"/root/overbound", "root-identity-overbound",
+       runtime::ProcessFilesystemAccess::read_only});
+  REQUIRE_FALSE(runtime::validate_process_launch_request(boundary));
 }
 
 TEST_CASE("only exact none launch contexts bind",

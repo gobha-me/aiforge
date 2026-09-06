@@ -316,7 +316,10 @@ auto validate_process_launch_request(const ProcessLaunchRequest& request,
         !valid_identity(request.working_directory_identity,
                         bounds.maximum_identity_bytes) ||
         request.arguments.size() > bounds.maximum_arguments ||
-        request.roots.empty() || request.roots.size() > bounds.maximum_roots ||
+        request.configured_roots.empty() ||
+        request.configured_roots.size() > bounds.maximum_roots ||
+        request.requested_roots.empty() ||
+        request.requested_roots.size() > bounds.maximum_roots ||
         request.environment.size() > bounds.maximum_environment_variables) {
       return launch_failure(ProcessLaunchErrorCode::invalid_request,
                             ProcessLaunchStage::validation,
@@ -356,15 +359,19 @@ auto validate_process_launch_request(const ProcessLaunchRequest& request,
       }
     }
 
-    std::set<std::string_view> paths;
-    for (const auto& root : request.roots) {
-      if (!normalized_absolute_path(root.path, bounds.maximum_path_bytes) ||
-          !valid_identity(root.identity, bounds.maximum_identity_bytes) ||
-          !valid_access(root.access) || !paths.insert(root.path).second) {
-        return launch_failure(ProcessLaunchErrorCode::invalid_request,
-                              ProcessLaunchStage::validation,
-                              "process filesystem roots are invalid");
-      }
+    const auto valid_roots = [&](const auto& roots) {
+      std::set<std::string_view> paths;
+      return std::ranges::all_of(roots, [&](const auto& root) {
+        return normalized_absolute_path(root.path, bounds.maximum_path_bytes) &&
+               valid_identity(root.identity, bounds.maximum_identity_bytes) &&
+               valid_access(root.access) && paths.insert(root.path).second;
+      });
+    };
+    if (!valid_roots(request.configured_roots) ||
+        !valid_roots(request.requested_roots)) {
+      return launch_failure(ProcessLaunchErrorCode::invalid_request,
+                            ProcessLaunchStage::validation,
+                            "process filesystem roots are invalid");
     }
 
     std::set<std::string_view> environment_names;

@@ -55,7 +55,8 @@ struct ProcessLaunchRequest {
   std::vector<std::string> arguments;
   std::string working_directory;
   std::string working_directory_identity;
-  std::vector<ProcessFilesystemRoot> roots;
+  std::vector<ProcessFilesystemRoot> configured_roots;
+  std::vector<ProcessFilesystemRoot> requested_roots;
   std::vector<ProcessEnvironmentVariable> environment;
   ProcessLaunchLimits limits;
   auto operator==(const ProcessLaunchRequest&) const -> bool = default;
@@ -64,7 +65,7 @@ struct ProcessLaunchRequest {
 struct ProcessLaunchBounds {
   std::size_t maximum_arguments{256};
   std::size_t maximum_argument_bytes{std::size_t{256} * 1024U};
-  std::size_t maximum_roots{64};
+  std::size_t maximum_roots{128};
   std::size_t maximum_environment_variables{64};
   std::size_t maximum_path_bytes{4096};
   std::size_t maximum_identity_bytes{128};
