@@ -115,6 +115,23 @@ TEST_CASE("process launch requests reject malformed or widened authority",
   REQUIRE_FALSE(runtime::validate_process_launch_request(invalid));
 
   invalid = request();
+  invalid.requested_roots.front().path = "/outside";
+  REQUIRE_FALSE(runtime::validate_process_launch_request(invalid));
+
+  invalid = request();
+  invalid.configured_roots.front().access =
+      runtime::ProcessFilesystemAccess::read_only;
+  REQUIRE_FALSE(runtime::validate_process_launch_request(invalid));
+
+  invalid = request();
+  invalid.requested_roots.front().identity = "different-identity";
+  REQUIRE_FALSE(runtime::validate_process_launch_request(invalid));
+
+  invalid = request();
+  invalid.working_directory = "/outside";
+  REQUIRE_FALSE(runtime::validate_process_launch_request(invalid));
+
+  invalid = request();
   invalid.environment.push_back(invalid.environment.front());
   REQUIRE_FALSE(runtime::validate_process_launch_request(invalid));
 
@@ -152,6 +169,8 @@ TEST_CASE("process launch root bounds preserve the independent tool ceilings",
   auto boundary = request();
   boundary.configured_roots.clear();
   boundary.requested_roots.clear();
+  boundary.working_directory = "/root/0";
+  boundary.working_directory_identity = "root-identity-0";
   constexpr auto hard_maximum = runtime::ProcessLaunchBounds{}.maximum_roots;
   static_assert(hard_maximum == 128);
   boundary.configured_roots.reserve(hard_maximum + 1U);
@@ -162,8 +181,8 @@ TEST_CASE("process launch root bounds preserve the independent tool ceilings",
          "root-identity-" + std::to_string(index),
          runtime::ProcessFilesystemAccess::read_only});
     boundary.requested_roots.push_back(
-        {"/requested/" + std::to_string(index),
-         "requested-root-identity-" + std::to_string(index),
+        {"/root/" + std::to_string(index),
+         "root-identity-" + std::to_string(index),
          runtime::ProcessFilesystemAccess::read_only});
   }
   REQUIRE(runtime::validate_process_launch_request(boundary));

@@ -56,6 +56,19 @@ namespace {
          path.lexically_normal().generic_string() == value;
 }
 
+[[nodiscard]] auto path_is_within(const std::string_view parent_text,
+                                  const std::string_view child_text) -> bool {
+  const std::filesystem::path parent{parent_text};
+  const std::filesystem::path child{child_text};
+  auto parent_part = parent.begin();
+  auto child_part = child.begin();
+  for (; parent_part != parent.end() && child_part != child.end();
+       ++parent_part, ++child_part) {
+    if (*parent_part != *child_part) return false;
+  }
+  return parent_part == parent.end();
+}
+
 [[nodiscard]] auto valid_environment_name(const std::string_view value)
     -> bool {
   if (value.empty() || value.size() > 255U || value.front() == '=' ||
@@ -372,6 +385,27 @@ auto validate_process_launch_request(const ProcessLaunchRequest& request,
       return launch_failure(ProcessLaunchErrorCode::invalid_request,
                             ProcessLaunchStage::validation,
                             "process filesystem roots are invalid");
+    }
+    const auto configured_covers = [&](const auto& requested) {
+      return std::ranges::any_of(
+          request.configured_roots, [&](const auto& configured) {
+            const bool access_covers =
+                configured.access == ProcessFilesystemAccess::read_write ||
+                requested.access == ProcessFilesystemAccess::read_only;
+            const bool identity_agrees =
+                configured.path != requested.path ||
+                configured.identity == requested.identity;
+            return access_covers && identity_agrees &&
+                   path_is_within(configured.path, requested.path);
+          });
+    };
+    if (!std::ranges::all_of(request.requested_roots, configured_covers) ||
+        std::ranges::none_of(request.requested_roots, [&](const auto& root) {
+          return path_is_within(root.path, request.working_directory);
+        })) {
+      return launch_failure(ProcessLaunchErrorCode::invalid_request,
+                            ProcessLaunchStage::validation,
+                            "process filesystem authority is widened");
     }
 
     std::set<std::string_view> environment_names;
