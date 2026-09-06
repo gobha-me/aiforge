@@ -163,7 +163,6 @@ src/adapters/process_tool.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c
 src/adapters/process_tool.cpp	modernize-deprecated-headers	4a21ab478f80ef15456a	inclusion of deprecated C++ header 'signal.h'; consider using 'csignal' instead
 src/adapters/process_tool.cpp	modernize-use-integer-sign-comparison	5ded5eda399a4faddc10	comparison between 'signed' and 'unsigned' integers
 src/adapters/process_tool.cpp	modernize-use-nodiscard	747226726207b84b1e4c	function 'validate' should be marked [[nodiscard]]
-src/adapters/process_tool.cpp	readability-function-cognitive-complexity	11d1477af9f6d2197889	function 'parse_request' has cognitive complexity of 30 (threshold 20)
 src/adapters/process_tool.cpp	readability-function-cognitive-complexity	8da71f44118678272551	function 'safe_utf8' has cognitive complexity of 29 (threshold 20)
 src/adapters/process_tool.cpp	readability-math-missing-parentheses	3823178d6963730833fa	'*' has higher precedence than '+'; add parentheses to explicitly specify the order of operations
 src/adapters/process_tool.cpp	readability-math-missing-parentheses	ce6abe3123ab50dd24c3	'*' has higher precedence than '+'; add parentheses to explicitly specify the order of operations

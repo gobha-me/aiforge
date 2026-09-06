@@ -4855,6 +4855,7 @@ auto ProcessInteractiveCommand::execute(Request request,
          .environment_lookup =
              [](const std::string_view name) -> std::optional<std::string> {
            const std::string owned_name{name};
+           // NOLINTNEXTLINE(concurrency-mt-unsafe) -- Startup snapshot.
            const auto* value = std::getenv(owned_name.c_str());
            return value == nullptr ? std::nullopt
                                    : std::optional<std::string>{value};
