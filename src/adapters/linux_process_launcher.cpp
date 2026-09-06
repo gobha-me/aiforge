@@ -149,7 +149,7 @@ struct FileIdentity {
     -> std::expected<UniqueFd, runtime::ProcessLaunchError> {
   // The POSIX fcntl API is variadic for all commands.
   int duplicate{};
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX fcntl API.
   duplicate = ::fcntl(descriptor, F_DUPFD_CLOEXEC, minimum_source_descriptor);
   if (duplicate < 0) {
     return launch_failure(runtime::ProcessLaunchErrorCode::unavailable,
@@ -170,7 +170,7 @@ struct FileIdentity {
     const runtime::ProcessFilesystemTargetKind kind)
     -> std::expected<UniqueFd, runtime::ProcessLaunchError> {
   // The POSIX open API is variadic even though no mode argument is read here.
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX open API.
   UniqueFd current{::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)};
   if (current.get() < 0) {
     return launch_failure(runtime::ProcessLaunchErrorCode::unavailable,
@@ -192,7 +192,7 @@ struct FileIdentity {
         !last || kind == runtime::ProcessFilesystemTargetKind::directory;
     const std::string component_text{component};
     // The POSIX openat API is variadic even though no mode argument is read.
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX openat API.
     UniqueFd next{::openat(current.get(), component_text.c_str(),
                            O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
                                (directory ? O_DIRECTORY : 0))};
@@ -253,7 +253,7 @@ struct FileIdentity {
     const auto end = slash == std::string_view::npos ? path.size() : slash;
     const std::string component{path.substr(position, end - position)};
     // The POSIX openat API is variadic even though no mode argument is read.
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX openat API.
     UniqueFd next{::openat(current->get(), component.c_str(),
                            O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECTORY)};
     if (next.get() < 0) {
@@ -315,7 +315,7 @@ struct FileIdentity {
 auto close_extra_descriptors(const int descriptor_limit) noexcept -> void {
 #if defined(SYS_close_range)
   // The raw Linux syscall boundary is necessarily variadic.
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Linux syscall API.
   if (::syscall(SYS_close_range, 5U, ~0U, 0U) == 0) return;
 #endif
   for (int descriptor = 5; descriptor < descriptor_limit; ++descriptor) {
@@ -325,16 +325,16 @@ auto close_extra_descriptors(const int descriptor_limit) noexcept -> void {
 
 [[nodiscard]] auto set_nonblocking(const int descriptor) -> bool {
   // The POSIX fcntl API is variadic for all commands.
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX fcntl API.
   const auto flags = ::fcntl(descriptor, F_GETFL);
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX fcntl API.
   return flags >= 0 && ::fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
 [[nodiscard]] auto set_close_on_exec(const int descriptor, const bool enabled)
     -> bool {
   // The POSIX fcntl API is variadic for all commands.
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX fcntl API.
   return ::fcntl(descriptor, F_SETFD, enabled ? FD_CLOEXEC : 0) == 0;
 }
 
@@ -373,7 +373,7 @@ class LinuxProcessStream final : public runtime::ProcessLaunchStream {
     }
   }
 
-  // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- State machine.
   auto next(const std::stop_token stop_token) noexcept
       -> std::expected<std::optional<runtime::ProcessLaunchEvent>,
                        runtime::ProcessLaunchError> override {
@@ -550,7 +550,7 @@ class LinuxProcessStream final : public runtime::ProcessLaunchStream {
     }
   }
 
-  // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- IO state flow.
   auto pump(const int timeout_ms) -> void {
     std::array<struct pollfd, 3> descriptors{};
     std::array<UniqueFd*, 3> owners{&m_standard_output, &m_standard_error,
@@ -707,7 +707,7 @@ class LinuxProcessLauncher final : public runtime::ProcessLauncher {
     }
   }
 
-  // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Ordered setup.
   auto do_launch(runtime::ProcessLaunchRequest request,
                  const std::stop_token stop_token) noexcept
       -> std::expected<std::unique_ptr<runtime::ProcessLaunchStream>,
@@ -850,7 +850,7 @@ class LinuxProcessLauncher final : public runtime::ProcessLauncher {
           fail(errno);
         }
         // The POSIX open API is variadic even though no mode argument is read.
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX open API.
         const auto input = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
         if (input < 0 || ::dup2(input, STDIN_FILENO) < 0 ||
             ::fchdir(working_directory->get()) != 0) {
@@ -862,7 +862,7 @@ class LinuxProcessLauncher final : public runtime::ProcessLauncher {
         if (::sigemptyset(&mask) != 0) fail(errno);
         // This runs in the single surviving thread after fork, where the
         // async-signal-safe sigprocmask is the required pre-exec primitive.
-        // NOLINTNEXTLINE(concurrency-mt-unsafe)
+        // NOLINTNEXTLINE(concurrency-mt-unsafe) -- Post-fork signal reset.
         if (::sigprocmask(SIG_SETMASK, &mask, nullptr) != 0) fail(errno);
         struct sigaction action{};
         action.sa_handler = SIG_DFL;
