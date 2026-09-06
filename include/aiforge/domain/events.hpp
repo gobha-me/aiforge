@@ -14,6 +14,7 @@
 #include <aiforge/domain/review_receipt.hpp>
 #include <aiforge/domain/tool_spend.hpp>
 #include <aiforge/domain/verification_evidence.hpp>
+#include <aiforge/domain/video.hpp>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -342,6 +343,75 @@ struct ArtifactRemovedFromView {
   auto operator==(const ArtifactRemovedFromView&) const -> bool = default;
 };
 
+struct VideoGenerationRequested {
+  VideoOperationId operation_id;
+  VideoGenerationSpec spec;
+  ArtifactId artifact_id;
+  auto operator==(const VideoGenerationRequested&) const -> bool = default;
+};
+
+struct VideoQuoteObserved {
+  VideoOperationId operation_id;
+  MonetaryAmount quote;
+  auto operator==(const VideoQuoteObserved&) const -> bool = default;
+};
+
+struct VideoJobQueued {
+  VideoOperationId operation_id;
+  VideoJobId job_id;
+  auto operator==(const VideoJobQueued&) const -> bool = default;
+};
+
+struct VideoJobStatusObserved {
+  VideoOperationId operation_id;
+  VideoJobId job_id;
+  std::uint32_t poll_number{};
+  VideoJobState state{VideoJobState::queued};
+  auto operator==(const VideoJobStatusObserved&) const -> bool = default;
+};
+
+struct VideoArtifactPublished {
+  VideoOperationId operation_id;
+  VideoJobId job_id;
+  ArtifactMetadata artifact;
+  auto operator==(const VideoArtifactPublished&) const -> bool = default;
+};
+
+struct VideoCleanupPending {
+  VideoOperationId operation_id;
+  VideoJobId job_id;
+  std::uint32_t attempt{};
+  auto operator==(const VideoCleanupPending&) const -> bool = default;
+};
+
+struct VideoCleanupCompleted {
+  VideoOperationId operation_id;
+  VideoJobId job_id;
+  std::uint32_t attempt{};
+  auto operator==(const VideoCleanupCompleted&) const -> bool = default;
+};
+
+struct VideoCleanupFailed {
+  VideoOperationId operation_id;
+  VideoJobId job_id;
+  std::uint32_t attempt{};
+  DomainError error;
+  auto operator==(const VideoCleanupFailed&) const -> bool = default;
+};
+
+struct VideoTranscriptionRequested {
+  VideoOperationId operation_id;
+  ModelId model_id;
+  auto operator==(const VideoTranscriptionRequested&) const -> bool = default;
+};
+
+struct VideoTranscriptionObserved {
+  VideoOperationId operation_id;
+  std::string text;
+  std::optional<std::string> language;
+  auto operator==(const VideoTranscriptionObserved&) const -> bool = default;
+};
+
 struct VerificationEvidenceRecorded {
   VerificationEvidence evidence;
   auto operator==(const VerificationEvidenceRecorded&) const -> bool = default;
@@ -511,10 +581,14 @@ using RunEventPayload = std::variant<
     ToolSpendReconciliationRequired, ToolResultRecorded, ToolErrored,
     QuestionRequested, QuestionAnswered, QuestionCancelled, ArtifactCreated,
     ArtifactReferenced, ArtifactDisplayed, ArtifactRemovedFromView,
-    VerificationEvidenceRecorded, ReviewReceiptDrafted, ReviewRequested,
-    ReviewFindingOpened, ReviewFindingResolved, ReviewVerdictRecorded,
-    ReviewVerdictRevoked, ReviewOverrideRecorded, ReviewOverrideRevoked,
-    PlanRevisionProposed, PlanRevisionDecisionRecorded, PlanRevisionInvalidated,
+    VideoGenerationRequested, VideoQuoteObserved, VideoJobQueued,
+    VideoJobStatusObserved, VideoArtifactPublished, VideoCleanupPending,
+    VideoCleanupCompleted, VideoCleanupFailed, VideoTranscriptionRequested,
+    VideoTranscriptionObserved, VerificationEvidenceRecorded,
+    ReviewReceiptDrafted, ReviewRequested, ReviewFindingOpened,
+    ReviewFindingResolved, ReviewVerdictRecorded, ReviewVerdictRevoked,
+    ReviewOverrideRecorded, ReviewOverrideRevoked, PlanRevisionProposed,
+    PlanRevisionDecisionRecorded, PlanRevisionInvalidated,
     SessionTasksMaterialized, ChildRunCreated, SessionTaskResultRecorded,
     ProjectBacklogItemPromoted, ProjectBacklogItemStatusChanged, MemoryProposed,
     MemoryPolicyDecided, MemoryAccepted, MemoryEditedAndAccepted,

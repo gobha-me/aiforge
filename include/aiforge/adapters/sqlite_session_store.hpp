@@ -48,6 +48,11 @@ class SqliteSessionStore final : public storage::SessionStore {
   [[nodiscard]] auto create_session(storage::SessionCreate session,
                                     std::stop_token stop_token = {})
       -> std::expected<void, storage::SessionStoreError> override;
+  [[nodiscard]] auto create_session_with_events(
+      storage::SessionCreate session,
+      std::span<const domain::RunEvent> initial_events,
+      std::stop_token stop_token = {})
+      -> std::expected<void, storage::SessionStoreError> override;
   [[nodiscard]] auto open_session(const domain::SessionId& session_id,
                                   std::stop_token stop_token = {})
       -> std::expected<storage::SessionInfo,

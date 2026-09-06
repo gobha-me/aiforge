@@ -75,6 +75,17 @@ class SessionStore {
   [[nodiscard]] virtual auto create_session(SessionCreate session,
                                             std::stop_token stop_token = {})
       -> std::expected<void, SessionStoreError> = 0;
+  [[nodiscard]] virtual auto create_session_with_events(
+      SessionCreate session, std::span<const domain::RunEvent> initial_events,
+      std::stop_token stop_token = {})
+      -> std::expected<void, SessionStoreError> {
+    static_cast<void>(session);
+    static_cast<void>(initial_events);
+    static_cast<void>(stop_token);
+    return std::unexpected(SessionStoreError{
+        SessionStoreErrorCode::unsupported_version,
+        "session store does not support atomic initial events", false});
+  }
   [[nodiscard]] virtual auto open_session(const domain::SessionId& session_id,
                                           std::stop_token stop_token = {})
       -> std::expected<SessionInfo, SessionStoreError> = 0;
