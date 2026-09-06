@@ -25,6 +25,9 @@ add_library(${PROJECT_NAME}_adapters STATIC
   playback_device.cpp
   process_provenance.cpp
   process_repository.cpp
+  process_video.cpp
+  process_video_production.cpp
+  secure_artifact_export.cpp
   process_draft_editor.cpp
   process_interactive.cpp
   process_image.cpp

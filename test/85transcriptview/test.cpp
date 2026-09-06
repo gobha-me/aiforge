@@ -37,6 +37,20 @@ auto started() -> domain::RunStarted {
           make_id<domain::PermissionProfileId>("observe"), std::nullopt};
 }
 
+auto video_artifact() -> domain::ArtifactMetadata {
+  return {
+      make_id<domain::ArtifactId>("video-artifact"),
+      "video/mp4",
+      123,
+      "sha256:"
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+  };
+}
+
 template <typename Screen>
 auto cell_text(const Screen& screen, const int column, const int row)
     -> std::string_view {
@@ -130,6 +144,77 @@ TEST_CASE("TranscriptView provides a markup-free plain fallback and resizes",
   view.set_geometry({0, 0, 1, 1});
   screen.resize(1, 1);
   view.draw(screen);
+}
+
+TEST_CASE(
+    "TranscriptView identifies durable MP4 and gives explicit export guidance",
+    "[adapter][transcript][video]") {
+  adapters::TranscriptView view{adapters::TranscriptRenderMode::plain_text};
+  view.set_geometry({0, 0, 120, 5});
+  REQUIRE(view.apply(event(1, started())));
+  const auto artifact = video_artifact();
+  REQUIRE(view.apply(event(2, domain::ArtifactCreated{artifact})));
+  CHECK(view.projection().items().empty());
+  REQUIRE(view.apply(
+      event(3, domain::VideoArtifactPublished{
+                   make_id<domain::VideoOperationId>("video-operation"),
+                   make_id<domain::VideoJobId>("provider-job"), artifact})));
+  REQUIRE(view.projection().items().size() == 1);
+  const auto& reference = std::get<domain::TranscriptArtifactReference>(
+      view.projection().items().front());
+  CHECK(reference.presentation ==
+        domain::TranscriptArtifactPresentation::published_video);
+
+  termforge::Screen screen{120, 5};
+  view.draw(screen);
+  std::string rendered;
+  for (int row{}; row < 5; ++row)
+    rendered += row_text(screen, row);
+  CHECK(rendered.find("Video Artifact video-artifact") != std::string::npos);
+  CHECK(rendered.find("video/mp4") != std::string::npos);
+  CHECK(rendered.find("aiforge video export") != std::string::npos);
+  CHECK(rendered.find("--artifact") != std::string::npos);
+  CHECK(rendered.find("http") == std::string::npos);
+  CHECK(rendered.find("provider-job") == std::string::npos);
+}
+
+TEST_CASE(
+    "TranscriptView withholds video guidance from generic and mismatched facts",
+    "[adapter][transcript][video][failure]") {
+  const auto artifact = video_artifact();
+  adapters::TranscriptView generic{adapters::TranscriptRenderMode::plain_text};
+  generic.set_geometry({0, 0, 120, 4});
+  REQUIRE(generic.apply(event(1, started())));
+  REQUIRE(generic.apply(event(2, domain::ArtifactCreated{artifact})));
+  REQUIRE(generic.apply(event(
+      3, domain::ArtifactReferenced{artifact.artifact_id, std::nullopt})));
+  REQUIRE(generic.projection().items().size() == 1);
+  const auto& reference = std::get<domain::TranscriptArtifactReference>(
+      generic.projection().items().front());
+  CHECK(reference.presentation ==
+        domain::TranscriptArtifactPresentation::reference);
+  termforge::Screen screen{120, 4};
+  generic.draw(screen);
+  std::string rendered;
+  for (int row{}; row < 4; ++row)
+    rendered += row_text(screen, row);
+  CHECK(rendered.find("aiforge video export") == std::string::npos);
+  CHECK(rendered.find("Video Artifact") == std::string::npos);
+
+  adapters::TranscriptView mismatched{
+      adapters::TranscriptRenderMode::plain_text};
+  REQUIRE(mismatched.apply(event(1, started())));
+  REQUIRE(mismatched.apply(event(2, domain::ArtifactCreated{artifact})));
+  auto altered = artifact;
+  ++altered.byte_size;
+  auto rejected = mismatched.apply(
+      event(3, domain::VideoArtifactPublished{
+                   make_id<domain::VideoOperationId>("video-operation"),
+                   make_id<domain::VideoJobId>("provider-job"), altered}));
+  REQUIRE_FALSE(rejected);
+  CHECK(rejected.error().code ==
+        adapters::TranscriptViewErrorCode::projection_rejected);
+  CHECK(mismatched.projection().items().empty());
 }
 
 TEST_CASE("TranscriptView keeps reasoning collapsed until explicitly expanded",

@@ -77,9 +77,16 @@ struct TranscriptQuestionSummary {
   auto operator==(const TranscriptQuestionSummary&) const -> bool = default;
 };
 
+enum class TranscriptArtifactPresentation {
+  reference,
+  published_video,
+};
+
 struct TranscriptArtifactReference {
   ArtifactMetadata artifact;
   std::optional<MessageId> message_id;
+  TranscriptArtifactPresentation presentation{
+      TranscriptArtifactPresentation::reference};
   auto operator==(const TranscriptArtifactReference&) const -> bool = default;
 };
 
@@ -168,6 +175,7 @@ class TranscriptProjection final {
   std::set<EventId> m_event_ids;
   std::map<InferenceId, Usage> m_inference_usage;
   std::map<ArtifactId, ArtifactMetadata> m_artifacts;
+  std::set<ArtifactId> m_published_video_artifacts;
   std::set<VerificationEvidenceId> m_verification_ids;
   std::set<InvocationId> m_verification_invocations;
 };

@@ -114,7 +114,6 @@ src/adapters/json_model_catalog_cache.cpp	performance-move-const-arg	a0ed7c86d02
 src/adapters/json_model_catalog_cache.cpp	readability-function-cognitive-complexity	ecd84bb0055d51e05d6b	function 'store' has cognitive complexity of 25 (threshold 20)
 src/adapters/process_audio.cpp	bugprone-implicit-widening-of-multiplication-result	924fb9e17768357f6740	performing an implicit widening conversion to type 'const std::size_t' (aka 'const unsigned long') of a multiplication performed in type 'unsigned int'
 src/adapters/process_audio.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	68809ec42b060f1088a5	do not use pointer arithmetic
-src/adapters/process_audio.cpp	cppcoreguidelines-pro-type-vararg	97451ad82c8fb3255a8c	do not call c-style vararg functions
 src/adapters/process_audio.cpp	cppcoreguidelines-pro-type-vararg	af1400161a9fb75a0ded	do not call c-style vararg functions
 src/adapters/process_audio.cpp	modernize-use-integer-sign-comparison	37fe90ed713818aca3ba	comparison between 'signed' and 'unsigned' integers
 src/adapters/process_audio.cpp	readability-simplify-boolean-expr	55550e106002fa33939c	boolean expression can be simplified by DeMorgan's theorem
@@ -139,9 +138,7 @@ src/adapters/process_image.cpp	bugprone-implicit-widening-of-multiplication-resu
 src/adapters/process_image.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	9015cee6cb911c21383a	do not declare C-style arrays, use 'std::array' instead
 src/adapters/process_image.cpp	cppcoreguidelines-pro-bounds-array-to-pointer-decay	020f6e05059a1892a527	do not implicitly decay an array into a pointer; consider using gsl::array_view or an explicit cast instead
 src/adapters/process_image.cpp	cppcoreguidelines-pro-bounds-array-to-pointer-decay	5b4a86efbdd8a7959ca4	do not implicitly decay an array into a pointer; consider using gsl::array_view or an explicit cast instead
-src/adapters/process_image.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	0c97dc3a21776e8739cf	do not use pointer arithmetic
 src/adapters/process_image.cpp	cppcoreguidelines-pro-type-vararg	66fa5e306b6f18c6c343	do not call c-style vararg functions
-src/adapters/process_image.cpp	cppcoreguidelines-pro-type-vararg	97451ad82c8fb3255a8c	do not call c-style vararg functions
 src/adapters/process_image.cpp	readability-function-cognitive-complexity	2218539b52118fae2370	function 'render_terminal_viewer' has cognitive complexity of 31 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	17175cd81b663ee15bc7	function 'show_plan' has cognitive complexity of 29 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	1cae3bdecf86de8b0b0d	function 'manage_memory' has cognitive complexity of 84 (threshold 20)

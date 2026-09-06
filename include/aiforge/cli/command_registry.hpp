@@ -182,6 +182,32 @@ class AudioCommand {
       -> std::expected<void, CommandFailure> = 0;
 };
 
+class VideoCommand {
+ public:
+  virtual ~VideoCommand() = default;
+
+  struct ShowRequest {
+    domain::SessionId session_id;
+    std::optional<domain::ArtifactId> artifact_id;
+  };
+
+  struct ExportRequest {
+    domain::SessionId session_id;
+    std::optional<domain::ArtifactId> artifact_id;
+    std::string output_path;
+  };
+
+  [[nodiscard]] virtual auto show(ShowRequest request,
+                                  CommandEnvironment& environment,
+                                  std::ostream& output, std::ostream& error)
+      -> std::expected<void, CommandFailure> = 0;
+  [[nodiscard]] virtual auto export_artifact(ExportRequest request,
+                                             CommandEnvironment& environment,
+                                             std::ostream& output,
+                                             std::ostream& error)
+      -> std::expected<void, CommandFailure> = 0;
+};
+
 class LoginCommand {
  public:
   virtual ~LoginCommand() = default;
@@ -225,6 +251,7 @@ struct CommandEnvironment {
   ImageCommand* image{};
   int output_descriptor{-1};
   AudioCommand* audio{};
+  VideoCommand* video{};
 };
 
 struct CommandContext {

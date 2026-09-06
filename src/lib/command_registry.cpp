@@ -466,6 +466,11 @@ auto audio_parent_handler(CommandContext& context) -> int {
   return usage_exit_code;
 }
 
+auto video_parent_handler(CommandContext& context) -> int {
+  context.error << "aiforge: a video subcommand is required\n";
+  return usage_exit_code;
+}
+
 auto audio_synthesize_handler(CommandContext& context) -> int {
   const auto text =
       parsed_text_values(context.invocation, "audio.synthesize.text");
@@ -692,6 +697,63 @@ auto image_show_handler(CommandContext& context) -> int {
       context.environment.image->show(
           {std::move(*session_id), std::move(artifact_id),
            output ? std::optional<std::string>{output->front()} : std::nullopt},
+          context.environment, context.output, context.error),
+      context);
+}
+
+[[nodiscard]] auto parse_video_selection(CommandContext& context,
+                                         const std::string_view prefix)
+    -> std::expected<
+        std::pair<domain::SessionId, std::optional<domain::ArtifactId>>, int> {
+  const auto session =
+      parsed_text_values(context.invocation, std::string{prefix} + ".session");
+  const auto artifact =
+      parsed_text_values(context.invocation, std::string{prefix} + ".artifact");
+  if (!session || session->size() != 1 || session->front().empty() ||
+      (artifact && (artifact->size() != 1 || artifact->front().empty()))) {
+    return std::unexpected(usage_exit_code);
+  }
+  auto session_id = domain::SessionId::from(std::string{session->front()});
+  if (!session_id) {
+    context.error << "aiforge: session ID is invalid\n";
+    return std::unexpected(usage_exit_code);
+  }
+  std::optional<domain::ArtifactId> artifact_id;
+  if (artifact) {
+    auto parsed = domain::ArtifactId::from(std::string{artifact->front()});
+    if (!parsed) {
+      context.error << "aiforge: artifact ID is invalid\n";
+      return std::unexpected(usage_exit_code);
+    }
+    artifact_id = std::move(*parsed);
+  }
+  return std::pair{std::move(*session_id), std::move(artifact_id)};
+}
+
+auto video_show_handler(CommandContext& context) -> int {
+  auto selection = parse_video_selection(context, "video.show");
+  if (!selection) return selection.error();
+  if (context.environment.video == nullptr) return unavailable_handler(context);
+  return command_result(
+      context.environment.video->show(
+          {std::move(selection->first), std::move(selection->second)},
+          context.environment, context.output, context.error),
+      context);
+}
+
+auto video_export_handler(CommandContext& context) -> int {
+  auto selection = parse_video_selection(context, "video.export");
+  if (!selection) return selection.error();
+  const auto output =
+      parsed_text_values(context.invocation, "video.export.output");
+  if (!output || output->size() != 1 || output->front().empty()) {
+    return usage_exit_code;
+  }
+  if (context.environment.video == nullptr) return unavailable_handler(context);
+  return command_result(
+      context.environment.video->export_artifact(
+          {std::move(selection->first), std::move(selection->second),
+           std::string{output->front()}},
           context.environment, context.output, context.error),
       context);
 }
@@ -1376,6 +1438,62 @@ auto builtin_command_registry() -> const CommandRegistry& {
            {},
            image_show_handler}},
          image_parent_handler},
+        {"video",
+         "video",
+         "Inspect or export durable MP4 video artifacts.",
+         true,
+         {},
+         {},
+         {{"video-show",
+           "show",
+           "Show metadata for an exact durable MP4 publication.",
+           false,
+           {{{"video.show.session",
+              {"--session"},
+              ArgumentValueKind::text,
+              1,
+              1},
+             "session-id",
+             "Select an exact durable session."},
+            {{"video.show.artifact",
+              {"--artifact"},
+              ArgumentValueKind::text,
+              0,
+              1},
+             "artifact-id",
+             "Select an exact artifact; omission requires one candidate."}},
+           {},
+           {},
+           video_show_handler},
+          {"video-export",
+           "export",
+           "Validate and export an exact durable MP4 publication.",
+           false,
+           {{{"video.export.session",
+              {"--session"},
+              ArgumentValueKind::text,
+              1,
+              1},
+             "session-id",
+             "Select an exact durable session."},
+            {{"video.export.artifact",
+              {"--artifact"},
+              ArgumentValueKind::text,
+              0,
+              1},
+             "artifact-id",
+             "Select an exact artifact; omission requires one candidate."},
+            {{"video.export.output",
+              {"--output"},
+              ArgumentValueKind::text,
+              1,
+              1},
+             "path",
+             "Create the validated MP4 export path exclusively."}},
+           {},
+           {},
+           video_export_handler}},
+         video_parent_handler},
         {"login",
          "login",
          "Store a Venice API credential from terminal input.",

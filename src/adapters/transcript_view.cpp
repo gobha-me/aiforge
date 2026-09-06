@@ -532,11 +532,22 @@ auto TranscriptView::render_run(const domain::TranscriptProjection& projection,
                      std::get_if<domain::TranscriptArtifactReference>(&item)) {
         auto media = sanitized(artifact->artifact.media_type);
         if (!media) return std::unexpected(std::move(media.error()));
+        const bool published_video =
+            artifact->presentation ==
+            domain::TranscriptArtifactPresentation::published_video;
+        const auto video_guidance =
+            published_video
+                ? std::format("\nExport: aiforge video export "
+                              "--session <session-id> "
+                              "--artifact {} --output <path>",
+                              artifact->artifact.artifact_id.value())
+                : std::string{};
         append_span(
             output,
-            std::format("Artifact {} — {}, {} bytes",
+            std::format("{}Artifact {} — {}, {} bytes{}",
+                        published_video ? "Video " : "",
                         artifact->artifact.artifact_id.value(), *media,
-                        artifact->artifact.byte_size),
+                        artifact->artifact.byte_size, video_guidance),
             style(m_theme.artifact, presentation::TextSemantic::strong));
       } else if (const auto* verification =
                      std::get_if<domain::TranscriptVerificationSummary>(

@@ -4562,9 +4562,13 @@ class Statement final {
         store_error(SessionStoreErrorCode::resource_exhausted,
                     "session-store text value is too large"));
   }
+  // clang-format off
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast, performance-no-int-to-ptr) -- SQLite callback ownership sentinel.
+  const auto transient = SQLITE_TRANSIENT;
+  // clang-format on
   const auto result =
       sqlite3_bind_text(statement, index, value.data(),
-                        static_cast<int>(value.size()), SQLITE_TRANSIENT);
+                        static_cast<int>(value.size()), transient);
   if (result != SQLITE_OK) return std::unexpected(sqlite_error(result));
   return {};
 }
