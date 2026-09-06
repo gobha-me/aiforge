@@ -543,9 +543,13 @@ production launch mechanics and bounded file manifests are owned by follow-up
 work. No model-facing shell tool is registered.
 
 Filesystem roots are capability-policy authority and constrain the working
-directory; they are not an operating-system sandbox. The current one-shot
-surface does not register `run_process` because it has no process approval or
-artifact-storage profile.
+directory; they are not an operating-system sandbox. Persistent Interactive
+Chat registers this executor only when `tools.process` supplies complete
+file-backed authority, the launch selects `none`, and `unrestricted_network`
+is explicitly true. The opt-in `process` profile contains `ask_user`,
+`propose_memory`, and `run_process`; `essentials` remains unchanged. Ephemeral
+Chat and the one-shot surface do not register `run_process`. `run_shell`
+remains separately and truthfully unavailable.
 
 ## Repository reads and launch authority
 
@@ -579,8 +583,10 @@ Authority is fixed for the application lifetime with
 until its production restriction launcher is installed, default `high` is
 recorded as unavailable and only process-category tools are withheld. The
 restriction level never removes authority from unrelated registered tools.
-Prompt mode shows the exact tool, effects, and normalized path scope and grants
-only that invocation. `auto` approves only explicit current-launch matcher
+Prompt mode shows the exact canonical invocation, selected and achieved
+restriction, approval source, effects, scopes, and executor limits and grants
+only that invocation. Oversized or malformed approval presentation denies
+without executing. `auto` approves only explicit current-launch matcher
 members; `allow-all` is a separate explicit launch choice. Neither mode grants
 authority beyond the exact registered declarations. Durable v2 provenance
 records selected and achieved restriction state, closed unavailability,
@@ -592,7 +598,13 @@ again before execution.
 
 No production implicit-approval rules are installed by default. Selecting
 `auto` without an explicit bounded per-tool rule therefore denies every
-authority-bearing invocation without falling back to a prompt.
+authority-bearing invocation without falling back to a prompt. Process
+allow-list membership becomes an automatic rule only when
+`tools.process.allowlist_automatic_approval.maximum_matches` is explicitly
+positive; the generated exact-executable rules share the same matcher quotas,
+ambiguity handling, replay evidence, and policy ceilings as authored rules.
+The configured match count applies per executable, and startup rejects a list
+whose aggregate accounting would exceed the matcher ceiling.
 
 Automatic rules are read only from the strict
 `tools.approval.automatic_rules` array in `config.json`. Each object names an
@@ -646,6 +658,32 @@ the exact paid image-tool model; it intentionally has no compiled default.
 `venice.include_system_prompt`, bound to
 `AIFORGE_VENICE_INCLUDE_SYSTEM_PROMPT`, is an optional boolean; absence
 preserves Venice's default and explicit `false` remains distinct from absence.
+
+The process tool is file-only and disabled when `tools.process.executables` is
+absent. Its object contains normalized absolute `executables`,
+`readable_roots`, and `writable_roots`; `environment` contains names inherited
+at application launch, never values. `unrestricted_network` is the explicit
+grant required by the currently available `none` contract. Optional bounded
+`limits` mirror the executor limits, and
+`allowlist_automatic_approval.maximum_matches` enables bounded implicit
+exact-executable matching. Restriction and approval mode remain application
+lifetime command-line choices and cannot be set in this file.
+
+```json
+{
+  "tools": {
+    "process": {
+      "executables": ["/usr/bin/git"],
+      "readable_roots": ["/srv/project"],
+      "writable_roots": ["/srv/project"],
+      "environment": ["PATH"],
+      "unrestricted_network": true,
+      "allowlist_automatic_approval": {"maximum_matches": 20},
+      "limits": {"timeout_ms": 30000, "output_bytes": 1048576}
+    }
+  }
+}
+```
 
 ```bash
 aiforge config show

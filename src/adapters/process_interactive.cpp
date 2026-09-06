@@ -8,6 +8,7 @@
 #include <aiforge/adapters/model_picker_dialog.hpp>
 #include <aiforge/adapters/persona_editor_dialog.hpp>
 #include <aiforge/adapters/pinned_repository_root_authority.hpp>
+#include <aiforge/adapters/process_chat_assembly.hpp>
 #include <aiforge/adapters/process_credentials.hpp>
 #include <aiforge/adapters/process_draft_editor.hpp>
 #include <aiforge/adapters/process_interactive.hpp>
@@ -133,34 +134,6 @@ constexpr std::size_t maximum_image_artifact_bytes =
   auto profile = domain::PermissionProfileId::from("interactive-tools-v2");
   if (!profile) return std::nullopt;
   return std::move(*profile);
-}
-
-[[nodiscard]] auto application_launch_context(
-    const runtime::RestrictionLevel restriction,
-    const runtime::ApprovalMode approval,
-    std::optional<std::string> matcher_policy_identity)
-    -> std::expected<runtime::ApplicationLaunchContext, std::string> {
-  runtime::ApplicationLaunchContextConfiguration configuration;
-  configuration.selected_restriction = restriction;
-  configuration.achieved_restriction =
-      restriction == runtime::RestrictionLevel::none
-          ? std::optional{runtime::RestrictionLevel::none}
-          : std::nullopt;
-  configuration.unavailable_reason =
-      restriction == runtime::RestrictionLevel::none
-          ? std::nullopt
-          : std::optional{
-                runtime::RestrictionUnavailableReason::mechanism_absent};
-  configuration.restriction_policy_identity =
-      restriction == runtime::RestrictionLevel::none
-          ? std::optional<std::string>{"aiforge.posix-process.none.v1"}
-          : std::nullopt;
-  configuration.approval_mode = approval;
-  configuration.matcher_policy_identity = std::move(matcher_policy_identity);
-  auto context =
-      runtime::make_application_launch_context(std::move(configuration));
-  if (!context) return std::unexpected(context.error().message);
-  return std::move(*context);
 }
 
 [[nodiscard]] auto configured_source_name(
@@ -4200,7 +4173,10 @@ class ChatAppImpl final : public InteractiveChatApp {
     const auto run_id = pending->run_id;
     const auto invocation_id = pending->invocation_id;
     auto presented = m_tool_approval_controller->present(
-        {pending->tool_name, pending->effects, pending->scopes},
+        {pending->tool_name, pending->effects, pending->scopes,
+         pending->canonical_arguments, pending->selected_restriction,
+         pending->achieved_restriction, pending->approval_mode,
+         pending->supply_source, pending->executor_limits},
         [this, run_id,
          invocation_id](runtime::ToolApprovalResolution resolution) {
           const auto decision = resolution.decision;
@@ -4564,6 +4540,21 @@ auto ProcessInteractiveCommand::execute(Request request,
       return failure(cli::CommandFailureKind::runtime,
                      automatic_approval_rules.error().message);
     }
+    auto process_settings = config::resolve_process_config_settings(*resolved);
+    if (!process_settings) {
+      return failure(cli::CommandFailureKind::runtime,
+                     process_settings.error().message);
+    }
+    auto restriction = tool_restriction(request.tool_restriction);
+    if (!restriction) {
+      return failure(cli::CommandFailureKind::usage,
+                     std::move(restriction.error()));
+    }
+    auto approval = tool_approval(request.tool_approval);
+    if (!approval) {
+      return failure(cli::CommandFailureKind::usage,
+                     std::move(approval.error()));
+    }
     auto generation_options = venice_generation_options(*resolved);
     if (!generation_options) {
       return failure(request.web_search ? cli::CommandFailureKind::usage
@@ -4690,15 +4681,24 @@ auto ProcessInteractiveCommand::execute(Request request,
                        "session storage could not be opened");
       }
       store = std::move(*opened);
-      if (*image_tool_model && image_generator != nullptr) {
+      const bool process_artifacts_required =
+          process_settings->has_value() &&
+          *restriction == runtime::RestrictionLevel::none &&
+          (*process_settings)->unrestricted_network;
+      const bool image_artifacts_required =
+          *image_tool_model && image_generator != nullptr;
+      if (image_artifacts_required || process_artifacts_required) {
         artifact_root = path->parent_path() / "artifacts";
         auto opened_artifacts = FilesystemArtifactStore::open(
             *artifact_root, {maximum_image_artifact_bytes});
         if (!opened_artifacts) {
-          return failure(cli::CommandFailureKind::runtime,
-                         "image artifact storage could not be opened");
+          if (image_artifacts_required) {
+            return failure(cli::CommandFailureKind::runtime,
+                           "image artifact storage could not be opened");
+          }
+        } else {
+          artifact_store = std::move(*opened_artifacts);
         }
-        artifact_store = std::move(*opened_artifacts);
       }
     }
 
@@ -4706,16 +4706,6 @@ auto ProcessInteractiveCommand::execute(Request request,
     if (!memory_settings) {
       return failure(cli::CommandFailureKind::runtime,
                      memory_settings.error().message);
-    }
-    auto restriction = tool_restriction(request.tool_restriction);
-    if (!restriction) {
-      return failure(cli::CommandFailureKind::usage,
-                     std::move(restriction.error()));
-    }
-    auto approval = tool_approval(request.tool_approval);
-    if (!approval) {
-      return failure(cli::CommandFailureKind::usage,
-                     std::move(approval.error()));
     }
     auto permission_profile_id = tool_launch_profile_id();
     if (!permission_profile_id) {
@@ -4810,6 +4800,21 @@ auto ProcessInteractiveCommand::execute(Request request,
       return failure(cli::CommandFailureKind::runtime,
                      "automatic approval repository root is unavailable");
     }
+    std::shared_ptr<runtime::AutomaticApprovalMatcher> automatic_matcher;
+    std::optional<std::string> matcher_policy_identity;
+    if (*approval == runtime::ApprovalMode::automatic) {
+      auto process_rules =
+          configured_process_automatic_approval_rules(*process_settings);
+      auto compiled = runtime::compile_configured_automatic_approval_matcher(
+          *automatic_approval_rules, repository_read_root, {}, {},
+          std::move(process_rules));
+      if (!compiled) {
+        return failure(cli::CommandFailureKind::runtime,
+                       compiled.error().message);
+      }
+      automatic_matcher = std::move(*compiled);
+      matcher_policy_identity = std::string{automatic_matcher->identity()};
+    }
     if (*image_tool_model && image_generator != nullptr && artifact_store &&
         artifact_root) {
       auto snapshot = (*catalog)->service().snapshot(environment.stop_token);
@@ -4836,32 +4841,34 @@ auto ProcessInteractiveCommand::execute(Request request,
                        registered.error().message);
       }
     }
+    auto process_assembly = assemble_process_chat_tool(
+        tool_registry,
+        {.durable_session = mode != surfaces::ChatSessionOpen::Mode::ephemeral,
+         .settings = std::move(*process_settings),
+         .restriction = *restriction,
+         .approval = *approval,
+         .matcher_policy_identity = matcher_policy_identity,
+         .artifact_store = artifact_store.get(),
+         .environment_lookup =
+             [](const std::string_view name) -> std::optional<std::string> {
+           const std::string owned_name{name};
+           const auto* value = std::getenv(owned_name.c_str());
+           return value == nullptr ? std::nullopt
+                                   : std::optional<std::string>{value};
+         },
+         .establish_launcher = establish_linux_process_launcher});
+    if (!process_assembly) {
+      return failure(cli::CommandFailureKind::runtime,
+                     process_assembly.error().message);
+    }
     auto tool_snapshot = tool_registry.snapshot();
     if (!tool_snapshot) {
       return failure(cli::CommandFailureKind::runtime,
                      tool_snapshot.error().message);
     }
     tools = std::move(*tool_snapshot);
-    std::shared_ptr<runtime::AutomaticApprovalMatcher> automatic_matcher;
-    std::optional<std::string> matcher_policy_identity;
-    if (*approval == runtime::ApprovalMode::automatic) {
-      auto compiled = runtime::compile_configured_automatic_approval_matcher(
-          *automatic_approval_rules, repository_read_root);
-      if (!compiled) {
-        return failure(cli::CommandFailureKind::runtime,
-                       compiled.error().message);
-      }
-      automatic_matcher = std::move(*compiled);
-      matcher_policy_identity = std::string{automatic_matcher->identity()};
-    }
-    auto launch_context = application_launch_context(
-        *restriction, *approval, std::move(matcher_policy_identity));
-    if (!launch_context) {
-      return failure(cli::CommandFailureKind::runtime,
-                     std::move(launch_context.error()));
-    }
     runtime::ToolLaunchPolicyConfiguration policy_configuration{
-        *permission_profile_id, std::move(*launch_context),
+        *permission_profile_id, std::move(process_assembly->launch_context),
         std::move(automatic_matcher)};
     auto tool_policy = runtime::make_tool_launch_policy(
         tools, std::move(policy_configuration));
