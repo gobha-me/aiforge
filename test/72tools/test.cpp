@@ -1619,12 +1619,21 @@ TEST_CASE("policy and approval decisions are one-shot and cannot widen scope",
   REQUIRE(kernel.start(run_start(initial)));
   drain_to_inference_boundary(kernel, wake);
 
-  REQUIRE(kernel.pending_tool_approval() ==
-          (runtime::PendingToolApproval{make_id<domain::RunId>("run"),
-                                        invocation,
-                                        "lookup",
-                                        {domain::Effect::read},
-                                        {scope}}));
+  const auto pending = kernel.pending_tool_approval();
+  REQUIRE(pending);
+  CHECK(pending->run_id == make_id<domain::RunId>("run"));
+  CHECK(pending->invocation_id == invocation);
+  CHECK(pending->tool_name == "lookup");
+  CHECK(pending->effects == std::vector{domain::Effect::read});
+  CHECK(pending->scopes == std::vector{scope});
+  CHECK(pending->canonical_arguments ==
+        (runtime::CanonicalToolArguments{"aiforge.canonical-tool-json.v1",
+                                         {"application/json", "{}"}}));
+  CHECK_FALSE(pending->selected_restriction);
+  CHECK_FALSE(pending->achieved_restriction);
+  CHECK(pending->approval_mode == domain::ToolApprovalMode::prompt);
+  CHECK(pending->supply_source ==
+        runtime::ToolApprovalSupplySource::per_invocation);
 
   const domain::CapabilityScope widened{domain::Effect::read, "filesystem.root",
                                         "/outside"};
@@ -1654,6 +1663,43 @@ TEST_CASE("policy and approval decisions are one-shot and cannot widen scope",
   REQUIRE(std::get<domain::TextBlock>(messages->front().content.front()).text ==
           "tool invocation denied");
   REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "test cleanup"));
+}
+
+TEST_CASE("an unpresentable approval is denied without awaiting or execution",
+          "[tools][policy][approval][bounds][failure]") {
+  const auto invocation = make_id<domain::InvocationId>("call");
+  auto executor = std::make_shared<CountingExecutor>();
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(declaration(), executor));
+  const auto snapshot = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1", snapshot.declarations());
+  testing::ScriptedBackend backend{{
+      {initial, tool_call_script(invocation)},
+  }};
+  WakeCounter wake;
+  runtime::RunKernelLimits limits;
+  limits.tool_approval_presentation.maximum_canonical_argument_bytes = 1;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"),
+                            backend,
+                            &wake,
+                            {},
+                            limits,
+                            snapshot,
+                            approval_policy()};
+  REQUIRE(kernel.start(run_start(initial)));
+  drain_to_inference_boundary(kernel, wake);
+
+  CHECK_FALSE(kernel.pending_tool_approval());
+  CHECK(executor->starts == 0);
+  CHECK(
+      std::ranges::none_of(kernel.event_log().events(), [](const auto& event) {
+        return std::holds_alternative<domain::ToolApprovalRequested>(
+            event.payload);
+      }));
+  CHECK(std::ranges::any_of(kernel.event_log().events(), [](const auto& event) {
+    return std::holds_alternative<domain::ToolErrored>(event.payload);
+  }));
+  REQUIRE(kernel.cancel_run(make_id<domain::RunId>("run"), "cleanup"));
 }
 
 TEST_CASE("durable pending approval is reconstructed without execution",
@@ -1702,6 +1748,16 @@ TEST_CASE("durable pending approval is reconstructed without execution",
   REQUIRE((*kernel)->projection(make_id<domain::RunId>("run"))->status() ==
           domain::RunStatus::awaiting_approval);
   REQUIRE((*kernel)->pending_tool_approval());
+  const auto before_restart = *(*kernel)->pending_tool_approval();
+  CHECK(before_restart.canonical_arguments.value ==
+        domain::StructuredDataBlock{"application/json", R"({"ratio":1.5})"});
+  CHECK(before_restart.selected_restriction ==
+        domain::ToolRestrictionLevel::medium);
+  CHECK(before_restart.achieved_restriction ==
+        domain::ToolRestrictionLevel::medium);
+  CHECK(before_restart.approval_mode == domain::ToolApprovalMode::prompt);
+  CHECK(before_restart.supply_source ==
+        runtime::ToolApprovalSupplySource::per_invocation);
   REQUIRE(executor->validations == 1);
   REQUIRE(executor->starts == 0);
   kernel->reset();
@@ -1717,6 +1773,7 @@ TEST_CASE("durable pending approval is reconstructed without execution",
   REQUIRE((*replayed)->projection(make_id<domain::RunId>("run"))->status() ==
           domain::RunStatus::awaiting_approval);
   REQUIRE((*replayed)->pending_tool_approval());
+  CHECK(*(*replayed)->pending_tool_approval() == before_restart);
   REQUIRE((*replayed)->pending_tool_approval()->invocation_id == invocation);
   REQUIRE(executor->validations == 1);
   REQUIRE(executor->starts == 0);

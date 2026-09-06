@@ -111,7 +111,7 @@ auto spend_event(const std::uint64_t sequence, Payload payload,
                  const std::string& run = "paid-run") -> RunEvent {
   std::uint32_t schema_version{1};
   if constexpr (std::is_same_v<Payload, ToolProposed>) {
-    if (payload.spend_quote) schema_version = 2;
+    if (payload.spend_quote || payload.validated_arguments) schema_version = 2;
   }
   return {{id<EventId>(event_id), id<RunId>(run), sequence, schema_version,
            EventTimestamp{std::chrono::milliseconds{sequence}}, std::nullopt,
@@ -149,6 +149,42 @@ TEST_CASE("paid tool spend lifecycle remains bound to its proposal run",
   REQUIRE_FALSE(start_after_release);
   CHECK(start_after_release.error().code ==
         ToolSpendLedgerErrorCode::invalid_transition);
+}
+
+TEST_CASE("normalized non-paid proposals use schema v2 without spend state",
+          "[spend][tool][replay][failure]") {
+  const auto invocation = id<InvocationId>("read");
+  ToolProposed normalized{
+      invocation,
+      "lookup",
+      {"application/json", R"({ "path":"a"})"},
+      {Effect::read},
+      std::nullopt,
+      false,
+      {},
+      {},
+      std::nullopt,
+      std::nullopt,
+      StructuredDataBlock{"application/json", R"({"path":"a"})"}};
+  ToolSpendLedgerProjection ledger;
+  REQUIRE(ledger.apply(spend_event(1, normalized, "normalized", "read")));
+
+  auto wrong_v1 = spend_event(2, normalized, "wrong-v1", "read-2");
+  wrong_v1.metadata.schema_version = 1;
+  std::get<ToolProposed>(wrong_v1.payload).invocation_id =
+      id<InvocationId>("read-2");
+  auto rejected = ledger.apply(wrong_v1);
+  REQUIRE_FALSE(rejected);
+  CHECK(rejected.error().code == ToolSpendLedgerErrorCode::invalid_transition);
+
+  auto wrong_v2 = normalized;
+  wrong_v2.invocation_id = id<InvocationId>("legacy");
+  wrong_v2.validated_arguments.reset();
+  auto legacy_with_v2 = spend_event(2, wrong_v2, "wrong-v2", "legacy");
+  legacy_with_v2.metadata.schema_version = 2;
+  rejected = ledger.apply(legacy_with_v2);
+  REQUIRE_FALSE(rejected);
+  CHECK(rejected.error().code == ToolSpendLedgerErrorCode::invalid_transition);
 }
 
 } // namespace

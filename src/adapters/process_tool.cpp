@@ -43,6 +43,7 @@
 #include <unistd.h>
 #endif
 
+#include <aiforge/detail/utf8_text.hpp>
 #include <aiforge/runtime/tool_policy.hpp>
 
 namespace aiforge::adapters {
@@ -307,6 +308,23 @@ struct ProcessRequest {
   std::size_t output_bytes{};
 };
 
+[[nodiscard]] auto normalized_arguments(const ProcessRequest& request,
+                                        const std::size_t maximum_bytes)
+    -> std::optional<domain::StructuredDataBlock> {
+  Json value{{"executable", request.executable},
+             {"arguments", request.arguments},
+             {"working_directory", request.working_directory},
+             {"readable_roots", request.readable_roots},
+             {"writable_roots", request.writable_roots},
+             {"environment", request.environment},
+             {"stdin", "closed"},
+             {"timeout_ms", request.timeout.count()},
+             {"output_bytes", request.output_bytes}};
+  auto data = value.dump();
+  if (data.empty() || data.size() > maximum_bytes) return std::nullopt;
+  return domain::StructuredDataBlock{"application/json", std::move(data)};
+}
+
 class DuplicateJsonKey final : public std::exception {
  public:
   [[nodiscard]] auto what() const noexcept -> const char* override {
@@ -423,6 +441,14 @@ class DuplicateJsonKey final : public std::exception {
     request.environment = std::move(*environment);
     request.timeout = std::chrono::milliseconds{timeout};
     request.output_bytes = static_cast<std::size_t>(output);
+
+    if (std::ranges::any_of(request.arguments, [](const auto& argument) {
+          return !argument.empty() && !detail::is_safe_utf8_text(argument);
+        })) {
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::invalid_arguments,
+                          "process arguments contain unsafe text"));
+    }
 
     auto executable = normalized_path(request.executable);
     auto working_directory = normalized_path(request.working_directory);
@@ -932,8 +958,16 @@ class LauncherProcessExecutor final : public runtime::ToolExecutor {
     try {
       auto parsed = parse_request(arguments, m_configuration);
       if (!parsed) return std::unexpected(std::move(parsed.error()));
-      return runtime::ValidatedToolArguments{
-          arguments, required_scopes(*parsed), required_effects(*parsed)};
+      auto normalized = normalized_arguments(
+          *parsed, m_configuration.source.limits.argument_bytes);
+      if (!normalized) {
+        return std::unexpected(execution_error(
+            runtime::ToolExecutionErrorCode::invalid_arguments,
+            "normalized process arguments exceed the configured byte limit"));
+      }
+      return runtime::ValidatedToolArguments{std::move(*normalized),
+                                             required_scopes(*parsed),
+                                             required_effects(*parsed)};
     } catch (...) {
       return std::unexpected(
           execution_error(runtime::ToolExecutionErrorCode::internal_failure,
@@ -1745,8 +1779,16 @@ class ProcessExecutor final : public runtime::ToolExecutor {
     try {
       auto parsed = parse_request(arguments, m_configuration.normalized);
       if (!parsed) return std::unexpected(std::move(parsed.error()));
-      return runtime::ValidatedToolArguments{
-          arguments, required_scopes(*parsed), required_effects(*parsed)};
+      auto normalized = normalized_arguments(
+          *parsed, m_configuration.normalized.source.limits.argument_bytes);
+      if (!normalized) {
+        return std::unexpected(execution_error(
+            runtime::ToolExecutionErrorCode::invalid_arguments,
+            "normalized process arguments exceed the configured byte limit"));
+      }
+      return runtime::ValidatedToolArguments{std::move(*normalized),
+                                             required_scopes(*parsed),
+                                             required_effects(*parsed)};
     } catch (...) {
       return std::unexpected(
           execution_error(runtime::ToolExecutionErrorCode::internal_failure,

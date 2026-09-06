@@ -1070,10 +1070,12 @@ TEST_CASE("paid tool spend codecs reject invalid writes and stored damage",
   REQUIRE(replayed.error().code == storage::SessionStoreErrorCode::corrupt);
 }
 
-TEST_CASE("schema-v2 tool proposals require complete durable offers",
+TEST_CASE("schema-v2 tool proposals persist normalized arguments with optional "
+          "spend quotes",
           "[storage][sqlite][spend][failure]") {
   TemporaryDirectory temporary;
-  auto store = open_store(temporary.path() / "aiforge" / "sessions.sqlite3");
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
   const auto session = create(*store, "spend-proposal-session", 100);
   const auto invocation = make_id<domain::InvocationId>("paid-call");
   const auto quote = domain::ToolSpendQuote{
@@ -1102,28 +1104,49 @@ TEST_CASE("schema-v2 tool proposals require complete durable offers",
 
   auto missing_quote = proposal;
   std::get<domain::ToolProposed>(missing_quote.payload).spend_quote.reset();
-  auto rejected = store->append_events(session, std::array{missing_quote});
-  REQUIRE_FALSE(rejected);
-  CHECK(rejected.error().code ==
-        storage::SessionStoreErrorCode::invalid_argument);
-  REQUIRE(store->replay_events(session)->empty());
+  std::get<domain::ToolProposed>(missing_quote.payload).tool_name = "lookup";
+  std::get<domain::ToolProposed>(missing_quote.payload).declared_effects = {
+      domain::Effect::read};
+  REQUIRE(store->append_events(session, std::array{missing_quote}));
+  auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  REQUIRE(replayed->size() == 1);
+  const auto& normalized =
+      std::get<domain::ToolProposed>(replayed->front().payload);
+  CHECK_FALSE(normalized.spend_quote);
+  CHECK(normalized.validated_arguments ==
+        domain::StructuredDataBlock{"application/json", "{}"});
 
   auto missing_arguments = proposal;
+  missing_arguments.metadata.sequence = 2;
+  missing_arguments.metadata.event_id =
+      make_id<domain::EventId>("missing-arguments");
   std::get<domain::ToolProposed>(missing_arguments.payload)
       .validated_arguments.reset();
-  rejected = store->append_events(session, std::array{missing_arguments});
+  auto rejected = store->append_events(session, std::array{missing_arguments});
   REQUIRE_FALSE(rejected);
   CHECK(rejected.error().code ==
         storage::SessionStoreErrorCode::invalid_argument);
-  CHECK(store->replay_events(session)->empty());
+  CHECK(store->replay_events(session)->size() == 1);
 
-  auto unsupported = missing_quote;
+  auto unsupported = proposal;
   unsupported.metadata.schema_version = 3;
+  unsupported.metadata.sequence = 2;
+  unsupported.metadata.event_id = make_id<domain::EventId>("unsupported");
   rejected = store->append_events(session, std::array{unsupported});
   REQUIRE_FALSE(rejected);
   CHECK(rejected.error().code ==
         storage::SessionStoreErrorCode::unsupported_version);
-  CHECK(store->replay_events(session)->empty());
+  CHECK(store->replay_events(session)->size() == 1);
+
+  store.reset();
+  execute_sql(path,
+              "UPDATE events SET payload_json=json_set(payload_json,"
+              "'$.validated_arguments',NULL) WHERE event_id='paid-proposed'");
+  store = open_store(path);
+  replayed = store->replay_events(session);
+  REQUIRE_FALSE(replayed);
+  CHECK(replayed.error().code == storage::SessionStoreErrorCode::corrupt);
 }
 
 TEST_CASE("session discovery derives distinct run counts without schema state",

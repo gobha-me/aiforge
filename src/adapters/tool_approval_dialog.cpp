@@ -6,6 +6,8 @@
 #include <string_view>
 #include <utility>
 
+#include <nlohmann/json.hpp>
+
 #include <aiforge/detail/utf8_text.hpp>
 
 namespace aiforge::adapters {
@@ -56,11 +58,33 @@ constexpr std::size_t kAllowOnceChoice = 1;
   return "unknown";
 }
 
+[[nodiscard]] auto restriction_text(
+    const domain::ToolRestrictionLevel restriction) -> std::string_view {
+  switch (restriction) {
+    case domain::ToolRestrictionLevel::high: return "high";
+    case domain::ToolRestrictionLevel::medium: return "medium";
+    case domain::ToolRestrictionLevel::low: return "low";
+    case domain::ToolRestrictionLevel::none: return "none";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] auto approval_mode_text(const domain::ToolApprovalMode mode)
+    -> std::string_view {
+  switch (mode) {
+    case domain::ToolApprovalMode::prompt: return "prompt";
+    case domain::ToolApprovalMode::automatic: return "automatic";
+    case domain::ToolApprovalMode::allow_all: return "allow all";
+  }
+  return "unknown";
+}
+
 [[nodiscard]] auto limits_are_valid(const ToolApprovalDialogLimits& limits)
     -> bool {
   return limits.maximum_tool_name_bytes != 0 && limits.maximum_effects != 0 &&
          limits.maximum_scopes != 0 && limits.maximum_scope_kind_bytes != 0 &&
          limits.maximum_scope_value_bytes != 0 &&
+         limits.maximum_canonical_argument_bytes != 0 &&
          limits.maximum_total_text_bytes != 0;
 }
 
@@ -100,9 +124,9 @@ constexpr std::size_t kAllowOnceChoice = 1;
     return failure(ToolApprovalDialogErrorCode::invalid_request,
                    "tool approval scope has an undeclared effect");
   }
-  if (!is_single_line_safe(scope.kind) ||
+  if (scope.kind.empty() || !is_single_line_safe(scope.kind) ||
       scope.kind.size() > limits.maximum_scope_kind_bytes ||
-      !is_single_line_safe(scope.value) ||
+      scope.value.empty() || !is_single_line_safe(scope.value) ||
       scope.value.size() > limits.maximum_scope_value_bytes) {
     return failure(ToolApprovalDialogErrorCode::invalid_request,
                    "tool approval scope is empty, unsafe, or too large");
@@ -154,7 +178,58 @@ constexpr std::size_t kAllowOnceChoice = 1;
       !valid) {
     return valid;
   }
+  const auto canonical_is_exact = [&] {
+    if (input.canonical_arguments.canonicalization_identity ==
+        "aiforge.canonical-tool-json.v1") {
+      const auto canonical = runtime::canonicalize_validated_tool_arguments(
+          input.canonical_arguments.value,
+          limits.maximum_canonical_argument_bytes);
+      return canonical && *canonical == input.canonical_arguments;
+    }
+    if (input.canonical_arguments.canonicalization_identity !=
+            "aiforge.approval-tool-json.v1" ||
+        input.canonical_arguments.value.media_type != "application/json" ||
+        input.canonical_arguments.value.data.empty() ||
+        input.canonical_arguments.value.data.size() >
+            limits.maximum_canonical_argument_bytes) {
+      return false;
+    }
+    try {
+      const auto parsed = nlohmann::json::parse(
+          input.canonical_arguments.value.data, nullptr, true, false);
+      return parsed.dump() == input.canonical_arguments.value.data;
+    } catch (...) {
+      return false;
+    }
+  };
+  if (!canonical_is_exact() ||
+      !detail::is_safe_utf8_text(input.canonical_arguments.value.data)) {
+    return failure(ToolApprovalDialogErrorCode::invalid_request,
+                   "tool approval arguments are not exact safe canonical JSON");
+  }
+  if (input.approval_mode != domain::ToolApprovalMode::prompt ||
+      input.supply_source !=
+          runtime::ToolApprovalSupplySource::per_invocation) {
+    return failure(ToolApprovalDialogErrorCode::invalid_request,
+                   "tool approval is not a per-invocation prompt");
+  }
+  if ((input.achieved_restriction && !input.selected_restriction) ||
+      (input.achieved_restriction && input.selected_restriction &&
+       *input.achieved_restriction != *input.selected_restriction)) {
+    return failure(ToolApprovalDialogErrorCode::invalid_request,
+                   "tool approval restriction state is inconsistent");
+  }
+  if (input.executor_limits.output_bytes == 0 ||
+      input.executor_limits.progress_events == 0 ||
+      input.executor_limits.timeout.count() <= 0) {
+    return failure(ToolApprovalDialogErrorCode::invalid_request,
+                   "tool approval executor limits must be positive");
+  }
   std::size_t total = input.tool_name.size();
+  if (!checked_add(total, input.canonical_arguments.value.data.size())) {
+    return failure(ToolApprovalDialogErrorCode::invalid_request,
+                   "tool approval text size overflowed");
+  }
   if (auto valid = validate_scopes(input.scopes, input.effects, limits, total);
       !valid) {
     return valid;
@@ -168,7 +243,27 @@ constexpr std::size_t kAllowOnceChoice = 1;
 
 [[nodiscard]] auto summary(const PendingToolApprovalView& input)
     -> std::string {
-  std::string text = "Tool: " + input.tool_name + "\nEffects: ";
+  std::string text = "Tool: " + input.tool_name;
+  text += "\nSelected restriction: ";
+  text += input.selected_restriction
+              ? restriction_text(*input.selected_restriction)
+              : std::string_view{"not applicable"};
+  text += "\nAchieved restriction: ";
+  text += input.achieved_restriction
+              ? restriction_text(*input.achieved_restriction)
+              : std::string_view{"unavailable or not applicable"};
+  text += "\nApproval: ";
+  text += approval_mode_text(input.approval_mode);
+  text += " / per invocation";
+  text += "\nCanonical arguments: ";
+  text += input.canonical_arguments.value.data;
+  text += "\nExecutor limits: timeout=";
+  text += std::to_string(input.executor_limits.timeout.count());
+  text += "ms, output=";
+  text += std::to_string(input.executor_limits.output_bytes);
+  text += " bytes, progress=";
+  text += std::to_string(input.executor_limits.progress_events);
+  text += " events\nEffects: ";
   for (std::size_t index{}; index < input.effects.size(); ++index) {
     if (index != 0) text += ", ";
     text += effect_text(input.effects[index]);

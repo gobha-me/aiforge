@@ -3811,11 +3811,10 @@ auto parse_v2_tool_policy_fields(const Json& value,
         parse_optional_string(value.at("reason"))};
   }
   if (type == "tool.proposed") {
-    if (schema_version >= 2 &&
-        (!value.contains("spend_quote") || value.at("spend_quote").is_null() ||
-         !value.contains("validated_arguments") ||
-         value.at("validated_arguments").is_null())) {
-      throw CodecFailure{"paid tool proposal approval offer is incomplete"};
+    if (schema_version >= 2 && (!value.contains("spend_quote") ||
+                                !value.contains("validated_arguments") ||
+                                value.at("validated_arguments").is_null())) {
+      throw CodecFailure{"tool proposal normalized arguments are incomplete"};
     }
     return domain::ToolProposed{
         parse_id<domain::InvocationId>(value.at("invocation_id")),
@@ -3837,7 +3836,7 @@ auto parse_v2_tool_policy_fields(const Json& value,
             ? parse_optional_id<domain::MessageId>(
                   value.at("result_message_id"))
             : std::nullopt,
-        schema_version >= 2
+        schema_version >= 2 && !value.at("spend_quote").is_null()
             ? std::optional<domain::ToolSpendQuote>{parse_tool_spend_quote(
                   value.at("spend_quote"))}
             : std::nullopt,
@@ -4183,9 +4182,9 @@ auto validate_payload_schema_for_encoding(const domain::RunEvent& event)
   if (event.metadata.schema_version < 2) return;
   const auto* proposed = std::get_if<domain::ToolProposed>(&event.payload);
   if (proposed == nullptr) return;
-  if (!proposed->spend_quote || !proposed->validated_arguments) {
+  if (!proposed->validated_arguments) {
     throw CodecFailure{
-        "tool proposal schema version 2 requires a complete durable offer"};
+        "tool proposal schema version 2 requires normalized arguments"};
   }
 }
 
