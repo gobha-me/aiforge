@@ -257,7 +257,7 @@ auto drain_to_inference_boundary(runtime::RunKernel& kernel, WakeCounter& wake)
   for (int attempt = 0; attempt < 100 && kernel.active_inference_id();
        ++attempt) {
     const auto drained = kernel.drain();
-    INFO(drained ? std::string{} : drained.error().message);
+    INFO((drained ? std::string{} : drained.error().message));
     REQUIRE(drained);
     if (kernel.active_inference_id()) wake.wait_for_change(observed);
     observed = wake.count();
