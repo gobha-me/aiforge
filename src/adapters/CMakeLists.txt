@@ -8,6 +8,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   filesystem_user_global_instruction_source.cpp
   git_repository_snapshot_source.cpp
   json_model_catalog_cache.cpp
+  linux_process_launcher.cpp
   model_picker_dialog.cpp
   persona_editor_dialog.cpp
   pinned_repository_root_authority.cpp

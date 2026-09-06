@@ -37,6 +37,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   persona_editor.cpp
   pricing.cpp
   provider_character_catalog.cpp
+  process_launcher.cpp
   project_backlog.cpp
   presentation_text.cpp
   project_instructions.cpp
@@ -62,6 +63,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   scripted_persona_editor.cpp
   scripted_persona_source.cpp
   scripted_playback_port.cpp
+  scripted_process_launcher.cpp
   scripted_project_instruction_source.cpp
   scripted_repository_snapshot_source.cpp
   scripted_session_store.cpp

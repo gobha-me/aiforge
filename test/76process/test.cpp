@@ -27,6 +27,7 @@
 
 #include <aiforge/adapters/process_tool.hpp>
 #include <aiforge/testing/scripted_artifact_store.hpp>
+#include <aiforge/testing/scripted_process_launcher.hpp>
 
 namespace {
 
@@ -190,7 +191,146 @@ auto fixture() -> std::filesystem::path {
   return std::filesystem::path{PROCESS_TEST_FIXTURE};
 }
 
+auto bytes_of(const std::string_view value) -> std::vector<std::byte> {
+  std::vector<std::byte> result;
+  result.reserve(value.size());
+  for (const unsigned char byte : value) {
+    result.push_back(static_cast<std::byte>(byte));
+  }
+  return result;
+}
+
+auto launch_context() -> runtime::ApplicationLaunchContext {
+  runtime::ApplicationLaunchContextConfiguration configuration;
+  configuration.selected_restriction = runtime::RestrictionLevel::none;
+  configuration.achieved_restriction = runtime::RestrictionLevel::none;
+  configuration.unavailable_reason.reset();
+  configuration.restriction_policy_identity = "test.process-policy.v1";
+  return runtime::make_application_launch_context(std::move(configuration))
+      .value();
+}
+
+auto pin_script(const std::string& executable, const std::string& root)
+    -> std::vector<testing::ScriptedProcessPathPinExchange> {
+  using Kind = runtime::ProcessFilesystemTargetKind;
+  return {{executable, Kind::regular_executable, std::string{"executable-id"}},
+          {root, Kind::directory, std::string{"root-id"}},
+          {executable, Kind::regular_executable, std::string{"executable-id"}},
+          {root, Kind::directory, std::string{"root-id"}},
+          {root, Kind::directory, std::string{"root-id"}},
+          {root, Kind::directory, std::string{"root-id"}},
+          {root, Kind::directory, std::string{"root-id"}}};
+}
+
 } // namespace
+
+TEST_CASE("process tool consumes a bound secret-safe launcher",
+          "[process][launcher][redaction][failure]") {
+  TemporaryDirectory temporary;
+  RecordingArtifactStore artifacts;
+  const auto executable = fixture().generic_string();
+  const auto root = temporary.path().generic_string();
+  const auto output = bytes_of("secret-value-123");
+  runtime::ProcessLaunchRequest expected{
+      make_id<domain::InvocationId>("process-call"),
+      executable,
+      "executable-id",
+      {},
+      root,
+      "root-id",
+      {{root, "root-id", runtime::ProcessFilesystemAccess::read_write}},
+      {{root, "root-id", runtime::ProcessFilesystemAccess::read_only}},
+      {{"SAFE_VALUE", ""}},
+      {1s, 128U * 1024U, 1024, 50ms}};
+  std::vector<testing::ScriptedProcessLaunchExchange> exchanges{
+      {expected,
+       testing::ScriptedProcessLaunchStream{
+           {runtime::ProcessLaunchEvent{runtime::ProcessLaunchProgress{
+                runtime::ProcessOutputStream::standard_output, output}},
+            runtime::ProcessLaunchEvent{runtime::ProcessLaunchTerminal{
+                runtime::ProcessTerminalKind::exited,
+                0,
+                std::nullopt,
+                std::nullopt,
+                3ms,
+                output,
+                {}}},
+            testing::ProcessLaunchEndOfStream{}}}},
+      {expected, runtime::ProcessLaunchError{
+                     runtime::ProcessLaunchErrorCode::unavailable,
+                     runtime::ProcessLaunchStage::spawn, std::nullopt,
+                     "secret-bearing adapter detail", true}}};
+  auto pins = pin_script(executable, root);
+  pins.insert(pins.begin() + 1,
+              {"/unused-executable",
+               runtime::ProcessFilesystemTargetKind::regular_executable,
+               std::string{"unused-executable-id"}});
+  const auto repeated = pin_script(executable, root);
+  pins.insert(pins.end(), repeated.begin() + 2, repeated.end());
+  auto scripted = std::make_shared<testing::ScriptedProcessLauncher>(
+      runtime::ProcessLauncherContract{
+          runtime::RestrictionLevel::none, {}, "test.process-policy.v1"},
+      std::move(exchanges), runtime::ProcessLaunchBounds{}, std::move(pins));
+  auto bound = runtime::bind_process_launcher(launch_context(), scripted);
+  REQUIRE(bound);
+  runtime::ToolRegistry registry;
+  auto process_configuration = configuration(fixture(), temporary.path());
+  process_configuration.executable_allowlist.emplace_back("/unused-executable");
+  REQUIRE(adapters::register_process_tool(registry, artifacts,
+                                          std::move(process_configuration),
+                                          std::move(*bound)));
+
+  auto execution = execute(
+      registry, arguments(fixture(), temporary.path(), {}, {"SAFE_VALUE"}));
+  REQUIRE(execution);
+  REQUIRE(execution->progress.empty());
+  REQUIRE(result_json(execution->result).at("stdout").at("text") ==
+          std::string(output.size(), '*'));
+  REQUIRE(scripted->recorded_requests() ==
+          std::vector<runtime::ProcessLaunchRequest>{expected});
+  REQUIRE(scripted->remaining_exchanges() == 1);
+
+  auto failed = execute(
+      registry, arguments(fixture(), temporary.path(), {}, {"SAFE_VALUE"}));
+  REQUIRE_FALSE(failed);
+  REQUIRE(failed.error().retryable);
+  REQUIRE(failed.error().message == "process launcher is unavailable");
+  REQUIRE(failed.error().message.find("secret-bearing") == std::string::npos);
+  REQUIRE(scripted->recorded_requests() ==
+          std::vector<runtime::ProcessLaunchRequest>{expected, expected});
+  REQUIRE(scripted->remaining_exchanges() == 0);
+}
+
+TEST_CASE("process tool blocks configured root drift before launch",
+          "[process][launcher][toctou][failure]") {
+  TemporaryDirectory temporary;
+  RecordingArtifactStore artifacts;
+  const auto executable = fixture().generic_string();
+  const auto root = temporary.path().generic_string();
+  using Kind = runtime::ProcessFilesystemTargetKind;
+  auto scripted = std::make_shared<testing::ScriptedProcessLauncher>(
+      runtime::ProcessLauncherContract{
+          runtime::RestrictionLevel::none, {}, "test.process-policy.v1"},
+      std::vector<testing::ScriptedProcessLaunchExchange>{},
+      runtime::ProcessLaunchBounds{},
+      std::vector<testing::ScriptedProcessPathPinExchange>{
+          {executable, Kind::regular_executable, std::string{"executable-id"}},
+          {root, Kind::directory, std::string{"root-id"}},
+          {executable, Kind::regular_executable, std::string{"executable-id"}},
+          {root, Kind::directory, std::string{"replacement-root-id"}}});
+  auto bound = runtime::bind_process_launcher(launch_context(), scripted);
+  REQUIRE(bound);
+  runtime::ToolRegistry registry;
+  REQUIRE(adapters::register_process_tool(
+      registry, artifacts, configuration(fixture(), temporary.path()),
+      std::move(*bound)));
+
+  auto drifted = execute(registry, arguments(fixture(), temporary.path(), {}));
+  REQUIRE_FALSE(drifted);
+  REQUIRE(drifted.error().code == runtime::ToolExecutionErrorCode::unavailable);
+  REQUIRE(scripted->recorded_requests().empty());
+  REQUIRE(scripted->remaining_path_pins() == 0);
+}
 
 TEST_CASE("process declaration and validation fail closed",
           "[process][validation][failure]") {
@@ -200,6 +340,10 @@ TEST_CASE("process declaration and validation fail closed",
   auto declaration = adapters::process_tool_declaration(config);
   REQUIRE(declaration);
   REQUIRE(declaration->name == "run_process");
+  const auto schema = Json::parse(declaration->input_schema.data);
+  REQUIRE(schema.at("properties").at("readable_roots").at("minItems") == 1);
+  REQUIRE_FALSE(
+      schema.at("properties").at("writable_roots").contains("minItems"));
   REQUIRE(declaration->effects ==
           std::vector<domain::Effect>{
               domain::Effect::execute, domain::Effect::read,
@@ -326,6 +470,10 @@ TEST_CASE("process declaration and validation fail closed",
   oversized_environment.environment_allowlist.front().value =
       std::string(config.limits.argument_bytes, 's');
   REQUIRE_FALSE(adapters::process_tool_declaration(oversized_environment));
+
+  auto non_ascii_environment = config;
+  non_ascii_environment.environment_allowlist.front().name = "N\xC3\x89";
+  REQUIRE_FALSE(adapters::process_tool_declaration(non_ascii_environment));
 
   auto combined_environment = config;
   combined_environment.environment_allowlist.front().value =
