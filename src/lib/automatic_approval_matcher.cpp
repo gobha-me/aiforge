@@ -264,7 +264,6 @@ struct CompiledRule {
   std::uint64_t remaining_matches{};
   std::optional<std::chrono::steady_clock::time_point> expires_at;
   std::uint32_t precedence{};
-  std::uint8_t specificity{};
   std::string identity;
 };
 
@@ -436,7 +435,6 @@ struct ReservedDecision {
                      AutomaticApprovalMatcherError> {
   std::optional<std::size_t> selected;
   std::uint32_t highest_precedence{};
-  std::uint8_t highest_specificity{};
   bool found{};
   bool ambiguous{};
   for (std::size_t index{}; index < rules.size(); ++index) {
@@ -450,16 +448,12 @@ struct ReservedDecision {
     auto matches = condition_matches(rule, request, limits);
     if (!matches) return std::unexpected(std::move(matches.error()));
     if (!*matches) continue;
-    if (!found || rule.specificity > highest_specificity ||
-        (rule.specificity == highest_specificity &&
-         rule.precedence > highest_precedence)) {
+    if (!found || rule.precedence > highest_precedence) {
       selected = index;
       highest_precedence = rule.precedence;
-      highest_specificity = rule.specificity;
       found = true;
       ambiguous = false;
-    } else if (rule.specificity == highest_specificity &&
-               rule.precedence == highest_precedence) {
+    } else if (rule.precedence == highest_precedence) {
       ambiguous = true;
     }
   }
@@ -537,7 +531,6 @@ struct CompiledRuleResult {
   CompiledCondition condition;
   std::size_t bytes{};
   std::string tool_name;
-  std::uint8_t specificity{1};
   if (auto* exact = std::get_if<ExactToolArgumentsApprovalRule>(&rule)) {
     if (exact->tool_name == "read_repository_file" ||
         !valid_text(exact->tool_name, limits.maximum_tool_name_bytes) ||
@@ -551,7 +544,6 @@ struct CompiledRuleResult {
             exact->arguments.value.media_type.size() +
             exact->arguments.value.data.size();
     tool_name = exact->tool_name;
-    specificity = 2;
     condition = CompiledExactCondition{std::move(exact->tool_name),
                                        std::move(exact->arguments)};
   } else if (auto* repository =
@@ -599,8 +591,7 @@ struct CompiledRuleResult {
   }
   return CompiledRuleResult{{std::move(condition), std::move(*restrictions),
                              constraints.maximum_matches, expires_at,
-                             constraints.precedence, specificity,
-                             std::move(identity)},
+                             constraints.precedence, std::move(identity)},
                             bytes,
                             std::move(tool_name)};
 }

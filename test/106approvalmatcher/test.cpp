@@ -220,13 +220,13 @@ TEST_CASE("process executable rules vary argv but stay exact and quota bounded",
                     .value());
 }
 
-TEST_CASE("exact process invocation outranks executable-wide approval",
+TEST_CASE("explicit precedence orders exact and executable process rules",
           "[approval-matcher][process][precedence]") {
   auto matcher = runtime::compile_automatic_approval_matcher(
-      {process_rule("/usr/bin/git", constraints(2, 999)),
+      {process_rule("/usr/bin/git", constraints(2, 0)),
        exact_rule("run_process",
                   R"({"argv":["status"],"executable":"/usr/bin/git"})",
-                  constraints(1, 0))});
+                  constraints(1, 1))});
   REQUIRE(matcher);
   const auto matched = (*matcher)->match(
       request("exact-process", "run_process",
@@ -235,6 +235,18 @@ TEST_CASE("exact process invocation outranks executable-wide approval",
   REQUIRE(matched->has_value());
   REQUIRE(matched->value().rule_identity.starts_with(
       "aiforge.auto-rule.exact.v1.sha256:"));
+
+  auto cross_kind_ambiguous = runtime::compile_automatic_approval_matcher(
+      {process_rule("/usr/bin/git", constraints(1, 4)),
+       exact_rule("run_process",
+                  R"({"argv":["status"],"executable":"/usr/bin/git"})",
+                  constraints(1, 4))});
+  REQUIRE(cross_kind_ambiguous);
+  REQUIRE_FALSE(
+      (*cross_kind_ambiguous)
+          ->match(request("cross-kind-ambiguous", "run_process",
+                          R"({"argv":["status"],"executable":"/usr/bin/git"})"))
+          .value());
 
   auto ambiguous = runtime::compile_automatic_approval_matcher(
       {process_rule("/usr/bin/git", constraints(1, 4)),
@@ -313,6 +325,8 @@ TEST_CASE("every matcher limit is part of the policy identity",
                   maximum_canonical_argument_bytes);
   add_variant(
       &runtime::AutomaticApprovalMatcherLimits::maximum_relative_path_bytes);
+  add_variant(&runtime::AutomaticApprovalMatcherLimits::
+                  maximum_process_executable_bytes);
   add_variant(
       &runtime::AutomaticApprovalMatcherLimits::maximum_total_rule_bytes);
   add_variant(&runtime::AutomaticApprovalMatcherLimits::maximum_total_matches);
