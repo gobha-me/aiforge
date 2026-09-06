@@ -392,14 +392,25 @@ auto validate_process_launch_request(const ProcessLaunchRequest& request,
             const bool access_covers =
                 configured.access == ProcessFilesystemAccess::read_write ||
                 requested.access == ProcessFilesystemAccess::read_only;
-            const bool identity_agrees =
-                configured.path != requested.path ||
-                configured.identity == requested.identity;
-            return access_covers && identity_agrees &&
+            return access_covers &&
                    path_is_within(configured.path, requested.path);
           });
     };
-    if (!std::ranges::all_of(request.requested_roots, configured_covers) ||
+    const bool conflicting_identity = std::ranges::any_of(
+        request.requested_roots, [&](const auto& requested) {
+          return std::ranges::any_of(
+              request.configured_roots, [&](const auto& configured) {
+                return configured.path == requested.path &&
+                       configured.identity != requested.identity;
+              });
+        });
+    const bool conflicting_working_identity =
+        std::ranges::any_of(request.requested_roots, [&](const auto& root) {
+          return root.path == request.working_directory &&
+                 root.identity != request.working_directory_identity;
+        });
+    if (conflicting_identity || conflicting_working_identity ||
+        !std::ranges::all_of(request.requested_roots, configured_covers) ||
         std::ranges::none_of(request.requested_roots, [&](const auto& root) {
           return path_is_within(root.path, request.working_directory);
         })) {

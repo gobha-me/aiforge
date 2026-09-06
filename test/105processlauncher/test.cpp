@@ -31,7 +31,7 @@ auto request(std::string secret = "fake-secret")
           "executable-identity",
           {"literal;argument"},
           "/workspace",
-          "working-directory-identity",
+          "root-identity",
           {{"/workspace", "root-identity",
             runtime::ProcessFilesystemAccess::read_write}},
           {{"/workspace", "root-identity",
@@ -125,6 +125,10 @@ TEST_CASE("process launch requests reject malformed or widened authority",
 
   invalid = request();
   invalid.requested_roots.front().identity = "different-identity";
+  REQUIRE_FALSE(runtime::validate_process_launch_request(invalid));
+
+  invalid = request();
+  invalid.working_directory_identity = "different-identity";
   REQUIRE_FALSE(runtime::validate_process_launch_request(invalid));
 
   invalid = request();
