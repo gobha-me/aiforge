@@ -342,6 +342,7 @@ TEST_CASE("process configuration fails closed before granting authority",
       R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace"],"limits":{"output_bytes":1024,"inline_output_bytes":512,"progress_chunk_bytes":2048}}}})",
       // Matcher accounting is positive when enabled and remains bounded.
       R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace"],"allowlist_automatic_approval":{"maximum_matches":1000001}}}})",
+      R"({"tools":{"process":{"executables":["/usr/bin/a","/usr/bin/b"],"readable_roots":["/workspace"],"allowlist_automatic_approval":{"maximum_matches":500001}}}})",
       // Restriction and harness are application-lifetime launch controls.
       R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace"],"restriction":"none"}}})",
       R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace"],"approval":"allow-all"}}})"};
@@ -423,6 +424,14 @@ TEST_CASE("process configuration resolves only bounded file-backed names",
   REQUIRE(zero_matches);
   REQUIRE(*zero_matches);
   REQUIRE_FALSE((*zero_matches)->allowlist_automatic_approval_maximum_matches);
+
+  const auto aggregate_boundary = resolve_process_document(
+      path,
+      R"({"tools":{"process":{"executables":["/usr/bin/a","/usr/bin/b"],"readable_roots":["/workspace"],"allowlist_automatic_approval":{"maximum_matches":500000}}}})");
+  REQUIRE(aggregate_boundary);
+  REQUIRE(*aggregate_boundary);
+  REQUIRE((*aggregate_boundary)->allowlist_automatic_approval_maximum_matches ==
+          500'000);
 }
 
 TEST_CASE("process capability settings reject non-file sources",

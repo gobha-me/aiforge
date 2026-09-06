@@ -1190,13 +1190,17 @@ auto resolve_process_config_settings(const ResolvedConfig& resolved)
                      "process configuration exceeds its selected limits"));
     }
     constexpr std::uint64_t maximum_automatic_matches{1'000'000};
-    if (settings.allowlist_automatic_approval_maximum_matches &&
-        *settings.allowlist_automatic_approval_maximum_matches >
-            maximum_automatic_matches) {
+    const auto per_executable_matches =
+        settings.allowlist_automatic_approval_maximum_matches;
+    if (per_executable_matches &&
+        (*per_executable_matches > maximum_automatic_matches ||
+         settings.executable_allowlist.size() >
+             maximum_automatic_matches / *per_executable_matches)) {
       return std::unexpected(diagnostic(
           ConfigDiagnosticCode::invalid_value, ConfigSource::file,
           std::string{process_allowlist_automatic_approval_maximum_matches_key},
-          "process allowlist automatic approval count exceeds its bound"));
+          "process allowlist automatic approval accounting exceeds its "
+          "aggregate bound"));
     }
     return std::optional<ProcessConfigSettings>{std::move(settings)};
   } catch (...) {

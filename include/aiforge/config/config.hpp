@@ -262,6 +262,8 @@ struct ProcessConfigSettings {
   std::vector<std::string> inherited_environment_names;
   ProcessConfigLimits limits{};
   bool unrestricted_network{};
+  // This application-lifetime quota applies independently to each executable.
+  // The resolver also bounds their aggregate matcher accounting.
   std::optional<std::uint64_t> allowlist_automatic_approval_maximum_matches;
   auto operator==(const ProcessConfigSettings&) const -> bool = default;
 };
