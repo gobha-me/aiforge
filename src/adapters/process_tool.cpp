@@ -43,6 +43,7 @@
 #include <unistd.h>
 #endif
 
+#include <aiforge/detail/utf8_text.hpp>
 #include <aiforge/runtime/tool_policy.hpp>
 
 namespace aiforge::adapters {
@@ -307,12 +308,50 @@ struct ProcessRequest {
   std::size_t output_bytes{};
 };
 
+[[nodiscard]] auto normalized_arguments(const ProcessRequest& request,
+                                        const std::size_t maximum_bytes)
+    -> std::optional<domain::StructuredDataBlock> {
+  Json value{{"executable", request.executable},
+             {"arguments", request.arguments},
+             {"working_directory", request.working_directory},
+             {"readable_roots", request.readable_roots},
+             {"writable_roots", request.writable_roots},
+             {"environment", request.environment},
+             {"stdin", "closed"},
+             {"timeout_ms", request.timeout.count()},
+             {"output_bytes", request.output_bytes}};
+  auto data = value.dump();
+  if (data.empty() || data.size() > maximum_bytes) return std::nullopt;
+  return domain::StructuredDataBlock{"application/json", std::move(data)};
+}
+
 class DuplicateJsonKey final : public std::exception {
  public:
   [[nodiscard]] auto what() const noexcept -> const char* override {
     return "duplicate process argument key";
   }
 };
+
+[[nodiscard]] auto parse_json_without_duplicate_keys(const std::string& data)
+    -> Json {
+  std::vector<std::set<std::string>> object_keys;
+  const auto callback =
+      [&object_keys](const int, const Json::parse_event_t event, Json& parsed) {
+        if (event == Json::parse_event_t::object_start) {
+          object_keys.emplace_back();
+        } else if (event == Json::parse_event_t::key) {
+          if (object_keys.empty() ||
+              !object_keys.back().insert(parsed.get<std::string>()).second) {
+            throw DuplicateJsonKey{};
+          }
+        } else if (event == Json::parse_event_t::object_end &&
+                   !object_keys.empty()) {
+          object_keys.pop_back();
+        }
+        return true;
+      };
+  return Json::parse(data, callback, true, false);
+}
 
 [[nodiscard]] auto string_array(const Json& value,
                                 const std::size_t maximum_items,
@@ -338,6 +377,101 @@ class DuplicateJsonKey final : public std::exception {
   return result;
 }
 
+[[nodiscard]] auto has_process_request_shape(const Json& value) -> bool {
+  static const std::set<std::string> fields{
+      "executable",     "arguments",      "working_directory",
+      "readable_roots", "writable_roots", "environment",
+      "stdin",          "timeout_ms",     "output_bytes"};
+  return value.is_object() && value.size() == fields.size() &&
+         std::ranges::none_of(
+             value.items(),
+             [&](const auto& item) { return !fields.contains(item.key()); }) &&
+         std::ranges::all_of(
+             fields,
+             [&](const auto& field) { return value.contains(field); }) &&
+         value.at("executable").is_string() &&
+         value.at("working_directory").is_string() &&
+         value.at("stdin").is_string() &&
+         value.at("stdin").get<std::string>() == "closed" &&
+         value.at("timeout_ms").is_number_unsigned() &&
+         value.at("output_bytes").is_number_unsigned();
+}
+
+[[nodiscard]] auto has_valid_request_identity_and_lists(
+    const ProcessRequest& request, const NormalizedConfiguration& configuration)
+    -> bool {
+  const auto executable = normalized_path(request.executable);
+  const auto working_directory = normalized_path(request.working_directory);
+  return executable && working_directory && *executable == request.executable &&
+         *working_directory == request.working_directory &&
+         std::ranges::contains(configuration.executables, request.executable) &&
+         !request.readable_roots.empty() && unique(request.readable_roots) &&
+         unique(request.writable_roots) && unique(request.environment);
+}
+
+[[nodiscard]] auto has_authorized_readable_roots(
+    const ProcessRequest& request, const NormalizedConfiguration& configuration)
+    -> bool {
+  return std::ranges::all_of(request.readable_roots, [&](const auto& root) {
+    const auto normalized = normalized_path(root);
+    return normalized && *normalized == root &&
+           std::ranges::any_of(configuration.readable_roots,
+                               [&](const auto& ceiling) {
+                                 return path_is_within(ceiling, root);
+                               });
+  });
+}
+
+[[nodiscard]] auto has_authorized_writable_roots(
+    const ProcessRequest& request, const NormalizedConfiguration& configuration)
+    -> bool {
+  return std::ranges::all_of(request.writable_roots, [&](const auto& root) {
+    const auto normalized = normalized_path(root);
+    return normalized && *normalized == root &&
+           std::ranges::any_of(configuration.writable_roots,
+                               [&](const auto& ceiling) {
+                                 return path_is_within(ceiling, root);
+                               }) &&
+           std::ranges::any_of(request.readable_roots,
+                               [&](const auto& readable_root) {
+                                 return path_is_within(readable_root, root);
+                               });
+  });
+}
+
+[[nodiscard]] auto has_authorized_working_directory_and_environment(
+    const ProcessRequest& request, const NormalizedConfiguration& configuration)
+    -> bool {
+  return std::ranges::any_of(request.readable_roots,
+                             [&](const auto& root) {
+                               return path_is_within(root,
+                                                     request.working_directory);
+                             }) &&
+         std::ranges::all_of(request.environment, [&](const auto& name) {
+           return configuration.environment.contains(name);
+         });
+}
+
+[[nodiscard]] auto process_bytes_are_within_limit(
+    const ProcessRequest& request, const NormalizedConfiguration& configuration)
+    -> bool {
+  std::size_t process_bytes{};
+  return add_within(process_bytes, request.executable.size() + 1U,
+                    configuration.source.limits.argument_bytes) &&
+         std::ranges::all_of(request.arguments,
+                             [&](const auto& argument) {
+                               return add_within(
+                                   process_bytes, argument.size() + 1U,
+                                   configuration.source.limits.argument_bytes);
+                             }) &&
+         std::ranges::all_of(request.environment, [&](const auto& name) {
+           const auto& environment_value = configuration.environment.at(name);
+           return add_within(process_bytes,
+                             name.size() + environment_value.size() + 2U,
+                             configuration.source.limits.argument_bytes);
+         });
+}
+
 [[nodiscard]] auto parse_request(const domain::StructuredDataBlock& arguments,
                                  const NormalizedConfiguration& configuration)
     -> std::expected<ProcessRequest, runtime::ToolExecutionError> {
@@ -348,41 +482,8 @@ class DuplicateJsonKey final : public std::exception {
           runtime::ToolExecutionErrorCode::invalid_arguments,
           "process arguments must be bounded application/json"));
     }
-    std::vector<std::set<std::string>> object_keys;
-    const auto callback = [&object_keys](const int,
-                                         const Json::parse_event_t event,
-                                         Json& parsed) {
-      if (event == Json::parse_event_t::object_start) {
-        object_keys.emplace_back();
-      } else if (event == Json::parse_event_t::key) {
-        if (object_keys.empty() ||
-            !object_keys.back().insert(parsed.get<std::string>()).second) {
-          throw DuplicateJsonKey{};
-        }
-      } else if (event == Json::parse_event_t::object_end &&
-                 !object_keys.empty()) {
-        object_keys.pop_back();
-      }
-      return true;
-    };
-    auto value = Json::parse(arguments.data, callback, true, false);
-    static const std::set<std::string> fields{
-        "executable",     "arguments",      "working_directory",
-        "readable_roots", "writable_roots", "environment",
-        "stdin",          "timeout_ms",     "output_bytes"};
-    if (!value.is_object() || value.size() != fields.size() ||
-        std::ranges::any_of(
-            value.items(),
-            [&](const auto& item) { return !fields.contains(item.key()); }) ||
-        std::ranges::any_of(
-            fields,
-            [&](const auto& field) { return !value.contains(field); }) ||
-        !value.at("executable").is_string() ||
-        !value.at("working_directory").is_string() ||
-        !value.at("stdin").is_string() ||
-        value.at("stdin").get<std::string>() != "closed" ||
-        !value.at("timeout_ms").is_number_unsigned() ||
-        !value.at("output_bytes").is_number_unsigned()) {
+    auto value = parse_json_without_duplicate_keys(arguments.data);
+    if (!has_process_request_shape(value)) {
       return std::unexpected(
           execution_error(runtime::ToolExecutionErrorCode::invalid_arguments,
                           "process arguments are malformed"));
@@ -424,73 +525,36 @@ class DuplicateJsonKey final : public std::exception {
     request.timeout = std::chrono::milliseconds{timeout};
     request.output_bytes = static_cast<std::size_t>(output);
 
-    auto executable = normalized_path(request.executable);
-    auto working_directory = normalized_path(request.working_directory);
-    if (!executable || !working_directory ||
-        *executable != request.executable ||
-        *working_directory != request.working_directory ||
-        !std::ranges::contains(configuration.executables, request.executable) ||
-        request.readable_roots.empty() || !unique(request.readable_roots) ||
-        !unique(request.writable_roots) || !unique(request.environment)) {
+    if (std::ranges::any_of(request.arguments, [](const auto& argument) {
+          return !argument.empty() && !detail::is_safe_utf8_text(argument);
+        })) {
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::invalid_arguments,
+                          "process arguments contain unsafe text"));
+    }
+
+    if (!has_valid_request_identity_and_lists(request, configuration)) {
       return std::unexpected(execution_error(
           runtime::ToolExecutionErrorCode::invalid_arguments,
           "process paths and lists must be unique normalized allowed values"));
     }
-    for (const auto& root : request.readable_roots) {
-      auto normalized = normalized_path(root);
-      if (!normalized || *normalized != root ||
-          std::ranges::none_of(configuration.readable_roots,
-                               [&](const auto& ceiling) {
-                                 return path_is_within(ceiling, root);
-                               })) {
-        return std::unexpected(
-            execution_error(runtime::ToolExecutionErrorCode::invalid_arguments,
-                            "readable root exceeds the configured ceiling"));
-      }
+    if (!has_authorized_readable_roots(request, configuration)) {
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::invalid_arguments,
+                          "readable root exceeds the configured ceiling"));
     }
-    for (const auto& root : request.writable_roots) {
-      auto normalized = normalized_path(root);
-      if (!normalized || *normalized != root ||
-          std::ranges::none_of(configuration.writable_roots,
-                               [&](const auto& ceiling) {
-                                 return path_is_within(ceiling, root);
-                               }) ||
-          std::ranges::none_of(request.readable_roots,
-                               [&](const auto& readable_root) {
-                                 return path_is_within(readable_root, root);
-                               })) {
-        return std::unexpected(execution_error(
-            runtime::ToolExecutionErrorCode::invalid_arguments,
-            "writable root exceeds the requested or configured ceiling"));
-      }
+    if (!has_authorized_writable_roots(request, configuration)) {
+      return std::unexpected(execution_error(
+          runtime::ToolExecutionErrorCode::invalid_arguments,
+          "writable root exceeds the requested or configured ceiling"));
     }
-    if (std::ranges::none_of(request.readable_roots,
-                             [&](const auto& root) {
-                               return path_is_within(root,
-                                                     request.working_directory);
-                             }) ||
-        std::ranges::any_of(request.environment, [&](const auto& name) {
-          return !configuration.environment.contains(name);
-        })) {
+    if (!has_authorized_working_directory_and_environment(request,
+                                                          configuration)) {
       return std::unexpected(execution_error(
           runtime::ToolExecutionErrorCode::invalid_arguments,
           "working directory or environment exceeds requested authority"));
     }
-    std::size_t process_bytes{};
-    if (!add_within(process_bytes, request.executable.size() + 1U,
-                    configuration.source.limits.argument_bytes) ||
-        std::ranges::any_of(request.arguments,
-                            [&](const auto& argument) {
-                              return !add_within(
-                                  process_bytes, argument.size() + 1U,
-                                  configuration.source.limits.argument_bytes);
-                            }) ||
-        std::ranges::any_of(request.environment, [&](const auto& name) {
-          const auto& environment_value = configuration.environment.at(name);
-          return !add_within(process_bytes,
-                             name.size() + environment_value.size() + 2U,
-                             configuration.source.limits.argument_bytes);
-        })) {
+    if (!process_bytes_are_within_limit(request, configuration)) {
       return std::unexpected(execution_error(
           runtime::ToolExecutionErrorCode::invalid_arguments,
           "process argv and environment exceed the configured byte limit"));
@@ -932,8 +996,16 @@ class LauncherProcessExecutor final : public runtime::ToolExecutor {
     try {
       auto parsed = parse_request(arguments, m_configuration);
       if (!parsed) return std::unexpected(std::move(parsed.error()));
-      return runtime::ValidatedToolArguments{
-          arguments, required_scopes(*parsed), required_effects(*parsed)};
+      auto normalized = normalized_arguments(
+          *parsed, m_configuration.source.limits.argument_bytes);
+      if (!normalized) {
+        return std::unexpected(execution_error(
+            runtime::ToolExecutionErrorCode::invalid_arguments,
+            "normalized process arguments exceed the configured byte limit"));
+      }
+      return runtime::ValidatedToolArguments{std::move(*normalized),
+                                             required_scopes(*parsed),
+                                             required_effects(*parsed)};
     } catch (...) {
       return std::unexpected(
           execution_error(runtime::ToolExecutionErrorCode::internal_failure,
@@ -1745,8 +1817,16 @@ class ProcessExecutor final : public runtime::ToolExecutor {
     try {
       auto parsed = parse_request(arguments, m_configuration.normalized);
       if (!parsed) return std::unexpected(std::move(parsed.error()));
-      return runtime::ValidatedToolArguments{
-          arguments, required_scopes(*parsed), required_effects(*parsed)};
+      auto normalized = normalized_arguments(
+          *parsed, m_configuration.normalized.source.limits.argument_bytes);
+      if (!normalized) {
+        return std::unexpected(execution_error(
+            runtime::ToolExecutionErrorCode::invalid_arguments,
+            "normalized process arguments exceed the configured byte limit"));
+      }
+      return runtime::ValidatedToolArguments{std::move(*normalized),
+                                             required_scopes(*parsed),
+                                             required_effects(*parsed)};
     } catch (...) {
       return std::unexpected(
           execution_error(runtime::ToolExecutionErrorCode::internal_failure,

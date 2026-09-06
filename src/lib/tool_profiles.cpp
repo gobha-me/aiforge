@@ -264,6 +264,9 @@ const std::array kBuiltinProfiles{
     ToolProfile{make_id("repository-read"),
                 "Repository read",
                 {"ask_user", "propose_memory", "read_repository_file"}},
+    ToolProfile{make_id("process"),
+                "Process",
+                {"ask_user", "propose_memory", "run_process"}},
     ToolProfile{make_id("media"),
                 "Media",
                 {"ask_user", "propose_memory", "generate_image"}},
@@ -355,6 +358,8 @@ auto tool_profile_availability_reason_text(
     case ToolProfileAvailabilityReason::available: return "available";
     case ToolProfileAvailabilityReason::tool_not_registered:
       return "tool is not registered in this runtime";
+    case ToolProfileAvailabilityReason::declared_unavailable:
+      return "tool is declared but unavailable in this runtime";
     case ToolProfileAvailabilityReason::profile_contract_mismatch:
       return "registered tool exceeds the profile's no-authority contract";
     case ToolProfileAvailabilityReason::session_tool_disabled:
@@ -396,7 +401,9 @@ auto tool_profile_category_members(
     result.reserve(selected->tool_names.size());
     for (const auto& tool_name : selected->tool_names) {
       const auto* registered = full_registry.find(tool_name);
-      if (registered != nullptr && registered->category == category) {
+      const auto* unavailable = full_registry.find_unavailable(tool_name);
+      if ((registered != nullptr && registered->category == category) ||
+          (unavailable != nullptr && unavailable->category == category)) {
         result.push_back(tool_name);
       }
     }
@@ -422,10 +429,18 @@ auto resolve_tool_profile(const ToolRegistrySnapshot& full_registry,
     effective_names.reserve(checked->selected->tool_names.size());
     for (const auto& tool_name : checked->selected->tool_names) {
       const auto* registered = full_registry.find(tool_name);
-      const auto reason = availability_reason(registered, tool_name, *checked);
+      const auto* unavailable = full_registry.find_unavailable(tool_name);
+      const auto reason =
+          unavailable != nullptr
+              ? ToolProfileAvailabilityReason::declared_unavailable
+              : availability_reason(registered, tool_name, *checked);
       if (reason == ToolProfileAvailabilityReason::available)
         effective_names.push_back(tool_name);
-      result.tool_availability.push_back({tool_name, reason});
+      result.tool_availability.push_back(
+          {tool_name, reason,
+           unavailable != nullptr
+               ? std::optional<ToolUnavailability>{unavailable->unavailability}
+               : std::nullopt});
     }
 
     auto effective = full_registry.subset(effective_names);
@@ -470,7 +485,10 @@ auto resolve_tool_profile(const ToolRegistrySnapshot& full_registry,
     for (const auto& tool_name : selected->tool_names) {
       auto reason = ToolProfileAvailabilityReason::available;
       const auto* registered = full_registry.find(tool_name);
-      if (registered == nullptr) {
+      const auto* unavailable = full_registry.find_unavailable(tool_name);
+      if (unavailable != nullptr) {
+        reason = ToolProfileAvailabilityReason::declared_unavailable;
+      } else if (registered == nullptr) {
         reason = ToolProfileAvailabilityReason::tool_not_registered;
       } else if (selected->profile_id == make_id("essentials") &&
                  (!registered->declaration.effects.empty() ||
@@ -483,7 +501,11 @@ auto resolve_tool_profile(const ToolRegistrySnapshot& full_registry,
       } else {
         effective_names.push_back(tool_name);
       }
-      result.tool_availability.push_back({tool_name, reason});
+      result.tool_availability.push_back(
+          {tool_name, reason,
+           unavailable != nullptr
+               ? std::optional<ToolUnavailability>{unavailable->unavailability}
+               : std::nullopt});
     }
 
     auto effective = full_registry.subset(effective_names);

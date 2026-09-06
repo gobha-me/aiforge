@@ -177,6 +177,8 @@ auto append_matcher_limits(detail::Sha256& digest,
                              limits.maximum_canonical_argument_bytes));
   append_integer(
       digest, static_cast<std::uint64_t>(limits.maximum_relative_path_bytes));
+  append_integer(digest, static_cast<std::uint64_t>(
+                             limits.maximum_process_executable_bytes));
   append_integer(digest,
                  static_cast<std::uint64_t>(limits.maximum_total_rule_bytes));
   append_integer(digest, limits.maximum_total_matches);
@@ -248,8 +250,13 @@ struct CompiledRepositoryCondition {
   std::string allowed_relative_path;
 };
 
+struct CompiledProcessExecutableCondition {
+  std::string executable;
+};
+
 using CompiledCondition =
-    std::variant<CompiledExactCondition, CompiledRepositoryCondition>;
+    std::variant<CompiledExactCondition, CompiledRepositoryCondition,
+                 CompiledProcessExecutableCondition>;
 
 struct CompiledRule {
   CompiledCondition condition;
@@ -303,6 +310,24 @@ struct ReservedDecision {
   return "aiforge.auto-rule.repository.v1.sha256:" + digest.finish();
 }
 
+[[nodiscard]] auto process_executable_rule_identity(
+    const ProcessExecutableApprovalRule& rule,
+    const std::vector<RestrictionLevel>& restrictions) -> std::string {
+  detail::Sha256 digest;
+  append_field(digest, "aiforge.automatic-approval-rule.process-executable.v1");
+  append_field(digest, "run_process");
+  append_field(digest, "executable");
+  append_field(digest, rule.executable);
+  for (const auto restriction : restrictions)
+    append_field(digest, restriction_name(restriction));
+  append_integer(digest, rule.constraints.maximum_matches);
+  append_integer(digest, rule.constraints.precedence);
+  append_integer(digest, rule.constraints.expires_after
+                             ? rule.constraints.expires_after->count()
+                             : std::int64_t{-1});
+  return "aiforge.auto-rule.process-executable.v1.sha256:" + digest.finish();
+}
+
 [[nodiscard]] auto valid_canonical_arguments(
     const CanonicalToolArguments& arguments,
     const AutomaticApprovalMatcherLimits& limits) -> bool {
@@ -342,6 +367,38 @@ struct ReservedDecision {
   }
 }
 
+[[nodiscard]] auto valid_process_executable(
+    const std::string_view value, const AutomaticApprovalMatcherLimits& limits)
+    -> bool {
+  if (!valid_text(value, limits.maximum_process_executable_bytes)) return false;
+  const std::filesystem::path path{value};
+  return path.is_absolute() && path.has_root_directory() &&
+         path.generic_string() == value && path.lexically_normal() == path &&
+         path.has_filename() &&
+         std::ranges::none_of(path, [](const auto& component) {
+           return component.empty() || component == "." || component == "..";
+         });
+}
+
+[[nodiscard]] auto process_candidate_executable(
+    const CanonicalToolArguments& arguments,
+    const AutomaticApprovalMatcherLimits& limits)
+    -> std::optional<std::string> {
+  if (!valid_canonical_arguments(arguments, limits)) return std::nullopt;
+  try {
+    const auto parsed = parse_json(arguments.value.data);
+    if (!parsed.is_object() || !parsed.contains("executable") ||
+        !parsed.at("executable").is_string()) {
+      return std::nullopt;
+    }
+    auto executable = parsed.at("executable").get<std::string>();
+    if (!valid_process_executable(executable, limits)) return std::nullopt;
+    return executable;
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
 [[nodiscard]] auto condition_matches(
     const CompiledRule& rule, const AutomaticApprovalMatchRequest& request,
     const AutomaticApprovalMatcherLimits& limits)
@@ -350,6 +407,13 @@ struct ReservedDecision {
           std::get_if<CompiledExactCondition>(&rule.condition)) {
     return exact->tool_name == request.tool_name &&
            exact->arguments == request.arguments;
+  }
+  if (const auto* process =
+          std::get_if<CompiledProcessExecutableCondition>(&rule.condition)) {
+    if (request.tool_name != "run_process") return false;
+    const auto executable =
+        process_candidate_executable(request.arguments, limits);
+    return executable && *executable == process->executable;
   }
   const auto& repository =
       std::get<CompiledRepositoryCondition>(rule.condition);
@@ -432,6 +496,9 @@ struct ReservedDecision {
          limits.maximum_relative_path_bytes != 0 &&
          limits.maximum_relative_path_bytes <=
              maximums.maximum_relative_path_bytes &&
+         limits.maximum_process_executable_bytes != 0 &&
+         limits.maximum_process_executable_bytes <=
+             maximums.maximum_process_executable_bytes &&
          limits.maximum_total_rule_bytes != 0 &&
          limits.maximum_total_rule_bytes <= maximums.maximum_total_rule_bytes &&
          limits.maximum_total_matches != 0 &&
@@ -479,27 +546,38 @@ struct CompiledRuleResult {
     tool_name = exact->tool_name;
     condition = CompiledExactCondition{std::move(exact->tool_name),
                                        std::move(exact->arguments)};
-  } else {
-    auto& repository = std::get<RepositoryReadPathApprovalRule>(rule);
-    if (!repository.root) {
+  } else if (auto* repository =
+                 std::get_if<RepositoryReadPathApprovalRule>(&rule)) {
+    if (!repository->root) {
       return failure(AutomaticApprovalMatcherErrorCode::invalid_configuration,
                      "repository-read automatic approval rule is invalid");
     }
-    std::string root_identity{repository.root->identity()};
+    std::string root_identity{repository->root->identity()};
     if (!valid_root_identity(root_identity) ||
         root_identity.size() > limits.maximum_identity_bytes ||
-        !valid_relative_path(repository.allowed_relative_path,
+        !valid_relative_path(repository->allowed_relative_path,
                              limits.maximum_relative_path_bytes, true)) {
       return failure(AutomaticApprovalMatcherErrorCode::invalid_configuration,
                      "repository-read automatic approval rule is invalid");
     }
     identity =
-        repository_rule_identity(repository, root_identity, *restrictions);
-    bytes = root_identity.size() + repository.allowed_relative_path.size();
+        repository_rule_identity(*repository, root_identity, *restrictions);
+    bytes = root_identity.size() + repository->allowed_relative_path.size();
     tool_name = "read_repository_file";
     condition = CompiledRepositoryCondition{
-        std::move(repository.root), std::move(root_identity),
-        std::move(repository.allowed_relative_path)};
+        std::move(repository->root), std::move(root_identity),
+        std::move(repository->allowed_relative_path)};
+  } else {
+    auto& process = std::get<ProcessExecutableApprovalRule>(rule);
+    if (!valid_process_executable(process.executable, limits)) {
+      return failure(AutomaticApprovalMatcherErrorCode::invalid_configuration,
+                     "process-executable automatic approval rule is invalid");
+    }
+    identity = process_executable_rule_identity(process, *restrictions);
+    bytes = process.executable.size();
+    tool_name = "run_process";
+    condition =
+        CompiledProcessExecutableCondition{std::move(process.executable)};
   }
 
   std::optional<std::chrono::steady_clock::time_point> expires_at;
@@ -785,7 +863,8 @@ auto compile_automatic_approval_matcher(
 auto compile_configured_automatic_approval_matcher(
     const config::AutomaticApprovalRulesConfig& configuration,
     std::shared_ptr<const DescriptorRelativePathAuthority> repository_read_root,
-    AutomaticApprovalClock clock, AutomaticApprovalMatcherLimits limits)
+    AutomaticApprovalClock clock, AutomaticApprovalMatcherLimits limits,
+    std::vector<AutomaticApprovalRule> additional_rules)
     -> std::expected<std::shared_ptr<AutomaticApprovalMatcher>,
                      AutomaticApprovalMatcherError> {
   try {
@@ -797,6 +876,8 @@ auto compile_configured_automatic_approval_matcher(
       if (!converted) return std::unexpected(converted.error());
       rules.push_back(std::move(*converted));
     }
+    for (auto& additional : additional_rules)
+      rules.push_back(std::move(additional));
     return compile_automatic_approval_matcher(std::move(rules),
                                               std::move(clock), limits);
   } catch (...) {

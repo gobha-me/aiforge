@@ -153,9 +153,12 @@ auto ToolSpendLedgerProjection::apply(const RunEvent& event)
       const bool paid =
           std::ranges::find(proposed->declared_effects, Effect::spend) !=
           proposed->declared_effects.end();
+      const auto expected_schema =
+          paid || proposed->validated_arguments ? 2U : 1U;
       if (!event_invocation_matches(event, proposed->invocation_id) ||
-          event.metadata.schema_version != (paid ? 2U : 1U) ||
+          event.metadata.schema_version != expected_schema ||
           paid != proposed->spend_quote.has_value() ||
+          (paid && !proposed->validated_arguments) ||
           (proposed->spend_quote &&
            (!valid_tool_spend_quote(*proposed->spend_quote) ||
             event.metadata.timestamp >= proposed->spend_quote->valid_until)) ||

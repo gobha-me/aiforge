@@ -17,18 +17,17 @@ struct PendingToolApprovalView {
   std::string tool_name;
   std::vector<domain::Effect> effects;
   std::vector<domain::CapabilityScope> scopes;
+  runtime::CanonicalToolArguments canonical_arguments;
+  std::optional<domain::ToolRestrictionLevel> selected_restriction;
+  std::optional<domain::ToolRestrictionLevel> achieved_restriction;
+  domain::ToolApprovalMode approval_mode{domain::ToolApprovalMode::prompt};
+  runtime::ToolApprovalSupplySource supply_source{
+      runtime::ToolApprovalSupplySource::per_invocation};
+  runtime::ToolExecutionLimits executor_limits;
   auto operator==(const PendingToolApprovalView&) const -> bool = default;
 };
 
-struct ToolApprovalDialogLimits {
-  std::size_t maximum_tool_name_bytes{256};
-  std::size_t maximum_effects{16};
-  std::size_t maximum_scopes{64};
-  std::size_t maximum_scope_kind_bytes{256};
-  std::size_t maximum_scope_value_bytes{4096};
-  std::size_t maximum_total_text_bytes{std::size_t{64} * 1024U};
-  auto operator==(const ToolApprovalDialogLimits&) const -> bool = default;
-};
+using ToolApprovalDialogLimits = runtime::ToolApprovalPresentationLimits;
 
 enum class ToolApprovalDialogErrorCode {
   invalid_limits,

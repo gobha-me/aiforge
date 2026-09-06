@@ -66,11 +66,29 @@ struct DurableSessionOpen {
   auto operator==(const DurableSessionOpen&) const -> bool = default;
 };
 
+struct ToolApprovalPresentationLimits {
+  std::size_t maximum_tool_name_bytes{256};
+  std::size_t maximum_effects{16};
+  std::size_t maximum_scopes{64};
+  std::size_t maximum_scope_kind_bytes{256};
+  std::size_t maximum_scope_value_bytes{4096};
+  std::size_t maximum_canonical_argument_bytes{std::size_t{256} * 1024U};
+  std::size_t maximum_total_text_bytes{std::size_t{512} * 1024U};
+  auto operator==(const ToolApprovalPresentationLimits&) const
+      -> bool = default;
+};
+
 struct RunKernelLimits {
   std::size_t pending_updates{256};
   std::size_t tool_argument_bytes{8U * 1024U * 1024U};
   domain::TaskSchedulingPolicy task_scheduling{};
+  ToolApprovalPresentationLimits tool_approval_presentation{};
   auto operator==(const RunKernelLimits&) const -> bool = default;
+};
+
+enum class ToolApprovalSupplySource {
+  per_invocation,
+  implicit,
 };
 
 struct RunStart {
@@ -113,6 +131,13 @@ struct PendingToolApproval {
   std::string tool_name;
   std::vector<domain::Effect> effects;
   std::vector<domain::CapabilityScope> scopes;
+  CanonicalToolArguments canonical_arguments;
+  std::optional<domain::ToolRestrictionLevel> selected_restriction;
+  std::optional<domain::ToolRestrictionLevel> achieved_restriction;
+  domain::ToolApprovalMode approval_mode{domain::ToolApprovalMode::prompt};
+  ToolApprovalSupplySource supply_source{
+      ToolApprovalSupplySource::per_invocation};
+  ToolExecutionLimits executor_limits;
   auto operator==(const PendingToolApproval&) const -> bool = default;
 };
 

@@ -2,6 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -38,7 +39,14 @@ auto request(std::string tool_name = "read_repository_file")
     -> adapters::PendingToolApprovalView {
   return {std::move(tool_name),
           {domain::Effect::read},
-          {{domain::Effect::read, "filesystem.root", "/work/repository"}}};
+          {{domain::Effect::read, "filesystem.root", "/work/repository"}},
+          {"aiforge.canonical-tool-json.v1",
+           {"application/json", R"({"path":"README.md"})"}},
+          domain::ToolRestrictionLevel::none,
+          domain::ToolRestrictionLevel::none,
+          domain::ToolApprovalMode::prompt,
+          runtime::ToolApprovalSupplySource::per_invocation,
+          {4096, 16, std::chrono::seconds{5}}};
 }
 
 } // namespace
@@ -146,17 +154,79 @@ TEST_CASE("tool approval rejects invalid and unbounded presentation input",
 
   SECTION("total text accepts the exact boundary and rejects one byte over") {
     adapters::ToolApprovalDialogLimits limits;
-    limits.maximum_total_text_bytes = 8;
     termforge::ChoiceWizardDialog exact_dialog;
-    adapters::ToolApprovalDialogController exact{exact_dialog, limits};
     auto input = request("tool");
     input.scopes = {{domain::Effect::read, "k", "abc"}};
-    CHECK(exact.present(input, [](auto) {}));
+    limits.maximum_total_text_bytes =
+        input.tool_name.size() + input.canonical_arguments.value.data.size() +
+        input.scopes.front().kind.size() + input.scopes.front().value.size();
+    adapters::ToolApprovalDialogController exact_at_boundary{exact_dialog,
+                                                             limits};
+    CHECK(exact_at_boundary.present(input, [](auto) {}));
 
     termforge::ChoiceWizardDialog over_dialog;
     adapters::ToolApprovalDialogController over{over_dialog, limits};
     input.scopes.front().value += "d";
     CHECK_FALSE(over.present(input, [](auto) {}));
+  }
+
+  SECTION("canonical arguments accept the exact boundary and reject one over") {
+    auto input = request();
+    adapters::ToolApprovalDialogLimits limits;
+    limits.maximum_canonical_argument_bytes =
+        input.canonical_arguments.value.data.size();
+    termforge::ChoiceWizardDialog exact_dialog;
+    adapters::ToolApprovalDialogController exact{exact_dialog, limits};
+    CHECK(exact.present(input, [](auto) {}));
+
+    --limits.maximum_canonical_argument_bytes;
+    termforge::ChoiceWizardDialog over_dialog;
+    adapters::ToolApprovalDialogController over{over_dialog, limits};
+    CHECK_FALSE(over.present(input, [](auto) {}));
+  }
+
+  SECTION("approval provenance and executor limits must be consistent") {
+    for (const auto mode : {domain::ToolApprovalMode::automatic,
+                            domain::ToolApprovalMode::allow_all}) {
+      auto input = request();
+      input.approval_mode = mode;
+      termforge::ChoiceWizardDialog dialog;
+      adapters::ToolApprovalDialogController controller{dialog};
+      CHECK_FALSE(controller.present(input, [](auto) {}));
+    }
+
+    auto input = request();
+    input.supply_source = runtime::ToolApprovalSupplySource::implicit;
+    termforge::ChoiceWizardDialog implicit_dialog;
+    adapters::ToolApprovalDialogController implicit{implicit_dialog};
+    CHECK_FALSE(implicit.present(input, [](auto) {}));
+
+    input = request();
+    input.achieved_restriction = domain::ToolRestrictionLevel::low;
+    termforge::ChoiceWizardDialog mismatch_dialog;
+    adapters::ToolApprovalDialogController mismatch{mismatch_dialog};
+    CHECK_FALSE(mismatch.present(input, [](auto) {}));
+
+    input = request();
+    input.executor_limits.timeout = std::chrono::milliseconds{0};
+    termforge::ChoiceWizardDialog limits_dialog;
+    adapters::ToolApprovalDialogController invalid_limits{limits_dialog};
+    CHECK_FALSE(invalid_limits.present(input, [](auto) {}));
+  }
+
+  SECTION("canonical arguments must be exact safe JSON") {
+    auto input = request();
+    input.canonical_arguments.value.data = R"({ "path":"README.md"})";
+    termforge::ChoiceWizardDialog noncanonical_dialog;
+    adapters::ToolApprovalDialogController noncanonical{noncanonical_dialog};
+    CHECK_FALSE(noncanonical.present(input, [](auto) {}));
+
+    input = request();
+    input.canonical_arguments.value.data =
+        std::string{"{\"path\":\"bad"} + "\xe2\x80\xae" + "\"}";
+    termforge::ChoiceWizardDialog unsafe_dialog;
+    adapters::ToolApprovalDialogController unsafe{unsafe_dialog};
+    CHECK_FALSE(unsafe.present(input, [](auto) {}));
   }
 }
 
@@ -169,13 +239,18 @@ TEST_CASE("tool approval defaults to invocation-only denial",
     resolutions.push_back(std::move(resolution));
   }));
 
-  termforge::Screen screen{100, 24};
+  termforge::Screen screen{180, 40};
   dialog.draw(screen);
   const auto rendered = screen_text(screen);
   CHECK(rendered.find("Tool: read_repository_file") != std::string::npos);
   CHECK(rendered.find("Effects: read") != std::string::npos);
   CHECK(rendered.find("filesystem.root: /work/repository") !=
         std::string::npos);
+  CHECK(rendered.find("Selected restriction: none") != std::string::npos);
+  CHECK(rendered.find("Achieved restriction: none") != std::string::npos);
+  CHECK(rendered.find("Approval: prompt / per invocation") !=
+        std::string::npos);
+  CHECK(rendered.find(R"({"path":"README.md"})") != std::string::npos);
   CHECK(rendered.find("Deny") != std::string::npos);
   CHECK(rendered.find("Allow once") != std::string::npos);
 

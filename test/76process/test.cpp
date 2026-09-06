@@ -375,6 +375,21 @@ TEST_CASE("process declaration and validation fail closed",
   REQUIRE(
       std::ranges::contains(valid->required_effects, domain::Effect::network));
 
+  auto raw = arguments(fixture(), temporary.path(),
+                       {"literal;still-one", "$(not-a-shell)", "line\nbreak"},
+                       {"SAFE_VALUE"});
+  raw.data = Json::parse(raw.data).dump(2);
+  const auto normalized = executor->validate(raw);
+  REQUIRE(normalized);
+  CHECK(normalized->value.media_type == "application/json");
+  CHECK(normalized->value.data == Json::parse(raw.data).dump());
+  CHECK(normalized->value.data != raw.data);
+  const auto normalized_json = Json::parse(normalized->value.data);
+  CHECK(normalized_json.at("arguments") ==
+        Json::array({"literal;still-one", "$(not-a-shell)", "line\nbreak"}));
+  CHECK(normalized_json.at("environment") == Json::array({"SAFE_VALUE"}));
+  CHECK(normalized->value.data.find("secret-value-123") == std::string::npos);
+
   for (auto malformed :
        std::vector<domain::StructuredDataBlock>{{"text/plain", "{}"},
                                                 {"application/json", "{"},
@@ -407,6 +422,9 @@ TEST_CASE("process declaration and validation fail closed",
   REQUIRE_FALSE(executor->validate({"application/json", bad.dump()}));
   bad = Json::parse(arguments(fixture(), temporary.path(), {}).data);
   bad["unknown"] = true;
+  REQUIRE_FALSE(executor->validate({"application/json", bad.dump()}));
+  bad = Json::parse(arguments(fixture(), temporary.path(), {}).data);
+  bad["arguments"] = Json::array({std::string{"unsafe\xe2\x80\xae", 9}});
   REQUIRE_FALSE(executor->validate({"application/json", bad.dump()}));
 
   auto too_many = std::vector<std::string>(33, "argument");

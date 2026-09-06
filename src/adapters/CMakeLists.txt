@@ -15,6 +15,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   provider_character_picker_dialog.cpp
   process_model_catalog.cpp
   process_audio.cpp
+  process_chat_assembly.cpp
   process_credentials.cpp
   process_login.cpp
   process_models.cpp

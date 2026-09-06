@@ -741,6 +741,63 @@ using WorkerUpdate =
   return std::move(*canonical);
 }
 
+[[nodiscard]] auto approval_canonical_arguments(
+    const domain::StructuredDataBlock& arguments,
+    const std::size_t maximum_bytes) -> std::optional<CanonicalToolArguments> {
+  if (auto canonical =
+          canonicalize_validated_tool_arguments(arguments, maximum_bytes)) {
+    return std::move(*canonical);
+  }
+  try {
+    if (maximum_bytes == 0 || arguments.media_type != "application/json" ||
+        arguments.data.empty() || arguments.data.size() > maximum_bytes) {
+      return std::nullopt;
+    }
+    auto value = nlohmann::json::parse(arguments.data, nullptr, true, false);
+    auto data = value.dump();
+    if (data.empty() || data.size() > maximum_bytes) return std::nullopt;
+    return CanonicalToolArguments{
+        "aiforge.approval-tool-json.v1",
+        domain::StructuredDataBlock{"application/json", std::move(data)}};
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+[[nodiscard]] auto valid_approval_canonical_arguments(
+    const CanonicalToolArguments& arguments, const std::size_t maximum_bytes)
+    -> bool {
+  if (arguments.canonicalization_identity == "aiforge.canonical-tool-json.v1") {
+    const auto canonical =
+        canonicalize_validated_tool_arguments(arguments.value, maximum_bytes);
+    return canonical && *canonical == arguments;
+  }
+  if (arguments.canonicalization_identity != "aiforge.approval-tool-json.v1" ||
+      arguments.value.media_type != "application/json" ||
+      arguments.value.data.empty() ||
+      arguments.value.data.size() > maximum_bytes) {
+    return false;
+  }
+  try {
+    const auto parsed =
+        nlohmann::json::parse(arguments.value.data, nullptr, true, false);
+    return parsed.dump() == arguments.value.data;
+  } catch (...) {
+    return false;
+  }
+}
+
+[[nodiscard]] auto domain_restriction(const RestrictionLevel level)
+    -> domain::ToolRestrictionLevel {
+  switch (level) {
+    case RestrictionLevel::high: return domain::ToolRestrictionLevel::high;
+    case RestrictionLevel::medium: return domain::ToolRestrictionLevel::medium;
+    case RestrictionLevel::low: return domain::ToolRestrictionLevel::low;
+    case RestrictionLevel::none: return domain::ToolRestrictionLevel::none;
+  }
+  return domain::ToolRestrictionLevel::high;
+}
+
 [[nodiscard]] auto valid_approval_decision(
     const domain::ApprovalDecision decision) -> bool {
   switch (decision) {
@@ -956,11 +1013,115 @@ struct RunKernel::Impl {
   }
 
   [[nodiscard]] auto valid_limits() const noexcept -> bool {
+    const auto& approval = limits.tool_approval_presentation;
     return limits.pending_updates != 0 && limits.tool_argument_bytes != 0 &&
+           approval.maximum_tool_name_bytes != 0 &&
+           approval.maximum_effects != 0 && approval.maximum_scopes != 0 &&
+           approval.maximum_scope_kind_bytes != 0 &&
+           approval.maximum_scope_value_bytes != 0 &&
+           approval.maximum_canonical_argument_bytes != 0 &&
+           approval.maximum_total_text_bytes != 0 &&
            limits.task_scheduling.maximum_concurrency != 0 &&
            limits.task_scheduling.maximum_concurrency <= 16 &&
            limits.task_scheduling.maximum_attempts != 0 &&
            limits.task_scheduling.maximum_attempts <= 8;
+  }
+
+  [[nodiscard]] auto approval_presentation(
+      const domain::RunId& run_id,
+      const domain::PermissionProfileId& permission_profile_id,
+      const PendingInvocation& invocation) const
+      -> std::expected<PendingToolApproval, RunKernelError> {
+    const auto invalid = [] {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_tool_state,
+          "tool approval presentation is invalid or exceeds its bounds"));
+    };
+    const auto& presentation = limits.tool_approval_presentation;
+    const auto& request = invocation.policy_request;
+    if (!request || request->run_id != run_id ||
+        request->invocation_id != invocation.invocation_id ||
+        request->permission_profile_id != permission_profile_id ||
+        request->tool_name != invocation.declaration.name ||
+        request->effects != invocation.requested_effects ||
+        request->scopes != invocation.requested_scopes ||
+        invocation.declaration.name.empty() ||
+        invocation.declaration.name.size() >
+            presentation.maximum_tool_name_bytes ||
+        !detail::is_safe_utf8_text(invocation.declaration.name) ||
+        has_control_character(invocation.declaration.name) ||
+        invocation.requested_effects.empty() ||
+        invocation.requested_effects.size() > presentation.maximum_effects ||
+        !effects_are_unique(invocation.requested_effects) ||
+        std::ranges::any_of(
+            invocation.requested_effects,
+            [](const auto effect) { return effect_name(effect).empty(); }) ||
+        invocation.requested_scopes.size() > presentation.maximum_scopes ||
+        !scopes_are_unique(invocation.requested_scopes) ||
+        invocation.limits.output_bytes == 0 ||
+        invocation.limits.progress_events == 0 ||
+        invocation.limits.timeout.count() <= 0) {
+      return invalid();
+    }
+
+    auto canonical = request->canonical_arguments
+                         ? request->canonical_arguments
+                         : approval_canonical_arguments(
+                               invocation.arguments.value,
+                               presentation.maximum_canonical_argument_bytes);
+    if (!canonical ||
+        !valid_approval_canonical_arguments(
+            *canonical, presentation.maximum_canonical_argument_bytes) ||
+        !detail::is_safe_utf8_text(canonical->value.data)) {
+      return invalid();
+    }
+
+    std::size_t total = invocation.declaration.name.size();
+    if (!checked_add(total, canonical->value.data.size())) return invalid();
+    for (const auto& scope : invocation.requested_scopes) {
+      if (std::ranges::find(invocation.requested_effects, scope.effect) ==
+              invocation.requested_effects.end() ||
+          scope.kind.empty() ||
+          scope.kind.size() > presentation.maximum_scope_kind_bytes ||
+          !detail::is_safe_utf8_text(scope.kind) ||
+          has_control_character(scope.kind) || scope.value.empty() ||
+          scope.value.size() > presentation.maximum_scope_value_bytes ||
+          !detail::is_safe_utf8_text(scope.value) ||
+          has_control_character(scope.value) ||
+          !checked_add(total, scope.kind.size()) ||
+          !checked_add(total, scope.value.size())) {
+        return invalid();
+      }
+    }
+    if (total > presentation.maximum_total_text_bytes) return invalid();
+
+    std::optional<domain::ToolRestrictionLevel> selected;
+    if (request->selected_restriction) {
+      selected = domain_restriction(*request->selected_restriction);
+    }
+    std::optional<domain::ToolRestrictionLevel> achieved;
+    auto mode = domain::ToolApprovalMode::prompt;
+    if (const auto* provenance = policy->provenance(); provenance != nullptr) {
+      if (provenance->permission_profile_id != permission_profile_id ||
+          provenance->approval_mode != domain::ToolApprovalMode::prompt ||
+          !selected || provenance->restriction_level != *selected) {
+        return invalid();
+      }
+      achieved = provenance->achieved_restriction_level;
+      if (achieved && *achieved != *selected) return invalid();
+      mode = provenance->approval_mode;
+    }
+    return PendingToolApproval{run_id,
+                               invocation.invocation_id,
+                               invocation.declaration.name,
+                               invocation.requested_effects,
+                               invocation.requested_scopes,
+                               std::move(*canonical),
+                               selected,
+                               achieved,
+                               mode,
+                               ToolApprovalSupplySource::per_invocation,
+                               invocation.limits};
   }
 
   auto adopt(Transaction transaction) -> void {
@@ -1335,7 +1496,8 @@ struct RunKernel::Impl {
             ? (child_payload->descriptor->review_receipt_id ? 4U : 3U)
             : (policy_decided
                    ? 2U
-                   : (proposed_tool != nullptr && proposed_tool->spend_quote
+                   : (proposed_tool != nullptr &&
+                              proposed_tool->validated_arguments
                           ? 2U
                           : (std::holds_alternative<
                                  domain::PlanRevisionProposed>(payload)
@@ -1908,7 +2070,8 @@ struct RunKernel::Impl {
                                       : std::vector<domain::CapabilityScope>{},
                             required_scopes, *message_id,
                             validated ? validated->spend_quote : std::nullopt,
-                            validated
+                            validated && (validated->spend_quote ||
+                                          validated->value != raw_arguments)
                                 ? std::optional<
                                       domain::StructuredDataBlock>{validated
                                                                        ->value}
@@ -2326,27 +2489,121 @@ struct RunKernel::Impl {
     return {};
   }
 
+  [[nodiscard]] auto record_policy_failure(Transaction& transaction,
+                                           ActiveRun& active,
+                                           PendingInvocation& invocation,
+                                           const domain::DomainError& error)
+      -> std::expected<void, RunKernelError> {
+    if (auto recorded =
+            record(active.run_id,
+                   domain::ToolPolicyFailed{invocation.invocation_id, error},
+                   transaction, invocation.invocation_id);
+        !recorded) {
+      return recorded;
+    }
+    return record_tool_error(transaction, invocation, error);
+  }
+
+  [[nodiscard]] auto policy_resolution_error(
+      const PendingInvocation& invocation,
+      const ToolPolicyResolution& resolution) const
+      -> std::optional<domain::DomainError> {
+    if (!valid_policy_decision(resolution.decision) ||
+        !valid_policy_decision_source(resolution.source) ||
+        (resolution.redacted_reason &&
+         (resolution.redacted_reason->size() > 4096 ||
+          has_control_character(*resolution.redacted_reason))) ||
+        !scopes_are_unique(resolution.scopes) ||
+        !valid_automatic_policy_resolution(resolution, policy->provenance())) {
+      return protocol_domain_error();
+    }
+    if (resolution.decision == domain::PolicyDecision::deny) {
+      if (!resolution.scopes.empty()) return protocol_domain_error();
+      return std::nullopt;
+    }
+    const auto forward = intersect_capability_scopes(
+        resolution.scopes, invocation.requested_scopes);
+    const auto reverse = intersect_capability_scopes(
+        invocation.requested_scopes, resolution.scopes);
+    if (!forward || !reverse) return policy_denied_error();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto record_policy_resolution(Transaction& transaction,
+                                              ActiveRun& active,
+                                              PendingInvocation& invocation,
+                                              ToolPolicyResolution resolution)
+      -> std::expected<void, RunKernelError> {
+    if (auto recorded = record(
+            active.run_id,
+            domain::ToolPolicyDecided{
+                invocation.invocation_id, resolution.decision,
+                resolution.scopes, std::move(resolution.redacted_reason),
+                resolution.source, std::move(resolution.automatic_approval)},
+            transaction, invocation.invocation_id);
+        !recorded) {
+      return recorded;
+    }
+    switch (resolution.decision) {
+      case domain::PolicyDecision::allow:
+        invocation.granted_scopes = std::move(resolution.scopes);
+        invocation.state = InvocationState::allowed;
+        return {};
+      case domain::PolicyDecision::deny:
+        return record_tool_error(transaction, invocation,
+                                 policy_denied_error());
+      case domain::PolicyDecision::require_approval:
+        if (auto requested = record(
+                active.run_id,
+                domain::ToolApprovalRequested{
+                    invocation.invocation_id, resolution.scopes,
+                    std::string{"Approval is required by runtime policy"}},
+                transaction, invocation.invocation_id);
+            !requested) {
+          return requested;
+        }
+        invocation.state = InvocationState::awaiting_approval;
+        return {};
+    }
+    return fail_live_run(transaction, protocol_domain_error());
+  }
+
+  [[nodiscard]] auto process_policy_resolution(Transaction& transaction,
+                                               ActiveRun& active,
+                                               PendingInvocation& invocation,
+                                               ToolPolicyResolution resolution)
+      -> std::expected<void, RunKernelError> {
+    if (auto error = policy_resolution_error(invocation, resolution)) {
+      return fail_live_run(transaction, std::move(*error));
+    }
+    if (resolution.decision == domain::PolicyDecision::require_approval &&
+        !approval_presentation(active.run_id, active.permission_profile_id,
+                               invocation)) {
+      return record_policy_failure(transaction, active, invocation,
+                                   policy_denied_error());
+    }
+    return record_policy_resolution(transaction, active, invocation,
+                                    std::move(resolution));
+  }
+
   [[nodiscard]] auto evaluate_pending_policies(Transaction& transaction)
       -> std::expected<void, RunKernelError> {
     if (!transaction.active || transaction.active->inference_id) return {};
-    for (const auto& invocation_id : transaction.active->invocation_order) {
-      auto& invocation = transaction.active->invocations.at(invocation_id);
+    auto& active = *transaction.active;
+    for (const auto& invocation_id : active.invocation_order) {
+      auto& invocation = active.invocations.at(invocation_id);
       if (invocation.state != InvocationState::proposed ||
           invocation.terminal_event_seen) {
         continue;
       }
       auto canonical_arguments = canonical_arguments_or_empty(
           invocation.arguments.value, limits.tool_argument_bytes);
-      invocation.policy_request =
-          ToolPolicyRequest{transaction.event_log.session_id(),
-                            transaction.active->run_id,
-                            invocation.invocation_id,
-                            transaction.active->permission_profile_id,
-                            invocation.declaration.name,
-                            invocation.requested_effects,
-                            invocation.requested_scopes,
-                            std::move(canonical_arguments),
-                            policy->selected_restriction()};
+      invocation.policy_request = ToolPolicyRequest{
+          transaction.event_log.session_id(), active.run_id,
+          invocation.invocation_id,           active.permission_profile_id,
+          invocation.declaration.name,        invocation.requested_effects,
+          invocation.requested_scopes,        std::move(canonical_arguments),
+          policy->selected_restriction()};
 
       std::expected<ToolPolicyResolution, ToolPolicyError> resolution =
           std::unexpected(ToolPolicyError{
@@ -2358,77 +2615,16 @@ struct RunKernel::Impl {
       }
       if (!resolution) {
         const auto domain_error = policy_failure_error(resolution.error());
-        if (auto recorded = record(transaction.active->run_id,
-                                   domain::ToolPolicyFailed{
-                                       invocation.invocation_id, domain_error},
-                                   transaction, invocation.invocation_id);
-            !recorded) {
-          return recorded;
-        }
-        if (auto failed =
-                record_tool_error(transaction, invocation, domain_error);
-            !failed) {
+        if (auto failed = record_policy_failure(transaction, active, invocation,
+                                                domain_error);
+            !failed)
           return failed;
-        }
         continue;
       }
-      if (!valid_policy_decision(resolution->decision) ||
-          !valid_policy_decision_source(resolution->source) ||
-          (resolution->redacted_reason &&
-           (resolution->redacted_reason->size() > 4096 ||
-            has_control_character(*resolution->redacted_reason))) ||
-          !scopes_are_unique(resolution->scopes) ||
-          !valid_automatic_policy_resolution(*resolution,
-                                             policy->provenance())) {
-        return fail_live_run(transaction, protocol_domain_error());
-      }
-      if (resolution->decision != domain::PolicyDecision::deny) {
-        const auto forward = intersect_capability_scopes(
-            resolution->scopes, invocation.requested_scopes);
-        const auto reverse = intersect_capability_scopes(
-            invocation.requested_scopes, resolution->scopes);
-        if (!forward || !reverse) {
-          return fail_live_run(transaction, policy_denied_error());
-        }
-      } else if (!resolution->scopes.empty()) {
-        return fail_live_run(transaction, protocol_domain_error());
-      }
-      if (auto recorded = record(transaction.active->run_id,
-                                 domain::ToolPolicyDecided{
-                                     invocation.invocation_id,
-                                     resolution->decision, resolution->scopes,
-                                     std::move(resolution->redacted_reason),
-                                     resolution->source,
-                                     std::move(resolution->automatic_approval)},
-                                 transaction, invocation.invocation_id);
-          !recorded) {
-        return recorded;
-      }
-      switch (resolution->decision) {
-        case domain::PolicyDecision::allow:
-          invocation.granted_scopes = std::move(resolution->scopes);
-          invocation.state = InvocationState::allowed;
-          break;
-        case domain::PolicyDecision::deny:
-          if (auto failed = record_tool_error(transaction, invocation,
-                                              policy_denied_error());
-              !failed) {
-            return failed;
-          }
-          break;
-        case domain::PolicyDecision::require_approval:
-          if (auto requested = record(
-                  transaction.active->run_id,
-                  domain::ToolApprovalRequested{
-                      invocation.invocation_id, resolution->scopes,
-                      std::string{"Approval is required by runtime policy"}},
-                  transaction, invocation.invocation_id);
-              !requested) {
-            return requested;
-          }
-          invocation.state = InvocationState::awaiting_approval;
-          break;
-      }
+      if (auto processed = process_policy_resolution(
+              transaction, active, invocation, std::move(*resolution));
+          !processed)
+        return processed;
     }
     return {};
   }
@@ -3646,17 +3842,32 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                   proposed->second.arguments),
               proposed->second.validated_required_scopes,
               proposed->second.declared_effects, proposed->second.spend_quote};
-          invocations.emplace(
-              current_id,
-              Impl::PendingInvocation{
-                  current_id, proposed->second.parent_invocation_id,
-                  registration->declaration, std::move(replayed_arguments),
-                  registration->limits, registration->executor,
-                  *result_message_id, proposed->second.declared_effects,
-                  proposed->second.requested_scopes, std::move(granted_scopes),
-                  std::move(policy_request), state, 0, 0,
-                  tool_terminal.contains(current_id),
-                  std::move(invocation_questions)});
+          Impl::PendingInvocation pending{current_id,
+                                          proposed->second.parent_invocation_id,
+                                          registration->declaration,
+                                          std::move(replayed_arguments),
+                                          registration->limits,
+                                          registration->executor,
+                                          *result_message_id,
+                                          proposed->second.declared_effects,
+                                          proposed->second.requested_scopes,
+                                          std::move(granted_scopes),
+                                          std::move(policy_request),
+                                          state,
+                                          0,
+                                          0,
+                                          tool_terminal.contains(current_id),
+                                          std::move(invocation_questions)};
+          if (state == Impl::InvocationState::awaiting_approval &&
+              !kernel->m_impl
+                   ->approval_presentation(
+                       *awaiting_run, started->permission_profile_id, pending)
+                   .has_value()) {
+            return std::unexpected(kernel_error(
+                RunKernelErrorCode::replay_rejected,
+                "queued tool approval presentation is invalid during replay"));
+          }
+          invocations.emplace(current_id, std::move(pending));
         }
         if (awaiting_tool_approval && pending_approval_count == 0) {
           return std::unexpected(kernel_error(
@@ -5516,9 +5727,11 @@ auto RunKernel::pending_tool_approval() const
     const auto& invocation = m_impl->active->invocations.at(invocation_id);
     if (invocation.state == Impl::InvocationState::awaiting_approval &&
         !invocation.terminal_event_seen) {
-      return PendingToolApproval{
-          m_impl->active->run_id, invocation_id, invocation.declaration.name,
-          invocation.requested_effects, invocation.requested_scopes};
+      auto presentation = m_impl->approval_presentation(
+          m_impl->active->run_id, m_impl->active->permission_profile_id,
+          invocation);
+      if (presentation) return std::move(*presentation);
+      return std::nullopt;
     }
   }
   return std::nullopt;

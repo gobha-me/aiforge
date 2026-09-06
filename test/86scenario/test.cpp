@@ -1718,6 +1718,7 @@ auto tool_profile_scenario() -> testing::TuiScenario {
       {9, down},
       {9, down},
       {9, down},
+      {9, down},
       {10, enter},
       {11, testing::TuiScenarioPost{termforge::PasteEvent{
                "/session resume target-session"}}},

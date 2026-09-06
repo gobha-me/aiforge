@@ -9,10 +9,12 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
 #include <aiforge/backend/backend.hpp>
+#include <aiforge/runtime/application_launch_context.hpp>
 
 namespace aiforge::runtime {
 
@@ -166,6 +168,49 @@ struct RegisteredTool {
   ToolCategory category{ToolCategory::other};
 };
 
+enum class ToolUnavailableReason {
+  not_configured,
+  durable_session_required,
+  unrestricted_network_required,
+  restriction_unavailable,
+  unsupported_platform,
+  runtime_dependency_or_path_unavailable,
+  shell_unimplemented,
+};
+
+struct ToolRestrictionUnavailability {
+  RestrictionLevel selected_restriction{RestrictionLevel::high};
+  RestrictionUnavailableReason reason{
+      RestrictionUnavailableReason::mechanism_absent};
+  auto operator==(const ToolRestrictionUnavailability&) const -> bool = default;
+};
+
+struct ToolUnavailability {
+  ToolUnavailableReason reason{ToolUnavailableReason::not_configured};
+  std::optional<ToolRestrictionUnavailability> restriction;
+  ToolUnavailability() = default;
+  ToolUnavailability(
+      ToolUnavailableReason unavailable_reason,
+      std::optional<ToolRestrictionUnavailability> restriction_detail = {})
+      : reason(unavailable_reason), restriction(restriction_detail) {}
+  auto operator==(const ToolUnavailability&) const -> bool = default;
+};
+
+[[nodiscard]] auto tool_unavailable_reason_text(
+    ToolUnavailableReason reason) noexcept -> std::string_view;
+inline constexpr std::size_t maximum_tool_unavailability_text_bytes{96};
+// Produces a closed, single-line operator summary. Its size is bounded because
+// every component is a closed enum; no adapter or platform message enters it.
+[[nodiscard]] auto format_tool_unavailability(
+    const ToolUnavailability& unavailability) -> std::string;
+
+struct UnavailableTool {
+  std::string name;
+  ToolCategory category{ToolCategory::other};
+  ToolUnavailability unavailability;
+  auto operator==(const UnavailableTool&) const -> bool = default;
+};
+
 class ToolRegistrySnapshot final {
  public:
   ToolRegistrySnapshot() = default;
@@ -174,6 +219,10 @@ class ToolRegistrySnapshot final {
       -> const std::vector<backend::ToolDeclaration>&;
   [[nodiscard]] auto find(std::string_view name) const noexcept
       -> const RegisteredTool*;
+  [[nodiscard]] auto find_unavailable(std::string_view name) const noexcept
+      -> const UnavailableTool*;
+  [[nodiscard]] auto unavailable_tools() const noexcept
+      -> std::span<const UnavailableTool>;
   [[nodiscard]] auto subset(std::span<const std::string> names) const
       -> std::expected<ToolRegistrySnapshot, ToolRegistryError>;
   [[nodiscard]] auto empty() const noexcept -> bool { return m_tools.empty(); }
@@ -184,11 +233,14 @@ class ToolRegistrySnapshot final {
  private:
   friend class ToolRegistry;
   ToolRegistrySnapshot(std::vector<RegisteredTool> tools,
-                       std::vector<backend::ToolDeclaration> declarations)
-      : m_tools(std::move(tools)), m_declarations(std::move(declarations)) {}
+                       std::vector<backend::ToolDeclaration> declarations,
+                       std::vector<UnavailableTool> unavailable_tools)
+      : m_tools(std::move(tools)), m_declarations(std::move(declarations)),
+        m_unavailable_tools(std::move(unavailable_tools)) {}
 
   std::vector<RegisteredTool> m_tools;
   std::vector<backend::ToolDeclaration> m_declarations;
+  std::vector<UnavailableTool> m_unavailable_tools;
 };
 
 class ToolRegistry final {
@@ -200,11 +252,17 @@ class ToolRegistry final {
       ToolCategory category = ToolCategory::other)
       -> std::expected<void, ToolRegistryError>;
 
+  [[nodiscard]] auto declare_unavailable_tool(
+      std::string name, ToolUnavailability unavailability,
+      ToolCategory category = ToolCategory::other)
+      -> std::expected<void, ToolRegistryError>;
+
   [[nodiscard]] auto snapshot() const
       -> std::expected<ToolRegistrySnapshot, ToolRegistryError>;
 
  private:
   std::vector<RegisteredTool> m_tools;
+  std::vector<UnavailableTool> m_unavailable_tools;
 };
 
 [[nodiscard]] auto tool_result_messages(

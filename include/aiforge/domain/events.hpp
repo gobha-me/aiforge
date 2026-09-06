@@ -177,8 +177,9 @@ struct ToolProposed {
   // Paid invocations persist the exact validated quote before approval so a
   // resumed invocation cannot silently adopt changed pricing provenance.
   std::optional<ToolSpendQuote> spend_quote{};
-  // Schema-v2 paid proposals retain the normalized launch value separately
-  // from the raw provider arguments used to reconstruct assistant history.
+  // Schema-v2 proposals retain the normalized launch value separately from
+  // raw provider arguments used to reconstruct assistant history. Paid
+  // proposals additionally carry the quote above.
   std::optional<StructuredDataBlock> validated_arguments{};
   auto operator==(const ToolProposed&) const -> bool = default;
 };

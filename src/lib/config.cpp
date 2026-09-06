@@ -6,6 +6,7 @@
 #include <charconv>
 #include <concepts>
 #include <cstdlib>
+#include <filesystem>
 #include <limits>
 #include <ranges>
 #include <sstream>
@@ -280,6 +281,83 @@ template <typename Integer>
     -> const ConfigKeySpec* {
   const auto found = std::ranges::find(registry.keys, key, &ConfigKeySpec::id);
   return found == registry.keys.end() ? nullptr : &*found;
+}
+
+[[nodiscard]] auto process_namespace_key(const std::string_view key) -> bool {
+  constexpr std::string_view prefix{"tools.process"};
+  return key == prefix ||
+         (key.size() > prefix.size() && key.starts_with(prefix) &&
+          key[prefix.size()] == '.');
+}
+
+template <typename Value>
+[[nodiscard]] auto process_config_value(const ResolvedConfig& resolved,
+                                        const std::string_view key)
+    -> std::expected<const Value*, ConfigDiagnostic> {
+  const auto* entry = resolved.find(key);
+  if (entry == nullptr) {
+    return std::unexpected(diagnostic(
+        ConfigDiagnosticCode::invalid_registry, ConfigSource::compiled_default,
+        std::string{key}, "a process configuration key is missing"));
+  }
+  if (!entry->value) return nullptr;
+  const auto source = entry->source.value_or(ConfigSource::compiled_default);
+  if (source != ConfigSource::file &&
+      source != ConfigSource::compiled_default) {
+    return std::unexpected(diagnostic(
+        ConfigDiagnosticCode::invalid_value, source, std::string{key},
+        "process capability configuration is file-backed only"));
+  }
+  const auto* value = std::get_if<Value>(&*entry->value);
+  if (value == nullptr) {
+    return std::unexpected(diagnostic(
+        ConfigDiagnosticCode::invalid_value, source, std::string{key},
+        "a process configuration value has the wrong type"));
+  }
+  return value;
+}
+
+[[nodiscard]] auto valid_process_path(const std::string& value) -> bool {
+  if (value.empty() || value.size() > 4096U ||
+      !detail::is_safe_utf8_text(value) ||
+      value.find_first_of("\r\n\t") != std::string::npos) {
+    return false;
+  }
+  const std::filesystem::path path{value};
+  return path.is_absolute() && path.generic_string() == value &&
+         path.lexically_normal().generic_string() == value;
+}
+
+[[nodiscard]] auto valid_environment_name(const std::string_view name) -> bool {
+  if (name.empty() || name.size() > 255U || name.front() == '=' ||
+      (name.front() >= '0' && name.front() <= '9')) {
+    return false;
+  }
+  return std::ranges::all_of(name, [](const unsigned char character) {
+    return (character >= 'a' && character <= 'z') ||
+           (character >= 'A' && character <= 'Z') ||
+           (character >= '0' && character <= '9') || character == '_';
+  });
+}
+
+template <typename Value>
+[[nodiscard]] auto unique_values(const std::vector<Value>& values) -> bool {
+  std::unordered_set<Value> unique;
+  return std::ranges::all_of(
+      values, [&](const auto& value) { return unique.insert(value).second; });
+}
+
+[[nodiscard]] auto path_is_within(const std::string_view parent_text,
+                                  const std::string_view child_text) -> bool {
+  const std::filesystem::path parent{parent_text};
+  const std::filesystem::path child{child_text};
+  auto parent_part = parent.begin();
+  auto child_part = child.begin();
+  for (; parent_part != parent.end() && child_part != child.end();
+       ++parent_part, ++child_part) {
+    if (*parent_part != *child_part) return false;
+  }
+  return parent_part == parent.end();
 }
 
 } // namespace
@@ -657,6 +735,51 @@ auto builtin_config_registry() -> const ConfigRegistry& {
       {"memory.context.max_tokens", ConfigValueKind::unsigned_integer,
        std::string{"AIFORGE_MEMORY_CONTEXT_MAX_TOKENS"},
        ConfigValue{std::uint64_t{2048}}, false, true, 32, 1},
+      {std::string{process_executables_key}, ConfigValueKind::text_list,
+       std::nullopt, std::nullopt, false, true, 4096, 64},
+      {std::string{process_readable_roots_key}, ConfigValueKind::text_list,
+       std::nullopt, std::nullopt, false, true, 4096, 64},
+      {std::string{process_writable_roots_key}, ConfigValueKind::text_list,
+       std::nullopt, std::nullopt, false, true, 4096, 64},
+      {std::string{process_environment_key}, ConfigValueKind::text_list,
+       std::nullopt, std::nullopt, false, true, 255, 64},
+      {std::string{process_unrestricted_network_key}, ConfigValueKind::boolean,
+       std::nullopt, ConfigValue{false}, false, true, 5, 1},
+      {std::string{process_allowlist_automatic_approval_maximum_matches_key},
+       ConfigValueKind::unsigned_integer, std::nullopt,
+       ConfigValue{std::uint64_t{0}}, false, true, 32, 1},
+      {std::string{process_limit_executables_key},
+       ConfigValueKind::unsigned_integer, std::nullopt,
+       ConfigValue{std::uint64_t{64}}, false, true, 32, 1},
+      {std::string{process_limit_arguments_key},
+       ConfigValueKind::unsigned_integer, std::nullopt,
+       ConfigValue{std::uint64_t{256}}, false, true, 32, 1},
+      {std::string{process_limit_argument_bytes_key},
+       ConfigValueKind::unsigned_integer, std::nullopt,
+       ConfigValue{std::uint64_t{256} * 1024U}, false, true, 32, 1},
+      {std::string{process_limit_roots_key}, ConfigValueKind::unsigned_integer,
+       std::nullopt, ConfigValue{std::uint64_t{64}}, false, true, 32, 1},
+      {std::string{process_limit_environment_variables_key},
+       ConfigValueKind::unsigned_integer, std::nullopt,
+       ConfigValue{std::uint64_t{64}}, false, true, 32, 1},
+      {std::string{process_limit_timeout_ms_key},
+       ConfigValueKind::unsigned_integer, std::nullopt,
+       ConfigValue{std::uint64_t{120'000}}, false, true, 32, 1},
+      {std::string{process_limit_output_bytes_key},
+       ConfigValueKind::unsigned_integer, std::nullopt,
+       ConfigValue{std::uint64_t{8} * 1024U * 1024U}, false, true, 32, 1},
+      {std::string{process_limit_inline_output_bytes_key},
+       ConfigValueKind::unsigned_integer, std::nullopt,
+       ConfigValue{std::uint64_t{32} * 1024U}, false, true, 32, 1},
+      {std::string{process_limit_progress_chunk_bytes_key},
+       ConfigValueKind::unsigned_integer, std::nullopt,
+       ConfigValue{std::uint64_t{4} * 1024U}, false, true, 32, 1},
+      {std::string{process_limit_progress_events_key},
+       ConfigValueKind::unsigned_integer, std::nullopt,
+       ConfigValue{std::uint64_t{64}}, false, true, 32, 1},
+      {std::string{process_limit_termination_grace_ms_key},
+       ConfigValueKind::unsigned_integer, std::nullopt,
+       ConfigValue{std::uint64_t{100}}, false, true, 32, 1},
       {std::string{model_maximum_tool_profiles_key}, ConfigValueKind::text_map,
        std::nullopt, std::nullopt, false, true, domain::ModelId::max_size, 256},
       {std::string{persona_maximum_tool_profiles_key},
@@ -855,6 +978,236 @@ auto resolve_automatic_approval_rules(const ResolvedConfig& resolved)
                    "automatic approval rules have an invalid value type"));
   }
   return *configured;
+}
+
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Every process capability and hard bound is validated before assembly receives authority.
+auto resolve_process_config_settings(const ResolvedConfig& resolved)
+    -> std::expected<std::optional<ProcessConfigSettings>, ConfigDiagnostic> {
+  // clang-format on
+  try {
+    for (const auto& issue : resolved.diagnostics) {
+      if (process_namespace_key(issue.key)) return std::unexpected(issue);
+    }
+
+    const auto executables = process_config_value<std::vector<std::string>>(
+        resolved, process_executables_key);
+    if (!executables) return std::unexpected(executables.error());
+    const auto readable = process_config_value<std::vector<std::string>>(
+        resolved, process_readable_roots_key);
+    if (!readable) return std::unexpected(readable.error());
+    const auto writable = process_config_value<std::vector<std::string>>(
+        resolved, process_writable_roots_key);
+    if (!writable) return std::unexpected(writable.error());
+    const auto environment = process_config_value<std::vector<std::string>>(
+        resolved, process_environment_key);
+    if (!environment) return std::unexpected(environment.error());
+    const auto network =
+        process_config_value<bool>(resolved, process_unrestricted_network_key);
+    if (!network) return std::unexpected(network.error());
+    const auto maximum_matches = process_config_value<std::uint64_t>(
+        resolved, process_allowlist_automatic_approval_maximum_matches_key);
+    if (!maximum_matches) return std::unexpected(maximum_matches.error());
+
+    const auto list_or_empty = [](const auto* value) {
+      return value == nullptr ? std::vector<std::string>{} : *value;
+    };
+    ProcessConfigSettings settings;
+    settings.executable_allowlist = list_or_empty(*executables);
+    settings.readable_roots = list_or_empty(*readable);
+    settings.writable_roots = list_or_empty(*writable);
+    settings.inherited_environment_names = list_or_empty(*environment);
+    settings.unrestricted_network = network.value() != nullptr && **network;
+    if (maximum_matches.value() != nullptr && **maximum_matches != 0) {
+      settings.allowlist_automatic_approval_maximum_matches = **maximum_matches;
+    }
+
+    std::size_t file_entries{};
+    for (const auto& entry : resolved.entries) {
+      if (process_namespace_key(entry.key) &&
+          entry.source == ConfigSource::file) {
+        ++file_entries;
+      }
+    }
+    const auto* executable_entry = resolved.find(process_executables_key);
+    const bool explicit_empty_executables =
+        executable_entry != nullptr &&
+        executable_entry->source == ConfigSource::file &&
+        settings.executable_allowlist.empty();
+    if (settings.executable_allowlist.empty()) {
+      if (file_entries > static_cast<std::size_t>(explicit_empty_executables)) {
+        return std::unexpected(diagnostic(
+            ConfigDiagnosticCode::invalid_value, ConfigSource::file,
+            std::string{process_executables_key},
+            "disabled process configuration must not contain partial "
+            "authority"));
+      }
+      return std::nullopt;
+    }
+    if (settings.readable_roots.empty()) {
+      return std::unexpected(
+          diagnostic(ConfigDiagnosticCode::invalid_value, ConfigSource::file,
+                     std::string{process_readable_roots_key},
+                     "enabled process configuration requires readable roots"));
+    }
+
+    const auto invalid_paths = [](const std::vector<std::string>& paths) {
+      return !unique_values(paths) ||
+             std::ranges::any_of(paths, [](const auto& path) {
+               return !valid_process_path(path);
+             });
+    };
+    if (invalid_paths(settings.executable_allowlist) ||
+        invalid_paths(settings.readable_roots) ||
+        invalid_paths(settings.writable_roots)) {
+      return std::unexpected(
+          diagnostic(ConfigDiagnosticCode::invalid_value, ConfigSource::file,
+                     std::string{process_executables_key},
+                     "process paths must be unique normalized absolute paths"));
+    }
+    if (!unique_values(settings.inherited_environment_names) ||
+        std::ranges::any_of(
+            settings.inherited_environment_names,
+            [](const auto& name) { return !valid_environment_name(name); })) {
+      return std::unexpected(
+          diagnostic(ConfigDiagnosticCode::invalid_value, ConfigSource::file,
+                     std::string{process_environment_key},
+                     "process environment names are invalid or duplicated"));
+    }
+    if (std::ranges::any_of(
+            settings.writable_roots, [&](const auto& writable_root) {
+              return std::ranges::none_of(
+                  settings.readable_roots, [&](const auto& readable_root) {
+                    return path_is_within(readable_root, writable_root);
+                  });
+            })) {
+      return std::unexpected(diagnostic(
+          ConfigDiagnosticCode::invalid_value, ConfigSource::file,
+          std::string{process_writable_roots_key},
+          "every writable process root must be covered by a readable root"));
+    }
+
+    constexpr ProcessConfigLimits maximums;
+    const auto assign_limit =
+        [&]<typename Value>(
+            const std::string_view key, const Value maximum,
+            Value& destination) -> std::expected<void, ConfigDiagnostic> {
+      const auto configured =
+          process_config_value<std::uint64_t>(resolved, key);
+      if (!configured) return std::unexpected(configured.error());
+      if (*configured == nullptr || **configured == 0 ||
+          **configured > static_cast<std::uint64_t>(maximum)) {
+        return std::unexpected(diagnostic(
+            ConfigDiagnosticCode::invalid_value,
+            (*configured == nullptr)
+                ? ConfigSource::compiled_default
+                : resolved.find(key)->source.value_or(ConfigSource::file),
+            std::string{key},
+            "a process limit must be positive and within its hard ceiling"));
+      }
+      destination = static_cast<Value>(**configured);
+      return {};
+    };
+    if (auto result =
+            assign_limit(process_limit_executables_key, maximums.executables,
+                         settings.limits.executables);
+        !result) {
+      return std::unexpected(result.error());
+    }
+    if (auto result =
+            assign_limit(process_limit_arguments_key, maximums.arguments,
+                         settings.limits.arguments);
+        !result) {
+      return std::unexpected(result.error());
+    }
+    if (auto result = assign_limit(process_limit_argument_bytes_key,
+                                   maximums.argument_bytes,
+                                   settings.limits.argument_bytes);
+        !result) {
+      return std::unexpected(result.error());
+    }
+    if (auto result = assign_limit(process_limit_roots_key, maximums.roots,
+                                   settings.limits.roots);
+        !result) {
+      return std::unexpected(result.error());
+    }
+    if (auto result = assign_limit(process_limit_environment_variables_key,
+                                   maximums.environment_variables,
+                                   settings.limits.environment_variables);
+        !result) {
+      return std::unexpected(result.error());
+    }
+    auto timeout_count = settings.limits.timeout.count();
+    if (auto result = assign_limit(process_limit_timeout_ms_key,
+                                   maximums.timeout.count(), timeout_count);
+        !result) {
+      return std::unexpected(result.error());
+    }
+    settings.limits.timeout = std::chrono::milliseconds{timeout_count};
+    if (auto result =
+            assign_limit(process_limit_output_bytes_key, maximums.output_bytes,
+                         settings.limits.output_bytes);
+        !result) {
+      return std::unexpected(result.error());
+    }
+    if (auto result = assign_limit(process_limit_inline_output_bytes_key,
+                                   maximums.inline_output_bytes,
+                                   settings.limits.inline_output_bytes);
+        !result) {
+      return std::unexpected(result.error());
+    }
+    if (auto result = assign_limit(process_limit_progress_chunk_bytes_key,
+                                   maximums.progress_chunk_bytes,
+                                   settings.limits.progress_chunk_bytes);
+        !result) {
+      return std::unexpected(result.error());
+    }
+    if (auto result = assign_limit(process_limit_progress_events_key,
+                                   maximums.progress_events,
+                                   settings.limits.progress_events);
+        !result) {
+      return std::unexpected(result.error());
+    }
+    auto grace_count = settings.limits.termination_grace.count();
+    if (auto result =
+            assign_limit(process_limit_termination_grace_ms_key,
+                         maximums.termination_grace.count(), grace_count);
+        !result) {
+      return std::unexpected(result.error());
+    }
+    settings.limits.termination_grace = std::chrono::milliseconds{grace_count};
+
+    if (settings.executable_allowlist.size() > settings.limits.executables ||
+        settings.readable_roots.size() > settings.limits.roots ||
+        settings.writable_roots.size() > settings.limits.roots ||
+        settings.inherited_environment_names.size() >
+            settings.limits.environment_variables ||
+        settings.limits.inline_output_bytes > settings.limits.output_bytes ||
+        settings.limits.progress_chunk_bytes > settings.limits.output_bytes) {
+      return std::unexpected(
+          diagnostic(ConfigDiagnosticCode::invalid_value, ConfigSource::file,
+                     "tools.process.limits",
+                     "process configuration exceeds its selected limits"));
+    }
+    constexpr std::uint64_t maximum_automatic_matches{1'000'000};
+    const auto per_executable_matches =
+        settings.allowlist_automatic_approval_maximum_matches;
+    if (per_executable_matches &&
+        (*per_executable_matches > maximum_automatic_matches ||
+         settings.executable_allowlist.size() >
+             maximum_automatic_matches / *per_executable_matches)) {
+      return std::unexpected(diagnostic(
+          ConfigDiagnosticCode::invalid_value, ConfigSource::file,
+          std::string{process_allowlist_automatic_approval_maximum_matches_key},
+          "process allowlist automatic approval accounting exceeds its "
+          "aggregate bound"));
+    }
+    return std::optional<ProcessConfigSettings>{std::move(settings)};
+  } catch (...) {
+    return std::unexpected(
+        diagnostic(ConfigDiagnosticCode::invalid_value, ConfigSource::file,
+                   "tools.process", "process configuration failed internally"));
+  }
 }
 
 } // namespace aiforge::config
