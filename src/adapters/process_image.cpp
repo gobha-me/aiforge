@@ -1,7 +1,6 @@
 #include <aiforge/adapters/process_image.hpp>
 
 #include <algorithm>
-#include <cerrno>
 #include <cstddef>
 #include <filesystem>
 #include <optional>
@@ -11,6 +10,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "secure_artifact_export.hpp"
 
 #include <aiforge/adapters/filesystem_artifact_store.hpp>
 #include <aiforge/adapters/image_backend.hpp>
@@ -28,9 +29,7 @@
 #include <termforge/core/terminal.hpp>
 
 #ifndef _WIN32
-#include <fcntl.h>
 #include <sys/ioctl.h>
-#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -188,69 +187,11 @@ struct Stores {
   return result;
 }
 
-#ifndef _WIN32
-class Descriptor final {
- public:
-  explicit Descriptor(const int descriptor) : m_descriptor(descriptor) {}
-  ~Descriptor() {
-    if (m_descriptor >= 0) static_cast<void>(::close(m_descriptor));
-  }
-  Descriptor(const Descriptor&) = delete;
-  auto operator=(const Descriptor&) -> Descriptor& = delete;
-  [[nodiscard]] auto get() const noexcept -> int { return m_descriptor; }
-
- private:
-  int m_descriptor;
-};
-#endif
-
 [[nodiscard]] auto export_artifact(const storage::ArtifactRead& artifact,
                                    const std::filesystem::path& path,
                                    const std::stop_token stop_token)
     -> std::expected<void, cli::CommandFailure> {
-  if (path.empty() || path.filename().empty()) {
-    return failure(cli::CommandFailureKind::usage,
-                   "output path must name a file");
-  }
-#ifdef _WIN32
-  static_cast<void>(artifact);
-  static_cast<void>(stop_token);
-  return failure(cli::CommandFailureKind::runtime,
-                 "artifact export is unavailable on Windows");
-#else
-  Descriptor descriptor{
-      ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-             S_IRUSR | S_IWUSR)};
-  if (descriptor.get() < 0) {
-    return failure(errno == EEXIST ? cli::CommandFailureKind::usage
-                                   : cli::CommandFailureKind::runtime,
-                   errno == EEXIST ? "output path already exists"
-                                   : "output file could not be created");
-  }
-  std::size_t offset{};
-  while (offset < artifact.content.size()) {
-    if (stop_token.stop_requested()) {
-      static_cast<void>(::unlink(path.c_str()));
-      return failure(cli::CommandFailureKind::cancelled, "export cancelled");
-    }
-    const auto count =
-        ::write(descriptor.get(), artifact.content.data() + offset,
-                artifact.content.size() - offset);
-    if (count < 0) {
-      if (errno == EINTR) continue;
-      static_cast<void>(::unlink(path.c_str()));
-      return failure(cli::CommandFailureKind::runtime,
-                     "output file could not be written");
-    }
-    offset += static_cast<std::size_t>(count);
-  }
-  if (::fsync(descriptor.get()) != 0) {
-    static_cast<void>(::unlink(path.c_str()));
-    return failure(cli::CommandFailureKind::runtime,
-                   "output file could not be synchronized");
-  }
-  return {};
-#endif
+  return detail::secure_export_bytes(artifact.content, path, stop_token);
 }
 
 [[nodiscard]] auto render_terminal_viewer(const storage::ArtifactRead& artifact,

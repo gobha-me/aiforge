@@ -176,6 +176,27 @@ class FakeAudio final : public AudioCommand {
   std::optional<CaptureRequest> captured;
 };
 
+class FakeVideo final : public VideoCommand {
+ public:
+  auto show(ShowRequest request, CommandEnvironment&, std::ostream& output,
+            std::ostream&) -> std::expected<void, CommandFailure> override {
+    shown = std::move(request);
+    output << "video shown\n";
+    return {};
+  }
+
+  auto export_artifact(ExportRequest request, CommandEnvironment&,
+                       std::ostream& output, std::ostream&)
+      -> std::expected<void, CommandFailure> override {
+    exported = std::move(request);
+    output << "video exported\n";
+    return {};
+  }
+
+  std::optional<ShowRequest> shown;
+  std::optional<ExportRequest> exported;
+};
+
 class FakeLogin final : public LoginCommand {
  public:
   auto execute(CommandEnvironment& environment, std::ostream& output,
@@ -385,7 +406,7 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
   const auto& registry = builtin_command_registry();
   const auto schema = make_parser_schema(registry);
   REQUIRE(schema);
-  REQUIRE(schema->root.subcommands.size() == 8);
+  REQUIRE(schema->root.subcommands.size() == 9);
   const auto config =
       std::ranges::find(schema->root.subcommands, "config", &CommandSchema::id);
   REQUIRE(config != schema->root.subcommands.end());
@@ -895,6 +916,53 @@ TEST_CASE("audio subcommands parse bounded explicit contracts",
         std::vector<std::string_view>{"audio", "capture", "--sample-rate",
                                       "48000", "--channels", "1", "--frames",
                                       "0"}}) {
+    CHECK(CommandDispatcher{}.dispatch(registry, arguments, environment, output,
+                                       error) == 2);
+  }
+}
+
+TEST_CASE("video subcommands require explicit bounded presentation contracts",
+          "[commands][video]") {
+  const auto& registry = builtin_command_registry();
+  FakeVideo video;
+  std::istringstream input;
+  CommandEnvironment environment{input, false, false, false, {}};
+  environment.video = &video;
+  std::ostringstream output;
+  std::ostringstream error;
+
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{"video", "show", "--session",
+                                            "video-session", "--artifact",
+                                            "video-artifact"},
+              environment, output, error) == 0);
+  REQUIRE(video.shown);
+  CHECK(video.shown->session_id ==
+        aiforge::domain::SessionId::from("video-session").value());
+  CHECK(video.shown->artifact_id ==
+        aiforge::domain::ArtifactId::from("video-artifact").value());
+
+  REQUIRE(CommandDispatcher{}.dispatch(
+              registry,
+              std::vector<std::string_view>{
+                  "video", "export", "--session", "video-session", "--artifact",
+                  "video-artifact", "--output", "copy.mp4"},
+              environment, output, error) == 0);
+  REQUIRE(video.exported);
+  CHECK(video.exported->session_id ==
+        aiforge::domain::SessionId::from("video-session").value());
+  CHECK(video.exported->artifact_id ==
+        aiforge::domain::ArtifactId::from("video-artifact").value());
+  CHECK(video.exported->output_path == "copy.mp4");
+
+  for (const auto& arguments :
+       {std::vector<std::string_view>{"video", "show"},
+        std::vector<std::string_view>{"video", "export", "--session",
+                                      "video-session"},
+        std::vector<std::string_view>{"video", "show", "--session", ""}}) {
+    output.str({});
+    error.str({});
     CHECK(CommandDispatcher{}.dispatch(registry, arguments, environment, output,
                                        error) == 2);
   }

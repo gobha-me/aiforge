@@ -591,6 +591,26 @@ auto TranscriptProjection::apply_in_place(const RunEvent& event)
                 found->second, referenced.message_id});
             return {};
           },
+          [&](const VideoArtifactPublished& published)
+              -> std::expected<void, TranscriptProjectionError> {
+            const auto found = m_artifacts.find(published.artifact.artifact_id);
+            if (found == m_artifacts.end()) {
+              return error(TranscriptProjectionErrorCode::unknown_artifact,
+                           "video publication has no matching artifact");
+            }
+            if (found->second != published.artifact ||
+                published.artifact.media_type != "video/mp4" ||
+                !m_published_video_artifacts
+                     .insert(published.artifact.artifact_id)
+                     .second) {
+              return transition_error(
+                  "video publication does not exactly match its artifact");
+            }
+            m_items.emplace_back(TranscriptArtifactReference{
+                published.artifact, std::nullopt,
+                TranscriptArtifactPresentation::published_video});
+            return {};
+          },
           [&](const VerificationEvidenceRecorded& recorded)
               -> std::expected<void, TranscriptProjectionError> {
             const auto& evidence = recorded.evidence;

@@ -40,6 +40,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   process_launcher.cpp
   project_backlog.cpp
   presentation_text.cpp
+  presentation_video.cpp
   project_instructions.cpp
   provenance.cpp
   repository_knowledge.cpp

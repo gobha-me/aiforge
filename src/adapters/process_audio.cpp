@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include "secure_artifact_export.hpp"
+
 #include <aiforge/adapters/audio_backend.hpp>
 #include <aiforge/adapters/filesystem_artifact_store.hpp>
 #include <aiforge/adapters/process_credentials.hpp>
@@ -262,44 +264,7 @@ class Descriptor final {
                                 const std::filesystem::path& path,
                                 const std::stop_token stop_token)
     -> std::expected<void, cli::CommandFailure> {
-#ifdef _WIN32
-  static_cast<void>(content);
-  static_cast<void>(path);
-  static_cast<void>(stop_token);
-  return failure(cli::CommandFailureKind::runtime,
-                 "secure audio export is unavailable on this platform");
-#else
-  Descriptor descriptor{
-      ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-             S_IRUSR | S_IWUSR)};
-  if (descriptor.get() < 0)
-    return failure(errno == EEXIST ? cli::CommandFailureKind::usage
-                                   : cli::CommandFailureKind::runtime,
-                   errno == EEXIST ? "output path already exists"
-                                   : "output file could not be created");
-  std::size_t offset{};
-  while (offset < content.size()) {
-    if (stop_token.stop_requested()) {
-      static_cast<void>(::unlink(path.c_str()));
-      return failure(cli::CommandFailureKind::cancelled, "export cancelled");
-    }
-    const auto count = ::write(descriptor.get(), content.data() + offset,
-                               content.size() - offset);
-    if (count < 0) {
-      if (errno == EINTR) continue;
-      static_cast<void>(::unlink(path.c_str()));
-      return failure(cli::CommandFailureKind::runtime,
-                     "output file could not be written");
-    }
-    offset += static_cast<std::size_t>(count);
-  }
-  if (::fsync(descriptor.get()) != 0) {
-    static_cast<void>(::unlink(path.c_str()));
-    return failure(cli::CommandFailureKind::runtime,
-                   "output file could not be synchronized");
-  }
-  return {};
-#endif
+  return detail::secure_export_bytes(content, path, stop_token);
 }
 
 [[nodiscard]] auto audio_artifacts(const std::vector<domain::RunEvent>& events)
