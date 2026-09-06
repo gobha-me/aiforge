@@ -607,6 +607,16 @@ replaced roots, and equal-precedence matches deny or fail launch. Tool/profile
 membership never creates a rule implicitly, and durable events contain only
 the matcher and selected-rule identities.
 
+The opt-in process-isolation evaluator emits immutable, separately versioned
+v1, v2, and v3 engineering reports. Restriction-level assessment requires all
+three complete reports to match an independently supplied exact source SHA,
+kernel identity, and architecture; applicable cleanup failure dominates other
+gaps. The v3 rows map exactly as follows: low and medium require
+`direct_process_tree_cgroup_nonescape` and `low_capability_nonescalation`, while
+high additionally requires `private_root_capability_discard`. Even all-green
+v3 evidence leaves `same_uid_broker_execution_confinement` unproven, so no
+restricted level or runtime authority follows from a CI artifact.
+
 ## Structured user questions
 
 `ask_user` is a no-authority model-facing tool for one or more bounded single-

@@ -2,9 +2,11 @@
 
 #include "evidence.hpp"
 #include "evidence_v2.hpp"
+#include "evidence_v3.hpp"
 
 #include <array>
 #include <optional>
+#include <span>
 #include <string_view>
 
 namespace aiforge::evaluation::process_isolation::mapping {
@@ -36,15 +38,25 @@ struct EvidenceAssessment {
   auto operator==(const EvidenceAssessment&) const -> bool = default;
 };
 
-// Reviews retained engineering evidence for the ADR 0018 conjunctions. This
+struct ExpectedEvidenceIdentity {
+  std::string_view source_sha;
+  std::string_view kernel;
+  std::string_view architecture;
+};
+
+// Reviews retained engineering evidence for the ADR 0018 conjunctions. The
+// expected identity must be supplied independently from the reports. This
 // result is non-authoritative and must never be reused as launch availability.
 [[nodiscard]] auto assess_linux_evidence(
-    std::string_view expected_source_sha,
+    ExpectedEvidenceIdentity expected_identity,
     std::optional<std::string_view> schema_v1_document,
-    std::optional<std::string_view> schema_v2_document) -> EvidenceAssessment;
+    std::optional<std::string_view> schema_v2_document,
+    std::optional<std::string_view> schema_v3_document) -> EvidenceAssessment;
 
 [[nodiscard]] auto evidence_level_name(EvidenceLevel value) -> std::string_view;
 [[nodiscard]] auto assessment_reason_name(AssessmentReason value)
     -> std::string_view;
+[[nodiscard]] auto required_v3_probe_ids(EvidenceLevel value)
+    -> std::span<const v3::ProbeId>;
 
 } // namespace aiforge::evaluation::process_isolation::mapping

@@ -4,6 +4,7 @@
 
 #include "probes_v2.hpp"
 
+#include "linux_support.hpp"
 #include "probes.hpp"
 
 #include <algorithm>
@@ -59,7 +60,18 @@ constexpr int assertion_internal_error = 23;
 constexpr int assertion_prerequisite_unavailable = 24;
 constexpr int assertion_limit_not_triggered = 25;
 constexpr auto observation_timeout = std::chrono::seconds{2};
-constexpr std::size_t maximum_control_bytes = 64UZ * 1024UZ;
+constexpr auto task_cgroup_prefix = std::string_view{"aiforge-evidence-v2-"};
+
+using Cgroup = linux_support::TaskCgroup;
+using linux_support::cgroup_is_populated;
+using linux_support::close_descriptors_from;
+using linux_support::Descriptor;
+using linux_support::pidfd_dead;
+using linux_support::pidfd_kill;
+using linux_support::pidfd_open;
+using linux_support::read_control;
+using linux_support::write_all;
+using linux_support::write_control;
 
 [[nodiscard]] constexpr auto combined_probe_id(const CombinedSetupMode mode)
     -> ProbeId {
@@ -87,6 +99,21 @@ constexpr std::size_t maximum_control_bytes = 64UZ * 1024UZ;
 [[nodiscard]] auto probe_error(const ProbeId id, const ReasonCode reason)
     -> ProbeRecord {
   return {id, ProbeState::probe_error, reason};
+}
+
+[[nodiscard]] auto cgroup_reason(const linux_support::TaskCgroupError error)
+    -> ReasonCode {
+  switch (error) {
+    case linux_support::TaskCgroupError::missing_delegation:
+      return ReasonCode::missing_delegation;
+    case linux_support::TaskCgroupError::mechanism_absent:
+      return ReasonCode::mechanism_absent;
+    case linux_support::TaskCgroupError::prerequisite_unavailable:
+      return ReasonCode::prerequisite_unavailable;
+    case linux_support::TaskCgroupError::internal_error:
+      return ReasonCode::internal_error;
+  }
+  return ReasonCode::internal_error;
 }
 
 [[nodiscard]] auto migration_observation(const bool confinement_applied,
@@ -302,77 +329,6 @@ template <typename Assertion>
   return assertion_result(id, WEXITSTATUS(status));
 }
 
-class Descriptor {
- public:
-  explicit Descriptor(const int value = -1) : m_value(value) {}
-  Descriptor(const Descriptor&) = delete;
-  auto operator=(const Descriptor&) -> Descriptor& = delete;
-  Descriptor(Descriptor&& other) noexcept : m_value(other.release()) {}
-  auto operator=(Descriptor&& other) noexcept -> Descriptor& {
-    if (this == &other) return *this;
-    reset(other.release());
-    return *this;
-  }
-  ~Descriptor() { reset(); }
-  [[nodiscard]] auto get() const noexcept -> int { return m_value; }
-  [[nodiscard]] auto release() noexcept -> int {
-    const auto value = m_value;
-    m_value = -1;
-    return value;
-  }
-  auto reset(const int value = -1) noexcept -> void {
-    if (m_value >= 0) static_cast<void>(::close(m_value));
-    m_value = value;
-  }
-
- private:
-  int m_value{-1};
-};
-
-[[nodiscard]] auto write_all(const int descriptor, const std::string_view value)
-    -> bool {
-  std::size_t offset{};
-  while (offset < value.size()) {
-    const auto count =
-        ::write(descriptor, value.data() + offset, value.size() - offset);
-    if (count < 0) {
-      if (errno == EINTR) continue;
-      return false;
-    }
-    if (count == 0) return false;
-    offset += static_cast<std::size_t>(count);
-  }
-  return true;
-}
-
-[[nodiscard]] auto write_control(const int directory, const char* name,
-                                 const std::string_view value) -> bool {
-  const Descriptor descriptor{
-      ::openat(directory, name, O_WRONLY | O_CLOEXEC | O_NOFOLLOW)};
-  return descriptor.get() >= 0 && write_all(descriptor.get(), value);
-}
-
-[[nodiscard]] auto read_control(const int directory, const char* name)
-    -> std::optional<std::string> {
-  const Descriptor descriptor{
-      ::openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
-  if (descriptor.get() < 0) return std::nullopt;
-  std::string result;
-  std::array<char, 1024> buffer{};
-  for (;;) {
-    const auto count = ::read(descriptor.get(), buffer.data(), buffer.size());
-    if (count == 0) break;
-    if (count < 0) {
-      if (errno == EINTR) continue;
-      return std::nullopt;
-    }
-    if (result.size() + static_cast<std::size_t>(count) > maximum_control_bytes)
-      return std::nullopt;
-    result.append(buffer.data(), static_cast<std::size_t>(count));
-  }
-  return result;
-}
-
 [[nodiscard]] auto valid_state_directory(const std::filesystem::path& path)
     -> bool {
   struct stat attributes{};
@@ -422,200 +378,11 @@ class Descriptor {
   return descriptor.get() >= 0 && write_all(descriptor.get(), pid);
 }
 
-[[nodiscard]] auto parse_pids(const std::string_view document)
-    -> std::optional<std::vector<pid_t>> {
-  std::vector<pid_t> result;
-  const char* cursor = document.data();
-  const char* end = cursor + document.size();
-  while (cursor != end) {
-    while (cursor != end && (*cursor == ' ' || *cursor == '\n'))
-      ++cursor;
-    if (cursor == end) break;
-    long value{};
-    const auto parsed = std::from_chars(cursor, end, value);
-    if (parsed.ec != std::errc{} || parsed.ptr == cursor || value <= 0 ||
-        value > INT_MAX) {
-      return std::nullopt;
-    }
-    result.push_back(static_cast<pid_t>(value));
-    cursor = parsed.ptr;
-    if (cursor != end && *cursor != '\n') return std::nullopt;
-  }
-  std::ranges::sort(result);
-  if (std::ranges::adjacent_find(result) != result.end()) return std::nullopt;
-  return result;
-}
-
-[[nodiscard]] auto cgroup_is_populated(const int directory)
-    -> std::optional<bool> {
-  const auto events = read_control(directory, "cgroup.events");
-  if (!events) return std::nullopt;
-  if (events->find("populated 0") != std::string::npos) return false;
-  if (events->find("populated 1") != std::string::npos) return true;
-  return std::nullopt;
-}
-
-[[nodiscard]] auto pidfd_open(const pid_t process) -> Descriptor {
-#if defined(SYS_pidfd_open)
-  return Descriptor{static_cast<int>(::syscall(SYS_pidfd_open, process, 0U))};
-#else
-  static_cast<void>(process);
-  return Descriptor{};
-#endif
-}
-
-[[nodiscard]] auto pidfd_kill(const int descriptor) -> bool {
-#if defined(SYS_pidfd_send_signal)
-  return descriptor >= 0 && (::syscall(SYS_pidfd_send_signal, descriptor,
-                                       SIGKILL, nullptr, 0U) == 0 ||
-                             errno == ESRCH);
-#else
-  static_cast<void>(descriptor);
-  return false;
-#endif
-}
-
-[[nodiscard]] auto pidfd_dead(const int descriptor) -> bool {
-  pollfd value{descriptor, POLLIN, 0};
-  int polled{};
-  do {
-    polled = ::poll(&value, 1, 0);
-  } while (polled < 0 && errno == EINTR);
-  return polled == 1 && (value.revents & POLLIN) != 0;
-}
-
-[[nodiscard]] auto close_descriptors_from(const unsigned int first) -> bool {
-#if defined(SYS_close_range)
-  if (::syscall(SYS_close_range, first, UINT_MAX, 0U) == 0) return true;
-  if (errno != ENOSYS && errno != EINVAL) return false;
-#endif
-  const auto maximum = ::sysconf(_SC_OPEN_MAX);
-  if (maximum <= 0 || maximum > INT_MAX) return false;
-  for (int descriptor = static_cast<int>(first); descriptor < maximum;
-       ++descriptor) {
-    if (::close(descriptor) != 0 && errno != EBADF && errno != EINTR)
-      return false;
-  }
-  return true;
-}
-
-class Cgroup final {
- public:
-  [[nodiscard]] static auto create(const std::string_view suffix = {})
-      -> std::expected<Cgroup, ReasonCode> {
-    Descriptor parent{::fcntl(4, F_DUPFD_CLOEXEC, 5)};
-    if (parent.get() < 0)
-      return std::unexpected(ReasonCode::missing_delegation);
-    const auto marker = read_control(parent.get(), "cgroup.controllers");
-    if (!marker) return std::unexpected(ReasonCode::mechanism_absent);
-    const auto name = "aiforge-evidence-v2-" + std::to_string(::getpid()) +
-                      std::string{suffix};
-    if (::mkdirat(parent.get(), name.c_str(), S_IRWXU) != 0) {
-      return std::unexpected(errno == EACCES || errno == EPERM || errno == EROFS
-                                 ? ReasonCode::missing_delegation
-                                 : ReasonCode::prerequisite_unavailable);
-    }
-    Descriptor child{::openat(parent.get(), name.c_str(),
-                              O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
-    if (child.get() < 0) {
-      static_cast<void>(::unlinkat(parent.get(), name.c_str(), AT_REMOVEDIR));
-      return std::unexpected(ReasonCode::internal_error);
-    }
-    return Cgroup{std::move(parent), std::move(child), name};
-  }
-
-  Cgroup(const Cgroup&) = delete;
-  auto operator=(const Cgroup&) -> Cgroup& = delete;
-  Cgroup(Cgroup&& other) noexcept
-      : m_parent(std::move(other.m_parent)), m_child(std::move(other.m_child)),
-        m_name(std::move(other.m_name)), m_cleaned(other.m_cleaned) {
-    other.m_cleaned = true;
-  }
-  auto operator=(Cgroup&& other) noexcept -> Cgroup& {
-    if (this == &other) return *this;
-    if (!m_cleaned) static_cast<void>(cleanup());
-    m_parent = std::move(other.m_parent);
-    m_child = std::move(other.m_child);
-    m_name = std::move(other.m_name);
-    m_cleaned = other.m_cleaned;
-    other.m_cleaned = true;
-    return *this;
-  }
-  ~Cgroup() {
-    if (!m_cleaned) static_cast<void>(cleanup());
-  }
-
-  [[nodiscard]] auto parent() const noexcept -> int { return m_parent.get(); }
-  [[nodiscard]] auto child() const noexcept -> int { return m_child.get(); }
-  [[nodiscard]] auto name() const noexcept -> std::string_view {
-    return m_name;
-  }
-
-  [[nodiscard]] auto has_required_controllers() const -> std::optional<bool> {
-    for (const auto* control : {"cpu.max", "memory.max", "pids.max"}) {
-      struct stat attributes{};
-      if (::fstatat(m_child.get(), control, &attributes, AT_SYMLINK_NOFOLLOW) !=
-          0) {
-        if (errno == ENOENT) return false;
-        return std::nullopt;
-      }
-      if (!S_ISREG(attributes.st_mode)) return std::nullopt;
-    }
-    return true;
-  }
-
-  [[nodiscard]] auto processes() const -> std::optional<std::vector<pid_t>> {
-    const auto value = read_control(m_child.get(), "cgroup.procs");
-    return value ? parse_pids(*value) : std::nullopt;
-  }
-
-  [[nodiscard]] auto cleanup() -> bool {
-    if (m_cleaned) return true;
-    bool trustworthy{true};
-    if (!write_control(m_child.get(), "cgroup.kill", "1")) {
-      const auto processes = this->processes();
-      if (!processes) {
-        trustworthy = false;
-      } else {
-        for (const auto process : *processes) {
-          auto pidfd = pidfd_open(process);
-          if (pidfd.get() < 0 || !pidfd_kill(pidfd.get())) trustworthy = false;
-        }
-      }
-    }
-    const auto deadline =
-        std::chrono::steady_clock::now() + observation_timeout;
-    bool empty{};
-    do {
-      const auto populated = cgroup_is_populated(m_child.get());
-      if (populated && !*populated) {
-        empty = true;
-        break;
-      }
-      static_cast<void>(::poll(nullptr, 0, 5));
-    } while (std::chrono::steady_clock::now() < deadline);
-    m_child.reset();
-    const bool removed =
-        ::unlinkat(m_parent.get(), m_name.c_str(), AT_REMOVEDIR) == 0;
-    m_cleaned = true;
-    return trustworthy && empty && removed;
-  }
-
- private:
-  Cgroup(Descriptor parent, Descriptor child, std::string name)
-      : m_parent(std::move(parent)), m_child(std::move(child)),
-        m_name(std::move(name)) {}
-  Descriptor m_parent;
-  Descriptor m_child;
-  std::string m_name;
-  bool m_cleaned{};
-};
-
 [[nodiscard]] auto cgroup_or_record(const ProbeId id)
     -> std::expected<Cgroup, ProbeRecord> {
-  auto cgroup = Cgroup::create();
+  auto cgroup = Cgroup::create(task_cgroup_prefix);
   if (!cgroup) {
-    const auto reason = cgroup.error();
+    const auto reason = cgroup_reason(cgroup.error());
     if (reason == ReasonCode::internal_error)
       return std::unexpected(probe_error(id, reason));
     return std::unexpected(unavailable(id, reason));
@@ -1087,11 +854,12 @@ enum class TreeShape {
     -> ProbeRecord {
   auto cgroup = required_cgroup_or_record(id);
   if (!cgroup) return cgroup.error();
-  auto sibling = Cgroup::create("-sibling");
+  auto sibling = Cgroup::create(task_cgroup_prefix, "-sibling");
   if (!sibling) {
-    auto result = sibling.error() == ReasonCode::internal_error
-                      ? probe_error(id, sibling.error())
-                      : unavailable(id, sibling.error());
+    const auto reason = cgroup_reason(sibling.error());
+    auto result = reason == ReasonCode::internal_error
+                      ? probe_error(id, reason)
+                      : unavailable(id, reason);
     if (!cgroup->cleanup())
       result = probe_error(id, ReasonCode::cleanup_failed);
     return result;

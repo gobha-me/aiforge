@@ -22,13 +22,14 @@ The mapping was evaluated against schema-v1 and schema-v2 implementations at
 AIForge source revision `8c4f6b6ed8aaa4934544234105ef914953ebf689`.
 Exact-revision reports and adversarial test results are engineering inputs to
 this decision. They are not copied into application state and cannot authorize
-a future process launch. Review of those reports identified missing execution
-non-escape proof: the v2 migration row does not exercise file-descriptor-based
-cgroup placement, and `low` still permits Unix-socket access to same-UID
-execution brokers outside the task cgroup. The private-root rows also do not
-prove capability discard before payload execution. Issue #209 tracks an
-immutable supplemental schema v3 for those properties. Until that evidence
-exists, every restricted level is incomplete.
+a future process launch. Review of those reports identified missing direct
+process-tree cgroup non-escape proof: the v2 migration row does not exercise
+file-descriptor-based cgroup placement. The private-root rows also do not prove
+capability discard before payload execution. Issue #209's immutable
+supplemental schema v3 measures those direct-tree and capability properties.
+It does not measure execution requested from arbitrary same-UID or external
+brokers. That separate conjunct remains unproven, so every restricted level is
+incomplete even when all applicable v3 rows are enforced.
 
 ## Decision
 
@@ -68,8 +69,8 @@ set-user-ID helpers, ambient capabilities, `CAP_SYS_ADMIN`, a privileged
 daemon, or a container runtime. `low` requires empty inheritable, permitted,
 effective, and ambient capability sets, a bounding set that never expands
 beyond the launch-time fingerprint, and failed namespace-creation and
-capability-regain attempts; those properties still require the schema-v3
-evidence in issue #209. `high`
+capability-regain attempts; those properties are measured by schema-v3
+`low_capability_nonescalation`. `high`
 additionally requires unprivileged user and mount namespaces
 whose mapping and mount operations succeed without host privilege. A host that
 disables those facilities reports the corresponding stable unavailable reason.
@@ -79,16 +80,15 @@ payload execution; schemas v1 and v2 do not prove that transition.
 
 ### Evidence input
 
-The noninstalled evidence assessor accepts one complete schema-v1 document and
-one complete schema-v2 document plus the expected evaluator source revision.
-It validates both schemas before examining their currently mapped rows. It does
-not assess the supplemental properties assigned to schema v3 by issue #209, so
-even an otherwise complete v1/v2 assessment is not evidence that a restriction
-level is complete. The documents must:
+The noninstalled evidence assessor accepts one complete document for each of
+schemas v1, v2, and v3 plus independently supplied expected source revision,
+kernel identity, and architecture. It strictly validates every schema before
+examining the mapped rows. The documents must:
 
 - contain the exact expected lowercase source revision;
 - identify Linux;
-- agree on source revision, kernel, and architecture; and
+- agree on source revision, kernel, and architecture and exactly match those
+  independent inputs; and
 - contain every required row exactly once in canonical order.
 
 Missing, malformed, stale, or conflicting documents make every assessed level
@@ -96,9 +96,20 @@ incomplete. A required `probe_error` makes that level indeterminate. A required
 `unavailable` row makes it incomplete. Only `enforced/none` satisfies a row.
 Assessment is deterministic. A required `cleanup_failed` row dominates other
 unmet rows for that level; otherwise assessment reports the first unmet
-conjunct in the order defined below. This assessor reviews retained engineering
-evidence only; it is not linked into installed targets and its answer is never
-runtime authority.
+conjunct in the order defined below. After all mapped rows pass, the assessor
+still reports the separate same-UID broker-execution conjunct as unproven. It
+reviews retained engineering evidence only; it is not linked into installed
+targets and its answer is never runtime authority.
+
+CI captures v3 only through the same bounded transient systemd delegation and
+cleanup contract used by v2, without modifying either released schema. The
+strict v3 verifier requires the two low rows to be enforced, validates the
+high-only row in exact canonical position, and rejects every indeterminate row.
+A host that cannot construct the high private root may therefore retain a
+truthful `private_root_capability_discard/unavailable` report while high remains
+incomplete. Both compiler jobs retain the complete v3 report under an artifact
+name containing the exact source revision, even when capture or verification
+fails; absence of that report is itself a CI error.
 
 ### `low`
 
@@ -152,7 +163,9 @@ The selected evidence conjunction is:
   `rlimit_file_size`, `inherited_descriptors`, `openat2_resolution`,
   `fexecve_identity`, and `fchdir_identity`;
 - v2: every `cgroup_*` row, `descriptor_relative_launch`, and
-  `partial_setup_cleanup`; and
+  `partial_setup_cleanup`;
+- v3: `direct_process_tree_cgroup_nonescape` and
+  `low_capability_nonescalation`; and
 - the v1 runner adversarial assertion that the fixed child receives neither an
   ambient environment nor unrelated descriptors.
 
@@ -162,13 +175,14 @@ Landlock guard. It does not try `cgroup.threads`, exercise
 `clone3(CLONE_INTO_CGROUP)` with its inherited delegated-root descriptor or
 another readable or `O_PATH` cgroup descriptor, or try to borrow another
 process's management descriptor. Landlock write denial therefore cannot be
-treated as proof of cgroup non-escape. V2 also does not prove that `low`, which
-permits new Unix sockets, cannot request execution from a same-UID service such
-as a user service manager or D-Bus broker outside the task cgroup. The broader
-supplemental `payload_execution_nonescape` proof in schema v3 must resolve
-both direct and brokered execution; issue #209 tracks whether that moves Unix
-socket denial into `low` or establishes another measured boundary. Its absence
-also makes `medium` and `high` incomplete.
+treated as proof of cgroup non-escape. Schema v3's
+`direct_process_tree_cgroup_nonescape` row measures those direct paths only.
+V2 and v3 still do not prove that `low`, which permits new Unix sockets, cannot
+request execution from a same-UID service such as a user service manager or
+D-Bus broker outside the task cgroup. The assessor therefore retains
+`same_uid_broker_execution_confinement` as a separate unproven conjunct even
+when every applicable v3 row is enforced. Because levels are cumulative, that
+gap keeps `low`, `medium`, and `high` incomplete.
 
 ### `medium`
 
@@ -231,15 +245,16 @@ must never be inferred safe from these rows.
    second descriptor-relative execution after private-root setup.
 7. Capabilities required to construct the private root are discarded after the
    final namespace and mount operation and before the payload-ready boundary.
-   Empty capability sets, locked securebits, failed regain attempts, and their
-   persistence across descriptor-relative execution and descendants require
-   the supplemental schema-v3 evidence in issue #209; no v1 or v2 row proves
-   this ordering.
+   Schema-v3 `private_root_capability_discard` measures empty capability and
+   bounding sets, locked securebits, failed regain attempts, and their
+   persistence across descriptor-relative execution and descendants; no v1 or
+   v2 row proves this ordering.
 
-The additional evidence conjunction is v1 `disposable_workspace` plus v2
+The additional evidence conjunction is v1 `disposable_workspace`; v2
 `private_root_construction`, `private_mount_propagation`,
 `staged_input_identity`, `staged_output_identity`, and
-`private_root_combined_setup_order`.
+`private_root_combined_setup_order`; plus v3
+`private_root_capability_discard`.
 
 The exact post-merge [reference run
 33961158809](https://github.com/gobha-me/aiforge/actions/runs/33961158809)
@@ -264,13 +279,13 @@ and Clang v2 artifact
 each contain a report whose SHA-256 is
 `6f21453cff361d1c0659781cbd561f249a183663f8689d8fbce655f41e4a1797`.
 Both compiler-specific report pairs satisfy the v1/v2 rows currently selected
-for `low` and `medium`, but they do not make either level complete. They contain
-no proof against `clone3(CLONE_INTO_CGROUP)` or borrowed cgroup descriptors and
-do not prove that `low` prevents brokered same-UID execution while allowing new
-Unix sockets. They also contain no complete payload capability non-escalation
-proof. Issue #209 assigns those missing properties to supplemental schema v3.
-Because levels are cumulative, that missing `low` evidence also makes `medium`
-and `high` incomplete. For both report pairs, the existing v2 high rows are
+for `low` and `medium`, but they do not make either level complete. They predate
+schema v3 and therefore contain no v3 direct process-tree cgroup non-escape or
+capability evidence. They also do not prove that `low` prevents execution
+requested from an arbitrary same-UID broker while allowing new Unix sockets;
+v3 deliberately makes no such claim. The separately unproven broker conjunct
+keeps `low`, `medium`, and `high` incomplete even after applicable v3 rows pass.
+For both report pairs, the existing v2 high rows are
 independently incomplete first at
 `private_root_construction/unavailable/permission_denied`; the later
 `private_mount_propagation` and `private_root_combined_setup_order` rows carry

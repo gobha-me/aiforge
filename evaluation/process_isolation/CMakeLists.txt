@@ -35,6 +35,30 @@ add_dependencies(aiforge_process_isolation_evaluation
   aiforge_process_isolation_probe
 )
 
+add_library(aiforge_process_isolation_evidence_v3_support STATIC
+  evidence_v3.cpp
+)
+target_compile_features(aiforge_process_isolation_evidence_v3_support
+  PUBLIC cxx_std_23
+)
+target_include_directories(aiforge_process_isolation_evidence_v3_support
+  PUBLIC ${CMAKE_CURRENT_LIST_DIR}
+)
+target_link_libraries(aiforge_process_isolation_evidence_v3_support
+  PRIVATE aiforge_process_isolation_evaluation_support
+  PRIVATE nlohmann_json::nlohmann_json
+)
+
+add_library(aiforge_process_isolation_linux_support STATIC
+  linux_support.cpp
+)
+target_compile_features(aiforge_process_isolation_linux_support
+  PUBLIC cxx_std_23
+)
+target_include_directories(aiforge_process_isolation_linux_support
+  PUBLIC ${CMAKE_CURRENT_LIST_DIR}
+)
+
 add_library(aiforge_process_isolation_evaluation_v2_support STATIC
   evidence_mapping.cpp
   evidence_v2.cpp
@@ -49,7 +73,26 @@ target_include_directories(aiforge_process_isolation_evaluation_v2_support
 )
 target_link_libraries(aiforge_process_isolation_evaluation_v2_support
   PRIVATE aiforge_process_isolation_evaluation_support
+  PRIVATE aiforge_process_isolation_evidence_v3_support
+  PRIVATE aiforge_process_isolation_linux_support
   PRIVATE nlohmann_json::nlohmann_json
+)
+
+add_library(aiforge_process_isolation_evaluation_v3_support STATIC
+  low_capability_v3.cpp
+  probes_v3.cpp
+  runner_v3.cpp
+)
+target_compile_features(aiforge_process_isolation_evaluation_v3_support
+  PUBLIC cxx_std_23
+)
+target_include_directories(aiforge_process_isolation_evaluation_v3_support
+  PUBLIC ${CMAKE_CURRENT_LIST_DIR}
+)
+target_link_libraries(aiforge_process_isolation_evaluation_v3_support
+  PRIVATE aiforge_process_isolation_evaluation_support
+  PRIVATE aiforge_process_isolation_evidence_v3_support
+  PRIVATE aiforge_process_isolation_linux_support
 )
 
 add_executable(aiforge_process_isolation_probe_v2
@@ -73,11 +116,41 @@ add_dependencies(aiforge_process_isolation_evaluation_v2
   aiforge_process_isolation_probe_v2
 )
 
+add_executable(aiforge_process_isolation_probe_v3
+  child_v3_main.cpp
+)
+target_compile_features(aiforge_process_isolation_probe_v3 PRIVATE cxx_std_23)
+target_link_libraries(aiforge_process_isolation_probe_v3
+  PRIVATE aiforge_process_isolation_evaluation_v3_support
+)
+# The private-root row descriptor-executes this fixed helper after pivoting
+# into an otherwise empty tmpfs root, where no host dynamic loader is present.
+target_link_options(aiforge_process_isolation_probe_v3 PRIVATE -static)
+
+add_executable(aiforge_process_isolation_evaluation_v3
+  main_v3.cpp
+)
+target_compile_features(aiforge_process_isolation_evaluation_v3
+  PRIVATE cxx_std_23
+)
+target_link_libraries(aiforge_process_isolation_evaluation_v3
+  PRIVATE aiforge_process_isolation_evaluation_v3_support
+)
+add_dependencies(aiforge_process_isolation_evaluation_v3
+  aiforge_process_isolation_probe_v3
+)
+
 if (${PROJECT_NAME}_TESTS)
+  target_compile_definitions(aiforge_process_isolation_linux_support
+    PUBLIC AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT=1
+  )
   target_compile_definitions(aiforge_process_isolation_evaluation_support
     PUBLIC AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT=1
   )
   target_compile_definitions(aiforge_process_isolation_evaluation_v2_support
+    PUBLIC AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT=1
+  )
+  target_compile_definitions(aiforge_process_isolation_evaluation_v3_support
     PUBLIC AIFORGE_PROCESS_ISOLATION_TEST_SUPPORT=1
   )
   add_executable(process-isolation-evaluation-test
@@ -85,23 +158,31 @@ if (${PROJECT_NAME}_TESTS)
     test_evidence.cpp
     test_integration.cpp
     test_integration_v2.cpp
+    test_integration_v3.cpp
     test_evidence_v2.cpp
+    test_evidence_v3.cpp
     test_evidence_mapping.cpp
     test_probes_v2.cpp
+    test_probes_v3.cpp
     test_runner.cpp
     test_runner_v2.cpp
+    test_runner_v3.cpp
   )
   target_compile_features(process-isolation-evaluation-test PRIVATE cxx_std_23)
   target_link_libraries(process-isolation-evaluation-test
     PRIVATE Catch2::Catch2
     PRIVATE aiforge_process_isolation_evaluation_support
     PRIVATE aiforge_process_isolation_evaluation_v2_support
+    PRIVATE aiforge_process_isolation_evaluation_v3_support
+    PRIVATE aiforge_process_isolation_evidence_v3_support
   )
   add_dependencies(process-isolation-evaluation-test
     aiforge_process_isolation_evaluation
     aiforge_process_isolation_evaluation_v2
+    aiforge_process_isolation_evaluation_v3
     aiforge_process_isolation_probe
     aiforge_process_isolation_probe_v2
+    aiforge_process_isolation_probe_v3
   )
 
   add_test(
