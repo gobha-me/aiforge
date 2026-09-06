@@ -4,8 +4,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <ranges>
 #include <string>
 #include <utility>
 #include <variant>
@@ -74,7 +76,8 @@ auto proposal_arguments(
 
 auto source_events(const domain::InvocationId& invocation,
                    std::string arguments = proposal_arguments(),
-                   std::string user_text = "Use snake_case in this project")
+                   std::string user_text = "Use snake_case in this project",
+                   std::optional<domain::PersonaId> persona_id = std::nullopt)
     -> std::vector<domain::RunEvent> {
   const auto run = id<domain::RunId>("source-run");
   return {
@@ -82,7 +85,7 @@ auto source_events(const domain::InvocationId& invocation,
             domain::RunStarted{id<domain::SurfaceId>("surface"),
                                id<domain::WorkspaceId>("workspace"),
                                id<domain::PermissionProfileId>("observe"),
-                               std::nullopt},
+                               std::move(persona_id)},
             run),
       event(2, "source-user",
             domain::UserContentAdded{{id<domain::MessageId>("user-message"),
@@ -155,11 +158,12 @@ struct Fixture {
 } // namespace
 
 TEST_CASE("memory proposal parsing fails closed", "[memory][tool][failure]") {
-  const runtime::MemoryToolConfiguration configuration{true, true, {}};
+  const runtime::MemoryToolConfiguration configuration{
+      true, true, true, id<domain::PersonaId>("persona:reviewer"), {}};
   auto parsed = runtime::parse_memory_proposal_draft(
       {"application/json", proposal_arguments()}, configuration);
   REQUIRE(parsed);
-  REQUIRE(parsed->scope == domain::MemoryScope::project);
+  REQUIRE(parsed->owner_kind == domain::MemoryOwnerKind::repository);
   REQUIRE(parsed->kind == domain::MemoryKind::project_convention);
 
   REQUIRE_FALSE(runtime::parse_memory_proposal_draft(
@@ -174,20 +178,82 @@ TEST_CASE("memory proposal parsing fails closed", "[memory][tool][failure]") {
   REQUIRE_FALSE(runtime::parse_memory_proposal_draft(
       {"application/json", proposal_arguments("global", "project_convention")},
       configuration));
+  REQUIRE_FALSE(runtime::parse_memory_proposal_draft(
+      {"application/json", proposal_arguments("persona")},
+      runtime::MemoryToolConfiguration{true, true, true, std::nullopt, {}}));
+  REQUIRE_FALSE(runtime::parse_memory_proposal_draft(
+      {"application/json",
+       R"({"scope":"persona","persona_id":"persona:forged","kind":"workflow","content":"x","rationale":"y","evidence_excerpt":"z"})"},
+      configuration));
 }
 
 TEST_CASE("memory tool registration carries a durable executor contract",
           "[memory][tool][registry]") {
   runtime::ToolRegistry registry;
   REQUIRE(runtime::register_memory_tool(
-      registry, runtime::MemoryToolConfiguration{true, false, {}}));
+      registry,
+      runtime::MemoryToolConfiguration{true, false, false, std::nullopt, {}}));
   const auto snapshot = registry.snapshot();
   REQUIRE(snapshot);
   const auto* registration = snapshot->find("propose_memory");
   REQUIRE(registration != nullptr);
   const runtime::ToolExecutorContract expected{"aiforge.runtime.propose_memory",
-                                               "1"};
+                                               "2"};
   REQUIRE(registration->executor_contract == expected);
+  REQUIRE(registration->declaration.effects.empty());
+  REQUIRE(registration->declaration.capability_scopes.empty());
+}
+
+TEST_CASE("persona memory binding is exact and preserves unavailable tools",
+          "[memory][persona][tool][registry][recovery]") {
+  runtime::ToolRegistry registry;
+  REQUIRE(runtime::register_memory_tool(
+      registry,
+      runtime::MemoryToolConfiguration{true, true, true, std::nullopt, {}}));
+  REQUIRE(registry.declare_unavailable_tool(
+      "shell", runtime::ToolUnavailableReason::shell_unimplemented,
+      runtime::ToolCategory::process));
+  auto snapshot = registry.snapshot();
+  REQUIRE(snapshot);
+  REQUIRE(snapshot->find_unavailable("shell") != nullptr);
+
+  const auto reviewer = id<domain::PersonaId>("persona:reviewer-exact");
+  const runtime::MemoryToolConfiguration bound_configuration{
+      true, true, true, reviewer, {}};
+  auto bound = runtime::bind_memory_tool(*snapshot, bound_configuration);
+  REQUIRE(bound);
+  REQUIRE(bound->find_unavailable("shell") != nullptr);
+  const auto* registration = bound->find("propose_memory");
+  REQUIRE(registration != nullptr);
+  const runtime::ToolExecutorContract current_contract{
+      "aiforge.runtime.propose_memory", "2"};
+  REQUIRE(registration->executor_contract == current_contract);
+  const domain::StructuredDataBlock persona_arguments{
+      "application/json", proposal_arguments("persona", "workflow")};
+  REQUIRE(registration->executor->validate(persona_arguments));
+
+  auto legacy_registration = *snapshot->find("propose_memory");
+  legacy_registration.declaration.description =
+      "Propose a bounded global or project memory for runtime review. This "
+      "proposal grants no authority and may be rejected by policy.";
+  legacy_registration.executor_contract =
+      runtime::ToolExecutorContract{"aiforge.runtime.propose_memory", "1"};
+  const auto legacy_digest =
+      runtime::tool_registration_digest(legacy_registration);
+  REQUIRE(legacy_digest);
+  auto legacy =
+      runtime::bind_memory_tool(*snapshot, bound_configuration, *legacy_digest);
+  REQUIRE(legacy);
+  registration = legacy->find("propose_memory");
+  REQUIRE(registration != nullptr);
+  const runtime::ToolExecutorContract legacy_contract{
+      "aiforge.runtime.propose_memory", "1"};
+  REQUIRE(registration->executor_contract == legacy_contract);
+  REQUIRE_FALSE(registration->executor->validate(persona_arguments));
+  REQUIRE(legacy->find_unavailable("shell") != nullptr);
+
+  REQUIRE_FALSE(runtime::bind_memory_tool(*snapshot, bound_configuration,
+                                          "sha256:" + std::string(64, 'f')));
 }
 
 TEST_CASE("memory settings have conservative bounded defaults",
@@ -200,6 +266,7 @@ TEST_CASE("memory settings have conservative bounded defaults",
   REQUIRE(settings);
   REQUIRE(settings->global_capture == domain::MemoryCaptureMode::off);
   REQUIRE(settings->project_capture == domain::MemoryCaptureMode::review);
+  REQUIRE(settings->persona_capture == domain::MemoryCaptureMode::review);
   REQUIRE(settings->context_tokens == 2048);
 
   const auto mutable_entry = [&](const std::string_view key) {
@@ -213,10 +280,123 @@ TEST_CASE("memory settings have conservative bounded defaults",
   global->value = std::string{"unbounded"};
   REQUIRE_FALSE(runtime::resolve_memory_settings(*resolved));
   global->value = std::string{"off"};
+  auto* persona = mutable_entry("memory.persona.capture");
+  REQUIRE(persona != nullptr);
+  persona->value = std::string{"inherit"};
+  REQUIRE_FALSE(runtime::resolve_memory_settings(*resolved));
+  persona->value = std::string{"review"};
   auto* tokens = mutable_entry("memory.context.max_tokens");
   REQUIRE(tokens != nullptr);
   tokens->value = std::uint64_t{};
   REQUIRE_FALSE(runtime::resolve_memory_settings(*resolved));
+}
+
+TEST_CASE("persona memories stay isolated in one shared evidence budget",
+          "[memory][persona][context][ordering][authority]") {
+  Fixture fixture;
+  const auto reviewer = id<domain::PersonaId>("persona:reviewer");
+  const auto other = id<domain::PersonaId>("persona:other");
+  const runtime::MemorySettings settings{
+      domain::MemoryCaptureMode::review, domain::MemoryCaptureMode::review,
+      domain::MemoryCaptureMode::review, 2048};
+  const auto capture_and_accept =
+      [&](const std::string& suffix, const std::string_view scope,
+          const std::string_view content, domain::MemoryOwner owner,
+          std::optional<domain::PersonaId> producing_persona) {
+        const auto source_session =
+            id<domain::SessionId>("owner-source-" + suffix);
+        REQUIRE(fixture.store->create_session(
+            {source_session,
+             domain::EventTimestamp{std::chrono::milliseconds{3000}}}));
+        auto events = source_events(
+            id<domain::InvocationId>("owner-invocation-" + suffix),
+            proposal_arguments(scope, "workflow", content, content),
+            std::string{content}, std::move(producing_persona));
+        REQUIRE(fixture.store->append_events(source_session, events));
+        REQUIRE(fixture.controller->capture_committed(
+                    source_session, events, settings, fixture.repository,
+                    "test-runtime") == 1);
+        const runtime::MemoryMutationTarget target{std::move(owner)};
+        auto state = fixture.controller->inspect(target);
+        REQUIRE(state);
+        REQUIRE(state->proposals.size() == 1);
+        const auto proposal = state->proposals.front().projected;
+        REQUIRE(fixture.controller->accept(
+            {target, proposal.proposal.proposal_id, proposal.proposal_event_id,
+             std::nullopt, std::nullopt, std::nullopt}));
+      };
+
+  capture_and_accept("global", "global", "Prefer tabs",
+                     domain::MemoryOwner::global(), std::nullopt);
+  capture_and_accept("project", "project", "Follow repository formatting",
+                     domain::MemoryOwner::repository(fixture.repository),
+                     std::nullopt);
+  capture_and_accept("persona", "persona", "Prefer spaces",
+                     domain::MemoryOwner::persona(reviewer), reviewer);
+
+  auto records =
+      fixture.controller->current_for_context(fixture.repository, reviewer);
+  REQUIRE(records);
+  REQUIRE(records->size() == 3);
+  REQUIRE((*records)[0].projected.record.owner.kind ==
+          domain::MemoryOwnerKind::persona);
+  REQUIRE((*records)[1].projected.record.owner.kind ==
+          domain::MemoryOwnerKind::repository);
+  REQUIRE((*records)[2].projected.record.owner.kind ==
+          domain::MemoryOwnerKind::global);
+  REQUIRE((*records)[0].projected.record.content == "Prefer spaces");
+  REQUIRE((*records)[2].projected.record.content == "Prefer tabs");
+
+  auto context = runtime::select_memory_context(
+      *fixture.controller, {fixture.repository, reviewer, 2048, 4096});
+  REQUIRE(context);
+  REQUIRE(context->size() == 3);
+  for (const auto& entry : *context) {
+    CHECK(entry.kind == domain::ContextContentKind::evidence);
+    CHECK(entry.message.role == domain::Role::evidence);
+    CHECK(entry.message.tool_calls.empty());
+    CHECK_FALSE(entry.message.invocation_id);
+  }
+  REQUIRE(std::get<domain::TextBlock>((*context)[0].message.content.front())
+              .text.starts_with("Saved persona workflow:"));
+
+  const auto persona_tokens = context->front().estimated_tokens;
+  context = runtime::select_memory_context(
+      *fixture.controller,
+      {fixture.repository, reviewer, persona_tokens, 4096});
+  REQUIRE(context);
+  REQUIRE(context->size() == 1);
+  REQUIRE(std::get<domain::TextBlock>(context->front().message.content.front())
+              .text.starts_with("Saved persona workflow:"));
+
+  context = runtime::select_memory_context(
+      *fixture.controller, {fixture.repository, other, 2048, 4096});
+  REQUIRE(context);
+  REQUIRE(context->size() == 2);
+  CHECK(std::ranges::none_of(*context, [](const auto& entry) {
+    return std::get<domain::TextBlock>(entry.message.content.front())
+        .text.contains("Saved persona");
+  }));
+  context = runtime::select_memory_context(
+      *fixture.controller, {fixture.repository, std::nullopt, 2048, 4096});
+  REQUIRE(context);
+  REQUIRE(context->size() == 2);
+
+  const auto inactive_session = id<domain::SessionId>("inactive-persona");
+  REQUIRE(fixture.store->create_session(
+      {inactive_session,
+       domain::EventTimestamp{std::chrono::milliseconds{4000}}}));
+  auto inactive =
+      source_events(id<domain::InvocationId>("inactive-persona-invocation"),
+                    proposal_arguments("persona", "workflow", "must not bind",
+                                       "must not bind"),
+                    "must not bind");
+  REQUIRE(fixture.store->append_events(inactive_session, inactive));
+  const auto rejected = fixture.controller->capture_committed(
+      inactive_session, inactive, settings, fixture.repository, "test-runtime");
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code ==
+          runtime::MemoryControllerErrorCode::invalid_source);
 }
 
 TEST_CASE("review memory is journaled accepted selected and expired",
@@ -226,7 +406,8 @@ TEST_CASE("review memory is journaled accepted selected and expired",
   const auto events = source_events(invocation);
   REQUIRE(fixture.store->append_events(fixture.source_session, events));
   const runtime::MemorySettings settings{
-      domain::MemoryCaptureMode::off, domain::MemoryCaptureMode::review, 2048};
+      domain::MemoryCaptureMode::off, domain::MemoryCaptureMode::review,
+      domain::MemoryCaptureMode::review, 2048};
 
   auto captured = fixture.controller->capture_committed(
       fixture.source_session, events, settings, fixture.repository, "0.46.0");
@@ -250,8 +431,8 @@ TEST_CASE("review memory is journaled accepted selected and expired",
   REQUIRE(listed->size() == 1);
   REQUIRE(listed->front().session_id == fixture.source_session);
 
-  const runtime::MemoryMutationTarget target{domain::MemoryScope::project,
-                                             fixture.repository};
+  const runtime::MemoryMutationTarget target{
+      domain::MemoryOwner::repository(fixture.repository)};
   auto state = fixture.controller->inspect(target);
   REQUIRE(state);
   REQUIRE(state->proposals.size() == 1);
@@ -271,7 +452,7 @@ TEST_CASE("review memory is journaled accepted selected and expired",
           domain::ProjectedMemoryRecordState::current);
 
   auto selected = runtime::select_memory_context(
-      *fixture.controller, {fixture.repository, 2048, 4096});
+      *fixture.controller, {fixture.repository, std::nullopt, 2048, 4096});
   const auto selected_error =
       selected ? std::string{} : selected.error().message;
   INFO(selected_error);
@@ -326,8 +507,8 @@ TEST_CASE("review memory is journaled accepted selected and expired",
   REQUIRE(fixture.controller->expire({target, record.record.record_id,
                                       record.record_event_id,
                                       "no longer applies"}));
-  selected = runtime::select_memory_context(*fixture.controller,
-                                            {fixture.repository, 2048, 4096});
+  selected = runtime::select_memory_context(
+      *fixture.controller, {fixture.repository, std::nullopt, 2048, 4096});
   REQUIRE(selected);
   REQUIRE(selected->empty());
 
@@ -355,12 +536,12 @@ TEST_CASE("auto policy accepts direct preferences and rejects reusable facts",
       fixture.store->append_events(fixture.source_session, preference_events));
   const runtime::MemorySettings automatic{domain::MemoryCaptureMode::automatic,
                                           domain::MemoryCaptureMode::automatic,
+                                          domain::MemoryCaptureMode::automatic,
                                           2048};
   REQUIRE(fixture.controller->capture_committed(
               fixture.source_session, preference_events, automatic,
               fixture.repository, "0.46.0") == 1);
-  auto global =
-      fixture.controller->inspect({domain::MemoryScope::global, std::nullopt});
+  auto global = fixture.controller->inspect({domain::MemoryOwner::global()});
   REQUIRE(global);
   REQUIRE(global->records.size() == 1);
   REQUIRE(global->records.front().projected.state ==
@@ -379,8 +560,7 @@ TEST_CASE("auto policy accepts direct preferences and rejects reusable facts",
   REQUIRE(fixture.controller->capture_committed(second_session, fact_events,
                                                 automatic, fixture.repository,
                                                 "0.46.0") == 1);
-  global =
-      fixture.controller->inspect({domain::MemoryScope::global, std::nullopt});
+  global = fixture.controller->inspect({domain::MemoryOwner::global()});
   REQUIRE(global);
   REQUIRE(global->records.size() == 1);
   REQUIRE(global->proposals.size() == 2);
@@ -395,12 +575,13 @@ TEST_CASE("unavailable source history stays visible but leaves context",
       source_events(id<domain::InvocationId>("unavailable-invocation"));
   REQUIRE(fixture.store->append_events(fixture.source_session, events));
   const runtime::MemorySettings settings{
-      domain::MemoryCaptureMode::off, domain::MemoryCaptureMode::review, 2048};
+      domain::MemoryCaptureMode::off, domain::MemoryCaptureMode::review,
+      domain::MemoryCaptureMode::review, 2048};
   REQUIRE(fixture.controller->capture_committed(fixture.source_session, events,
                                                 settings, fixture.repository,
                                                 "0.46.0") == 1);
-  const runtime::MemoryMutationTarget target{domain::MemoryScope::project,
-                                             fixture.repository};
+  const runtime::MemoryMutationTarget target{
+      domain::MemoryOwner::repository(fixture.repository)};
   auto state = fixture.controller->inspect(target);
   REQUIRE(state);
   const auto proposal = state->proposals.front().projected;
@@ -417,7 +598,7 @@ TEST_CASE("unavailable source history stays visible but leaves context",
   REQUIRE(state->records.size() == 1);
   REQUIRE_FALSE(state->records.front().source_available);
   auto selected = runtime::select_memory_context(
-      *fixture.controller, {fixture.repository, 2048, 4096});
+      *fixture.controller, {fixture.repository, std::nullopt, 2048, 4096});
   REQUIRE(selected);
   REQUIRE(selected->empty());
 }
@@ -435,8 +616,7 @@ TEST_CASE("unknown future memory kinds replay but do not enter context",
   const domain::MemoryProposal proposal{
       proposal_id,
       record_id,
-      domain::MemoryScope::global,
-      std::nullopt,
+      domain::MemoryOwner::global(),
       domain::MemoryKind::unknown,
       "Future memory content",
       "Preserve a future schema value",
@@ -450,7 +630,7 @@ TEST_CASE("unknown future memory kinds replay but do not enter context",
       {}};
   auto journal = fixture.store->open_or_create_memory_journal(
       {id<domain::SessionId>("future-memory-journal"),
-       domain::MemoryScope::global, std::nullopt,
+       domain::MemoryOwner::global(),
        domain::EventTimestamp{std::chrono::milliseconds{1500}}});
   REQUIRE(journal);
   const std::vector<domain::RunEvent> future_events{
@@ -463,21 +643,20 @@ TEST_CASE("unknown future memory kinds replay but do not enter context",
                  "future kind requires review", proposal_event_id}}),
       event(3, "future-accepted",
             domain::MemoryAccepted{
-                {{record_id, proposal_id, domain::MemoryScope::global,
-                  std::nullopt, domain::MemoryKind::unknown, proposal.content,
+                {{record_id, proposal_id, domain::MemoryOwner::global(),
+                  domain::MemoryKind::unknown, proposal.content,
                   proposal.rationale, proposal.source, proposal.producer},
                  domain::MemoryDecisionSource::user,
                  proposal_event_id}})};
   REQUIRE(fixture.store->append_events(journal->session_id, future_events));
 
-  auto state =
-      fixture.controller->inspect({domain::MemoryScope::global, std::nullopt});
+  auto state = fixture.controller->inspect({domain::MemoryOwner::global()});
   REQUIRE(state);
   REQUIRE(state->records.size() == 1);
   REQUIRE(state->records.front().projected.record.kind ==
           domain::MemoryKind::unknown);
-  auto selected = runtime::select_memory_context(*fixture.controller,
-                                                 {std::nullopt, 2048, 4096});
+  auto selected = runtime::select_memory_context(
+      *fixture.controller, {std::nullopt, std::nullopt, 2048, 4096});
   REQUIRE(selected);
   REQUIRE(selected->empty());
 }

@@ -108,7 +108,9 @@ auto PersonaEditorDialog::set_submission(PersonaEditorSubmission submission,
       [](const auto& request) {
         using Request = std::decay_t<decltype(request)>;
         if constexpr (std::same_as<Request, persona::PersonaCreate>) {
-          return "Create persona " + request.draft.name;
+          return std::string{request.rebind_persona_id ? "Rebind persona "
+                                                       : "Create persona "} +
+                 request.draft.name;
         } else {
           return "Edit persona " + request.expected.name;
         }
@@ -289,10 +291,24 @@ auto PersonaEditorDialog::update_body() -> void {
     body = "Preview is unavailable.";
   } else {
     const auto& reference = m_preview->reference;
+    const auto identity = std::visit(
+        [&](const auto& request) {
+          using Request = std::decay_t<decltype(request)>;
+          if constexpr (std::same_as<Request, persona::PersonaCreate>) {
+            return request.rebind_persona_id
+                       ? "Rebind: " +
+                             std::string{request.rebind_persona_id->value()}
+                       : std::string{"Identity: generated on save"};
+          } else {
+            return "Identity: " +
+                   std::string{request.expected.persona_id.value()};
+          }
+        },
+        m_reviewed_submission);
     body = std::format(
-        "Name: {}\nSource: {}\nBytes: {} / {}\nSHA-256: {}\nSelected: "
+        "Name: {}\n{}\nSource: {}\nBytes: {} / {}\nSHA-256: {}\nSelected: "
         "{}\nSave performs one digest-checked write; Back returns to editing.",
-        reference.name, reference.source_location,
+        reference.name, identity, reference.source_location,
         reference.content_digest.byte_size,
         request_limits(m_reviewed_submission).maximum_file_bytes,
         reference.content_digest.value, m_selected ? "yes" : "no");

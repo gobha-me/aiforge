@@ -1,6 +1,7 @@
 #include <aiforge/runtime/tool_policy.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
 
+#include <aiforge/detail/sha256.hpp>
 #include <aiforge/detail/utf8_text.hpp>
 
 #include <algorithm>
@@ -26,6 +27,40 @@ constexpr std::size_t kMaximumExecutorContractBytes{128};
 constexpr std::array kToolCategories{
     ToolCategory::interaction, ToolCategory::memory, ToolCategory::repository,
     ToolCategory::process,     ToolCategory::media,  ToolCategory::other};
+
+auto append_registration_field(detail::Sha256& digest,
+                               const std::string_view value) -> void {
+  std::array<std::byte, 8> length{};
+  const auto size = static_cast<std::uint64_t>(value.size());
+  for (std::size_t index{}; index < length.size(); ++index) {
+    const auto shift = static_cast<unsigned>((length.size() - index - 1U) * 8U);
+    length[index] = static_cast<std::byte>((size >> shift) & 0xffU);
+  }
+  digest.update(length);
+  digest.update(std::as_bytes(std::span{value.data(), value.size()}));
+}
+
+template <typename Value>
+auto append_registration_number(detail::Sha256& digest, const Value value)
+    -> void {
+  append_registration_field(digest, std::to_string(value));
+}
+
+[[nodiscard]] auto effect_name(const domain::Effect effect) noexcept
+    -> std::string_view {
+  switch (effect) {
+    case domain::Effect::read: return "read";
+    case domain::Effect::write: return "write";
+    case domain::Effect::remove: return "remove";
+    case domain::Effect::execute: return "execute";
+    case domain::Effect::network: return "network";
+    case domain::Effect::communicate: return "communicate";
+    case domain::Effect::spend: return "spend";
+    case domain::Effect::change_infrastructure: return "change_infrastructure";
+    case domain::Effect::change_privileges: return "change_privileges";
+  }
+  return {};
+}
 
 [[nodiscard]] auto has_control_character(const std::string_view value) -> bool {
   return std::ranges::any_of(value, [](const unsigned char character) {
@@ -243,6 +278,33 @@ auto all_tool_categories() noexcept -> std::span<const ToolCategory> {
   return kToolCategories;
 }
 
+auto tool_registration_digest(const RegisteredTool& tool)
+    -> std::optional<std::string> {
+  if (!tool.executor_contract) return std::nullopt;
+  detail::Sha256 digest;
+  append_registration_field(digest, "aiforge.tool-registration.v1");
+  append_registration_field(digest, tool.declaration.name);
+  append_registration_field(digest, tool.declaration.description);
+  append_registration_field(digest, tool.declaration.input_schema.media_type);
+  append_registration_field(digest, tool.declaration.input_schema.data);
+  append_registration_number(digest, tool.declaration.effects.size());
+  for (const auto effect : tool.declaration.effects) {
+    append_registration_field(digest, effect_name(effect));
+  }
+  append_registration_number(digest, tool.declaration.capability_scopes.size());
+  for (const auto& scope : tool.declaration.capability_scopes) {
+    append_registration_field(digest, effect_name(scope.effect));
+    append_registration_field(digest, scope.kind);
+    append_registration_field(digest, scope.value);
+  }
+  append_registration_number(digest, tool.limits.output_bytes);
+  append_registration_number(digest, tool.limits.progress_events);
+  append_registration_number(digest, tool.limits.timeout.count());
+  append_registration_field(digest, tool.executor_contract->identity);
+  append_registration_field(digest, tool.executor_contract->version);
+  return "sha256:" + digest.finish();
+}
+
 auto tool_unavailable_reason_text(const ToolUnavailableReason reason) noexcept
     -> std::string_view {
   switch (reason) {
@@ -340,6 +402,44 @@ auto ToolRegistrySnapshot::subset(const std::span<const std::string> names)
     return std::unexpected(
         ToolRegistryError{ToolRegistryErrorCode::internal_failure,
                           "tool subset selection failed internally"});
+  }
+}
+
+auto ToolRegistrySnapshot::replace(RegisteredTool replacement) const
+    -> std::expected<ToolRegistrySnapshot, ToolRegistryError> {
+  try {
+    if (!replacement.executor) {
+      return std::unexpected(
+          ToolRegistryError{ToolRegistryErrorCode::missing_executor,
+                            "replacement tool requires an executor"});
+    }
+    if (auto checked = valid_declaration(replacement.declaration); !checked) {
+      return std::unexpected(std::move(checked.error()));
+    }
+    if (!valid_limits(replacement.limits) ||
+        (replacement.executor_contract &&
+         !valid_executor_contract(*replacement.executor_contract)) ||
+        !valid_category(replacement.category)) {
+      return invalid("replacement tool registration is invalid");
+    }
+    const auto found = std::ranges::find(
+        m_tools, replacement.declaration.name, [](const auto& tool) {
+          return std::string_view{tool.declaration.name};
+        });
+    if (found == m_tools.end()) {
+      return invalid("replacement tool is not registered");
+    }
+    auto tools = m_tools;
+    auto declarations = m_declarations;
+    const auto index = static_cast<std::size_t>(found - m_tools.begin());
+    tools[index] = std::move(replacement);
+    declarations[index] = tools[index].declaration;
+    return ToolRegistrySnapshot{std::move(tools), std::move(declarations),
+                                m_unavailable_tools};
+  } catch (...) {
+    return std::unexpected(
+        ToolRegistryError{ToolRegistryErrorCode::internal_failure,
+                          "tool replacement failed internally"});
   }
 }
 

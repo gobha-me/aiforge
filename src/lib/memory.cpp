@@ -46,13 +46,6 @@ namespace {
   return bearer != std::string::npos && lower.size() - bearer >= 16;
 }
 
-[[nodiscard]] auto valid_scope(const MemoryScope scope,
-                               const std::optional<RepositoryId>& repository)
-    -> bool {
-  return (scope == MemoryScope::global && !repository) ||
-         (scope == MemoryScope::project && repository);
-}
-
 [[nodiscard]] auto valid_producer(const MemoryProducer& producer) -> bool {
   return !producer.runtime_name.empty() &&
          producer.runtime_name.size() <= 128 &&
@@ -74,6 +67,27 @@ namespace {
 
 } // namespace
 
+auto MemoryOwner::global() -> MemoryOwner {
+  return {};
+}
+
+auto MemoryOwner::repository(RepositoryId repository_id) -> MemoryOwner {
+  return {MemoryOwnerKind::repository, std::move(repository_id), std::nullopt};
+}
+
+auto MemoryOwner::persona(PersonaId persona_id) -> MemoryOwner {
+  return {MemoryOwnerKind::persona, std::nullopt, std::move(persona_id)};
+}
+
+auto validate_memory_owner(const MemoryOwner& owner) noexcept -> bool {
+  return (owner.kind == MemoryOwnerKind::global && !owner.repository_id &&
+          !owner.persona_id) ||
+         (owner.kind == MemoryOwnerKind::repository && owner.repository_id &&
+          !owner.persona_id) ||
+         (owner.kind == MemoryOwnerKind::persona && !owner.repository_id &&
+          owner.persona_id);
+}
+
 auto memory_text_is_safe(const std::string_view value) -> bool {
   if (value.empty()) return false;
   return std::ranges::none_of(value, [](const unsigned char character) {
@@ -93,9 +107,9 @@ auto validate_memory_proposal(const MemoryProposal& proposal,
     return failure(MemoryErrorCode::invalid_limits,
                    "memory limits must be positive");
   }
-  if (!valid_scope(proposal.scope, proposal.repository_id)) {
+  if (!validate_memory_owner(proposal.owner)) {
     return failure(MemoryErrorCode::wrong_scope,
-                   "memory scope and repository identity disagree",
+                   "memory proposal must have exactly one valid owner",
                    proposal.proposal_id, proposal.record_id);
   }
   if (proposal.content.size() > limits.maximum_content_bytes ||
@@ -135,12 +149,17 @@ auto validate_memory_proposal(const MemoryProposal& proposal,
 auto validate_memory_record(const MemoryRecord& record,
                             const MemoryLimits& limits)
     -> std::expected<void, MemoryError> {
-  MemoryProposal proposal{record.proposal_id, record.record_id,
-                          record.scope,       record.repository_id,
-                          record.kind,        record.content,
-                          record.rationale,   "accepted-memory-source",
-                          record.source,      record.producer,
-                          std::nullopt,       {}};
+  MemoryProposal proposal{record.proposal_id,
+                          record.record_id,
+                          record.owner,
+                          record.kind,
+                          record.content,
+                          record.rationale,
+                          "accepted-memory-source",
+                          record.source,
+                          record.producer,
+                          std::nullopt,
+                          {}};
   return validate_memory_proposal(proposal, limits);
 }
 

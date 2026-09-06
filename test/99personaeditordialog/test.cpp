@@ -18,10 +18,13 @@ namespace {
 
 using namespace aiforge;
 
-auto create_request(std::string text = {}, const std::size_t maximum = 64)
-    -> persona::PersonaCreate {
+auto create_request(std::string text = {}, const std::size_t maximum = 64,
+                    std::optional<domain::PersonaId> rebind_persona_id =
+                        std::nullopt) -> persona::PersonaCreate {
   persona::PersonaCreate request{
-      {"Reviewer", persona::PersonaFileKind::markdown, std::move(text)}, {}};
+      {"Reviewer", persona::PersonaFileKind::markdown, std::move(text)},
+      {},
+      std::move(rebind_persona_id)};
   request.limits.maximum_file_bytes = maximum;
   return request;
 }
@@ -112,6 +115,7 @@ TEST_CASE("persona editor reviews bounded multiline content before saving",
   dialog.draw(screen);
   const auto preview = screen_text(screen);
   CHECK(preview.find("Name: Reviewer") != std::string::npos);
+  CHECK(preview.find("Identity: generated on save") != std::string::npos);
   CHECK(preview.find("Source: personas/Reviewer.md") != std::string::npos);
   CHECK(preview.find("Bytes: 7 / 64") != std::string::npos);
   CHECK(preview.find("SHA-256:") != std::string::npos);
@@ -124,6 +128,35 @@ TEST_CASE("persona editor reviews bounded multiline content before saving",
   REQUIRE(result->receipt);
   CHECK_FALSE(result->effect_may_have_applied);
   CHECK(result->receipt->resulting == dialog.preview()->reference);
+}
+
+TEST_CASE("persona editor requires explicit preview for dormant ID rebind",
+          "[adapter][persona][dialog][identity]") {
+  const auto dormant =
+      domain::PersonaId::from("persona:dormant-reviewed").value();
+  adapters::PersonaEditorDialog dialog;
+  dialog.set_submission(create_request("restored", 64, dormant), false);
+  std::optional<adapters::PersonaEditorSubmission> saved;
+  dialog.on_save([&](adapters::PersonaEditorSubmission submission) {
+    saved = submission;
+    return receipt_for(submission);
+  });
+
+  termforge::Screen screen{100, 30};
+  dialog.draw(screen);
+  CHECK(screen_text(screen).find("Rebind persona Reviewer") !=
+        std::string::npos);
+  REQUIRE(dialog.on_event(key(termforge::Key::Tab)));
+  REQUIRE(dialog.on_event(key(termforge::Key::Enter)));
+  screen.clear();
+  dialog.draw(screen);
+  CHECK(screen_text(screen).find("Rebind: persona:dormant-reviewed") !=
+        std::string::npos);
+  REQUIRE_FALSE(saved);
+  REQUIRE(dialog.on_event(key(termforge::Key::Enter)));
+  REQUIRE(saved);
+  REQUIRE(std::get<persona::PersonaCreate>(*saved).rebind_persona_id ==
+          dormant);
 }
 
 TEST_CASE("persona editor rejects invalid input before Composer mutation",

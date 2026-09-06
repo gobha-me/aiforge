@@ -214,9 +214,26 @@ auto warning(std::ostream& stream, const std::string_view message) -> bool {
   return std::format("{}.{}.{}", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
 }
 
-[[nodiscard]] auto memory_scope_text(const domain::MemoryScope scope)
+[[nodiscard]] auto memory_owner_text(const domain::MemoryOwnerKind kind)
     -> std::string_view {
-  return scope == domain::MemoryScope::project ? "project" : "global";
+  switch (kind) {
+    case domain::MemoryOwnerKind::global: return "global";
+    case domain::MemoryOwnerKind::repository: return "project";
+    case domain::MemoryOwnerKind::persona: return "persona";
+    case domain::MemoryOwnerKind::unknown: return "unknown";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] auto memory_owner_label(const domain::MemoryOwner& owner)
+    -> std::string {
+  std::string label{memory_owner_text(owner.kind)};
+  if (owner.persona_id) {
+    label += "[" + std::string{owner.persona_id->value()} + "]";
+  } else if (owner.repository_id) {
+    label += "[" + std::string{owner.repository_id->value()} + "]";
+  }
+  return label;
 }
 
 [[nodiscard]] auto memory_kind_text(const domain::MemoryKind kind)
@@ -1366,8 +1383,9 @@ class ChatAppImpl final : public InteractiveChatApp {
         const bool selected =
             state.selected &&
             state.selected->persona_id == summary.reference.persona_id;
-        auto line = std::format("{}{} | {}", selected ? "* " : "  ",
+        auto line = std::format("{}{} | ID {} | {}", selected ? "* " : "  ",
                                 summary.reference.name,
+                                summary.reference.persona_id.value(),
                                 summary.reference.source_location);
         if (!summary.description.empty()) line += " | " + summary.description;
         lines.push_back(std::move(line));
@@ -1394,7 +1412,8 @@ class ChatAppImpl final : public InteractiveChatApp {
                                                  surfaces::ChatSessionError> {
                 using Request = std::decay_t<decltype(value)>;
                 if constexpr (std::same_as<Request, persona::PersonaCreate>) {
-                  return m_session->create_persona(std::move(value.draft));
+                  return m_session->create_persona(
+                      std::forward<decltype(value)>(value));
                 } else {
                   return m_session->replace_persona(std::move(value.expected),
                                                     std::move(value.text));
@@ -1437,9 +1456,66 @@ class ChatAppImpl final : public InteractiveChatApp {
         selected ? "Edit the selected persona" : "Edit bounded persona content";
   }
 
-  auto show_persona_create_setup(std::string validation_message = {}) -> void {
+  auto handle_persona_create_setup_result(
+      const bool rebind, std::optional<termforge::ChoiceWizardResult> result)
+      -> void {
+    pop_modal();
+    m_persona_manager_active = false;
+    const auto expected_pages = rebind ? std::size_t{3} : std::size_t{2};
+    if (!result) {
+      m_status = "Persona creation cancelled";
+      return;
+    }
+    auto pages = std::move(result).value().pages;
+    if (pages.size() != expected_pages) {
+      m_status = "Persona creation cancelled";
+      return;
+    }
+    auto name = std::move(pages[0].other).value_or(std::string{});
+    if (name.empty() || pages[1].selected_indices.size() != 1) {
+      m_status = "Persona creation cancelled";
+      return;
+    }
+    const auto kind = pages[1].selected_indices.front();
+    if (kind > 1U) {
+      m_status = "Persona creation dialog returned an invalid file type";
+      return;
+    }
+    std::optional<domain::PersonaId> rebind_persona_id;
+    if (rebind) {
+      auto identity = std::move(pages[2].other).value_or(std::string{});
+      if (identity.empty()) {
+        m_status = "Persona creation cancelled";
+        return;
+      }
+      auto parsed = domain::PersonaId::from(std::move(identity));
+      if (!parsed) {
+        show_persona_create_setup(
+            true, "dormant identity must be an exact valid PersonaId");
+        return;
+      }
+      rebind_persona_id = std::move(*parsed);
+    }
+    persona::PersonaCreate request{{std::move(name),
+                                    kind == 0U
+                                        ? persona::PersonaFileKind::markdown
+                                        : persona::PersonaFileKind::text,
+                                    "validate"},
+                                   m_session->persona_limits(),
+                                   std::move(rebind_persona_id)};
+    auto valid = persona::prepare_persona_create(request);
+    if (!valid) {
+      show_persona_create_setup(rebind, valid.error().message);
+      return;
+    }
+    request.draft.text.clear();
+    show_persona_editor(std::move(request), false);
+  }
+
+  auto show_persona_create_setup(const bool rebind,
+                                 std::string validation_message = {}) -> void {
     termforge::ChoiceWizardPage name;
-    name.title = "Create persona";
+    name.title = rebind ? "Rebind persona" : "Create persona";
     name.text = "Enter a bare name. Names start with an ASCII letter or digit "
                 "and may also contain '_' or '-'.";
     if (!validation_message.empty()) {
@@ -1462,45 +1538,39 @@ class ChatAppImpl final : public InteractiveChatApp {
     kind.choices = {{"Markdown (.md)", "Plain UTF-8 Markdown instructions."},
                     {"Text (.txt)", "Plain UTF-8 text instructions."}};
     kind.selected_indices = {0};
-    if (!m_persona_manager_dialog->set_pages(
-            {std::move(name), std::move(kind)})) {
+    std::vector<termforge::ChoiceWizardPage> pages;
+    pages.push_back(std::move(name));
+    pages.push_back(std::move(kind));
+    if (rebind) {
+      termforge::ChoiceWizardPage identity;
+      identity.title = "Dormant persona identity";
+      identity.text =
+          "Enter the exact immutable PersonaId to rebind. The save preview "
+          "will show it before any write.";
+      identity.mode = termforge::ChoiceMode::Single;
+      identity.minimum_selected = 1;
+      identity.maximum_selected = 1;
+      identity.other_enabled = true;
+      identity.other_label = "PersonaId";
+      identity.other_placeholder = "persona:...";
+      identity.other_selected = true;
+      pages.push_back(std::move(identity));
+    }
+    if (!m_persona_manager_dialog->set_pages(std::move(pages))) {
       m_status = "Persona creation dialog rejected its fields";
       return;
     }
     m_persona_manager_dialog->on_result(
-        [this](std::optional<termforge::ChoiceWizardResult> result) {
-          pop_modal();
-          m_persona_manager_active = false;
-          if (!result || result->pages.size() != 2 || !result->pages[0].other ||
-              result->pages[0].other->empty() ||
-              result->pages[1].selected_indices.size() != 1) {
-            m_status = "Persona creation cancelled";
-            return;
-          }
-          const auto kind = result->pages[1].selected_indices.front();
-          if (kind > 1U) {
-            m_status = "Persona creation dialog returned an invalid file type";
-            return;
-          }
-          persona::PersonaCreate request{
-              {std::move(*result->pages[0].other),
-               kind == 0U ? persona::PersonaFileKind::markdown
-                          : persona::PersonaFileKind::text,
-               "validate"},
-              m_session->persona_limits()};
-          auto valid = persona::prepare_persona_create(request);
-          if (!valid) {
-            show_persona_create_setup(valid.error().message);
-            return;
-          }
-          request.draft.text.clear();
-          show_persona_editor(std::move(request), false);
+        [this, rebind](std::optional<termforge::ChoiceWizardResult> result) {
+          handle_persona_create_setup_result(rebind, std::move(result));
         });
     m_persona_manager_active = true;
     push_modal(*m_persona_manager_dialog, {.backdrop = termforge::Backdrop::Dim,
                                            .dismiss_on_click_outside = false});
-    m_status = validation_message.empty() ? "Define the new persona"
-                                          : "Correct the rejected persona name";
+    m_status = validation_message.empty()
+                   ? (rebind ? "Define the explicitly rebound persona"
+                             : "Define the new persona")
+                   : "Correct the rejected persona request";
   }
 
   auto show_persona_manager() -> bool {
@@ -1519,15 +1589,22 @@ class ChatAppImpl final : public InteractiveChatApp {
     }
     termforge::ChoiceWizardPage page;
     page.title = "Manage personas";
-    page.text = "Create a bounded persona or edit one exact existing file. "
-                "Deletion and arbitrary paths are unavailable.";
+    page.text =
+        "Create a bounded persona, explicitly rebind one dormant immutable "
+        "identity, or edit one exact existing file. Deletion and arbitrary "
+        "paths are unavailable.";
     page.mode = termforge::ChoiceMode::Single;
     page.minimum_selected = 1;
     page.maximum_selected = 1;
     page.choices.push_back({"Create new", "Create one .md or .txt persona."});
+    page.choices.push_back(
+        {"Rebind dormant ID",
+         "Explicitly reuse one exact dormant immutable PersonaId."});
     for (const auto& entry : *personas) {
       page.choices.push_back(
-          {entry.reference.name, entry.reference.source_location});
+          {entry.reference.name,
+           "ID " + std::string{entry.reference.persona_id.value()} + " | " +
+               entry.reference.source_location});
     }
     page.selected_indices = {0};
     if (!m_persona_manager_dialog->set_pages({std::move(page)})) {
@@ -1546,15 +1623,19 @@ class ChatAppImpl final : public InteractiveChatApp {
           }
           const auto selected = result->pages.front().selected_indices.front();
           if (selected == 0U) {
-            show_persona_create_setup();
+            show_persona_create_setup(false);
             return;
           }
-          if (selected > personas.size()) {
+          if (selected == 1U) {
+            show_persona_create_setup(true);
+            return;
+          }
+          if (selected > personas.size() + 1U) {
             m_status = "Persona manager returned an invalid choice";
             return;
           }
           auto document =
-              m_session->load_persona(personas[selected - 1].reference.name);
+              m_session->load_persona(personas[selected - 2].reference.name);
           if (!document) {
             m_status =
                 "Persona could not be loaded: " + document.error().message;
@@ -1717,8 +1798,25 @@ class ChatAppImpl final : public InteractiveChatApp {
   [[nodiscard]] auto memory_target(const std::string_view scope)
       -> std::optional<runtime::MemoryMutationTarget> {
     if (scope == "global") {
-      return runtime::MemoryMutationTarget{domain::MemoryScope::global,
-                                           std::nullopt};
+      return runtime::MemoryMutationTarget{domain::MemoryOwner::global()};
+    }
+    if (scope == "persona") {
+      const auto persona = m_session->persona_state();
+      if (!persona.selected) {
+        m_status = "Persona memory is unavailable without an active persona";
+        return std::nullopt;
+      }
+      return runtime::MemoryMutationTarget{
+          domain::MemoryOwner::persona(persona.selected->persona_id)};
+    }
+    if (scope.starts_with("persona:")) {
+      auto persona_id = domain::PersonaId::from(std::string{scope});
+      if (!persona_id) {
+        m_status = "Persona memory identity is invalid";
+        return std::nullopt;
+      }
+      return runtime::MemoryMutationTarget{
+          domain::MemoryOwner::persona(std::move(*persona_id))};
     }
     if (scope != "project") return std::nullopt;
     auto snapshot = repository_snapshot();
@@ -1726,29 +1824,53 @@ class ChatAppImpl final : public InteractiveChatApp {
       m_status = "Project memory is unavailable: " + snapshot.error();
       return std::nullopt;
     }
-    return runtime::MemoryMutationTarget{domain::MemoryScope::project,
-                                         snapshot->root.repository_id};
+    return runtime::MemoryMutationTarget{
+        domain::MemoryOwner::repository(snapshot->root.repository_id)};
   }
 
-  auto show_memory(std::optional<std::string> search = std::nullopt) -> bool {
+  // clang-format off
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Owner-filtered lifecycle rendering keeps every memory state explicit.
+  auto show_memory(std::optional<std::string> search = std::nullopt,
+                   std::optional<runtime::MemoryMutationTarget> filter =
+                       std::nullopt) -> bool {
+    // clang-format on
     std::vector<runtime::MemoryState> states;
-    auto global =
-        m_session->memory_state({domain::MemoryScope::global, std::nullopt});
-    if (!global) {
-      show_panel("Memory — Proposed | Saved | History",
-                 {"Durable memory is unavailable: " + global.error().message},
-                 "Memory is unavailable for this session");
-      return true;
-    }
-    states.push_back(std::move(*global));
-    if (auto snapshot = repository_snapshot()) {
-      auto project = m_session->memory_state(
-          {domain::MemoryScope::project, snapshot->root.repository_id});
-      if (!project) {
-        m_status = project.error().message;
-        return false;
+    if (filter) {
+      auto state = m_session->memory_state(*filter);
+      if (!state) {
+        show_panel("Memory — Proposed | Saved | History",
+                   {"Durable memory is unavailable: " + state.error().message},
+                   "Memory is unavailable for this owner");
+        return true;
       }
-      states.push_back(std::move(*project));
+      states.push_back(std::move(*state));
+    } else {
+      auto global = m_session->memory_state({domain::MemoryOwner::global()});
+      if (!global) {
+        show_panel("Memory — Proposed | Saved | History",
+                   {"Durable memory is unavailable: " + global.error().message},
+                   "Memory is unavailable for this session");
+        return true;
+      }
+      states.push_back(std::move(*global));
+      if (auto snapshot = repository_snapshot()) {
+        auto project = m_session->memory_state(
+            {domain::MemoryOwner::repository(snapshot->root.repository_id)});
+        if (!project) {
+          m_status = project.error().message;
+          return false;
+        }
+        states.push_back(std::move(*project));
+      }
+      if (const auto persona = m_session->persona_state(); persona.selected) {
+        auto scoped = m_session->memory_state(
+            {domain::MemoryOwner::persona(persona.selected->persona_id)});
+        if (!scoped) {
+          m_status = scoped.error().message;
+          return false;
+        }
+        states.push_back(std::move(*scoped));
+      }
     }
     const auto needle = search ? lower_copy(*search) : std::string{};
     const auto matches = [&](const std::string_view id,
@@ -1769,8 +1891,7 @@ class ChatAppImpl final : public InteractiveChatApp {
           continue;
         }
         auto line = "[" + std::string{value.proposal.proposal_id.value()} +
-                    "] " +
-                    std::string{memory_scope_text(value.proposal.scope)} + "/" +
+                    "] " + memory_owner_label(value.proposal.owner) + "/" +
                     std::string{memory_kind_text(value.proposal.kind)} + " — " +
                     value.proposal.content + " @ " +
                     format_timestamp(value.proposed_at) +
@@ -1791,7 +1912,7 @@ class ChatAppImpl final : public InteractiveChatApp {
           continue;
         }
         auto line = "[" + std::string{value.record.record_id.value()} + "] " +
-                    std::string{memory_scope_text(value.record.scope)} + "/" +
+                    memory_owner_label(value.record.owner) + "/" +
                     std::string{memory_kind_text(value.record.kind)} + " — " +
                     value.record.content + " @ " +
                     format_timestamp(
@@ -1824,7 +1945,10 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
+  // clang-format off
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit owner and lifecycle command guards preserve fail-closed mutations.
   auto manage_memory(const std::optional<std::string>& arguments) -> bool {
+    // clang-format on
     if (!arguments || *arguments == "list") return show_memory();
     std::string_view rest{*arguments};
     const auto action = take_word(rest);
@@ -1836,10 +1960,22 @@ class ChatAppImpl final : public InteractiveChatApp {
       }
       return show_memory(std::string{query});
     }
+    if (action == "list") {
+      const auto scope = take_word(rest);
+      if (scope.empty() || !trim_words(rest).empty()) {
+        m_status = "Filtered memory list requires exactly one owner";
+        return false;
+      }
+      auto target = memory_target(scope);
+      if (!target) return false;
+      return show_memory(std::nullopt, std::move(target));
+    }
     const auto scope = take_word(rest);
     auto target = memory_target(scope);
     if (!target) {
-      if (m_status.empty()) m_status = "Memory scope must be global or project";
+      if (m_status.empty()) {
+        m_status = "Memory scope must be global, project, or persona";
+      }
       return false;
     }
     auto state = m_session->memory_state(*target);
@@ -4743,9 +4879,12 @@ auto ProcessInteractiveCommand::execute(Request request,
           memory_settings->global_capture != domain::MemoryCaptureMode::off,
           repository_id && memory_settings->project_capture !=
                                domain::MemoryCaptureMode::off,
+          memory_settings->persona_capture != domain::MemoryCaptureMode::off,
+          std::nullopt,
           {}};
       if (tool_configuration.global_enabled ||
-          tool_configuration.project_enabled) {
+          tool_configuration.project_enabled ||
+          tool_configuration.persona_capable) {
         auto registered =
             runtime::register_memory_tool(tool_registry, tool_configuration);
         if (!registered) {

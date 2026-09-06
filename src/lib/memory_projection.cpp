@@ -21,9 +21,7 @@ namespace {
     -> bool {
   return record.record_id == proposal.record_id &&
          record.proposal_id == proposal.proposal_id &&
-         record.scope == proposal.scope &&
-         record.repository_id == proposal.repository_id &&
-         record.kind == proposal.kind &&
+         record.owner == proposal.owner && record.kind == proposal.kind &&
          (allow_edited_content || record.content == proposal.content) &&
          record.rationale == proposal.rationale &&
          record.source == proposal.source &&

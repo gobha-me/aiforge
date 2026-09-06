@@ -383,9 +383,12 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
           memory_settings->global_capture != domain::MemoryCaptureMode::off,
           repository_id && memory_settings->project_capture !=
                                domain::MemoryCaptureMode::off,
+          memory_settings->persona_capture != domain::MemoryCaptureMode::off,
+          std::nullopt,
           {}};
       if (tool_configuration.global_enabled ||
-          tool_configuration.project_enabled) {
+          tool_configuration.project_enabled ||
+          tool_configuration.persona_capable) {
         auto registered =
             runtime::register_memory_tool(tool_registry, tool_configuration);
         if (!registered) {

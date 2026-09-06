@@ -475,7 +475,8 @@ using ToolTargetValidator = auto (*)(std::string_view) -> bool;
       {"tasks", "tasks", "", "Show session tasks and project backlog.",
        idle_available, tasks_handler},
       {"memory", "memory",
-       "[search <text> | accept|edit|reject|expire|accept-all|reject-all ...]",
+       "[list [global|project|persona|persona:<id>] | search <text> | "
+       "accept|edit|reject|expire|accept-all|reject-all ...]",
        "Inspect and manage proposed, saved, and historical memory.",
        idle_available, memory_handler},
   };

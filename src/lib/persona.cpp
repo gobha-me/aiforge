@@ -31,12 +31,19 @@ namespace {
                              });
 }
 
-[[nodiscard]] auto canonical_name(const std::string_view value) -> std::string {
-  std::string result{value};
-  std::ranges::transform(result, result.begin(), [](const unsigned char ch) {
-    return static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch + ('a' - 'A') : ch);
-  });
-  return result;
+[[nodiscard]] auto valid_identity(const std::string_view value) -> bool {
+  constexpr std::string_view prefix{"persona:"};
+  if (!value.starts_with(prefix) || value.size() <= prefix.size() ||
+      value.size() > domain::PersonaId::max_size) {
+    return false;
+  }
+  return std::ranges::all_of(value.substr(prefix.size()),
+                             [](const unsigned char character) {
+                               return (character >= '0' && character <= '9') ||
+                                      (character >= 'A' && character <= 'Z') ||
+                                      (character >= 'a' && character <= 'z') ||
+                                      character == '-' || character == '_';
+                             });
 }
 
 } // namespace
@@ -47,10 +54,9 @@ auto validate_persona_reference(const PersonaReference& reference)
     return failure(PersonaValidationErrorCode::invalid_name,
                    "persona name is invalid");
   }
-  if (reference.persona_id.value() !=
-      "persona:" + canonical_name(reference.name)) {
+  if (!valid_identity(reference.persona_id.value())) {
     return failure(PersonaValidationErrorCode::invalid_identity,
-                   "persona identity does not match its name");
+                   "persona identity is invalid");
   }
   const auto expected_md = "personas/" + reference.name + ".md";
   const auto expected_txt = "personas/" + reference.name + ".txt";

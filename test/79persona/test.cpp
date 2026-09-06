@@ -52,7 +52,7 @@ auto persona_create(std::string text = "Review carefully.")
 
 } // namespace
 
-TEST_CASE("persona values reject ambiguous identity and malformed content",
+TEST_CASE("persona values accept opaque identity and reject malformed content",
           "[persona][domain][failure]") {
   const auto document = persona_document();
   REQUIRE(domain::validate_persona_document(document));
@@ -61,7 +61,16 @@ TEST_CASE("persona values reject ambiguous identity and malformed content",
   auto wrong_identity = document;
   wrong_identity.reference.persona_id =
       make_id<domain::PersonaId>("persona:someone-else");
+  REQUIRE(domain::validate_persona_document(wrong_identity));
+  wrong_identity.reference.persona_id =
+      make_id<domain::PersonaId>("not-a-persona");
   REQUIRE_FALSE(domain::validate_persona_document(wrong_identity));
+
+  for (const auto* malformed :
+       {"persona:", "persona:bad/value", "persona:bad value"}) {
+    wrong_identity.reference.persona_id = make_id<domain::PersonaId>(malformed);
+    REQUIRE_FALSE(domain::validate_persona_document(wrong_identity));
+  }
 
   auto escaped = document;
   escaped.reference.source_location = "../Reviewer.md";
@@ -228,14 +237,43 @@ TEST_CASE("persona write preparation rejects malformed input before mutation",
   const auto valid = persona::prepare_persona_create(persona_create());
   REQUIRE(valid);
   auto malformed_reference = valid->reference;
-  malformed_reference.persona_id =
-      make_id<domain::PersonaId>("persona:someone-else");
+  malformed_reference.persona_id = make_id<domain::PersonaId>("not-a-persona");
   const auto replacement = persona::prepare_persona_replace(
       {std::move(malformed_reference), "replacement", {}});
   REQUIRE_FALSE(replacement);
   REQUIRE(replacement.error().code ==
           persona::PersonaEditorErrorCode::invalid_request);
   REQUIRE_FALSE(replacement.error().may_have_applied);
+}
+
+TEST_CASE("persona creation receipts expose generated and reviewed rebind IDs",
+          "[persona][editor][identity]") {
+  const auto generated =
+      make_id<domain::PersonaId>("persona:0123456789abcdef0123456789abcdef");
+  const auto create = persona_create();
+  auto prepared = persona::prepare_persona_create(create);
+  REQUIRE(prepared);
+  auto resulting = prepared->reference;
+  resulting.persona_id = generated;
+  REQUIRE(persona::validate_persona_write_receipt(create,
+                                                  {std::nullopt, resulting}));
+
+  auto rebind = create;
+  rebind.rebind_persona_id =
+      make_id<domain::PersonaId>("persona:dormant-reviewed");
+  prepared = persona::prepare_persona_create(rebind);
+  REQUIRE(prepared);
+  REQUIRE(prepared->reference.persona_id == *rebind.rebind_persona_id);
+  REQUIRE(persona::validate_persona_write_receipt(
+      rebind, {std::nullopt, prepared->reference}));
+
+  resulting = prepared->reference;
+  resulting.persona_id = generated;
+  const auto substituted = persona::validate_persona_write_receipt(
+      rebind, {std::nullopt, resulting});
+  REQUIRE_FALSE(substituted);
+  REQUIRE(substituted.error().code ==
+          persona::PersonaEditorErrorCode::internal_failure);
 }
 
 TEST_CASE("persona receipt validation marks uncertain postconditions",

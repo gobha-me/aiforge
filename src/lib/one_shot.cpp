@@ -2,6 +2,7 @@
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/presentation/text.hpp>
 #include <aiforge/runtime/context_builder.hpp>
+#include <aiforge/runtime/memory_tool.hpp>
 #include <aiforge/runtime/persona.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/runtime/user_global_instructions.hpp>
@@ -671,6 +672,75 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       session_id = sessions->front().session_id;
     }
 
+    domain::SessionEventLog recovery_history{session_id};
+    if (durable &&
+        request.session_mode != OneShotRequest::SessionMode::create) {
+      auto replayed = m_session_store->replay_events(session_id, stop_token);
+      if (!replayed) {
+        return one_shot_error(OneShotErrorCode::run_failed,
+                              "durable session could not be opened");
+      }
+      for (auto& event : *replayed) {
+        if (auto appended = recovery_history.append(std::move(event));
+            !appended) {
+          return one_shot_error(OneShotErrorCode::run_failed,
+                                "durable session could not be opened");
+        }
+      }
+    }
+    auto recoverable = runtime::classify_recoverable_run(recovery_history);
+    if (!recoverable) {
+      return one_shot_error(OneShotErrorCode::run_failed,
+                            "durable session could not be opened");
+    }
+    if (*recoverable) {
+      return one_shot_error(OneShotErrorCode::run_failed,
+                            "one-shot cannot resume a recoverable pending run");
+    }
+    auto resolved_persona = resolve_persona(m_persona_source, request.persona,
+                                            recovery_history, stop_token);
+    if (!resolved_persona) {
+      return std::unexpected(std::move(resolved_persona.error()));
+    }
+    const auto selected_persona_id =
+        resolved_persona->document
+            ? std::optional<domain::PersonaId>{resolved_persona->document
+                                                   ->reference.persona_id}
+            : std::nullopt;
+    const auto tool_persona_id = *recoverable
+                                     ? (*recoverable)->attributes.persona_id
+                                     : selected_persona_id;
+    std::optional<std::string> recovered_memory_digest;
+    if (*recoverable && (*recoverable)->provenance) {
+      const auto found = std::ranges::find(
+          (*recoverable)->provenance->tools, std::string_view{"propose_memory"},
+          [](const auto& tool) { return std::string_view{tool.tool_name}; });
+      if (found != (*recoverable)->provenance->tools.end()) {
+        recovered_memory_digest = found->registration_digest;
+      }
+    }
+    auto run_tools = m_dependencies.tools;
+    if (m_dependencies.memory_controller != nullptr &&
+        run_tools.find("propose_memory") != nullptr) {
+      auto bound = runtime::bind_memory_tool(
+          run_tools,
+          {m_dependencies.memory_settings.global_capture !=
+               domain::MemoryCaptureMode::off,
+           m_dependencies.repository_id &&
+               m_dependencies.memory_settings.project_capture !=
+                   domain::MemoryCaptureMode::off,
+           m_dependencies.memory_settings.persona_capture !=
+               domain::MemoryCaptureMode::off,
+           tool_persona_id,
+           {}},
+          std::move(recovered_memory_digest));
+      if (!bound) {
+        return one_shot_error(OneShotErrorCode::run_failed,
+                              bound.error().message);
+      }
+      run_tools = std::move(*bound);
+    }
+
     Wake wake;
     std::unique_ptr<runtime::RunKernel> kernel;
     if (durable) {
@@ -683,8 +753,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
            std::chrono::floor<std::chrono::milliseconds>(
                std::chrono::system_clock::now())},
           *m_session_store, m_backend, &wake, runtime::TimestampSource{},
-          runtime::RunKernelLimits{}, m_dependencies.tools,
-          m_dependencies.tool_policy);
+          runtime::RunKernelLimits{}, run_tools, m_dependencies.tool_policy);
       if (!opened) {
         return one_shot_error(stop_token.stop_requested()
                                   ? OneShotErrorCode::cancelled
@@ -697,8 +766,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
     } else {
       kernel = std::make_unique<runtime::RunKernel>(
           session_id, m_backend, &wake, runtime::TimestampSource{},
-          runtime::RunKernelLimits{}, m_dependencies.tools,
-          m_dependencies.tool_policy);
+          runtime::RunKernelLimits{}, run_tools, m_dependencies.tool_policy);
     }
 
     if (auto applied = apply_requested_spend_ceiling(
@@ -732,11 +800,6 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       }
     }
 
-    auto resolved_persona = resolve_persona(m_persona_source, request.persona,
-                                            kernel->event_log(), stop_token);
-    if (!resolved_persona) {
-      return std::unexpected(std::move(resolved_persona.error()));
-    }
     std::optional<domain::UserGlobalInstructionDocument>
         user_global_instruction;
     if (m_dependencies.user_global_instructions_enabled) {
@@ -799,6 +862,10 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       auto memory = runtime::select_memory_context(
           *m_dependencies.memory_controller,
           {m_dependencies.repository_id,
+           resolved_persona->document
+               ? std::optional<domain::PersonaId>{resolved_persona->document
+                                                      ->reference.persona_id}
+               : std::nullopt,
            m_dependencies.memory_settings.context_tokens, available});
       if (!memory) {
         return one_shot_error(OneShotErrorCode::context_failed,
@@ -888,7 +955,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                                             *assistant_message_id,
                                             request.model_id,
                                             std::move(*context),
-                                            m_dependencies.tools.declarations(),
+                                            run_tools.declarations(),
                                             request.generation_options};
     if (request.provenance) {
       request.provenance->user_global_instruction =
@@ -1029,7 +1096,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
               *run_id,
               {*continuation_inference, *continuation_assistant,
                request.model_id, std::move(*continuation_context),
-               m_dependencies.tools.declarations(), request.generation_options,
+               run_tools.declarations(), request.generation_options,
                std::move(*continuation_state)},
               model->pricing_observation);
           if (!continued &&

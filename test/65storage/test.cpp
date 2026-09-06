@@ -172,6 +172,34 @@ auto backlog_item() -> domain::ProjectBacklogItem {
           domain::ProjectBacklogDecisionSource::user};
 }
 
+auto memory_proposal(domain::MemoryOwner owner,
+                     const std::string_view suffix = "global")
+    -> domain::MemoryProposal {
+  return {
+      make_id<domain::MemoryProposalId>("memory-proposal:" +
+                                        std::string{suffix}),
+      make_id<domain::MemoryRecordId>("memory-record:" + std::string{suffix}),
+      std::move(owner),
+      domain::MemoryKind::workflow,
+      "Run focused tests before broad validation",
+      "This keeps failures local and actionable",
+      "focused tests passed",
+      {make_id<domain::SessionId>("memory-source-session"),
+       make_id<domain::RunId>("memory-source-run"),
+       make_id<domain::InvocationId>("memory-source-invocation"),
+       {make_id<domain::EventId>("memory-source-event")}},
+      {make_id<domain::ModelId>("memory-model"), "test-runtime", "1"},
+      std::nullopt,
+      {}};
+}
+
+auto memory_record(const domain::MemoryProposal& proposal)
+    -> domain::MemoryRecord {
+  return {proposal.record_id, proposal.proposal_id, proposal.owner,
+          proposal.kind,      proposal.content,     proposal.rationale,
+          proposal.source,    proposal.producer};
+}
+
 auto child_run_descriptor() -> domain::ChildRunDescriptor {
   return {make_id<domain::RunId>("run"),
           plan_revision().plan_id,
@@ -357,6 +385,8 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
       domain::MonetaryAmount::create(
           "USD", domain::DecimalAmount::from("1.25").value())
           .value();
+  const auto proposal = memory_proposal(domain::MemoryOwner::global());
+  const auto record = memory_record(proposal);
   return {
       started(),
       domain::RunProvenanceRecorded{run_provenance()},
@@ -523,6 +553,30 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
            domain::ProjectBacklogDecisionSource::policy,
            std::string{"completed by another session"},
            make_id<domain::EventId>("promotion-event")}},
+      domain::MemoryProposed{proposal},
+      domain::MemoryPolicyDecided{
+          {proposal.proposal_id, domain::MemoryPolicyAction::stage,
+           domain::MemoryDecisionSource::policy, "review required",
+           make_id<domain::EventId>("memory-proposed-event")}},
+      domain::MemoryAccepted{
+          {record, domain::MemoryDecisionSource::user,
+           make_id<domain::EventId>("memory-proposed-event")}},
+      domain::MemoryEditedAndAccepted{
+          {{record, domain::MemoryDecisionSource::user,
+            make_id<domain::EventId>("memory-proposed-event")},
+           make_id<domain::MemoryRecordId>("memory-replaced-record"),
+           make_id<domain::EventId>("memory-record-event")}},
+      domain::MemoryRejected{
+          {proposal.proposal_id, domain::MemoryDecisionSource::user,
+           "not durable", make_id<domain::EventId>("memory-proposed-event")}},
+      domain::MemorySuperseded{
+          {record.record_id,
+           make_id<domain::MemoryRecordId>("memory-replacement-record"),
+           domain::MemoryDecisionSource::user,
+           make_id<domain::EventId>("memory-record-event")}},
+      domain::MemoryExpired{{record.record_id,
+                             domain::MemoryDecisionSource::user, "expired",
+                             make_id<domain::EventId>("memory-record-event")}},
       domain::VideoGenerationRequested{video_operation, video_spec,
                                        video_artifact.artifact_id},
       domain::VideoQuoteObserved{video_operation, video_quote},
@@ -603,6 +657,53 @@ auto execute_sql(const std::filesystem::path& path, const std::string& sql)
   if (message != nullptr) sqlite3_free(message);
   REQUIRE(result == SQLITE_OK);
   REQUIRE(sqlite3_close(database) == SQLITE_OK);
+}
+
+auto execute_sql_result(const std::filesystem::path& path,
+                        const std::string& sql) -> int {
+  sqlite3* database{};
+  REQUIRE(sqlite3_open(path.c_str(), &database) == SQLITE_OK);
+  char* message{};
+  const auto result =
+      sqlite3_exec(database, sql.c_str(), nullptr, nullptr, &message);
+  if (message != nullptr) sqlite3_free(message);
+  REQUIRE(sqlite3_close(database) == SQLITE_OK);
+  return result;
+}
+
+auto replace_with_version_three_store(const std::filesystem::path& path,
+                                      const std::string_view session_rows)
+    -> void {
+  std::string sql{
+      "PRAGMA foreign_keys=OFF;"
+      "DROP TABLE events;"
+      "DROP TABLE sessions;"
+      "CREATE TABLE sessions("
+      "session_id TEXT PRIMARY KEY NOT NULL,"
+      "created_at_ms INTEGER NOT NULL,"
+      "storage_format_version INTEGER NOT NULL "
+      "CHECK(storage_format_version=1),"
+      "session_kind TEXT NOT NULL CHECK(session_kind IN ('user','memory')) "
+      "DEFAULT 'user',"
+      "journal_key TEXT,"
+      "CHECK((session_kind='user' AND journal_key IS NULL) OR "
+      "(session_kind='memory' AND journal_key IS NOT NULL))) STRICT;"
+      "CREATE TABLE events("
+      "session_id TEXT NOT NULL REFERENCES sessions(session_id),"
+      "sequence INTEGER NOT NULL CHECK(sequence>0),"
+      "event_id TEXT NOT NULL,run_id TEXT NOT NULL,"
+      "schema_version INTEGER NOT NULL CHECK(schema_version>0),"
+      "timestamp_ms INTEGER NOT NULL,caused_by_event_id TEXT,"
+      "parent_run_id TEXT,invocation_id TEXT,payload_type TEXT NOT NULL,"
+      "payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),"
+      "PRIMARY KEY(session_id,sequence),UNIQUE(session_id,event_id)) STRICT;"
+      "CREATE INDEX events_session_timestamp "
+      "ON events(session_id,timestamp_ms);"
+      "CREATE UNIQUE INDEX sessions_memory_journal_key "
+      "ON sessions(journal_key) WHERE session_kind='memory';"};
+  sql += session_rows;
+  sql += "PRAGMA user_version=3;PRAGMA foreign_keys=ON;";
+  execute_sql(path, sql);
 }
 
 auto file_content(const std::filesystem::path& path) -> std::string {
@@ -773,6 +874,205 @@ TEST_CASE("SQLite storage version one migrates backlog indexes transactionally",
   const auto histories = store->replay_project_backlog(repository, 10);
   REQUIRE(histories);
   REQUIRE(histories->empty());
+  const auto persona_journal = store->open_or_create_memory_journal(
+      {make_id<domain::SessionId>("migrated-persona-journal"),
+       domain::MemoryOwner::persona(
+           make_id<domain::PersonaId>("persona:migrated")),
+       domain::EventTimestamp{std::chrono::milliseconds{200}}});
+  REQUIRE(persona_journal);
+}
+
+TEST_CASE("SQLite storage version three migrates exact memory owners",
+          "[storage][sqlite][migration][memory][persona]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  store.reset();
+  replace_with_version_three_store(
+      path, "INSERT INTO sessions VALUES"
+            "('preserved-user',99,1,'user',NULL),"
+            "('legacy-global',100,1,'memory','global'),"
+            "('legacy-project',101,1,'memory','project:repository');"
+            "INSERT INTO events VALUES("
+            "'preserved-user',1,'migrated-event','run',1,1001,NULL,NULL,NULL,"
+            "'run.started',"
+            "'{\"permission_profile_id\":\"observe\",\"persona_id\":null,"
+            "\"surface_id\":\"surface\",\"workspace_id\":\"chat\"}');");
+
+  store = open_store(path);
+  const auto events =
+      store->replay_events(make_id<domain::SessionId>("preserved-user"));
+  REQUIRE(events);
+  REQUIRE(*events ==
+          std::vector<domain::RunEvent>{event(1, started(), "migrated-event")});
+  const auto global = store->open_or_create_memory_journal(
+      {make_id<domain::SessionId>("replacement-global"),
+       domain::MemoryOwner::global(),
+       domain::EventTimestamp{std::chrono::milliseconds{200}}});
+  REQUIRE(global);
+  REQUIRE(global->session_id == make_id<domain::SessionId>("legacy-global"));
+  const auto project = store->open_or_create_memory_journal(
+      {make_id<domain::SessionId>("replacement-project"),
+       domain::MemoryOwner::repository(
+           make_id<domain::RepositoryId>("repository")),
+       domain::EventTimestamp{std::chrono::milliseconds{200}}});
+  REQUIRE(project);
+  REQUIRE(project->session_id == make_id<domain::SessionId>("legacy-project"));
+  const auto persona = store->open_or_create_memory_journal(
+      {make_id<domain::SessionId>("new-persona"),
+       domain::MemoryOwner::persona(
+           make_id<domain::PersonaId>("persona:reviewer")),
+       domain::EventTimestamp{std::chrono::milliseconds{200}}});
+  REQUIRE(persona);
+  REQUIRE(persona->session_id == make_id<domain::SessionId>("new-persona"));
+
+  CHECK(execute_sql_result(
+            path,
+            "INSERT INTO sessions VALUES"
+            "('ownerless-memory',200,1,'memory','ownerless',NULL,NULL)") ==
+        SQLITE_CONSTRAINT);
+  CHECK(execute_sql_result(path,
+                           "INSERT INTO sessions VALUES"
+                           "('owned-user',200,1,'user',NULL,'global',NULL)") ==
+        SQLITE_CONSTRAINT);
+  CHECK(execute_sql_result(
+            path, "INSERT INTO sessions VALUES"
+                  "('invalid-kind',200,1,'memory','invalid','invalid',NULL)") ==
+        SQLITE_CONSTRAINT);
+  CHECK(execute_sql_result(
+            path, "UPDATE sessions SET journal_owner_kind='persona',"
+                  "journal_owner_id=NULL WHERE session_id='legacy-global'") ==
+        SQLITE_CONSTRAINT);
+  CHECK(execute_sql_result(path, "UPDATE sessions SET journal_key='owned' "
+                                 "WHERE session_id='preserved-user'") ==
+        SQLITE_CONSTRAINT);
+
+  const auto global_after = store->open_or_create_memory_journal(
+      {make_id<domain::SessionId>("unused-global"),
+       domain::MemoryOwner::global(),
+       domain::EventTimestamp{std::chrono::milliseconds{300}}});
+  REQUIRE(global_after);
+  CHECK(global_after->session_id ==
+        make_id<domain::SessionId>("legacy-global"));
+  const auto events_after =
+      store->replay_events(make_id<domain::SessionId>("preserved-user"));
+  REQUIRE(events_after);
+  CHECK(*events_after == *events);
+}
+
+TEST_CASE("SQLite v3 memory migration rolls back malformed legacy owners",
+          "[storage][sqlite][migration][memory][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  store.reset();
+  replace_with_version_three_store(
+      path, "INSERT INTO sessions VALUES"
+            "('preserved-user',99,1,'user',NULL),"
+            "('malformed-owner',100,1,'memory','project:');");
+
+  const auto failed = adapters::SqliteSessionStore::open(path);
+  REQUIRE_FALSE(failed);
+  REQUIRE(failed.error().code == storage::SessionStoreErrorCode::corrupt);
+
+  sqlite3* database{};
+  REQUIRE(sqlite3_open(path.c_str(), &database) == SQLITE_OK);
+  sqlite3_stmt* statement{};
+  REQUIRE(sqlite3_prepare_v2(database, "PRAGMA user_version", -1, &statement,
+                             nullptr) == SQLITE_OK);
+  REQUIRE(sqlite3_step(statement) == SQLITE_ROW);
+  CHECK(sqlite3_column_int(statement, 0) == 3);
+  REQUIRE(sqlite3_finalize(statement) == SQLITE_OK);
+  REQUIRE(sqlite3_prepare_v2(database,
+                             "SELECT count(*) FROM sessions WHERE "
+                             "session_id='preserved-user'",
+                             -1, &statement, nullptr) == SQLITE_OK);
+  REQUIRE(sqlite3_step(statement) == SQLITE_ROW);
+  CHECK(sqlite3_column_int(statement, 0) == 1);
+  REQUIRE(sqlite3_finalize(statement) == SQLITE_OK);
+  REQUIRE(sqlite3_prepare_v2(database,
+                             "SELECT count(*) FROM sessions WHERE "
+                             "session_id='malformed-owner' AND "
+                             "journal_key='project:'",
+                             -1, &statement, nullptr) == SQLITE_OK);
+  REQUIRE(sqlite3_step(statement) == SQLITE_ROW);
+  CHECK(sqlite3_column_int(statement, 0) == 1);
+  REQUIRE(sqlite3_finalize(statement) == SQLITE_OK);
+  REQUIRE(sqlite3_close(database) == SQLITE_OK);
+}
+
+TEST_CASE("SQLite v3 memory migration rejects duplicate exact owners",
+          "[storage][sqlite][migration][memory][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  store.reset();
+  replace_with_version_three_store(
+      path, "DROP INDEX sessions_memory_journal_key;"
+            "INSERT INTO sessions VALUES"
+            "('duplicate-one',100,1,'memory','project:repository'),"
+            "('duplicate-two',101,1,'memory','project:repository');");
+
+  const auto failed = adapters::SqliteSessionStore::open(path);
+  REQUIRE_FALSE(failed);
+  REQUIRE(failed.error().code == storage::SessionStoreErrorCode::corrupt);
+
+  sqlite3* database{};
+  REQUIRE(sqlite3_open(path.c_str(), &database) == SQLITE_OK);
+  sqlite3_stmt* statement{};
+  REQUIRE(sqlite3_prepare_v2(database, "PRAGMA user_version", -1, &statement,
+                             nullptr) == SQLITE_OK);
+  REQUIRE(sqlite3_step(statement) == SQLITE_ROW);
+  CHECK(sqlite3_column_int(statement, 0) == 3);
+  REQUIRE(sqlite3_finalize(statement) == SQLITE_OK);
+  REQUIRE(sqlite3_prepare_v2(database, "SELECT count(*) FROM sessions", -1,
+                             &statement, nullptr) == SQLITE_OK);
+  REQUIRE(sqlite3_step(statement) == SQLITE_ROW);
+  CHECK(sqlite3_column_int(statement, 0) == 2);
+  REQUIRE(sqlite3_finalize(statement) == SQLITE_OK);
+  REQUIRE(sqlite3_close(database) == SQLITE_OK);
+}
+
+TEST_CASE("SQLite memory journals are isolated by exact owner",
+          "[storage][sqlite][memory][persona][failure]") {
+  TemporaryDirectory temporary;
+  auto store = open_store(temporary.path() / "aiforge" / "sessions.sqlite3");
+  const auto created = domain::EventTimestamp{std::chrono::milliseconds{100}};
+  const auto global = store->open_or_create_memory_journal(
+      {make_id<domain::SessionId>("global-journal"),
+       domain::MemoryOwner::global(), created});
+  const auto repository = store->open_or_create_memory_journal(
+      {make_id<domain::SessionId>("repository-journal"),
+       domain::MemoryOwner::repository(
+           make_id<domain::RepositoryId>("shared-name")),
+       created});
+  const auto persona = store->open_or_create_memory_journal(
+      {make_id<domain::SessionId>("persona-journal"),
+       domain::MemoryOwner::persona(make_id<domain::PersonaId>("shared-name")),
+       created});
+  REQUIRE(global);
+  REQUIRE(repository);
+  REQUIRE(persona);
+  CHECK(global->session_id == make_id<domain::SessionId>("global-journal"));
+  CHECK(repository->session_id ==
+        make_id<domain::SessionId>("repository-journal"));
+  CHECK(persona->session_id == make_id<domain::SessionId>("persona-journal"));
+
+  const auto reopened = store->open_or_create_memory_journal(
+      {make_id<domain::SessionId>("unused-candidate"),
+       domain::MemoryOwner::persona(make_id<domain::PersonaId>("shared-name")),
+       created});
+  REQUIRE(reopened);
+  CHECK(reopened->session_id == persona->session_id);
+
+  const domain::MemoryOwner invalid{
+      domain::MemoryOwnerKind::persona,
+      make_id<domain::RepositoryId>("wrong-id-kind"), std::nullopt};
+  const auto rejected = store->open_or_create_memory_journal(
+      {make_id<domain::SessionId>("invalid-owner"), invalid, created});
+  REQUIRE_FALSE(rejected);
+  CHECK(rejected.error().code ==
+        storage::SessionStoreErrorCode::invalid_argument);
 }
 
 TEST_CASE("all typed payloads and opaque future payloads round trip",
@@ -836,6 +1136,77 @@ TEST_CASE("all typed payloads and opaque future payloads round trip",
   REQUIRE_FALSE(rejected);
   REQUIRE(rejected.error().code ==
           storage::SessionStoreErrorCode::invalid_argument);
+}
+
+TEST_CASE("schema-v1 memory codecs retain global and project owners",
+          "[storage][sqlite][codec][memory][compatibility]") {
+  TemporaryDirectory temporary;
+  auto store = open_store(temporary.path() / "aiforge" / "sessions.sqlite3");
+  const auto session = create(*store, "legacy-memory-owners", 100);
+  const auto global = memory_proposal(domain::MemoryOwner::global(), "legacy");
+  const auto project =
+      memory_proposal(domain::MemoryOwner::repository(
+                          make_id<domain::RepositoryId>("legacy-repository")),
+                      "legacy-project");
+  const std::vector events{
+      event(1, domain::MemoryProposed{global}, "legacy-global-memory"),
+      event(2,
+            domain::MemoryAccepted{
+                {memory_record(project), domain::MemoryDecisionSource::user,
+                 make_id<domain::EventId>("legacy-project-proposal")}},
+            "legacy-project-memory")};
+
+  REQUIRE(store->append_events(session, events));
+  const auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  CHECK(*replayed == events);
+}
+
+TEST_CASE("schema-v2 persona memory codecs are exact and fail closed",
+          "[storage][sqlite][codec][memory][persona][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "persona-memory", 100);
+  const auto proposal =
+      memory_proposal(domain::MemoryOwner::persona(
+                          make_id<domain::PersonaId>("persona:reviewer")),
+                      "persona");
+  auto proposed =
+      event(1, domain::MemoryProposed{proposal}, "persona-memory-proposed");
+  proposed.metadata.schema_version = 2;
+  auto accepted =
+      event(2,
+            domain::MemoryAccepted{{memory_record(proposal),
+                                    domain::MemoryDecisionSource::user,
+                                    proposed.metadata.event_id}},
+            "persona-memory-accepted");
+  accepted.metadata.schema_version = 2;
+  const std::vector events{proposed, accepted};
+  REQUIRE(store->append_events(session, events));
+  const auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  CHECK(*replayed == events);
+
+  const auto legacy_session = create(*store, "invalid-legacy-persona", 200);
+  proposed.metadata.sequence = 1;
+  proposed.metadata.schema_version = 1;
+  proposed.metadata.event_id =
+      make_id<domain::EventId>("legacy-persona-memory");
+  const auto rejected =
+      store->append_events(legacy_session, std::array{proposed});
+  REQUIRE_FALSE(rejected);
+  CHECK(rejected.error().code ==
+        storage::SessionStoreErrorCode::invalid_argument);
+
+  store.reset();
+  execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                    "'$.proposal.owner.repository_id','forged-repository') "
+                    "WHERE event_id='persona-memory-proposed'");
+  store = open_store(path);
+  const auto corrupt = store->replay_events(session);
+  REQUIRE_FALSE(corrupt);
+  CHECK(corrupt.error().code == storage::SessionStoreErrorCode::corrupt);
 }
 
 TEST_CASE("legacy review payload shapes remain canonical",
