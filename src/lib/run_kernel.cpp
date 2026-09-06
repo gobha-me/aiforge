@@ -2489,6 +2489,101 @@ struct RunKernel::Impl {
     return {};
   }
 
+  [[nodiscard]] auto record_policy_failure(Transaction& transaction,
+                                           PendingInvocation& invocation,
+                                           const domain::DomainError& error)
+      -> std::expected<void, RunKernelError> {
+    if (auto recorded =
+            record(transaction.active->run_id,
+                   domain::ToolPolicyFailed{invocation.invocation_id, error},
+                   transaction, invocation.invocation_id);
+        !recorded) {
+      return recorded;
+    }
+    return record_tool_error(transaction, invocation, error);
+  }
+
+  [[nodiscard]] auto policy_resolution_error(
+      const PendingInvocation& invocation,
+      const ToolPolicyResolution& resolution) const
+      -> std::optional<domain::DomainError> {
+    if (!valid_policy_decision(resolution.decision) ||
+        !valid_policy_decision_source(resolution.source) ||
+        (resolution.redacted_reason &&
+         (resolution.redacted_reason->size() > 4096 ||
+          has_control_character(*resolution.redacted_reason))) ||
+        !scopes_are_unique(resolution.scopes) ||
+        !valid_automatic_policy_resolution(resolution, policy->provenance())) {
+      return protocol_domain_error();
+    }
+    if (resolution.decision == domain::PolicyDecision::deny) {
+      if (!resolution.scopes.empty()) return protocol_domain_error();
+      return std::nullopt;
+    }
+    const auto forward = intersect_capability_scopes(
+        resolution.scopes, invocation.requested_scopes);
+    const auto reverse = intersect_capability_scopes(
+        invocation.requested_scopes, resolution.scopes);
+    if (!forward || !reverse) return policy_denied_error();
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto record_policy_resolution(Transaction& transaction,
+                                              PendingInvocation& invocation,
+                                              ToolPolicyResolution resolution)
+      -> std::expected<void, RunKernelError> {
+    if (auto recorded = record(
+            transaction.active->run_id,
+            domain::ToolPolicyDecided{
+                invocation.invocation_id, resolution.decision,
+                resolution.scopes, std::move(resolution.redacted_reason),
+                resolution.source, std::move(resolution.automatic_approval)},
+            transaction, invocation.invocation_id);
+        !recorded) {
+      return recorded;
+    }
+    switch (resolution.decision) {
+      case domain::PolicyDecision::allow:
+        invocation.granted_scopes = std::move(resolution.scopes);
+        invocation.state = InvocationState::allowed;
+        return {};
+      case domain::PolicyDecision::deny:
+        return record_tool_error(transaction, invocation,
+                                 policy_denied_error());
+      case domain::PolicyDecision::require_approval:
+        if (auto requested = record(
+                transaction.active->run_id,
+                domain::ToolApprovalRequested{
+                    invocation.invocation_id, resolution.scopes,
+                    std::string{"Approval is required by runtime policy"}},
+                transaction, invocation.invocation_id);
+            !requested) {
+          return requested;
+        }
+        invocation.state = InvocationState::awaiting_approval;
+        return {};
+    }
+    return fail_live_run(transaction, protocol_domain_error());
+  }
+
+  [[nodiscard]] auto process_policy_resolution(Transaction& transaction,
+                                               PendingInvocation& invocation,
+                                               ToolPolicyResolution resolution)
+      -> std::expected<void, RunKernelError> {
+    if (auto error = policy_resolution_error(invocation, resolution)) {
+      return fail_live_run(transaction, std::move(*error));
+    }
+    if (resolution.decision == domain::PolicyDecision::require_approval &&
+        !approval_presentation(transaction.active->run_id,
+                               transaction.active->permission_profile_id,
+                               invocation)) {
+      return record_policy_failure(transaction, invocation,
+                                   policy_denied_error());
+    }
+    return record_policy_resolution(transaction, invocation,
+                                    std::move(resolution));
+  }
+
   [[nodiscard]] auto evaluate_pending_policies(Transaction& transaction)
       -> std::expected<void, RunKernelError> {
     if (!transaction.active || transaction.active->inference_id) return {};
@@ -2521,97 +2616,16 @@ struct RunKernel::Impl {
       }
       if (!resolution) {
         const auto domain_error = policy_failure_error(resolution.error());
-        if (auto recorded = record(transaction.active->run_id,
-                                   domain::ToolPolicyFailed{
-                                       invocation.invocation_id, domain_error},
-                                   transaction, invocation.invocation_id);
-            !recorded) {
-          return recorded;
-        }
         if (auto failed =
-                record_tool_error(transaction, invocation, domain_error);
-            !failed) {
+                record_policy_failure(transaction, invocation, domain_error);
+            !failed)
           return failed;
-        }
         continue;
       }
-      if (!valid_policy_decision(resolution->decision) ||
-          !valid_policy_decision_source(resolution->source) ||
-          (resolution->redacted_reason &&
-           (resolution->redacted_reason->size() > 4096 ||
-            has_control_character(*resolution->redacted_reason))) ||
-          !scopes_are_unique(resolution->scopes) ||
-          !valid_automatic_policy_resolution(*resolution,
-                                             policy->provenance())) {
-        return fail_live_run(transaction, protocol_domain_error());
-      }
-      if (resolution->decision != domain::PolicyDecision::deny) {
-        const auto forward = intersect_capability_scopes(
-            resolution->scopes, invocation.requested_scopes);
-        const auto reverse = intersect_capability_scopes(
-            invocation.requested_scopes, resolution->scopes);
-        if (!forward || !reverse) {
-          return fail_live_run(transaction, policy_denied_error());
-        }
-      } else if (!resolution->scopes.empty()) {
-        return fail_live_run(transaction, protocol_domain_error());
-      }
-      if (resolution->decision == domain::PolicyDecision::require_approval) {
-        auto presentation = approval_presentation(
-            transaction.active->run_id,
-            transaction.active->permission_profile_id, invocation);
-        if (!presentation) {
-          const auto denied = policy_denied_error();
-          if (auto recorded = record(
-                  transaction.active->run_id,
-                  domain::ToolPolicyFailed{invocation.invocation_id, denied},
-                  transaction, invocation.invocation_id);
-              !recorded) {
-            return recorded;
-          }
-          if (auto failed = record_tool_error(transaction, invocation, denied);
-              !failed) {
-            return failed;
-          }
-          continue;
-        }
-      }
-      if (auto recorded = record(transaction.active->run_id,
-                                 domain::ToolPolicyDecided{
-                                     invocation.invocation_id,
-                                     resolution->decision, resolution->scopes,
-                                     std::move(resolution->redacted_reason),
-                                     resolution->source,
-                                     std::move(resolution->automatic_approval)},
-                                 transaction, invocation.invocation_id);
-          !recorded) {
-        return recorded;
-      }
-      switch (resolution->decision) {
-        case domain::PolicyDecision::allow:
-          invocation.granted_scopes = std::move(resolution->scopes);
-          invocation.state = InvocationState::allowed;
-          break;
-        case domain::PolicyDecision::deny:
-          if (auto failed = record_tool_error(transaction, invocation,
-                                              policy_denied_error());
-              !failed) {
-            return failed;
-          }
-          break;
-        case domain::PolicyDecision::require_approval:
-          if (auto requested = record(
-                  transaction.active->run_id,
-                  domain::ToolApprovalRequested{
-                      invocation.invocation_id, resolution->scopes,
-                      std::string{"Approval is required by runtime policy"}},
-                  transaction, invocation.invocation_id);
-              !requested) {
-            return requested;
-          }
-          invocation.state = InvocationState::awaiting_approval;
-          break;
-      }
+      if (auto processed = process_policy_resolution(transaction, invocation,
+                                                     std::move(*resolution));
+          !processed)
+        return processed;
     }
     return {};
   }

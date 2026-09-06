@@ -162,6 +162,29 @@ constexpr std::size_t kAllowOnceChoice = 1;
   return {};
 }
 
+[[nodiscard]] auto canonical_arguments_are_exact(
+    const runtime::CanonicalToolArguments& arguments,
+    const std::size_t maximum_bytes) -> bool {
+  if (arguments.canonicalization_identity == "aiforge.canonical-tool-json.v1") {
+    const auto canonical = runtime::canonicalize_validated_tool_arguments(
+        arguments.value, maximum_bytes);
+    return canonical && *canonical == arguments;
+  }
+  if (arguments.canonicalization_identity != "aiforge.approval-tool-json.v1" ||
+      arguments.value.media_type != "application/json" ||
+      arguments.value.data.empty() ||
+      arguments.value.data.size() > maximum_bytes) {
+    return false;
+  }
+  try {
+    const auto parsed =
+        nlohmann::json::parse(arguments.value.data, nullptr, true, false);
+    return parsed.dump() == arguments.value.data;
+  } catch (...) {
+    return false;
+  }
+}
+
 [[nodiscard]] auto validate(const PendingToolApprovalView& input,
                             const ToolApprovalDialogLimits& limits)
     -> std::expected<void, ToolApprovalDialogError> {
@@ -178,31 +201,8 @@ constexpr std::size_t kAllowOnceChoice = 1;
       !valid) {
     return valid;
   }
-  const auto canonical_is_exact = [&] {
-    if (input.canonical_arguments.canonicalization_identity ==
-        "aiforge.canonical-tool-json.v1") {
-      const auto canonical = runtime::canonicalize_validated_tool_arguments(
-          input.canonical_arguments.value,
-          limits.maximum_canonical_argument_bytes);
-      return canonical && *canonical == input.canonical_arguments;
-    }
-    if (input.canonical_arguments.canonicalization_identity !=
-            "aiforge.approval-tool-json.v1" ||
-        input.canonical_arguments.value.media_type != "application/json" ||
-        input.canonical_arguments.value.data.empty() ||
-        input.canonical_arguments.value.data.size() >
-            limits.maximum_canonical_argument_bytes) {
-      return false;
-    }
-    try {
-      const auto parsed = nlohmann::json::parse(
-          input.canonical_arguments.value.data, nullptr, true, false);
-      return parsed.dump() == input.canonical_arguments.value.data;
-    } catch (...) {
-      return false;
-    }
-  };
-  if (!canonical_is_exact() ||
+  if (!canonical_arguments_are_exact(input.canonical_arguments,
+                                     limits.maximum_canonical_argument_bytes) ||
       !detail::is_safe_utf8_text(input.canonical_arguments.value.data)) {
     return failure(ToolApprovalDialogErrorCode::invalid_request,
                    "tool approval arguments are not exact safe canonical JSON");
