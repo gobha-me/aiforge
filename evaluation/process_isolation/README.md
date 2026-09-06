@@ -60,12 +60,14 @@ Linux mechanism conjunctions for each restriction level. Review of the v1/v2
 evidence found supplemental direct-tree, capability, and external same-UID
 execution proof gaps tracked by issue #209. Schema v3 now measures the narrow
 direct process-tree cgroup property and low's capability non-escalation
-property and high's post-private-root capability-discard property. Arbitrary
-same-UID broker confinement remains a separate unproven conjunct.
-Until every applicable conjunct exists, retained evidence leaves every
-restricted level incomplete.
-Production must still re-establish support at application launch and fail
-closed without downgrade.
+property and high's post-private-root capability-discard property. ADR 0018's
+issue #212 amendment concludes that arbitrary same-UID broker confinement has
+no positive implementation inside the accepted privilege boundary. The
+assessor retains that separately named conjunct as unproven by evidence, and
+every restricted level remains architecturally unavailable. Production must
+still evaluate and bind the selected contract at application launch; a
+restricted request binds the immediate unavailable result and fails closed
+without downgrade or setup.
 
 ## Evidence v2
 
@@ -95,8 +97,10 @@ launched process tree only; its other rows are
 `low_capability_nonescalation` and `private_root_capability_discard`. None of
 those rows proves that a payload permitted to create Unix sockets cannot ask a
 same-UID service manager, D-Bus broker, or other external broker to execute
-outside the task cgroup. That external-broker conjunct remains separately
-unproven and keeps `low`, `medium`, and `high` incomplete.
+outside the task cgroup. The assessor retains that external-broker conjunct as
+separately unproven by evidence; ADR 0018 concludes that it is architecturally
+unavailable under the accepted mechanism contract and therefore keeps `low`,
+`medium`, and `high` unavailable.
 
 Filesystem rows separately measure read, complete mutation, and execute
 confinement;
@@ -174,7 +178,8 @@ cumulative and never downgrade. This result helps reviewers check retained
 engineering evidence; it is deliberately not a launch-time availability API.
 The helper requires the applicable schema-v3 rows but cannot establish a
 complete restriction level while the separate same-UID broker conjunct is
-unproven. V3's direct-tree row addresses only path, borrowed-descriptor, and
+unproven by evidence and architecturally unavailable under ADR 0018. V3's
+direct-tree row addresses only path, borrowed-descriptor, and
 `clone3(CLONE_INTO_CGROUP)` cgroup escape by the launched process tree. It does
 not prove denial or containment of execution requested from a same-UID broker.
 The capability rows remain engineering evidence rather than launch authority.
@@ -255,7 +260,10 @@ host capability or generic high availability.
 
 Even a report with all three v3 rows enforced cannot complete a restriction
 level. The separately named
-`same_uid_broker_execution_confinement` conjunct remains unproven for low and
-therefore for cumulative medium and high. Cleanup failure in any applicable
-v1, v2, or v3 row dominates another unmet conjunct during assessment, and
-retained reports never grant production launch authority.
+`same_uid_broker_execution_confinement` conjunct remains unproven by evidence
+for low and therefore for cumulative medium and high. ADR 0018 concludes that
+the conjunct is architecturally unavailable under the accepted mechanism
+contract. Cleanup failure in any applicable v1, v2, or v3 row dominates
+another unmet conjunct during assessment, and retained reports never grant
+production launch authority. A negative conclusion creates no schema-v4
+evaluator, report, or artifact.
