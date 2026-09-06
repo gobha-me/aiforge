@@ -130,6 +130,18 @@ auto write_file(const std::filesystem::path& path, const std::string_view value)
           std::istreambuf_iterator<char>{}};
 }
 
+[[nodiscard]] auto resolve_process_document(const std::filesystem::path& path,
+                                            const std::string_view document)
+    -> std::expected<std::optional<ProcessConfigSettings>, ConfigDiagnostic> {
+  write_file(path, document);
+  REQUIRE(::chmod(path.c_str(), 0600) == 0);
+  const auto file = JsonConfigFileStore{path}.load(builtin_config_registry());
+  REQUIRE(file);
+  const auto resolved = resolve_config(builtin_config_registry(), {&*file, 1});
+  REQUIRE(resolved);
+  return resolve_process_config_settings(*resolved);
+}
+
 [[nodiscard]] auto run_cli(std::vector<std::string_view> arguments,
                            std::string& output, std::string& error) -> int {
   std::ostringstream output_stream;
@@ -288,6 +300,164 @@ TEST_CASE("automatic approval configuration is strict bounded and file-only",
   REQUIRE(spec != registry.keys.end());
   constexpr std::array values{std::string_view{"[]"}};
   REQUIRE_FALSE(parse_config_value(*spec, values, ConfigSource::environment));
+}
+
+TEST_CASE("process configuration fails closed before granting authority",
+          "[config][process][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "config.json";
+
+  const auto missing = resolve_config(builtin_config_registry(), {});
+  REQUIRE(missing);
+  const auto disabled = resolve_process_config_settings(*missing);
+  REQUIRE(disabled);
+  REQUIRE_FALSE(*disabled);
+
+  auto result = resolve_process_document(
+      path, R"({"tools":{"process":{"executables":[]}}})");
+  REQUIRE(result);
+  REQUIRE_FALSE(*result);
+
+  const std::array invalid_documents{
+      // A disabled namespace cannot retain latent authority.
+      R"({"tools":{"process":{"unrestricted_network":true}}})",
+      // Enabling requires a nonempty readable-root ceiling.
+      R"({"tools":{"process":{"executables":["/usr/bin/tool"]}}})",
+      // Native JSON types are not coerced.
+      R"({"tools":{"process":{"executables":"/usr/bin/tool","readable_roots":["/workspace"]}}})",
+      // Authority paths are unique, absolute, and already normalized.
+      R"({"tools":{"process":{"executables":["/usr/bin/tool","/usr/bin/tool"],"readable_roots":["/workspace"]}}})",
+      R"({"tools":{"process":{"executables":["usr/bin/tool"],"readable_roots":["/workspace"]}}})",
+      R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace/../workspace"]}}})",
+      // Writable authority cannot escape the readable ceiling.
+      R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace"],"writable_roots":["/outside"]}}})",
+      // Inherited environment entries are names, never assignments.
+      R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace"],"environment":["TOKEN=value"]}}})",
+      // Zero and values above the shipped hard ceiling are invalid.
+      R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace"],"limits":{"arguments":0}}}})",
+      R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace"],"limits":{"timeout_ms":120001}}}})",
+      // Selected limits constrain the configured lists and each other.
+      R"({"tools":{"process":{"executables":["/usr/bin/a","/usr/bin/b"],"readable_roots":["/workspace"],"limits":{"executables":1}}}})",
+      R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace"],"limits":{"output_bytes":1024,"inline_output_bytes":2048}}}})",
+      R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace"],"limits":{"output_bytes":1024,"inline_output_bytes":512,"progress_chunk_bytes":2048}}}})",
+      // Matcher accounting is positive when enabled and remains bounded.
+      R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace"],"allowlist_automatic_approval":{"maximum_matches":1000001}}}})",
+      // Restriction and harness are application-lifetime launch controls.
+      R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace"],"restriction":"none"}}})",
+      R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace"],"approval":"allow-all"}}})"};
+  for (const auto document : invalid_documents) {
+    CAPTURE(document);
+    result = resolve_process_document(path, document);
+    REQUIRE_FALSE(result);
+  }
+}
+
+TEST_CASE("process configuration resolves only bounded file-backed names",
+          "[config][process][provenance]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "config.json";
+  EnvironmentGuard inherited{"AIFORGE_CONFIG_TEST_SECRET",
+                             std::string{"value-must-not-be-recorded"}};
+  write_file(path, R"({
+    "tools":{"process":{
+      "executables":["/usr/bin/tool"],
+      "readable_roots":["/workspace"],
+      "writable_roots":["/workspace/output"],
+      "environment":["AIFORGE_CONFIG_TEST_SECRET"],
+      "unrestricted_network":true,
+      "allowlist_automatic_approval":{"maximum_matches":7},
+      "limits":{"arguments":32,"timeout_ms":5000}
+    }}
+  })");
+  REQUIRE(::chmod(path.c_str(), 0600) == 0);
+  const auto file = JsonConfigFileStore{path}.load(builtin_config_registry());
+  REQUIRE(file);
+  const auto resolved = resolve_config(builtin_config_registry(), {&*file, 1});
+  REQUIRE(resolved);
+
+  const auto configured = resolve_process_config_settings(*resolved);
+  REQUIRE(configured);
+  REQUIRE(*configured);
+  REQUIRE((*configured)->executable_allowlist ==
+          std::vector<std::string>{"/usr/bin/tool"});
+  REQUIRE((*configured)->readable_roots ==
+          std::vector<std::string>{"/workspace"});
+  REQUIRE((*configured)->writable_roots ==
+          std::vector<std::string>{"/workspace/output"});
+  REQUIRE((*configured)->inherited_environment_names ==
+          std::vector<std::string>{"AIFORGE_CONFIG_TEST_SECRET"});
+  REQUIRE((*configured)->unrestricted_network);
+  REQUIRE((*configured)->allowlist_automatic_approval_maximum_matches == 7);
+  REQUIRE((*configured)->limits.arguments == 32);
+  REQUIRE((*configured)->limits.timeout == std::chrono::seconds{5});
+  REQUIRE((*configured)->limits.executables == 64);
+  REQUIRE((*configured)->limits.argument_bytes == 256U * 1024U);
+  REQUIRE((*configured)->limits.roots == 64);
+  REQUIRE((*configured)->limits.environment_variables == 64);
+  REQUIRE((*configured)->limits.output_bytes == 8U * 1024U * 1024U);
+  REQUIRE((*configured)->limits.inline_output_bytes == 32U * 1024U);
+  REQUIRE((*configured)->limits.progress_chunk_bytes == 4U * 1024U);
+  REQUIRE((*configured)->limits.progress_events == 64);
+  REQUIRE((*configured)->limits.termination_grace ==
+          std::chrono::milliseconds{100});
+
+  const auto provenance = configuration_provenance(*resolved);
+  const auto environment_entry =
+      std::ranges::find(provenance, process_environment_key,
+                        &aiforge::domain::ConfigurationProvenanceEntry::key);
+  REQUIRE(environment_entry != provenance.end());
+  REQUIRE(environment_entry->source == aiforge::domain::ProvenanceSource::file);
+  REQUIRE(environment_entry->value == "AIFORGE_CONFIG_TEST_SECRET");
+  for (const auto& entry : provenance) {
+    REQUIRE(entry.value.value_or("").find("value-must-not-be-recorded") ==
+            std::string::npos);
+  }
+  for (const auto& diagnostic : resolved->diagnostics) {
+    REQUIRE(diagnostic.message.find("value-must-not-be-recorded") ==
+            std::string::npos);
+  }
+
+  const auto zero_matches = resolve_process_document(
+      path,
+      R"({"tools":{"process":{"executables":["/usr/bin/tool"],"readable_roots":["/workspace"],"allowlist_automatic_approval":{"maximum_matches":0}}}})");
+  REQUIRE(zero_matches);
+  REQUIRE(*zero_matches);
+  REQUIRE_FALSE((*zero_matches)->allowlist_automatic_approval_maximum_matches);
+}
+
+TEST_CASE("process capability settings reject non-file sources",
+          "[config][process][failure][provenance]") {
+  const auto& registry = builtin_config_registry();
+  for (const auto& spec : registry.keys) {
+    if (spec.id.starts_with("tools.process.")) {
+      REQUIRE_FALSE(spec.environment_name);
+    }
+    REQUIRE(spec.id != "tools.process.restriction");
+    REQUIRE(spec.id != "tools.process.approval");
+  }
+
+  const auto environment = environment_config_layer(registry);
+  REQUIRE(environment);
+  REQUIRE(std::ranges::none_of(environment->candidates, [](const auto& value) {
+    return value.key.starts_with("tools.process.");
+  }));
+
+  for (const auto source :
+       {ConfigSource::environment, ConfigSource::command_line}) {
+    CAPTURE(config_source_name(source));
+    const ConfigLayer widened{
+        source,
+        {candidate(std::string{process_executables_key},
+                   std::vector<std::string>{"/usr/bin/tool"}),
+         candidate(std::string{process_readable_roots_key},
+                   std::vector<std::string>{"/workspace"})},
+        {}};
+    const auto resolved = resolve_config(registry, {&widened, 1});
+    REQUIRE(resolved);
+    const auto configured = resolve_process_config_settings(*resolved);
+    REQUIRE_FALSE(configured);
+    REQUIRE(configured.error().source == source);
+  }
 }
 
 TEST_CASE("all present-layer permutations resolve by fixed precedence",
@@ -1076,6 +1246,24 @@ TEST_CASE("config CLI keeps content and diagnostics on their streams",
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n"
+                    "tools.process.executables\t<unset>\tunset\n"
+                    "tools.process.readable_roots\t<unset>\tunset\n"
+                    "tools.process.writable_roots\t<unset>\tunset\n"
+                    "tools.process.environment\t<unset>\tunset\n"
+                    "tools.process.unrestricted_network\tfalse\tdefault\n"
+                    "tools.process.allowlist_automatic_approval.maximum_"
+                    "matches\t0\tdefault\n"
+                    "tools.process.limits.executables\t64\tdefault\n"
+                    "tools.process.limits.arguments\t256\tdefault\n"
+                    "tools.process.limits.argument_bytes\t262144\tdefault\n"
+                    "tools.process.limits.roots\t64\tdefault\n"
+                    "tools.process.limits.environment_variables\t64\tdefault\n"
+                    "tools.process.limits.timeout_ms\t120000\tdefault\n"
+                    "tools.process.limits.output_bytes\t8388608\tdefault\n"
+                    "tools.process.limits.inline_output_bytes\t32768\tdefault\n"
+                    "tools.process.limits.progress_chunk_bytes\t4096\tdefault\n"
+                    "tools.process.limits.progress_events\t64\tdefault\n"
+                    "tools.process.limits.termination_grace_ms\t100\tdefault\n"
                     "tools.models.maximum_profiles\t<unset>\tunset\n"
                     "tools.personas.maximum_profiles\t<unset>\tunset\n"
                     "tools.image.model\t<unset>\tunset\n"
@@ -1127,6 +1315,24 @@ TEST_CASE("malformed files are diagnostic for reads but never overwritten",
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n"
+                    "tools.process.executables\t<unset>\tunset\n"
+                    "tools.process.readable_roots\t<unset>\tunset\n"
+                    "tools.process.writable_roots\t<unset>\tunset\n"
+                    "tools.process.environment\t<unset>\tunset\n"
+                    "tools.process.unrestricted_network\tfalse\tdefault\n"
+                    "tools.process.allowlist_automatic_approval.maximum_"
+                    "matches\t0\tdefault\n"
+                    "tools.process.limits.executables\t64\tdefault\n"
+                    "tools.process.limits.arguments\t256\tdefault\n"
+                    "tools.process.limits.argument_bytes\t262144\tdefault\n"
+                    "tools.process.limits.roots\t64\tdefault\n"
+                    "tools.process.limits.environment_variables\t64\tdefault\n"
+                    "tools.process.limits.timeout_ms\t120000\tdefault\n"
+                    "tools.process.limits.output_bytes\t8388608\tdefault\n"
+                    "tools.process.limits.inline_output_bytes\t32768\tdefault\n"
+                    "tools.process.limits.progress_chunk_bytes\t4096\tdefault\n"
+                    "tools.process.limits.progress_events\t64\tdefault\n"
+                    "tools.process.limits.termination_grace_ms\t100\tdefault\n"
                     "tools.models.maximum_profiles\t<unset>\tunset\n"
                     "tools.personas.maximum_profiles\t<unset>\tunset\n"
                     "tools.image.model\t<unset>\tunset\n"
@@ -1160,6 +1366,24 @@ TEST_CASE("read-only resolution survives an unavailable config home",
                     "memory.global.capture\toff\tdefault\n"
                     "memory.project.capture\treview\tdefault\n"
                     "memory.context.max_tokens\t2048\tdefault\n"
+                    "tools.process.executables\t<unset>\tunset\n"
+                    "tools.process.readable_roots\t<unset>\tunset\n"
+                    "tools.process.writable_roots\t<unset>\tunset\n"
+                    "tools.process.environment\t<unset>\tunset\n"
+                    "tools.process.unrestricted_network\tfalse\tdefault\n"
+                    "tools.process.allowlist_automatic_approval.maximum_"
+                    "matches\t0\tdefault\n"
+                    "tools.process.limits.executables\t64\tdefault\n"
+                    "tools.process.limits.arguments\t256\tdefault\n"
+                    "tools.process.limits.argument_bytes\t262144\tdefault\n"
+                    "tools.process.limits.roots\t64\tdefault\n"
+                    "tools.process.limits.environment_variables\t64\tdefault\n"
+                    "tools.process.limits.timeout_ms\t120000\tdefault\n"
+                    "tools.process.limits.output_bytes\t8388608\tdefault\n"
+                    "tools.process.limits.inline_output_bytes\t32768\tdefault\n"
+                    "tools.process.limits.progress_chunk_bytes\t4096\tdefault\n"
+                    "tools.process.limits.progress_events\t64\tdefault\n"
+                    "tools.process.limits.termination_grace_ms\t100\tdefault\n"
                     "tools.models.maximum_profiles\t<unset>\tunset\n"
                     "tools.personas.maximum_profiles\t<unset>\tunset\n"
                     "tools.image.model\t<unset>\tunset\n"

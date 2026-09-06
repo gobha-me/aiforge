@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -201,6 +202,69 @@ inline constexpr std::string_view automatic_approval_rules_key{
     "tools.approval.automatic_rules"};
 inline constexpr std::string_view user_global_instructions_enabled_key{
     "instructions.global.enabled"};
+inline constexpr std::string_view process_executables_key{
+    "tools.process.executables"};
+inline constexpr std::string_view process_readable_roots_key{
+    "tools.process.readable_roots"};
+inline constexpr std::string_view process_writable_roots_key{
+    "tools.process.writable_roots"};
+inline constexpr std::string_view process_environment_key{
+    "tools.process.environment"};
+inline constexpr std::string_view process_unrestricted_network_key{
+    "tools.process.unrestricted_network"};
+inline constexpr std::string_view
+    process_allowlist_automatic_approval_maximum_matches_key{
+        "tools.process.allowlist_automatic_approval.maximum_matches"};
+inline constexpr std::string_view process_limit_executables_key{
+    "tools.process.limits.executables"};
+inline constexpr std::string_view process_limit_arguments_key{
+    "tools.process.limits.arguments"};
+inline constexpr std::string_view process_limit_argument_bytes_key{
+    "tools.process.limits.argument_bytes"};
+inline constexpr std::string_view process_limit_roots_key{
+    "tools.process.limits.roots"};
+inline constexpr std::string_view process_limit_environment_variables_key{
+    "tools.process.limits.environment_variables"};
+inline constexpr std::string_view process_limit_timeout_ms_key{
+    "tools.process.limits.timeout_ms"};
+inline constexpr std::string_view process_limit_output_bytes_key{
+    "tools.process.limits.output_bytes"};
+inline constexpr std::string_view process_limit_inline_output_bytes_key{
+    "tools.process.limits.inline_output_bytes"};
+inline constexpr std::string_view process_limit_progress_chunk_bytes_key{
+    "tools.process.limits.progress_chunk_bytes"};
+inline constexpr std::string_view process_limit_progress_events_key{
+    "tools.process.limits.progress_events"};
+inline constexpr std::string_view process_limit_termination_grace_ms_key{
+    "tools.process.limits.termination_grace_ms"};
+
+struct ProcessConfigLimits {
+  std::size_t executables{64};
+  std::size_t arguments{256};
+  std::size_t argument_bytes{std::size_t{256} * 1024U};
+  std::size_t roots{64};
+  std::size_t environment_variables{64};
+  std::chrono::milliseconds timeout{std::chrono::seconds{120}};
+  std::size_t output_bytes{std::size_t{8} * 1024U * 1024U};
+  std::size_t inline_output_bytes{std::size_t{32} * 1024U};
+  std::size_t progress_chunk_bytes{std::size_t{4} * 1024U};
+  std::size_t progress_events{64};
+  std::chrono::milliseconds termination_grace{std::chrono::milliseconds{100}};
+  auto operator==(const ProcessConfigLimits&) const -> bool = default;
+};
+
+struct ProcessConfigSettings {
+  std::vector<std::string> executable_allowlist;
+  std::vector<std::string> readable_roots;
+  std::vector<std::string> writable_roots;
+  // Names are inherited from the application environment by the production
+  // adapter. Values never enter configuration or configuration provenance.
+  std::vector<std::string> inherited_environment_names;
+  ProcessConfigLimits limits{};
+  bool unrestricted_network{};
+  std::optional<std::uint64_t> allowlist_automatic_approval_maximum_matches;
+  auto operator==(const ProcessConfigSettings&) const -> bool = default;
+};
 
 struct ToolProfileMaximumMappings {
   std::map<domain::ModelId, domain::ToolProfileId> models;
@@ -227,5 +291,13 @@ struct ToolProfileMaximumMappings {
 [[nodiscard]] auto resolve_automatic_approval_rules(
     const ResolvedConfig& resolved)
     -> std::expected<AutomaticApprovalRulesConfig, ConfigDiagnostic>;
+
+// An absent value means the process tool is not configured. Process authority
+// is file-backed only: command-line and environment candidates are rejected.
+// Launch restriction and approval mode remain separate application-lifetime
+// controls and are intentionally absent from this value.
+[[nodiscard]] auto resolve_process_config_settings(
+    const ResolvedConfig& resolved)
+    -> std::expected<std::optional<ProcessConfigSettings>, ConfigDiagnostic>;
 
 } // namespace aiforge::config
