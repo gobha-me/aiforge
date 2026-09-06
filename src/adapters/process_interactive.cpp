@@ -3695,8 +3695,11 @@ class ChatAppImpl final : public InteractiveChatApp {
         continue;
       }
       summary += " " + availability.tool_name + ": ";
-      summary +=
-          runtime::tool_profile_availability_reason_text(availability.reason);
+      summary += availability.unavailability
+                     ? runtime::format_tool_unavailability(
+                           *availability.unavailability)
+                     : runtime::tool_profile_availability_reason_text(
+                           availability.reason);
       summary += ".";
     }
     return summary;

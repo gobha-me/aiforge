@@ -153,6 +153,55 @@ TEST_CASE("unavailable tool catalog is typed bounded and never callable",
   REQUIRE(runtime::tool_unavailable_reason_text(
               runtime::ToolUnavailableReason::shell_unimplemented) ==
           "shell-unimplemented");
+  REQUIRE(runtime::format_tool_unavailability(
+              {runtime::ToolUnavailableReason::not_configured}) ==
+          "not-configured");
+  REQUIRE(runtime::format_tool_unavailability(
+              {runtime::ToolUnavailableReason::restriction_unavailable,
+               runtime::ToolRestrictionUnavailability{
+                   runtime::RestrictionLevel::medium,
+                   runtime::RestrictionUnavailableReason::mechanism_absent}}) ==
+          "restriction-unavailable (selected=medium, reason=mechanism-absent)");
+  REQUIRE(runtime::format_tool_unavailability(
+              {runtime::ToolUnavailableReason::restriction_unavailable,
+               runtime::ToolRestrictionUnavailability{
+                   runtime::RestrictionLevel::none,
+                   runtime::RestrictionUnavailableReason::cleanup_failed}}) ==
+          "restriction-unavailable (selected=none, reason=cleanup-failed)");
+  REQUIRE(runtime::format_tool_unavailability(
+              {runtime::ToolUnavailableReason::restriction_unavailable,
+               runtime::ToolRestrictionUnavailability{
+                   runtime::RestrictionLevel::low,
+                   runtime::RestrictionUnavailableReason::setup_race}}) ==
+          "restriction-unavailable (selected=low, reason=setup-race)");
+
+  using RestrictionReason = runtime::RestrictionUnavailableReason;
+  const std::array restriction_reasons{
+      std::pair{RestrictionReason::unsupported_platform,
+                "unsupported-platform"},
+      std::pair{RestrictionReason::unsupported_architecture,
+                "unsupported-architecture"},
+      std::pair{RestrictionReason::unsupported_kernel, "unsupported-kernel"},
+      std::pair{RestrictionReason::missing_delegation, "missing-delegation"},
+      std::pair{RestrictionReason::missing_controller, "missing-controller"},
+      std::pair{RestrictionReason::permission_denied, "permission-denied"},
+      std::pair{RestrictionReason::privilege_changed, "privilege-changed"},
+      std::pair{RestrictionReason::mechanism_absent, "mechanism-absent"},
+      std::pair{RestrictionReason::unsupported_combination,
+                "unsupported-combination"},
+      std::pair{RestrictionReason::setup_race, "setup-race"},
+      std::pair{RestrictionReason::enforcement_failed, "enforcement-failed"},
+      std::pair{RestrictionReason::cleanup_failed, "cleanup-failed"},
+      std::pair{RestrictionReason::internal_error, "internal-error"}};
+  for (const auto& [reason, text] : restriction_reasons) {
+    const auto formatted = runtime::format_tool_unavailability(
+        {runtime::ToolUnavailableReason::restriction_unavailable,
+         runtime::ToolRestrictionUnavailability{runtime::RestrictionLevel::high,
+                                                reason}});
+    CHECK(formatted == "restriction-unavailable (selected=high, reason=" +
+                           std::string{text} + ")");
+    CHECK(formatted.size() <= runtime::maximum_tool_unavailability_text_bytes);
+  }
 
   runtime::ToolRegistry registry;
   const runtime::ToolUnavailability unavailable{

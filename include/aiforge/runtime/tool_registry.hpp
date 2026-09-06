@@ -199,6 +199,11 @@ struct ToolUnavailability {
 
 [[nodiscard]] auto tool_unavailable_reason_text(
     ToolUnavailableReason reason) noexcept -> std::string_view;
+inline constexpr std::size_t maximum_tool_unavailability_text_bytes{96};
+// Produces a closed, single-line operator summary. Its size is bounded because
+// every component is a closed enum; no adapter or platform message enters it.
+[[nodiscard]] auto format_tool_unavailability(
+    const ToolUnavailability& unavailability) -> std::string;
 
 struct UnavailableTool {
   std::string name;

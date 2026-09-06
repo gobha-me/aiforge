@@ -113,6 +113,47 @@ constexpr std::array kToolCategories{
   return false;
 }
 
+[[nodiscard]] auto restriction_level_text(const RestrictionLevel level) noexcept
+    -> std::string_view {
+  switch (level) {
+    case RestrictionLevel::high: return "high";
+    case RestrictionLevel::medium: return "medium";
+    case RestrictionLevel::low: return "low";
+    case RestrictionLevel::none: return "none";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] auto restriction_unavailable_reason_text(
+    const RestrictionUnavailableReason reason) noexcept -> std::string_view {
+  switch (reason) {
+    case RestrictionUnavailableReason::unsupported_platform:
+      return "unsupported-platform";
+    case RestrictionUnavailableReason::unsupported_architecture:
+      return "unsupported-architecture";
+    case RestrictionUnavailableReason::unsupported_kernel:
+      return "unsupported-kernel";
+    case RestrictionUnavailableReason::missing_delegation:
+      return "missing-delegation";
+    case RestrictionUnavailableReason::missing_controller:
+      return "missing-controller";
+    case RestrictionUnavailableReason::permission_denied:
+      return "permission-denied";
+    case RestrictionUnavailableReason::privilege_changed:
+      return "privilege-changed";
+    case RestrictionUnavailableReason::mechanism_absent:
+      return "mechanism-absent";
+    case RestrictionUnavailableReason::unsupported_combination:
+      return "unsupported-combination";
+    case RestrictionUnavailableReason::setup_race: return "setup-race";
+    case RestrictionUnavailableReason::enforcement_failed:
+      return "enforcement-failed";
+    case RestrictionUnavailableReason::cleanup_failed: return "cleanup-failed";
+    case RestrictionUnavailableReason::internal_error: return "internal-error";
+  }
+  return "unknown";
+}
+
 [[nodiscard]] auto valid_declaration(
     const backend::ToolDeclaration& declaration)
     -> std::expected<void, ToolRegistryError> {
@@ -220,6 +261,24 @@ auto tool_unavailable_reason_text(const ToolUnavailableReason reason) noexcept
       return "shell-unimplemented";
   }
   return "tool unavailable";
+}
+
+auto format_tool_unavailability(const ToolUnavailability& unavailability)
+    -> std::string {
+  std::string text{tool_unavailable_reason_text(unavailability.reason)};
+  if (unavailability.restriction) {
+    text += " (selected=";
+    text += restriction_level_text(
+        unavailability.restriction->selected_restriction);
+    text += ", reason=";
+    text +=
+        restriction_unavailable_reason_text(unavailability.restriction->reason);
+    text += ")";
+  }
+  if (text.size() > maximum_tool_unavailability_text_bytes) {
+    return "tool-unavailability-overflow";
+  }
+  return text;
 }
 
 auto ToolRegistrySnapshot::declarations() const noexcept
