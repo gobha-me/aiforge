@@ -37,7 +37,7 @@ namespace {
 using Json = nlohmann::json;
 using storage::SessionStoreError;
 using storage::SessionStoreErrorCode;
-constexpr int storage_format_version = 3;
+constexpr int storage_format_version = 4;
 
 template <typename... Visitors> struct Overloaded : Visitors... {
   using Visitors::operator()...;
@@ -1629,22 +1629,56 @@ template <typename IdType>
   return change;
 }
 
-[[nodiscard]] auto memory_scope_name(const domain::MemoryScope scope)
+[[nodiscard]] auto memory_owner_kind_name(const domain::MemoryOwnerKind kind)
     -> std::string_view {
-  switch (scope) {
-    case domain::MemoryScope::global: return "global";
-    case domain::MemoryScope::project: return "project";
-    case domain::MemoryScope::unknown: break;
+  switch (kind) {
+    case domain::MemoryOwnerKind::global: return "global";
+    case domain::MemoryOwnerKind::repository: return "repository";
+    case domain::MemoryOwnerKind::persona: return "persona";
+    case domain::MemoryOwnerKind::unknown: break;
   }
-  throw CodecFailure{"invalid memory scope"};
+  throw CodecFailure{"invalid memory owner kind"};
 }
 
-[[nodiscard]] auto parse_memory_scope(const Json& value)
-    -> domain::MemoryScope {
-  using Scope = domain::MemoryScope;
-  return enum_value<Scope>(
-      value.get<std::string>(),
-      {{"global", Scope::global}, {"project", Scope::project}});
+[[nodiscard]] auto memory_owner_json(const domain::MemoryOwner& owner) -> Json {
+  if (!domain::validate_memory_owner(owner)) {
+    throw CodecFailure{"invalid memory owner"};
+  }
+  return {{"kind", memory_owner_kind_name(owner.kind)},
+          {"repository_id", optional_id_json(owner.repository_id)},
+          {"persona_id", optional_id_json(owner.persona_id)}};
+}
+
+[[nodiscard]] auto parse_memory_owner(const Json& value)
+    -> domain::MemoryOwner {
+  using Kind = domain::MemoryOwnerKind;
+  if (!value.is_object() || value.size() != 3 || !value.contains("kind") ||
+      !value.contains("repository_id") || !value.contains("persona_id")) {
+    throw CodecFailure{"memory owner is invalid"};
+  }
+  domain::MemoryOwner owner{
+      enum_value<Kind>(value.at("kind").get<std::string>(),
+                       {{"global", Kind::global},
+                        {"repository", Kind::repository},
+                        {"persona", Kind::persona}}),
+      parse_optional_id<domain::RepositoryId>(value.at("repository_id")),
+      parse_optional_id<domain::PersonaId>(value.at("persona_id"))};
+  if (!domain::validate_memory_owner(owner)) {
+    throw CodecFailure{"memory owner is invalid"};
+  }
+  return owner;
+}
+
+[[nodiscard]] auto parse_legacy_memory_owner(const Json& value)
+    -> domain::MemoryOwner {
+  const auto scope = value.at("scope").get<std::string>();
+  const auto repository =
+      parse_optional_id<domain::RepositoryId>(value.at("repository_id"));
+  if (scope == "global" && !repository) return domain::MemoryOwner::global();
+  if (scope == "project" && repository) {
+    return domain::MemoryOwner::repository(*repository);
+  }
+  throw CodecFailure{"legacy memory owner is invalid"};
 }
 
 [[nodiscard]] auto memory_kind_name(const domain::MemoryKind kind)
@@ -1747,7 +1781,8 @@ template <typename IdType>
           value.at("runtime_version").get<std::string>()};
 }
 
-[[nodiscard]] auto memory_proposal_json(const domain::MemoryProposal& proposal)
+[[nodiscard]] auto memory_proposal_json(const domain::MemoryProposal& proposal,
+                                        const std::uint32_t schema_version)
     -> Json {
   if (!domain::validate_memory_proposal(proposal)) {
     throw CodecFailure{"memory proposal is invalid"};
@@ -1756,22 +1791,33 @@ template <typename IdType>
   for (const auto& record_id : proposal.overlap_record_ids) {
     overlaps.push_back(id_text(record_id));
   }
-  return {{"proposal_id", id_text(proposal.proposal_id)},
-          {"record_id", id_text(proposal.record_id)},
-          {"scope", memory_scope_name(proposal.scope)},
-          {"repository_id", optional_id_json(proposal.repository_id)},
-          {"kind", memory_kind_name(proposal.kind)},
-          {"content", proposal.content},
-          {"rationale", proposal.rationale},
-          {"evidence_excerpt", proposal.evidence_excerpt},
-          {"source", memory_source_json(proposal.source)},
-          {"producer", memory_producer_json(proposal.producer)},
-          {"replacement_record_id",
-           optional_id_json(proposal.replacement_record_id)},
-          {"overlap_record_ids", std::move(overlaps)}};
+  Json result{{"proposal_id", id_text(proposal.proposal_id)},
+              {"record_id", id_text(proposal.record_id)},
+              {"kind", memory_kind_name(proposal.kind)},
+              {"content", proposal.content},
+              {"rationale", proposal.rationale},
+              {"evidence_excerpt", proposal.evidence_excerpt},
+              {"source", memory_source_json(proposal.source)},
+              {"producer", memory_producer_json(proposal.producer)},
+              {"replacement_record_id",
+               optional_id_json(proposal.replacement_record_id)},
+              {"overlap_record_ids", std::move(overlaps)}};
+  if (schema_version >= 2) {
+    result["owner"] = memory_owner_json(proposal.owner);
+  } else {
+    if (proposal.owner.kind == domain::MemoryOwnerKind::persona) {
+      throw CodecFailure{"persona memory requires event schema version 2"};
+    }
+    result["scope"] = proposal.owner.kind == domain::MemoryOwnerKind::global
+                          ? "global"
+                          : "project";
+    result["repository_id"] = optional_id_json(proposal.owner.repository_id);
+  }
+  return result;
 }
 
-[[nodiscard]] auto parse_memory_proposal(const Json& value)
+[[nodiscard]] auto parse_memory_proposal(const Json& value,
+                                         const std::uint32_t schema_version)
     -> domain::MemoryProposal {
   const auto& raw_overlaps = value.at("overlap_record_ids");
   if (!raw_overlaps.is_array()) {
@@ -1780,8 +1826,8 @@ template <typename IdType>
   domain::MemoryProposal proposal{
       parse_id<domain::MemoryProposalId>(value.at("proposal_id")),
       parse_id<domain::MemoryRecordId>(value.at("record_id")),
-      parse_memory_scope(value.at("scope")),
-      parse_optional_id<domain::RepositoryId>(value.at("repository_id")),
+      schema_version >= 2 ? parse_memory_owner(value.at("owner"))
+                          : parse_legacy_memory_owner(value),
       parse_memory_kind(value.at("kind")),
       value.at("content").get<std::string>(),
       value.at("rationale").get<std::string>(),
@@ -1802,29 +1848,41 @@ template <typename IdType>
   return proposal;
 }
 
-[[nodiscard]] auto memory_record_json(const domain::MemoryRecord& record)
+[[nodiscard]] auto memory_record_json(const domain::MemoryRecord& record,
+                                      const std::uint32_t schema_version)
     -> Json {
   if (!domain::validate_memory_record(record)) {
     throw CodecFailure{"memory record is invalid"};
   }
-  return {{"record_id", id_text(record.record_id)},
-          {"proposal_id", id_text(record.proposal_id)},
-          {"scope", memory_scope_name(record.scope)},
-          {"repository_id", optional_id_json(record.repository_id)},
-          {"kind", memory_kind_name(record.kind)},
-          {"content", record.content},
-          {"rationale", record.rationale},
-          {"source", memory_source_json(record.source)},
-          {"producer", memory_producer_json(record.producer)}};
+  Json result{{"record_id", id_text(record.record_id)},
+              {"proposal_id", id_text(record.proposal_id)},
+              {"kind", memory_kind_name(record.kind)},
+              {"content", record.content},
+              {"rationale", record.rationale},
+              {"source", memory_source_json(record.source)},
+              {"producer", memory_producer_json(record.producer)}};
+  if (schema_version >= 2) {
+    result["owner"] = memory_owner_json(record.owner);
+  } else {
+    if (record.owner.kind == domain::MemoryOwnerKind::persona) {
+      throw CodecFailure{"persona memory requires event schema version 2"};
+    }
+    result["scope"] = record.owner.kind == domain::MemoryOwnerKind::global
+                          ? "global"
+                          : "project";
+    result["repository_id"] = optional_id_json(record.owner.repository_id);
+  }
+  return result;
 }
 
-[[nodiscard]] auto parse_memory_record(const Json& value)
+[[nodiscard]] auto parse_memory_record(const Json& value,
+                                       const std::uint32_t schema_version)
     -> domain::MemoryRecord {
   domain::MemoryRecord record{
       parse_id<domain::MemoryRecordId>(value.at("record_id")),
       parse_id<domain::MemoryProposalId>(value.at("proposal_id")),
-      parse_memory_scope(value.at("scope")),
-      parse_optional_id<domain::RepositoryId>(value.at("repository_id")),
+      schema_version >= 2 ? parse_memory_owner(value.at("owner"))
+                          : parse_legacy_memory_owner(value),
       parse_memory_kind(value.at("kind")),
       value.at("content").get<std::string>(),
       value.at("rationale").get<std::string>(),
@@ -3409,7 +3467,8 @@ auto parse_v2_tool_policy_fields(const Json& value,
   return (schema_version == 1 && known_payload_type(type)) ||
          (schema_version == 2 &&
           (type == "plan.revision_proposed" || type == "run.child_created" ||
-           type == "tool.proposed" || type == "tool.policy_decided")) ||
+           type == "tool.proposed" || type == "tool.policy_decided" ||
+           (type.starts_with("memory.") && known_payload_type(type)))) ||
          ((schema_version == 3 || schema_version == 4) &&
           type == "run.child_created");
 }
@@ -3767,23 +3826,27 @@ auto parse_v2_tool_policy_fields(const Json& value,
             return {
                 {"change", project_backlog_status_change_json(value.change)}};
           },
-          [](const domain::MemoryProposed& value) -> Json {
-            return {{"proposal", memory_proposal_json(value.proposal)}};
+          [schema_version](const domain::MemoryProposed& value) -> Json {
+            return {{"proposal",
+                     memory_proposal_json(value.proposal, schema_version)}};
           },
           [](const domain::MemoryPolicyDecided& value) -> Json {
             return {{"evaluation", memory_policy_json(value.evaluation)}};
           },
-          [](const domain::MemoryAccepted& value) -> Json {
-            return {{"record", memory_record_json(value.acceptance.record)},
+          [schema_version](const domain::MemoryAccepted& value) -> Json {
+            return {{"record", memory_record_json(value.acceptance.record,
+                                                  schema_version)},
                     {"source",
                      memory_decision_source_name(value.acceptance.source)},
                     {"expected_proposal_event_id",
                      id_text(value.acceptance.expected_proposal_event_id)}};
           },
-          [](const domain::MemoryEditedAndAccepted& value) -> Json {
+          [schema_version](
+              const domain::MemoryEditedAndAccepted& value) -> Json {
             return {{"acceptance",
                      {{"record",
-                       memory_record_json(value.acceptance.acceptance.record)},
+                       memory_record_json(value.acceptance.acceptance.record,
+                                          schema_version)},
                       {"source", memory_decision_source_name(
                                      value.acceptance.acceptance.source)},
                       {"expected_proposal_event_id",
@@ -4284,7 +4347,8 @@ auto parse_v2_tool_policy_fields(const Json& value,
         parse_project_backlog_status_change(value.at("change"))};
   }
   if (type == "memory.proposed") {
-    return domain::MemoryProposed{parse_memory_proposal(value.at("proposal"))};
+    return domain::MemoryProposed{
+        parse_memory_proposal(value.at("proposal"), schema_version)};
   }
   if (type == "memory.policy_decided") {
     return domain::MemoryPolicyDecided{
@@ -4292,14 +4356,14 @@ auto parse_v2_tool_policy_fields(const Json& value,
   }
   if (type == "memory.accepted") {
     return domain::MemoryAccepted{domain::MemoryAcceptance{
-        parse_memory_record(value.at("record")),
+        parse_memory_record(value.at("record"), schema_version),
         parse_memory_decision_source(value.at("source")),
         parse_id<domain::EventId>(value.at("expected_proposal_event_id"))}};
   }
   if (type == "memory.edited_and_accepted") {
     const auto& acceptance = value.at("acceptance");
     return domain::MemoryEditedAndAccepted{domain::MemoryEditedAcceptance{
-        {parse_memory_record(acceptance.at("record")),
+        {parse_memory_record(acceptance.at("record"), schema_version),
          parse_memory_decision_source(acceptance.at("source")),
          parse_id<domain::EventId>(
              acceptance.at("expected_proposal_event_id"))},
@@ -4573,6 +4637,15 @@ class Statement final {
   return {};
 }
 
+[[nodiscard]] auto bind_optional_text(sqlite3_stmt* statement, const int index,
+                                      const std::optional<std::string>& value)
+    -> std::expected<void, SessionStoreError> {
+  if (value) return bind_text(statement, index, *value);
+  const auto result = sqlite3_bind_null(statement, index);
+  if (result != SQLITE_OK) return std::unexpected(sqlite_error(result));
+  return {};
+}
+
 template <typename IdType>
 [[nodiscard]] auto bind_optional_id(sqlite3_stmt* statement, const int index,
                                     const std::optional<IdType>& id)
@@ -4818,8 +4891,69 @@ class Transaction final {
   return result;
 }
 
+[[nodiscard]] auto validate_legacy_memory_journal_owners(sqlite3* database)
+    -> std::expected<void, SessionStoreError> {
+  auto statement = prepare(
+      database, "SELECT journal_key FROM sessions WHERE session_kind='memory'");
+  if (!statement) return std::unexpected(std::move(statement.error()));
+  std::set<std::pair<std::string, std::string>> owners;
+  while (true) {
+    const auto result = sqlite3_step(statement->get());
+    if (result == SQLITE_DONE) break;
+    if (result != SQLITE_ROW) return std::unexpected(sqlite_error(result));
+    auto journal_key = column_text(statement->get(), 0);
+    if (!journal_key) return std::unexpected(std::move(journal_key.error()));
+    std::pair<std::string, std::string> owner;
+    if (*journal_key == "global") {
+      owner.first = "global";
+    } else if (journal_key->starts_with("project:")) {
+      auto repository = domain::RepositoryId::from(journal_key->substr(8));
+      if (!repository) {
+        return std::unexpected(store_error(
+            SessionStoreErrorCode::corrupt,
+            "legacy memory journal repository identity is invalid"));
+      }
+      owner = {"repository", std::string{repository->value()}};
+    } else {
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::corrupt,
+                      "legacy memory journal ownership is invalid"));
+    }
+    if (!owners.insert(std::move(owner)).second) {
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::corrupt,
+                      "legacy memory journal ownership is duplicated"));
+    }
+  }
+  return {};
+}
+
+[[nodiscard]] auto install_memory_owner_triggers(sqlite3* database)
+    -> std::expected<void, SessionStoreError> {
+  constexpr std::string_view valid_owner =
+      "((NEW.session_kind='user' AND NEW.journal_key IS NULL AND "
+      "NEW.journal_owner_kind IS NULL AND NEW.journal_owner_id IS NULL) OR "
+      "(NEW.session_kind='memory' AND NEW.journal_key IS NOT NULL AND "
+      "((NEW.journal_owner_kind='global' AND NEW.journal_owner_id IS NULL) OR "
+      "(NEW.journal_owner_kind IN ('repository','persona') AND "
+      "NEW.journal_owner_id IS NOT NULL))))";
+  return execute(
+      database,
+      std::string{"CREATE TRIGGER sessions_memory_owner_insert "
+                  "BEFORE INSERT ON sessions WHEN COALESCE("} +
+          std::string{valid_owner} +
+          ",0)=0 BEGIN SELECT RAISE(ABORT,'invalid session owner'); END;"
+          "CREATE TRIGGER sessions_memory_owner_update "
+          "BEFORE UPDATE ON sessions WHEN COALESCE(" +
+          std::string{valid_owner} +
+          ",0)=0 BEGIN SELECT RAISE(ABORT,'invalid session owner'); END;");
+}
+
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit version paths keep each transactional migration fail-closed.
 [[nodiscard]] auto migrate(sqlite3* database)
     -> std::expected<void, SessionStoreError> {
+  // clang-format on
   auto version_statement = prepare(database, "PRAGMA user_version");
   if (!version_statement)
     return std::unexpected(std::move(version_statement.error()));
@@ -4836,25 +4970,43 @@ class Transaction final {
   if (version == 1) {
     auto begun = begin_immediate(database);
     if (!begun) return begun;
-    const auto upgraded =
-        execute(database,
-                "CREATE INDEX events_project_backlog_promoted_repository "
-                "ON events(json_extract(payload_json,'$.item.repository_id'),"
-                "session_id,sequence) "
-                "WHERE payload_type='project_backlog.item_promoted';"
-                "CREATE INDEX events_project_backlog_status_repository "
-                "ON events(json_extract(payload_json,'$.change.repository_id'),"
-                "session_id,sequence) "
-                "WHERE payload_type='project_backlog.item_status_changed';"
-                "ALTER TABLE sessions ADD COLUMN session_kind TEXT NOT NULL "
-                "DEFAULT 'user';"
-                "ALTER TABLE sessions ADD COLUMN journal_key TEXT;"
-                "CREATE UNIQUE INDEX sessions_memory_journal_key "
-                "ON sessions(journal_key) WHERE session_kind='memory';"
-                "PRAGMA user_version=3;");
+    const auto upgraded = execute(
+        database,
+        "CREATE INDEX events_project_backlog_promoted_repository "
+        "ON events(json_extract(payload_json,'$.item.repository_id'),"
+        "session_id,sequence) "
+        "WHERE payload_type='project_backlog.item_promoted';"
+        "CREATE INDEX events_project_backlog_status_repository "
+        "ON events(json_extract(payload_json,'$.change.repository_id'),"
+        "session_id,sequence) "
+        "WHERE payload_type='project_backlog.item_status_changed';"
+        "ALTER TABLE sessions ADD COLUMN session_kind TEXT NOT NULL "
+        "DEFAULT 'user';"
+        "ALTER TABLE sessions ADD COLUMN journal_key TEXT;"
+        "CREATE UNIQUE INDEX sessions_memory_journal_key "
+        "ON sessions(journal_key) WHERE session_kind='memory';"
+        "ALTER TABLE sessions ADD COLUMN journal_owner_kind TEXT "
+        "CHECK(journal_owner_kind IN ('global','repository','persona'));"
+        "ALTER TABLE sessions ADD COLUMN journal_owner_id TEXT "
+        "CHECK(journal_owner_id IS NULL OR length(journal_owner_id)>0);"
+        "UPDATE sessions SET journal_owner_kind="
+        "CASE WHEN journal_key='global' THEN 'global' "
+        "WHEN journal_key LIKE 'project:%' THEN 'repository' "
+        "ELSE 'invalid' END,"
+        "journal_owner_id=CASE WHEN journal_key LIKE 'project:%' "
+        "THEN substr(journal_key,9) END WHERE session_kind='memory';"
+        "CREATE UNIQUE INDEX sessions_memory_owner ON sessions("
+        "journal_owner_kind,COALESCE(journal_owner_id,'')) "
+        "WHERE session_kind='memory';"
+        "PRAGMA user_version=4;");
     if (!upgraded) {
       rollback(database);
       return upgraded;
+    }
+    auto triggers = install_memory_owner_triggers(database);
+    if (!triggers) {
+      rollback(database);
+      return triggers;
     }
     return commit(database);
   }
@@ -4867,10 +5019,66 @@ class Transaction final {
                   "ALTER TABLE sessions ADD COLUMN journal_key TEXT;"
                   "CREATE UNIQUE INDEX sessions_memory_journal_key "
                   "ON sessions(journal_key) WHERE session_kind='memory';"
-                  "PRAGMA user_version=3;");
+                  "ALTER TABLE sessions ADD COLUMN journal_owner_kind TEXT "
+                  "CHECK(journal_owner_kind IN "
+                  "('global','repository','persona'));"
+                  "ALTER TABLE sessions ADD COLUMN journal_owner_id TEXT "
+                  "CHECK(journal_owner_id IS NULL OR "
+                  "length(journal_owner_id)>0);"
+                  "UPDATE sessions SET journal_owner_kind="
+                  "CASE WHEN journal_key='global' THEN 'global' "
+                  "WHEN journal_key LIKE 'project:%' THEN 'repository' "
+                  "ELSE 'invalid' END,"
+                  "journal_owner_id=CASE WHEN journal_key LIKE 'project:%' "
+                  "THEN substr(journal_key,9) END "
+                  "WHERE session_kind='memory';"
+                  "CREATE UNIQUE INDEX sessions_memory_owner ON sessions("
+                  "journal_owner_kind,COALESCE(journal_owner_id,'')) "
+                  "WHERE session_kind='memory';"
+                  "PRAGMA user_version=4;");
     if (!upgraded) {
       rollback(database);
       return upgraded;
+    }
+    auto triggers = install_memory_owner_triggers(database);
+    if (!triggers) {
+      rollback(database);
+      return triggers;
+    }
+    return commit(database);
+  }
+  if (version == 3) {
+    auto begun = begin_immediate(database);
+    if (!begun) return begun;
+    auto validated = validate_legacy_memory_journal_owners(database);
+    if (!validated) {
+      rollback(database);
+      return validated;
+    }
+    const auto upgraded = execute(
+        database,
+        "ALTER TABLE sessions ADD COLUMN journal_owner_kind TEXT "
+        "CHECK(journal_owner_kind IN ('global','repository','persona'));"
+        "ALTER TABLE sessions ADD COLUMN journal_owner_id TEXT "
+        "CHECK(journal_owner_id IS NULL OR length(journal_owner_id)>0);"
+        "UPDATE sessions SET journal_owner_kind="
+        "CASE WHEN journal_key='global' THEN 'global' "
+        "WHEN journal_key LIKE 'project:%' THEN 'repository' "
+        "ELSE 'invalid' END,"
+        "journal_owner_id=CASE WHEN journal_key LIKE 'project:%' "
+        "THEN substr(journal_key,9) END WHERE session_kind='memory';"
+        "CREATE UNIQUE INDEX sessions_memory_owner ON sessions("
+        "journal_owner_kind,COALESCE(journal_owner_id,'')) "
+        "WHERE session_kind='memory';"
+        "PRAGMA user_version=4;");
+    if (!upgraded) {
+      rollback(database);
+      return upgraded;
+    }
+    auto triggers = install_memory_owner_triggers(database);
+    if (!triggers) {
+      rollback(database);
+      return triggers;
     }
     return commit(database);
   }
@@ -4902,8 +5110,17 @@ class Transaction final {
       "session_kind TEXT NOT NULL CHECK(session_kind IN ('user','memory')) "
       "DEFAULT 'user',"
       "journal_key TEXT,"
+      "journal_owner_kind TEXT CHECK(journal_owner_kind IN "
+      "('global','repository','persona')) ,"
+      "journal_owner_id TEXT CHECK(journal_owner_id IS NULL OR "
+      "length(journal_owner_id)>0),"
       "CHECK((session_kind='user' AND journal_key IS NULL) OR "
-      "(session_kind='memory' AND journal_key IS NOT NULL))"
+      "(session_kind='memory' AND journal_key IS NOT NULL)),"
+      "CHECK((session_kind='user' AND journal_owner_kind IS NULL AND "
+      "journal_owner_id IS NULL) OR (session_kind='memory' AND "
+      "((journal_owner_kind='global' AND journal_owner_id IS NULL) OR "
+      "(journal_owner_kind IN ('repository','persona') AND "
+      "journal_owner_id IS NOT NULL))))"
       ") STRICT;"
       "CREATE TABLE events("
       "session_id TEXT NOT NULL REFERENCES sessions(session_id),"
@@ -4932,10 +5149,18 @@ class Transaction final {
       "WHERE payload_type='project_backlog.item_status_changed';"
       "CREATE UNIQUE INDEX sessions_memory_journal_key "
       "ON sessions(journal_key) WHERE session_kind='memory';"
-      "PRAGMA user_version=3;");
+      "CREATE UNIQUE INDEX sessions_memory_owner ON sessions("
+      "journal_owner_kind,COALESCE(journal_owner_id,'')) "
+      "WHERE session_kind='memory';"
+      "PRAGMA user_version=4;");
   if (!schema) {
     rollback(database);
     return schema;
+  }
+  auto triggers = install_memory_owner_triggers(database);
+  if (!triggers) {
+    rollback(database);
+    return triggers;
   }
   return commit(database);
 }
@@ -5296,7 +5521,7 @@ auto SqliteSessionStore::open_existing_read_only(
     auto version = prepare(database, "PRAGMA user_version");
     if (!version) return std::unexpected(std::move(version.error()));
     if (sqlite3_step(version->get()) != SQLITE_ROW ||
-        sqlite3_column_int64(version->get(), 0) != 3) {
+        sqlite3_column_int64(version->get(), 0) != storage_format_version) {
       return std::unexpected(
           store_error(SessionStoreErrorCode::unsupported_version,
                       "session database version is unsupported"));
@@ -5458,24 +5683,29 @@ auto SqliteSessionStore::list_sessions(const std::size_t limit,
   }
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- One transaction validates, finds, creates, and verifies an exact-owner journal.
 auto SqliteSessionStore::open_or_create_memory_journal(
     storage::MemoryJournalOpen request, const std::stop_token stop_token)
     -> std::expected<storage::SessionInfo, storage::SessionStoreError> {
+  // clang-format on
   try {
     if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
-    const bool valid_scope = (request.scope == domain::MemoryScope::global &&
-                              !request.repository_id) ||
-                             (request.scope == domain::MemoryScope::project &&
-                              request.repository_id.has_value());
-    if (!valid_scope) {
+    if (!domain::validate_memory_owner(request.owner)) {
       return std::unexpected(
           store_error(SessionStoreErrorCode::invalid_argument,
-                      "memory journal scope and repository identity disagree"));
+                      "memory journal owner is invalid"));
+    }
+    const auto owner_kind = memory_owner_kind_name(request.owner.kind);
+    std::optional<std::string> owner_id;
+    if (request.owner.repository_id) {
+      owner_id = request.owner.repository_id->value();
+    } else if (request.owner.persona_id) {
+      owner_id = request.owner.persona_id->value();
     }
     const std::string journal_key =
-        request.scope == domain::MemoryScope::global
-            ? "global"
-            : "project:" + std::string{request.repository_id->value()};
+        owner_id ? std::string{owner_kind} + ":" + *owner_id
+                 : std::string{owner_kind};
     auto created_at = timestamp_count(request.created_at);
     if (!created_at) return std::unexpected(std::move(created_at.error()));
 
@@ -5488,9 +5718,11 @@ auto SqliteSessionStore::open_or_create_memory_journal(
     auto lookup =
         prepare(m_impl->database,
                 "SELECT session_id FROM sessions WHERE session_kind='memory' "
-                "AND journal_key=?1");
+                "AND journal_owner_kind=?1 "
+                "AND journal_owner_id IS ?2");
     if (!lookup) return std::unexpected(std::move(lookup.error()));
-    auto bound = bind_text(lookup->get(), 1, journal_key);
+    auto bound = bind_text(lookup->get(), 1, owner_kind);
+    if (bound) bound = bind_optional_text(lookup->get(), 2, owner_id);
     if (!bound) return std::unexpected(std::move(bound.error()));
     const auto lookup_result = sqlite3_step(lookup->get());
     if (lookup_result == SQLITE_ROW) {
@@ -5504,8 +5736,9 @@ auto SqliteSessionStore::open_or_create_memory_journal(
     if (!session_id) {
       auto insert = prepare(m_impl->database,
                             "INSERT INTO sessions(session_id,created_at_ms,"
-                            "storage_format_version,session_kind,journal_key) "
-                            "VALUES(?1,?2,1,'memory',?3)");
+                            "storage_format_version,session_kind,journal_key,"
+                            "journal_owner_kind,journal_owner_id) "
+                            "VALUES(?1,?2,1,'memory',?3,?4,?5)");
       if (!insert) return std::unexpected(std::move(insert.error()));
       bound = bind_text(insert->get(), 1, request.candidate_session_id.value());
       if (bound) {
@@ -5513,6 +5746,8 @@ auto SqliteSessionStore::open_or_create_memory_journal(
         if (result != SQLITE_OK) bound = std::unexpected(sqlite_error(result));
       }
       if (bound) bound = bind_text(insert->get(), 3, journal_key);
+      if (bound) bound = bind_text(insert->get(), 4, owner_kind);
+      if (bound) bound = bind_optional_text(insert->get(), 5, owner_id);
       if (!bound) return std::unexpected(std::move(bound.error()));
       auto inserted = step_done(insert->get());
       if (!inserted) {

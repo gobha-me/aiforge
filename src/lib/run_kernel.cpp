@@ -58,51 +58,6 @@ constexpr std::size_t maximum_reasoning_bytes = std::size_t{1024} * 1024U;
   return {};
 }
 
-auto append_registration_field(detail::Sha256& digest,
-                               const std::string_view value) -> void {
-  std::array<std::byte, 8> length{};
-  const auto size = static_cast<std::uint64_t>(value.size());
-  for (std::size_t index{}; index < length.size(); ++index) {
-    const auto shift = static_cast<unsigned>((length.size() - index - 1U) * 8U);
-    length[index] = static_cast<std::byte>((size >> shift) & 0xffU);
-  }
-  digest.update(length);
-  digest.update(std::as_bytes(std::span{value.data(), value.size()}));
-}
-
-template <typename Value>
-auto append_registration_number(detail::Sha256& digest, const Value value)
-    -> void {
-  append_registration_field(digest, std::to_string(value));
-}
-
-[[nodiscard]] auto registration_digest(const RegisteredTool& tool)
-    -> std::optional<std::string> {
-  if (!tool.executor_contract) return std::nullopt;
-  detail::Sha256 digest;
-  append_registration_field(digest, "aiforge.tool-registration.v1");
-  append_registration_field(digest, tool.declaration.name);
-  append_registration_field(digest, tool.declaration.description);
-  append_registration_field(digest, tool.declaration.input_schema.media_type);
-  append_registration_field(digest, tool.declaration.input_schema.data);
-  append_registration_number(digest, tool.declaration.effects.size());
-  for (const auto effect : tool.declaration.effects) {
-    append_registration_field(digest, effect_name(effect));
-  }
-  append_registration_number(digest, tool.declaration.capability_scopes.size());
-  for (const auto& scope : tool.declaration.capability_scopes) {
-    append_registration_field(digest, effect_name(scope.effect));
-    append_registration_field(digest, scope.kind);
-    append_registration_field(digest, scope.value);
-  }
-  append_registration_number(digest, tool.limits.output_bytes);
-  append_registration_number(digest, tool.limits.progress_events);
-  append_registration_number(digest, tool.limits.timeout.count());
-  append_registration_field(digest, tool.executor_contract->identity);
-  append_registration_field(digest, tool.executor_contract->version);
-  return "sha256:" + digest.finish();
-}
-
 struct BackendFailure {
   backend::BackendError error;
 };
@@ -889,7 +844,180 @@ using WorkerUpdate =
   return std::nullopt;
 }
 
+[[nodiscard]] auto recorded_persona_selection(
+    const domain::SessionEventLog& event_log, const domain::RunId& run_id)
+    -> std::optional<domain::PersonaSelection> {
+  for (const auto& event : event_log.events()) {
+    if (event.metadata.run_id != run_id) continue;
+    if (const auto* recorded =
+            std::get_if<domain::PersonaSelectionRecorded>(&event.payload)) {
+      return recorded->selection;
+    }
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] auto persona_context_matches(
+    const domain::ConstructedContext& context,
+    const std::optional<domain::PersonaSelection>& expected) -> bool {
+  const auto count = std::ranges::count_if(
+      context.entries, [](const domain::ContextEntry& entry) {
+        return entry.kind == domain::ContextEntryKind::instruction &&
+               entry.instruction_layer == domain::InstructionLayer::persona;
+      });
+  if (!expected) return count == 0;
+  if (!domain::validate_persona_selection(*expected)) return false;
+  if (expected->action == domain::PersonaSelectionAction::disabled) {
+    return count == 0;
+  }
+  if (count != 1) return false;
+  const auto& reference = *expected->persona;
+  const auto source_id = domain::ContextSourceId::from(
+      "source:" + std::string{reference.persona_id.value()});
+  if (!source_id) return false;
+  const auto found = std::ranges::find_if(
+      context.entries, [](const domain::ContextEntry& entry) {
+        return entry.kind == domain::ContextEntryKind::instruction &&
+               entry.instruction_layer == domain::InstructionLayer::persona;
+      });
+  if (found == context.entries.end() ||
+      found->provenance.source_id != *source_id ||
+      found->provenance.source_location != reference.source_location ||
+      found->provenance.digest != reference.content_digest.algorithm + ":" +
+                                      reference.content_digest.value ||
+      found->message.role != domain::Role::system ||
+      found->message.invocation_id || !found->message.tool_calls.empty() ||
+      found->message.content.size() != 1) {
+    return false;
+  }
+  const auto* text =
+      std::get_if<domain::TextBlock>(found->message.content.data());
+  if (text == nullptr ||
+      text->text.size() != reference.content_digest.byte_size)
+    return false;
+  detail::Sha256 digest;
+  digest.update(std::as_bytes(std::span{text->text.data(), text->text.size()}));
+  return reference.content_digest.algorithm == "sha256" &&
+         digest.finish() == reference.content_digest.value;
+}
+
 } // namespace
+
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Recovery classification validates complete primary/child provenance and exact pending authority.
+auto classify_recoverable_run(const domain::SessionEventLog& event_log)
+    -> std::expected<std::optional<RecoverableRun>, RunKernelError> {
+  // clang-format on
+  try {
+    std::map<domain::RunId, domain::RunProjection> projections;
+    std::map<domain::RunId, std::optional<domain::RunId>> parents;
+    std::set<domain::RunId> child_created;
+    std::map<domain::RunId, std::set<domain::InvocationId>> unstarted_authority;
+    std::map<domain::RunId, domain::RunStarted> starts;
+    std::map<domain::RunId, domain::RunProvenance> provenance;
+
+    for (const auto& event : event_log.events()) {
+      auto [projection, inserted_projection] =
+          projections.try_emplace(event.metadata.run_id);
+      static_cast<void>(inserted_projection);
+      if (!projection->second.apply(event)) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::replay_rejected,
+            "durable recovery candidates could not rebuild projections"));
+      }
+
+      const auto [parent, inserted] =
+          parents.emplace(event.metadata.run_id, event.metadata.parent_run_id);
+      if (!inserted && parent->second != event.metadata.parent_run_id) {
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::replay_rejected,
+                         "durable run changes parent identity during replay"));
+      }
+      if (const auto* created =
+              std::get_if<domain::ChildRunCreated>(&event.payload)) {
+        if (!event.metadata.parent_run_id ||
+            created->child_run_id != event.metadata.run_id ||
+            (created->descriptor && created->descriptor->parent_run_id !=
+                                        *event.metadata.parent_run_id) ||
+            !child_created.insert(event.metadata.run_id).second) {
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::replay_rejected,
+              "durable session contains invalid child-run provenance"));
+        }
+      }
+      if (const auto* started =
+              std::get_if<domain::RunStarted>(&event.payload)) {
+        starts.insert_or_assign(event.metadata.run_id, *started);
+      } else if (const auto* recorded =
+                     std::get_if<domain::RunProvenanceRecorded>(
+                         &event.payload)) {
+        provenance.insert_or_assign(event.metadata.run_id,
+                                    recorded->provenance);
+      }
+
+      if (const auto* decided =
+              std::get_if<domain::ToolPolicyDecided>(&event.payload);
+          decided != nullptr &&
+          decided->decision == domain::PolicyDecision::allow) {
+        unstarted_authority[event.metadata.run_id].insert(
+            decided->invocation_id);
+      } else if (const auto* decided =
+                     std::get_if<domain::ToolApprovalDecided>(&event.payload);
+                 decided != nullptr &&
+                 decided->decision == domain::ApprovalDecision::approved) {
+        unstarted_authority[event.metadata.run_id].insert(
+            decided->invocation_id);
+      } else if (const auto invocation_id = tool_invocation_id(event.payload);
+                 invocation_id &&
+                 (std::holds_alternative<domain::ToolStarted>(event.payload) ||
+                  std::holds_alternative<domain::ToolResultRecorded>(
+                      event.payload) ||
+                  std::holds_alternative<domain::ToolErrored>(event.payload))) {
+        unstarted_authority[event.metadata.run_id].erase(*invocation_id);
+      }
+    }
+
+    for (const auto& [run_id, parent] : parents) {
+      if (parent &&
+          (!child_created.contains(run_id) || !parents.contains(*parent) ||
+           parents.at(*parent).has_value())) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::replay_rejected,
+            "durable session contains incomplete child-run provenance"));
+      }
+    }
+
+    std::optional<RecoverableRun> result;
+    for (const auto& [run_id, projection] : projections) {
+      if (parents.at(run_id)) continue;
+      const bool recoverable_authority =
+          projection.status() == domain::RunStatus::running &&
+          !unstarted_authority[run_id].empty();
+      if (projection.status() != domain::RunStatus::awaiting_input &&
+          projection.status() != domain::RunStatus::awaiting_approval &&
+          !recoverable_authority) {
+        continue;
+      }
+      if (result || !starts.contains(run_id)) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::replay_rejected,
+            result ? "durable session contains multiple awaiting runs"
+                   : "recoverable run lacks its runtime identity"));
+      }
+      result = RecoverableRun{
+          run_id, starts.at(run_id),
+          provenance.contains(run_id)
+              ? std::optional<domain::RunProvenance>{provenance.at(run_id)}
+              : std::nullopt,
+          projection.status(), recoverable_authority};
+    }
+    return result;
+  } catch (...) {
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::internal_failure,
+                     "durable recovery classification failed internally"));
+  }
+}
 
 struct RunKernel::Impl {
   struct ToolAssembly {
@@ -3313,39 +3441,34 @@ auto RunKernel::open_durable(DurableSessionOpen session,
       std::optional<domain::RunId> awaiting_plan_run;
       bool awaiting_tool_approval{};
       bool recovering_unstarted_authority{};
+      auto recoverable = classify_recoverable_run(event_log);
+      if (!recoverable) {
+        return std::unexpected(std::move(recoverable.error()));
+      }
+      if (*recoverable) {
+        awaiting_run = (*recoverable)->run_id;
+        awaiting_tool_approval =
+            (*recoverable)->status == domain::RunStatus::awaiting_approval;
+        recovering_unstarted_authority =
+            (*recoverable)->recovering_unstarted_authority;
+      }
+      std::set<domain::RunId> child_runs;
+      for (const auto& event : event_log.events()) {
+        if (event.metadata.parent_run_id) {
+          child_runs.insert(event.metadata.run_id);
+        }
+      }
       for (const auto& [run_id, projection] : projections) {
-        const bool recoverable_authority =
-            projection.status() == domain::RunStatus::running &&
-            !unstarted_authority[run_id].empty();
-        if (projection.status() == domain::RunStatus::awaiting_input ||
-            projection.status() == domain::RunStatus::awaiting_approval ||
-            recoverable_authority) {
-          if (awaiting_run || awaiting_plan_run) {
-            return std::unexpected(kernel_error(
-                RunKernelErrorCode::replay_rejected,
-                "durable session contains multiple awaiting runs"));
-          }
-          awaiting_run = run_id;
-          awaiting_tool_approval =
-              projection.status() == domain::RunStatus::awaiting_approval;
-          recovering_unstarted_authority = recoverable_authority;
-        } else if (projection.status() ==
-                       domain::RunStatus::awaiting_plan_decision ||
-                   projection.status() ==
-                       domain::RunStatus::awaiting_plan_revision) {
+        if (!child_runs.contains(run_id) &&
+            (projection.status() == domain::RunStatus::awaiting_plan_decision ||
+             projection.status() ==
+                 domain::RunStatus::awaiting_plan_revision)) {
           if (awaiting_run || awaiting_plan_run) {
             return std::unexpected(kernel_error(
                 RunKernelErrorCode::replay_rejected,
                 "durable session contains multiple awaiting runs"));
           }
           awaiting_plan_run = run_id;
-        } else {
-          continue;
-        }
-        if (awaiting_run && awaiting_plan_run) {
-          return std::unexpected(
-              kernel_error(RunKernelErrorCode::replay_rejected,
-                           "durable session contains multiple awaiting runs"));
         }
       }
       if (awaiting_run) {
@@ -3555,9 +3678,9 @@ auto RunKernel::open_durable(DurableSessionOpen session,
           const auto& declaration = selected_tools->declarations()[index];
           const auto* registration = selected_tools->find(declaration.name);
           const auto& recorded = (*provenance_tools)[index];
-          const auto current_digest = registration == nullptr
-                                          ? std::nullopt
-                                          : registration_digest(*registration);
+          const auto current_digest =
+              registration == nullptr ? std::nullopt
+                                      : tool_registration_digest(*registration);
           if (recorded.tool_name != declaration.name ||
               recorded.declared_effects != declaration.effects ||
               recorded.capability_scopes != declaration.capability_scopes ||
@@ -4006,6 +4129,17 @@ auto RunKernel::open_durable(DurableSessionOpen session,
 
 RunKernel::~RunKernel() = default;
 
+auto RunKernel::replace_available_tools(ToolRegistrySnapshot tools)
+    -> std::expected<void, RunKernelError> {
+  if (m_impl->active) {
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::run_already_active,
+                     "available tools cannot change while a run is active"));
+  }
+  m_impl->tools = std::move(tools);
+  return {};
+}
+
 // clang-format off
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicitly stages run admission, provenance, and persistence.
 auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
@@ -4063,7 +4197,7 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
             kernel_error(RunKernelErrorCode::invalid_start,
                          "run tool registration is internally inconsistent"));
       }
-      auto digest = registration_digest(*registration);
+      auto digest = tool_registration_digest(*registration);
       if (m_impl->session_store != nullptr && !digest) {
         return std::unexpected(
             kernel_error(RunKernelErrorCode::invalid_start,
@@ -5503,6 +5637,9 @@ auto RunKernel::continue_run(
                      Impl::InvocationState::terminal;
             }) ||
         request.tools != active.tools.declarations() ||
+        !persona_context_matches(
+            request.context,
+            recorded_persona_selection(m_impl->event_log, run_id)) ||
         !user_global_context_matches(
             request.context,
             recorded_user_global_instruction(m_impl->event_log, run_id)) ||

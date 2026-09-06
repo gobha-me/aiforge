@@ -134,7 +134,16 @@ namespace {
 auto prepare_persona_create(const PersonaCreate& request)
     -> std::expected<domain::PersonaDocument, PersonaEditorError> {
   try {
-    return prepare_draft(request.draft, request.limits);
+    auto prepared = prepare_draft(request.draft, request.limits);
+    if (!prepared) return prepared;
+    if (request.rebind_persona_id) {
+      prepared->reference.persona_id = *request.rebind_persona_id;
+      if (!domain::validate_persona_document(*prepared)) {
+        return failure(PersonaEditorErrorCode::invalid_request,
+                       "persona rebind identity is invalid");
+      }
+    }
+    return prepared;
   } catch (...) {
     return failure(PersonaEditorErrorCode::internal_failure,
                    "persona creation preparation failed internally");
@@ -174,7 +183,12 @@ auto validate_persona_write_receipt(const PersonaCreate& request,
   try {
     auto prepared = prepare_persona_create(request);
     if (!prepared) return std::unexpected(std::move(prepared.error()));
-    if (receipt.previous || receipt.resulting != prepared->reference) {
+    auto expected = prepared->reference;
+    expected.persona_id = receipt.resulting.persona_id;
+    if (receipt.previous || receipt.resulting != expected ||
+        !domain::validate_persona_reference(receipt.resulting) ||
+        (request.rebind_persona_id &&
+         receipt.resulting.persona_id != *request.rebind_persona_id)) {
       return receipt_failure();
     }
     return {};

@@ -4,6 +4,7 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <utility>
 
 #include <aiforge/persona/source.hpp>
 
@@ -22,8 +23,17 @@ struct PersonaDraft {
 };
 
 struct PersonaCreate {
+  PersonaCreate() = default;
+  PersonaCreate(PersonaDraft draft, PersonaLimits limits = {},
+                std::optional<domain::PersonaId> rebind_persona_id = {})
+      : draft(std::move(draft)), limits(limits),
+        rebind_persona_id(std::move(rebind_persona_id)) {}
+
   PersonaDraft draft;
   PersonaLimits limits{};
+  // Explicitly reuses a dormant identity. Ordinary creation always generates
+  // a new identity, including after deletion of a same-named persona.
+  std::optional<domain::PersonaId> rebind_persona_id;
   auto operator==(const PersonaCreate&) const -> bool = default;
 };
 

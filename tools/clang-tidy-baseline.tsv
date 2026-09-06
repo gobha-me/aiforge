@@ -141,12 +141,10 @@ src/adapters/process_image.cpp	cppcoreguidelines-pro-bounds-array-to-pointer-dec
 src/adapters/process_image.cpp	cppcoreguidelines-pro-type-vararg	66fa5e306b6f18c6c343	do not call c-style vararg functions
 src/adapters/process_image.cpp	readability-function-cognitive-complexity	2218539b52118fae2370	function 'render_terminal_viewer' has cognitive complexity of 31 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	17175cd81b663ee15bc7	function 'show_plan' has cognitive complexity of 29 (threshold 20)
-src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	1cae3bdecf86de8b0b0d	function 'manage_memory' has cognitive complexity of 84 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	39b0e565bfcd66520988	function 'request_close' has cognitive complexity of 50 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	7c3209940c7bc6a277b6	function 'on_render' has cognitive complexity of 27 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	c8e01de8f7f20ca090b4	function 'ensure_plan_review' has cognitive complexity of 64 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	d2b512e48c1c32a25b60	lambda has cognitive complexity of 21 (threshold 20)
-src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	e2cb5e508d1870ec8883	function 'show_memory' has cognitive complexity of 43 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	ee61c5ba8d710095f66b	lambda has cognitive complexity of 21 (threshold 20)
 src/adapters/process_login.cpp	readability-function-cognitive-complexity	d9032caf106e6bcf2f41	function 'execute' has cognitive complexity of 22 (threshold 20)
 src/adapters/process_one_shot.cpp	performance-move-const-arg	d75fb6f1b6260c132cfb	std::move of the expression of the trivially-copyable type 'std::optional<domain::SessionSpendCeiling>' has no effect; remove std::move()
@@ -276,15 +274,12 @@ src/lib/language_analysis.cpp	readability-function-cognitive-complexity	78a03f55
 src/lib/language_analysis.cpp	readability-implicit-bool-conversion	2ab4baa817f0cbd2b839	implicit conversion 'const KnowledgeEntity *' -> 'bool'
 src/lib/memory_controller.cpp	bugprone-implicit-widening-of-multiplication-result	9f5a24ccd2aebf5c8905	performing an implicit widening conversion to type 'unsigned long' of a multiplication performed in type 'unsigned int'
 src/lib/memory_controller.cpp	readability-function-cognitive-complexity	85ae13ff397c99c3d26d	function 'inspect' has cognitive complexity of 23 (threshold 20)
-src/lib/memory_controller.cpp	readability-function-cognitive-complexity	9350b251782a4ff474f6	function 'capture_committed' has cognitive complexity of 67 (threshold 20)
 src/lib/memory_projection.cpp	readability-function-cognitive-complexity	ff0aa8ad5577d19062f7	function 'apply' has cognitive complexity of 53 (threshold 20)
 src/lib/memory_projection.cpp	readability-implicit-bool-conversion	22cf9d9288e931c0cc94	implicit conversion 'const ProjectedMemoryRecord *' -> 'bool'
 src/lib/memory_projection.cpp	readability-implicit-bool-conversion	7012bedb39c15fcbe109	implicit conversion 'const ProjectedMemoryRecord *' -> 'bool'
 src/lib/memory_projection.cpp	readability-implicit-bool-conversion	93ec71e74e41d06915d7	implicit conversion 'const ProjectedMemoryRecord *' -> 'bool'
 src/lib/memory_projection.cpp	readability-implicit-bool-conversion	c61087491e9974557052	implicit conversion 'const ProjectedMemoryProposal *' -> 'bool'
 src/lib/memory_tool.cpp	modernize-use-nodiscard	6634eee7ceab98f2be84	function 'validate' should be marked [[nodiscard]]
-src/lib/memory_tool.cpp	performance-move-const-arg	e4bccf215a945393b561	std::move of the variable 'configuration' of the trivially-copyable type 'MemoryToolConfiguration' has no effect; remove std::move()
-src/lib/memory_tool.cpp	readability-function-cognitive-complexity	15973404797c5353026d	function 'parse_draft' has cognitive complexity of 36 (threshold 20)
 src/lib/model_catalog.cpp	readability-function-cognitive-complexity	404d990de3013cc1e90e	function 'valid_text' has cognitive complexity of 29 (threshold 20)
 src/lib/model_catalog.cpp	readability-function-cognitive-complexity	78d300e72f987be08e56	function 'snapshot' has cognitive complexity of 31 (threshold 20)
 src/lib/money.cpp	modernize-use-integer-sign-comparison	dcea9467895a051e1037	comparison between 'signed' and 'unsigned' integers
@@ -401,7 +396,6 @@ src/lib/sqlite_session_store.cpp	performance-move-const-arg	9ed619b4d0dec50b3202
 src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	46cb989175705abfa405	function 'append_events' has cognitive complexity of 59 (threshold 20)
 src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	56504b750c7c85a1938c	function 'replay_events' has cognitive complexity of 59 (threshold 20)
 src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	6ce7e0c9dfab2a23e300	function 'open' has cognitive complexity of 28 (threshold 20)
-src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	8db47d5d78a5c044f99d	function 'open_or_create_memory_journal' has cognitive complexity of 40 (threshold 20)
 src/lib/sqlite_session_store.cpp	readability-function-cognitive-complexity	9fe5e262b39b7ebf1411	function 'replay_project_backlog' has cognitive complexity of 22 (threshold 20)
 src/lib/sqlite_session_store.cpp	readability-use-anyofallof	574d8db7bbf43f36c9a2	replace loop by 'std::ranges::any_of()'
 src/lib/task_scheduler.cpp	bugprone-unchecked-optional-access	cf109f800ab12c223bfa	unchecked access to optional value

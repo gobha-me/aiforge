@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -17,6 +18,7 @@
 #include <vector>
 
 #include <aiforge/instructions/editor.hpp>
+#include <aiforge/runtime/memory_tool.hpp>
 #include <aiforge/surfaces/one_shot.hpp>
 #include <aiforge/testing/scripted_persona_source.hpp>
 #include <aiforge/testing/scripted_tool_executor.hpp>
@@ -1511,7 +1513,111 @@ TEST_CASE("semantically corrupt replay is rejected without provider work",
       output, error);
   REQUIRE_FALSE(result);
   REQUIRE(result.error().code == surfaces::OneShotErrorCode::run_failed);
+  REQUIRE(result.error().message == "durable session could not be opened");
   REQUIRE(backend.captured.empty());
+}
+
+TEST_CASE("one-shot rejects every recoverable pending run without effects",
+          "[one-shot][session][recovery][memory][failure]") {
+  const auto scenario =
+      GENERATE(std::string{"awaiting input"}, std::string{"awaiting approval"},
+               std::string{"memory v1"}, std::string{"memory v2"});
+  CAPTURE(scenario);
+  FakeModels models;
+  ConversationBackend backend;
+  MemoryStore store;
+  const auto session_id = make_id<domain::SessionId>("pending-session");
+  const auto run_id = make_id<domain::RunId>("pending-run");
+  const auto invocation_id =
+      make_id<domain::InvocationId>("pending-invocation");
+  const auto timestamp = domain::EventTimestamp{std::chrono::milliseconds{1}};
+  std::vector<domain::RunEvent> events;
+  const auto append = [&](domain::RunEventPayload payload,
+                          std::optional<domain::InvocationId> invocation =
+                              std::nullopt) {
+    const auto sequence = events.size() + 1;
+    events.push_back(
+        {{make_id<domain::EventId>("pending-event-" + std::to_string(sequence)),
+          run_id, sequence, 2,
+          domain::EventTimestamp{std::chrono::milliseconds{sequence}},
+          std::nullopt, std::nullopt, std::move(invocation)},
+         std::move(payload)});
+  };
+  append(domain::RunStarted{make_id<domain::SurfaceId>("one-shot"),
+                            make_id<domain::WorkspaceId>("chat"),
+                            make_id<domain::PermissionProfileId>("observe"),
+                            std::nullopt});
+
+  runtime::ToolRegistry registry;
+  const runtime::MemoryToolConfiguration memory_configuration{
+      true, true, false, std::nullopt, {}};
+  REQUIRE(runtime::register_memory_tool(registry, memory_configuration));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  if (scenario == "awaiting input") {
+    append(domain::RunAwaitingInput{
+        make_id<domain::QuestionId>("pending-question")});
+  } else if (scenario == "awaiting approval") {
+    append(domain::ToolApprovalRequested{invocation_id, {}, std::nullopt},
+           invocation_id);
+  } else {
+    auto registration = *tools->find("propose_memory");
+    if (scenario == "memory v1") {
+      registration.declaration.description =
+          "Propose a bounded global or project memory for runtime review. "
+          "This proposal grants no authority and may be rejected by policy.";
+      registration.executor_contract =
+          runtime::ToolExecutorContract{"aiforge.runtime.propose_memory", "1"};
+    }
+    auto provenance = run_provenance();
+    provenance.tools = {{"propose_memory",
+                         {},
+                         {},
+                         runtime::tool_registration_digest(registration)}};
+    append(domain::RunProvenanceRecorded{std::move(provenance)});
+    append(
+        domain::ToolProposed{
+            invocation_id,
+            "propose_memory",
+            {"application/json",
+             R"({"scope":"global","kind":"workflow","content":"x","rationale":"y","evidence_excerpt":"z"})"},
+            {},
+            std::nullopt,
+            true},
+        invocation_id);
+    append(domain::ToolPolicyDecided{invocation_id,
+                                     domain::PolicyDecision::allow,
+                                     {},
+                                     std::nullopt,
+                                     domain::PolicyDecisionSource::fallback,
+                                     std::nullopt},
+           invocation_id);
+  }
+  store.sessions.emplace(
+      session_id,
+      storage::SessionInfo{session_id, timestamp, timestamp, events.size()});
+  store.histories.emplace(session_id, events);
+  const auto history_before = store.histories.at(session_id);
+  const auto append_calls_before = store.append_calls;
+  surfaces::OneShotDependencies dependencies;
+  dependencies.tools = *tools;
+  surfaces::OneShotSurface surface{backend, models,  store,
+                                   {},      nullptr, std::move(dependencies)};
+  std::ostringstream output;
+  std::ostringstream error;
+
+  const auto result = surface.run(
+      {"must not run", std::nullopt, make_id<domain::ModelId>("model"),
+       surfaces::OneShotRequest::SessionMode::resume, session_id},
+      output, error);
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == surfaces::OneShotErrorCode::run_failed);
+  REQUIRE(result.error().message ==
+          "one-shot cannot resume a recoverable pending run");
+  REQUIRE(backend.captured.empty());
+  REQUIRE(store.append_calls == append_calls_before);
+  REQUIRE(store.histories.at(session_id) == history_before);
+  REQUIRE(output.str().empty());
 }
 
 TEST_CASE("cancelled partial assistant content stays out of resumed context",

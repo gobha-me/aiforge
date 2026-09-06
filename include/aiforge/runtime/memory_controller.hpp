@@ -20,6 +20,7 @@ namespace aiforge::runtime {
 struct MemorySettings {
   domain::MemoryCaptureMode global_capture{domain::MemoryCaptureMode::off};
   domain::MemoryCaptureMode project_capture{domain::MemoryCaptureMode::review};
+  domain::MemoryCaptureMode persona_capture{domain::MemoryCaptureMode::review};
   std::uint64_t context_tokens{2048};
   auto operator==(const MemorySettings&) const -> bool = default;
 };
@@ -55,15 +56,13 @@ struct MemoryProposalView {
 };
 
 struct MemoryState {
-  domain::MemoryScope scope{domain::MemoryScope::global};
-  std::optional<domain::RepositoryId> repository_id;
+  domain::MemoryOwner owner;
   std::vector<MemoryProposalView> proposals;
   std::vector<MemoryRecordView> records;
 };
 
 struct MemoryMutationTarget {
-  domain::MemoryScope scope{domain::MemoryScope::global};
-  std::optional<domain::RepositoryId> repository_id;
+  domain::MemoryOwner owner;
 };
 
 struct MemoryAcceptRequest {
@@ -91,6 +90,7 @@ struct MemoryExpireRequest {
 
 struct MemoryContextRequest {
   std::optional<domain::RepositoryId> repository_id;
+  std::optional<domain::PersonaId> persona_id;
   std::uint64_t maximum_tokens{2048};
   std::uint64_t available_tokens{};
 };
@@ -125,7 +125,8 @@ class MemoryController final {
   [[nodiscard]] auto inspect(MemoryMutationTarget target)
       -> std::expected<MemoryState, MemoryControllerError>;
   [[nodiscard]] auto current_for_context(
-      std::optional<domain::RepositoryId> repository_id)
+      std::optional<domain::RepositoryId> repository_id,
+      std::optional<domain::PersonaId> persona_id)
       -> std::expected<std::vector<MemoryRecordView>, MemoryControllerError>;
   [[nodiscard]] auto accept(MemoryAcceptRequest request)
       -> std::expected<void, MemoryControllerError>;

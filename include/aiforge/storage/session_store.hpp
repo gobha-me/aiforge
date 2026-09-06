@@ -53,8 +53,7 @@ struct SessionInfo {
 
 struct MemoryJournalOpen {
   domain::SessionId candidate_session_id;
-  domain::MemoryScope scope{domain::MemoryScope::global};
-  std::optional<domain::RepositoryId> repository_id;
+  domain::MemoryOwner owner;
   domain::EventTimestamp created_at;
   auto operator==(const MemoryJournalOpen&) const -> bool = default;
 };

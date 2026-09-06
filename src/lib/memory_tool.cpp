@@ -41,9 +41,10 @@ class DuplicateJsonKey final : public std::exception {};
 }
 
 [[nodiscard]] auto scope_from(const std::string_view value)
-    -> std::optional<domain::MemoryScope> {
-  if (value == "global") return domain::MemoryScope::global;
-  if (value == "project") return domain::MemoryScope::project;
+    -> std::optional<domain::MemoryOwnerKind> {
+  if (value == "global") return domain::MemoryOwnerKind::global;
+  if (value == "project") return domain::MemoryOwnerKind::repository;
+  if (value == "persona") return domain::MemoryOwnerKind::persona;
   return std::nullopt;
 }
 
@@ -57,15 +58,29 @@ class DuplicateJsonKey final : public std::exception {};
   return std::nullopt;
 }
 
+[[nodiscard]] auto scope_name(const domain::MemoryOwnerKind kind)
+    -> std::string_view {
+  switch (kind) {
+    case domain::MemoryOwnerKind::global: return "global";
+    case domain::MemoryOwnerKind::repository: return "project";
+    case domain::MemoryOwnerKind::persona: return "persona";
+    case domain::MemoryOwnerKind::unknown: break;
+  }
+  return "unknown";
+}
+
 [[nodiscard]] auto valid_text(const std::string& value, const std::size_t limit)
     -> bool {
   return value.size() <= limit && domain::memory_text_is_safe(value) &&
          !domain::memory_text_looks_secret(value);
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Strict bounded JSON and owner validation remain one auditable parser.
 [[nodiscard]] auto parse_draft(const domain::StructuredDataBlock& arguments,
                                const MemoryToolConfiguration& configuration)
     -> std::expected<MemoryProposalDraft, ToolExecutionError> {
+  // clang-format on
   if (arguments.media_type != "application/json" || arguments.data.empty() ||
       arguments.data.size() > std::size_t{64} * 1024U) {
     return error("propose_memory arguments must be bounded JSON");
@@ -94,11 +109,13 @@ class DuplicateJsonKey final : public std::exception {};
     auto scope = scope_from(root.at("scope").get<std::string>());
     auto kind = kind_from(root.at("kind").get<std::string>());
     if (!scope || !kind ||
-        (*scope == domain::MemoryScope::global &&
+        (*scope == domain::MemoryOwnerKind::global &&
          !configuration.global_enabled) ||
-        (*scope == domain::MemoryScope::project &&
+        (*scope == domain::MemoryOwnerKind::repository &&
          !configuration.project_enabled) ||
-        (*scope == domain::MemoryScope::global &&
+        (*scope == domain::MemoryOwnerKind::persona &&
+         (!configuration.persona_capable || !configuration.persona_id)) ||
+        (*scope == domain::MemoryOwnerKind::global &&
          *kind == domain::MemoryKind::project_convention)) {
       return error("propose_memory scope or kind is unavailable");
     }
@@ -196,9 +213,7 @@ class MemoryToolExecutor final : public ToolExecutor {
     auto parsed = parse_draft(invocation.arguments.value, m_configuration);
     if (!parsed) return std::unexpected(std::move(parsed.error()));
     Json result{{"status", "proposed"},
-                {"scope", parsed->scope == domain::MemoryScope::global
-                              ? "global"
-                              : "project"}};
+                {"scope", scope_name(parsed->owner_kind)}};
     return std::make_unique<MemoryToolStream>(
         domain::StructuredDataBlock{"application/json", result.dump()});
   }
@@ -207,19 +222,15 @@ class MemoryToolExecutor final : public ToolExecutor {
   MemoryToolConfiguration m_configuration;
 };
 
-} // namespace
-
-auto parse_memory_proposal_draft(const domain::StructuredDataBlock& arguments,
-                                 const MemoryToolConfiguration& configuration)
-    -> std::expected<MemoryProposalDraft, ToolExecutionError> {
-  return parse_draft(arguments, configuration);
-}
-
-auto memory_tool_declaration(const MemoryToolConfiguration& configuration)
+[[nodiscard]] auto make_memory_tool_declaration(
+    const MemoryToolConfiguration& configuration, const bool legacy)
     -> backend::ToolDeclaration {
   Json scopes = Json::array();
   if (configuration.global_enabled) scopes.push_back("global");
   if (configuration.project_enabled) scopes.push_back("project");
+  if (!legacy && configuration.persona_capable && configuration.persona_id) {
+    scopes.push_back("persona");
+  }
   Json schema{
       {"type", "object"},
       {"additionalProperties", false},
@@ -245,28 +256,87 @@ auto memory_tool_declaration(const MemoryToolConfiguration& configuration)
           {"maxItems", configuration.limits.maximum_relationships},
           {"uniqueItems", true},
           {"items", {{"type", "string"}, {"maxLength", 128}}}}}}}};
+  auto description =
+      std::string{"Propose a bounded global or project memory for runtime "
+                  "review. "};
+  if (!legacy) {
+    description =
+        "Propose a bounded global, project, or active-persona memory for "
+        "runtime review. Persona identity is bound by the runtime and is not "
+        "a tool argument. ";
+  }
+  description +=
+      "This proposal grants no authority and may be rejected by policy.";
   return {"propose_memory",
-          "Propose a bounded global or project memory for runtime review. "
-          "This proposal grants no authority and may be rejected by policy.",
+          std::move(description),
           {"application/schema+json", schema.dump()},
           {},
           {}};
 }
 
+[[nodiscard]] auto make_memory_registration(
+    MemoryToolConfiguration configuration, const bool legacy)
+    -> RegisteredTool {
+  if (legacy) {
+    configuration.persona_capable = false;
+    configuration.persona_id.reset();
+  }
+  return RegisteredTool{
+      make_memory_tool_declaration(configuration, legacy),
+      ToolExecutionLimits{std::size_t{64} * 1024U, 1, std::chrono::seconds{5}},
+      std::make_shared<MemoryToolExecutor>(configuration),
+      ToolExecutorContract{"aiforge.runtime.propose_memory",
+                           legacy ? "1" : "2"},
+      ToolCategory::memory};
+}
+
+} // namespace
+
+auto parse_memory_proposal_draft(const domain::StructuredDataBlock& arguments,
+                                 const MemoryToolConfiguration& configuration)
+    -> std::expected<MemoryProposalDraft, ToolExecutionError> {
+  return parse_draft(arguments, configuration);
+}
+
+auto memory_tool_declaration(const MemoryToolConfiguration& configuration)
+    -> backend::ToolDeclaration {
+  return make_memory_tool_declaration(configuration, false);
+}
+
 auto register_memory_tool(ToolRegistry& registry,
                           MemoryToolConfiguration configuration)
     -> std::expected<void, ToolRegistryError> {
-  if (!configuration.global_enabled && !configuration.project_enabled) {
+  if (!configuration.global_enabled && !configuration.project_enabled &&
+      !configuration.persona_capable) {
     return std::unexpected(ToolRegistryError{
         ToolRegistryErrorCode::invalid_declaration,
         "propose_memory requires at least one enabled scope"});
   }
+  auto registration = make_memory_registration(std::move(configuration), false);
   return registry.register_tool(
-      memory_tool_declaration(configuration),
-      std::make_shared<MemoryToolExecutor>(configuration),
-      ToolExecutionLimits{std::size_t{64} * 1024U, 1, std::chrono::seconds{5}},
-      ToolExecutorContract{"aiforge.runtime.propose_memory", "1"},
-      ToolCategory::memory);
+      std::move(registration.declaration), std::move(registration.executor),
+      registration.limits, std::move(registration.executor_contract),
+      registration.category);
+}
+
+auto bind_memory_tool(const ToolRegistrySnapshot& tools,
+                      MemoryToolConfiguration configuration,
+                      std::optional<std::string> expected_registration_digest)
+    -> std::expected<ToolRegistrySnapshot, ToolRegistryError> {
+  if (tools.find("propose_memory") == nullptr) return tools;
+  auto current = make_memory_registration(configuration, false);
+  if (!expected_registration_digest ||
+      tool_registration_digest(current) == expected_registration_digest) {
+    return tools.replace(std::move(current));
+  }
+  auto legacy = make_memory_registration(std::move(configuration), true);
+  if (tool_registration_digest(legacy) == expected_registration_digest) {
+    return tools.replace(std::move(legacy));
+  }
+  return std::unexpected(ToolRegistryError{
+      ToolRegistryErrorCode::invalid_declaration,
+      "recorded propose_memory registration is not an exact supported "
+      "contract"});
 }
 
 } // namespace aiforge::runtime

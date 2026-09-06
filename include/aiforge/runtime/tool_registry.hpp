@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <memory>
 #include <optional>
@@ -168,6 +169,12 @@ struct RegisteredTool {
   ToolCategory category{ToolCategory::other};
 };
 
+// Canonical durable identity for one exact declaration, limits, and executor
+// contract. Registrations without a versioned executor contract have no
+// recoverable identity.
+[[nodiscard]] auto tool_registration_digest(const RegisteredTool& tool)
+    -> std::optional<std::string>;
+
 enum class ToolUnavailableReason {
   not_configured,
   durable_session_required,
@@ -224,6 +231,8 @@ class ToolRegistrySnapshot final {
   [[nodiscard]] auto unavailable_tools() const noexcept
       -> std::span<const UnavailableTool>;
   [[nodiscard]] auto subset(std::span<const std::string> names) const
+      -> std::expected<ToolRegistrySnapshot, ToolRegistryError>;
+  [[nodiscard]] auto replace(RegisteredTool replacement) const
       -> std::expected<ToolRegistrySnapshot, ToolRegistryError>;
   [[nodiscard]] auto empty() const noexcept -> bool { return m_tools.empty(); }
   [[nodiscard]] auto size() const noexcept -> std::size_t {

@@ -71,21 +71,26 @@ template <typename Id>
 
 [[nodiscard]] auto to_record(const domain::MemoryProposal& proposal)
     -> domain::MemoryRecord {
-  return {proposal.record_id,     proposal.proposal_id, proposal.scope,
-          proposal.repository_id, proposal.kind,        proposal.content,
-          proposal.rationale,     proposal.source,      proposal.producer};
+  return {proposal.record_id, proposal.proposal_id, proposal.owner,
+          proposal.kind,      proposal.content,     proposal.rationale,
+          proposal.source,    proposal.producer};
 }
 
 [[nodiscard]] auto mode_for(const MemorySettings& settings,
-                            const domain::MemoryScope scope)
+                            const domain::MemoryOwnerKind kind)
     -> domain::MemoryCaptureMode {
-  return scope == domain::MemoryScope::global ? settings.global_capture
-                                              : settings.project_capture;
+  switch (kind) {
+    case domain::MemoryOwnerKind::global: return settings.global_capture;
+    case domain::MemoryOwnerKind::repository: return settings.project_capture;
+    case domain::MemoryOwnerKind::persona: return settings.persona_capture;
+    case domain::MemoryOwnerKind::unknown: break;
+  }
+  return domain::MemoryCaptureMode::off;
 }
 
-[[nodiscard]] auto direct_auto_kind(const domain::MemoryScope scope,
+[[nodiscard]] auto direct_auto_kind(const domain::MemoryOwnerKind owner_kind,
                                     const domain::MemoryKind kind) -> bool {
-  if (scope == domain::MemoryScope::global) {
+  if (owner_kind == domain::MemoryOwnerKind::global) {
     return kind == domain::MemoryKind::user_preference;
   }
   return kind == domain::MemoryKind::user_preference ||
@@ -93,9 +98,15 @@ template <typename Id>
          kind == domain::MemoryKind::workflow;
 }
 
-[[nodiscard]] auto scope_name(const domain::MemoryScope scope)
+[[nodiscard]] auto owner_name(const domain::MemoryOwnerKind kind)
     -> std::string_view {
-  return scope == domain::MemoryScope::project ? "project" : "global";
+  switch (kind) {
+    case domain::MemoryOwnerKind::global: return "global";
+    case domain::MemoryOwnerKind::repository: return "project";
+    case domain::MemoryOwnerKind::persona: return "persona";
+    case domain::MemoryOwnerKind::unknown: return "unknown";
+  }
+  return "unknown";
 }
 
 [[nodiscard]] auto kind_name(const domain::MemoryKind kind)
@@ -121,9 +132,11 @@ auto resolve_memory_settings(const config::ResolvedConfig& config)
     -> std::expected<MemorySettings, MemoryControllerError> {
   auto global = capture_mode(config, "memory.global.capture");
   auto project = capture_mode(config, "memory.project.capture");
+  auto persona = capture_mode(config, "memory.persona.capture");
   const auto* tokens = config.find("memory.context.max_tokens");
   if (!global) return std::unexpected(std::move(global.error()));
   if (!project) return std::unexpected(std::move(project.error()));
+  if (!persona) return std::unexpected(std::move(persona.error()));
   if (tokens == nullptr || !tokens->value) {
     return failure(MemoryControllerErrorCode::invalid_configuration,
                    "memory context budget is missing");
@@ -133,7 +146,7 @@ auto resolve_memory_settings(const config::ResolvedConfig& config)
     return failure(MemoryControllerErrorCode::invalid_configuration,
                    "memory context budget must be between 1 and 1048576");
   }
-  return MemorySettings{*global, *project, *value};
+  return MemorySettings{*global, *project, *persona, *value};
 }
 
 auto select_memory_context(MemoryController& controller,
@@ -141,7 +154,8 @@ auto select_memory_context(MemoryController& controller,
     -> std::expected<std::vector<domain::ContextContentInput>,
                      MemoryControllerError> {
   if (request.maximum_tokens == 0 || request.available_tokens == 0) return {};
-  auto records = controller.current_for_context(request.repository_id);
+  auto records =
+      controller.current_for_context(request.repository_id, request.persona_id);
   if (!records) return std::unexpected(std::move(records.error()));
 
   runtime::ContextSelectionRequest selection;
@@ -178,7 +192,7 @@ auto select_memory_context(MemoryController& controller,
       return failure(MemoryControllerErrorCode::internal_failure,
                      "saved memory identity cannot enter context");
     }
-    auto text = "Saved " + std::string{scope_name(record.scope)} + " " +
+    auto text = "Saved " + std::string{owner_name(record.owner.kind)} + " " +
                 std::string{kind_name(record.kind)} + ": " + record.content;
     domain::ContextContentInput content{
         std::move(*entry_id),
@@ -230,21 +244,17 @@ MemoryController::MemoryController(
 
 auto MemoryController::open(MemoryMutationTarget target)
     -> std::expected<Journal, MemoryControllerError> {
-  const bool valid =
-      (target.scope == domain::MemoryScope::global && !target.repository_id) ||
-      (target.scope == domain::MemoryScope::project && target.repository_id);
-  if (!valid || !m_identity_suffix_source || !m_timestamp_source) {
+  if (!domain::validate_memory_owner(target.owner) ||
+      !m_identity_suffix_source || !m_timestamp_source) {
     return failure(MemoryControllerErrorCode::invalid_configuration,
                    "memory journal target or identity sources are invalid");
   }
   auto candidate = make_id<domain::SessionId>(
-      target.scope == domain::MemoryScope::global ? "memory-global"
-                                                  : "memory-project",
+      "memory-" + std::string{owner_name(target.owner.kind)},
       m_identity_suffix_source());
   if (!candidate) return std::unexpected(std::move(candidate.error()));
   auto info = m_store.open_or_create_memory_journal(
-      {std::move(*candidate), target.scope, target.repository_id,
-       m_timestamp_source()},
+      {std::move(*candidate), target.owner, m_timestamp_source()},
       m_stop_token);
   if (!info) return storage_failure(info.error());
   auto events = m_store.replay_events(info->session_id, m_stop_token);
@@ -253,6 +263,16 @@ auto MemoryController::open(MemoryMutationTarget target)
   if (!projection) {
     return failure(MemoryControllerErrorCode::storage_failure,
                    projection.error().message);
+  }
+  if (std::ranges::any_of(projection->proposals(),
+                          [&](const auto& value) {
+                            return value.proposal.owner != target.owner;
+                          }) ||
+      std::ranges::any_of(projection->records(), [&](const auto& value) {
+        return value.record.owner != target.owner;
+      })) {
+    return failure(MemoryControllerErrorCode::storage_failure,
+                   "memory journal contains a different owner");
   }
   return Journal{std::move(*info), std::move(*projection)};
 }
@@ -269,7 +289,7 @@ auto MemoryController::append(Journal& journal, const domain::RunId& run_id,
         make_id<domain::EventId>("memory-event", m_identity_suffix_source());
     if (!event_id) return std::unexpected(std::move(event_id.error()));
     events.push_back(
-        {{std::move(*event_id), run_id, ++sequence, 1, m_timestamp_source(),
+        {{std::move(*event_id), run_id, ++sequence, 2, m_timestamp_source(),
           std::nullopt, std::nullopt, invocation_id},
          std::move(payload)});
   }
@@ -304,7 +324,7 @@ auto MemoryController::append_capture(Journal& journal,
     if (!event_id) return std::unexpected(std::move(event_id.error()));
     auto result = *event_id;
     events.push_back(
-        {{std::move(*event_id), run_id, ++sequence, 1, m_timestamp_source(),
+        {{std::move(*event_id), run_id, ++sequence, 2, m_timestamp_source(),
           std::nullopt, std::nullopt, invocation_id},
          std::move(payload)});
     return result;
@@ -345,6 +365,8 @@ auto MemoryController::append_capture(Journal& journal,
   return {};
 }
 
+// clang-format off
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Capture validates provenance, runtime ownership, policy, and append-only transitions explicitly.
 auto MemoryController::capture_committed(
     const domain::SessionId& source_session_id,
     const std::span<const domain::RunEvent> source_events,
@@ -352,6 +374,7 @@ auto MemoryController::capture_committed(
     std::optional<domain::RepositoryId> repository_id,
     std::string runtime_version)
     -> std::expected<std::size_t, MemoryControllerError> {
+  // clang-format on
   try {
     std::size_t captured{};
     for (std::size_t index{}; index < source_events.size(); ++index) {
@@ -363,26 +386,51 @@ auto MemoryController::capture_committed(
         const auto* value = std::get_if<domain::ToolProposed>(
             &source_events[candidate].payload);
         if (value != nullptr && value->invocation_id == result->invocation_id &&
+            source_events[candidate].metadata.run_id ==
+                source_events[index].metadata.run_id &&
             value->tool_name == "propose_memory") {
           proposed = value;
         }
       }
       if (proposed == nullptr) continue;
 
+      std::optional<domain::PersonaId> producing_persona_id;
+      bool run_started{};
+      for (std::size_t source_index{}; source_index <= index; ++source_index) {
+        const auto& event = source_events[source_index];
+        if (event.metadata.run_id != source_events[index].metadata.run_id)
+          continue;
+        if (const auto* started =
+                std::get_if<domain::RunStarted>(&event.payload)) {
+          run_started = true;
+          producing_persona_id = started->persona_id;
+          break;
+        }
+      }
       MemoryToolConfiguration tool_configuration{
-          settings.global_capture != domain::MemoryCaptureMode::off,
-          settings.project_capture != domain::MemoryCaptureMode::off, m_limits};
+          true, true, true, producing_persona_id, m_limits};
       auto draft =
           parse_memory_proposal_draft(proposed->arguments, tool_configuration);
-      if (!draft) continue;
-      if (mode_for(settings, draft->scope) == domain::MemoryCaptureMode::off ||
-          (draft->scope == domain::MemoryScope::project && !repository_id)) {
+      if (!run_started || !draft) {
+        return failure(MemoryControllerErrorCode::invalid_source,
+                       "committed memory proposal lacks its producing run "
+                       "identity or exact owner binding");
+      }
+      if (mode_for(settings, draft->owner_kind) ==
+              domain::MemoryCaptureMode::off ||
+          (draft->owner_kind == domain::MemoryOwnerKind::repository &&
+           !repository_id) ||
+          (draft->owner_kind == domain::MemoryOwnerKind::persona &&
+           !producing_persona_id)) {
         continue;
       }
-      MemoryMutationTarget target{draft->scope,
-                                  draft->scope == domain::MemoryScope::project
-                                      ? repository_id
-                                      : std::nullopt};
+      auto owner = domain::MemoryOwner::global();
+      if (draft->owner_kind == domain::MemoryOwnerKind::repository) {
+        owner = domain::MemoryOwner::repository(*repository_id);
+      } else if (draft->owner_kind == domain::MemoryOwnerKind::persona) {
+        owner = domain::MemoryOwner::persona(*producing_persona_id);
+      }
+      MemoryMutationTarget target{owner};
       auto journal = open(target);
       if (!journal) return std::unexpected(std::move(journal.error()));
       if (std::ranges::any_of(
@@ -427,8 +475,7 @@ auto MemoryController::capture_committed(
       domain::MemoryProposal proposal{
           std::move(*proposal_id),
           std::move(*record_id),
-          draft->scope,
-          target.repository_id,
+          target.owner,
           draft->kind,
           std::move(draft->content),
           std::move(draft->rationale),
@@ -457,13 +504,14 @@ auto MemoryController::capture_committed(
             return value.state == domain::ProjectedMemoryRecordState::current &&
                    value.record.content == proposal.content;
           });
-      const auto mode = mode_for(settings, proposal.scope);
+      const auto mode = mode_for(settings, proposal.owner.kind);
       domain::MemoryPolicyAction action = domain::MemoryPolicyAction::stage;
       std::string reason{"capture mode requires user review"};
       if (mode == domain::MemoryCaptureMode::automatic) {
-        const bool allowed = evidence_event_id &&
-                             direct_auto_kind(proposal.scope, proposal.kind) &&
-                             proposal.overlap_record_ids.empty() && !duplicate;
+        const bool allowed =
+            evidence_event_id &&
+            direct_auto_kind(proposal.owner.kind, proposal.kind) &&
+            proposal.overlap_record_ids.empty() && !duplicate;
         action = allowed ? domain::MemoryPolicyAction::accept
                          : domain::MemoryPolicyAction::reject;
         reason = allowed ? "accepted by conservative direct-evidence policy"
@@ -487,7 +535,7 @@ auto MemoryController::inspect(MemoryMutationTarget target)
     -> std::expected<MemoryState, MemoryControllerError> {
   auto journal = open(target);
   if (!journal) return std::unexpected(std::move(journal.error()));
-  MemoryState state{target.scope, target.repository_id, {}, {}};
+  MemoryState state{target.owner, {}, {}};
   std::map<domain::SessionId, std::optional<std::set<domain::EventId>>> sources;
   const auto source_available = [&](const domain::MemorySource& source)
       -> std::expected<bool, MemoryControllerError> {
@@ -527,34 +575,38 @@ auto MemoryController::inspect(MemoryMutationTarget target)
 }
 
 auto MemoryController::current_for_context(
-    std::optional<domain::RepositoryId> repository_id)
+    std::optional<domain::RepositoryId> repository_id,
+    std::optional<domain::PersonaId> persona_id)
     -> std::expected<std::vector<MemoryRecordView>, MemoryControllerError> {
   std::vector<MemoryRecordView> result;
-  if (repository_id) {
-    auto project = inspect({domain::MemoryScope::project, repository_id});
-    if (!project) return std::unexpected(std::move(project.error()));
-    for (auto& record : project->records) {
+  const auto append_current = [&](domain::MemoryOwner owner)
+      -> std::expected<void, MemoryControllerError> {
+    auto state = inspect({std::move(owner)});
+    if (!state) return std::unexpected(std::move(state.error()));
+    std::ranges::sort(state->records, [](const auto& left, const auto& right) {
+      return left.projected.record.record_id > right.projected.record.record_id;
+    });
+    for (auto& record : state->records) {
       if (record.source_available &&
           record.projected.state ==
               domain::ProjectedMemoryRecordState::current &&
-          record.projected.record.kind != domain::MemoryKind::unknown)
+          record.projected.record.kind != domain::MemoryKind::unknown) {
         result.push_back(std::move(record));
+      }
     }
+    return {};
+  };
+  if (persona_id) {
+    auto appended = append_current(domain::MemoryOwner::persona(*persona_id));
+    if (!appended) return std::unexpected(std::move(appended.error()));
   }
-  auto global = inspect({domain::MemoryScope::global, std::nullopt});
-  if (!global) return std::unexpected(std::move(global.error()));
-  for (auto& record : global->records) {
-    if (record.source_available &&
-        record.projected.state == domain::ProjectedMemoryRecordState::current &&
-        record.projected.record.kind != domain::MemoryKind::unknown)
-      result.push_back(std::move(record));
+  if (repository_id) {
+    auto appended =
+        append_current(domain::MemoryOwner::repository(*repository_id));
+    if (!appended) return std::unexpected(std::move(appended.error()));
   }
-  std::ranges::stable_sort(result, [](const auto& left, const auto& right) {
-    if (left.projected.record.scope != right.projected.record.scope) {
-      return left.projected.record.scope == domain::MemoryScope::project;
-    }
-    return left.projected.record.record_id > right.projected.record.record_id;
-  });
+  auto appended = append_current(domain::MemoryOwner::global());
+  if (!appended) return std::unexpected(std::move(appended.error()));
   return result;
 }
 

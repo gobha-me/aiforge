@@ -210,7 +210,7 @@ class ChatSession final {
   [[nodiscard]] auto select_persona(std::string name)
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto disable_persona() -> std::expected<void, ChatSessionError>;
-  [[nodiscard]] auto create_persona(persona::PersonaDraft draft)
+  [[nodiscard]] auto create_persona(persona::PersonaCreate request)
       -> std::expected<persona::PersonaWriteReceipt, ChatSessionError>;
   [[nodiscard]] auto replace_persona(domain::PersonaReference expected,
                                      std::string text)

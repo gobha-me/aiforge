@@ -12,7 +12,7 @@
 namespace aiforge::runtime {
 
 struct MemoryProposalDraft {
-  domain::MemoryScope scope{domain::MemoryScope::global};
+  domain::MemoryOwnerKind owner_kind{domain::MemoryOwnerKind::global};
   domain::MemoryKind kind{domain::MemoryKind::user_preference};
   std::string content;
   std::string rationale;
@@ -25,6 +25,8 @@ struct MemoryProposalDraft {
 struct MemoryToolConfiguration {
   bool global_enabled{};
   bool project_enabled{};
+  bool persona_capable{};
+  std::optional<domain::PersonaId> persona_id;
   domain::MemoryLimits limits{};
   auto operator==(const MemoryToolConfiguration&) const -> bool = default;
 };
@@ -38,5 +40,9 @@ struct MemoryToolConfiguration {
 [[nodiscard]] auto register_memory_tool(ToolRegistry& registry,
                                         MemoryToolConfiguration configuration)
     -> std::expected<void, ToolRegistryError>;
+[[nodiscard]] auto bind_memory_tool(
+    const ToolRegistrySnapshot& tools, MemoryToolConfiguration configuration,
+    std::optional<std::string> expected_registration_digest = std::nullopt)
+    -> std::expected<ToolRegistrySnapshot, ToolRegistryError>;
 
 } // namespace aiforge::runtime

@@ -2,6 +2,10 @@
 
 #include <filesystem>
 #include <functional>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
 
 #include <aiforge/config/file_store.hpp>
 #include <aiforge/persona/editor.hpp>
@@ -27,12 +31,24 @@ using PersonaFilesystemCheckpoint =
     std::function<std::expected<void, persona::PersonaEditorError>(
         PersonaFilesystemCheckpointStage)>;
 
+// Deterministic failure hooks for the security-critical persistent identity
+// boundary. Empty operations use the native Linux getrandom/xattr/fsync calls.
+struct PersonaIdentityOperations {
+  std::function<std::expected<std::size_t, int>(std::span<unsigned char>)>
+      entropy;
+  std::function<std::expected<std::optional<std::string>, int>(int)> read;
+  std::function<std::expected<void, int>(int, std::string_view)> create;
+  std::function<std::expected<void, int>(int)> synchronize;
+};
+
 class FilesystemPersonaSource final : public persona::PersonaSource,
                                       public persona::PersonaEditor {
  public:
   explicit FilesystemPersonaSource(std::filesystem::path root,
-                                   PersonaFilesystemCheckpoint checkpoint = {})
-      : m_root(std::move(root)), m_checkpoint(std::move(checkpoint)) {}
+                                   PersonaFilesystemCheckpoint checkpoint = {},
+                                   PersonaIdentityOperations identity = {})
+      : m_root(std::move(root)), m_checkpoint(std::move(checkpoint)),
+        m_identity(std::move(identity)) {}
 
   [[nodiscard]] auto root() const noexcept -> const std::filesystem::path& {
     return m_root;
@@ -56,6 +72,7 @@ class FilesystemPersonaSource final : public persona::PersonaSource,
  private:
   std::filesystem::path m_root;
   PersonaFilesystemCheckpoint m_checkpoint;
+  PersonaIdentityOperations m_identity;
 };
 
 } // namespace aiforge::adapters

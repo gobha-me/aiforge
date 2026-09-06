@@ -10,7 +10,19 @@
 
 namespace aiforge::domain {
 
-enum class MemoryScope { global, project, unknown };
+enum class MemoryOwnerKind { global, repository, persona, unknown };
+
+struct MemoryOwner {
+  MemoryOwnerKind kind{MemoryOwnerKind::global};
+  std::optional<RepositoryId> repository_id;
+  std::optional<PersonaId> persona_id;
+
+  [[nodiscard]] static auto global() -> MemoryOwner;
+  [[nodiscard]] static auto repository(RepositoryId repository_id)
+      -> MemoryOwner;
+  [[nodiscard]] static auto persona(PersonaId persona_id) -> MemoryOwner;
+  auto operator==(const MemoryOwner&) const -> bool = default;
+};
 enum class MemoryKind {
   user_preference,
   project_convention,
@@ -40,8 +52,7 @@ struct MemorySource {
 struct MemoryProposal {
   MemoryProposalId proposal_id;
   MemoryRecordId record_id;
-  MemoryScope scope{MemoryScope::global};
-  std::optional<RepositoryId> repository_id;
+  MemoryOwner owner;
   MemoryKind kind{MemoryKind::user_preference};
   std::string content;
   std::string rationale;
@@ -65,8 +76,7 @@ struct MemoryPolicyEvaluation {
 struct MemoryRecord {
   MemoryRecordId record_id;
   MemoryProposalId proposal_id;
-  MemoryScope scope{MemoryScope::global};
-  std::optional<RepositoryId> repository_id;
+  MemoryOwner owner;
   MemoryKind kind{MemoryKind::user_preference};
   std::string content;
   std::string rationale;
@@ -149,6 +159,8 @@ struct MemoryError {
 [[nodiscard]] auto validate_memory_proposal(const MemoryProposal& proposal,
                                             const MemoryLimits& limits = {})
     -> std::expected<void, MemoryError>;
+[[nodiscard]] auto validate_memory_owner(const MemoryOwner& owner) noexcept
+    -> bool;
 [[nodiscard]] auto validate_memory_record(const MemoryRecord& record,
                                           const MemoryLimits& limits = {})
     -> std::expected<void, MemoryError>;

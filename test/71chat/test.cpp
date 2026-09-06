@@ -1,5 +1,7 @@
+#include <aiforge/detail/sha256.hpp>
 #include <aiforge/instructions/editor.hpp>
 #include <aiforge/runtime/ask_user_tool.hpp>
+#include <aiforge/runtime/memory_tool.hpp>
 #include <aiforge/runtime/tool_launch_policy.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
 #include <aiforge/testing/application_launch_context.hpp>
@@ -9,12 +11,14 @@
 #include <aiforge/testing/scripted_user_global_instruction_source.hpp>
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <chrono>
 #include <cstdint>
 #include <expected>
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -166,6 +170,71 @@ class QuestionBackend final : public backend::Backend,
   bool tool_support{true};
 };
 
+class MemoryProposalStream final : public backend::BackendStream {
+ public:
+  MemoryProposalStream(domain::MessageId message_id, const bool proposes)
+      : m_message_id(std::move(message_id)), m_proposes(proposes) {}
+
+  auto next(std::stop_token)
+      -> std::expected<std::optional<backend::BackendEvent>,
+                       backend::BackendError> override {
+    if (m_proposes) {
+      switch (m_step++) {
+        case 0:
+          return backend::BackendEvent{
+              backend::ResponseStarted{"memory-proposal"}};
+        case 1:
+          return backend::BackendEvent{backend::ToolCallDelta{
+              make_id<domain::InvocationId>("memory-call"), "propose_memory",
+              R"({"scope":"persona","kind":"workflow","content":"Remember alpha","rationale":"Preserve the producing persona workflow","evidence_excerpt":"alpha evidence"})"}};
+        case 2:
+          return backend::BackendEvent{
+              backend::ResponseFinished{domain::FinishReason::tool_call}};
+        default: return std::optional<backend::BackendEvent>{};
+      }
+    }
+    switch (m_step++) {
+      case 0:
+        return backend::BackendEvent{
+            backend::ResponseStarted{"memory-continuation"}};
+      case 1:
+        return backend::BackendEvent{backend::ContentDelta{
+            m_message_id, domain::TextBlock{"proposal recorded"}}};
+      case 2:
+        return backend::BackendEvent{
+            backend::ResponseFinished{domain::FinishReason::stop}};
+      default: return std::optional<backend::BackendEvent>{};
+    }
+  }
+
+ private:
+  domain::MessageId m_message_id;
+  bool m_proposes{};
+  int m_step{};
+};
+
+class MemoryProposalBackend final : public backend::Backend,
+                                    public backend::ModelContextProvider {
+ public:
+  auto lookup(const domain::ModelId& model_id, std::stop_token)
+      -> std::expected<backend::ModelContextInfo,
+                       backend::BackendError> override {
+    return backend::ModelContextInfo{
+        model_id, 100000, 4096, std::nullopt,
+        backend::ModelCapabilityMap{{"tools", true}}};
+  }
+
+  auto start(backend::BackendRequest request, std::stop_token)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    requests.push_back(request);
+    return std::make_unique<MemoryProposalStream>(request.assistant_message_id,
+                                                  requests.size() == 1);
+  }
+
+  std::vector<backend::BackendRequest> requests;
+};
+
 class ApprovalStream final : public backend::BackendStream {
  public:
   auto next(std::stop_token)
@@ -287,8 +356,31 @@ class MemoryStore final : public storage::SessionStore {
     return histories[session_id];
   }
 
+  auto open_or_create_memory_journal(storage::MemoryJournalOpen request,
+                                     std::stop_token stop_token)
+      -> std::expected<storage::SessionInfo,
+                       storage::SessionStoreError> override {
+    const auto existing =
+        std::ranges::find(memory_journals, request.owner,
+                          [](const auto& entry) -> const domain::MemoryOwner& {
+                            return entry.first;
+                          });
+    if (existing != memory_journals.end()) {
+      return sessions.at(existing->second);
+    }
+    if (auto created = create_session(
+            {request.candidate_session_id, request.created_at}, stop_token);
+        !created) {
+      return std::unexpected(std::move(created.error()));
+    }
+    memory_journals.emplace_back(request.owner, request.candidate_session_id);
+    return sessions.at(request.candidate_session_id);
+  }
+
   std::map<domain::SessionId, storage::SessionInfo> sessions;
   std::map<domain::SessionId, std::vector<domain::RunEvent>> histories;
+  std::vector<std::pair<domain::MemoryOwner, domain::SessionId>>
+      memory_journals;
 };
 
 auto drain_to_end(surfaces::ChatSession& session)
@@ -346,12 +438,59 @@ auto text_messages(const backend::BackendRequest& request,
 
 auto persona_document(std::string text = "Review carefully.")
     -> domain::PersonaDocument {
+  detail::Sha256 digest;
+  digest.update(std::as_bytes(std::span{text.data(), text.size()}));
   return {{make_id<domain::PersonaId>("persona:reviewer"),
            "reviewer",
            "personas/reviewer.md",
-           {"sha256", std::string(64, 'a'), text.size()}},
+           {"sha256", digest.finish(), text.size()}},
           std::move(text)};
 }
+
+auto named_persona_document(const std::string& id, const std::string& name,
+                            std::string text) -> domain::PersonaDocument {
+  detail::Sha256 digest;
+  digest.update(std::as_bytes(std::span{text.data(), text.size()}));
+  return {{make_id<domain::PersonaId>(id),
+           name,
+           "personas/" + name + ".md",
+           {"sha256", digest.finish(), text.size()}},
+          std::move(text)};
+}
+
+class MutablePersonaSource final : public persona::PersonaSource {
+ public:
+  MutablePersonaSource() = default;
+  explicit MutablePersonaSource(
+      std::map<std::string, domain::PersonaDocument> initial_documents)
+      : documents(std::move(initial_documents)) {}
+
+  auto list(persona::PersonaLimits, std::stop_token)
+      -> std::expected<std::vector<domain::PersonaSummary>,
+                       persona::PersonaError> override {
+    std::vector<domain::PersonaSummary> result;
+    for (const auto& [name, document] : documents) {
+      result.push_back({document.reference, name});
+    }
+    return result;
+  }
+
+  auto load(std::string name, persona::PersonaLimits, std::stop_token)
+      -> std::expected<domain::PersonaDocument,
+                       persona::PersonaError> override {
+    loads.push_back(name);
+    const auto found = documents.find(name);
+    if (found == documents.end()) {
+      return std::unexpected(
+          persona::PersonaError{persona::PersonaErrorCode::not_found,
+                                "persona missing", name, false});
+    }
+    return found->second;
+  }
+
+  std::map<std::string, domain::PersonaDocument> documents;
+  std::vector<std::string> loads;
+};
 
 auto user_global_document(std::string text = "Use terse answers.")
     -> domain::UserGlobalInstructionDocument {
@@ -1063,6 +1202,111 @@ TEST_CASE("recovered approvals cannot bypass global snapshot validation",
   }
 }
 
+TEST_CASE("recovered approvals revalidate their originating persona",
+          "[chat][persona][approval][storage][failure]") {
+  const auto changed_after_open = GENERATE(true, false);
+  CAPTURE(changed_after_open);
+  ApprovalBackend backend;
+  MemoryStore store;
+  const auto original = named_persona_document(
+      "persona:alpha-immutable", "alpha", "Original approval persona.");
+  const auto changed = named_persona_document(
+      "persona:alpha-immutable", "alpha", "Changed approval persona.");
+  MutablePersonaSource create_source{{{"alpha", original}}};
+  const backend::ToolDeclaration declaration{
+      "read_repository_file",
+      "Read a repository file",
+      {"application/schema+json", R"({"type":"object"})"},
+      {domain::Effect::read},
+      {{domain::Effect::read, "filesystem.root", "/repo"}}};
+  auto executor = std::make_shared<testing::ScriptedToolExecutor>(
+      std::vector<testing::ScriptedToolExchange>{});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      declaration, executor, {},
+      runtime::ToolExecutorContract{"test.read_repository_file", "1"},
+      runtime::ToolCategory::repository));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  const auto permission =
+      make_id<domain::PermissionProfileId>("tools-medium-prompt-v1");
+  auto policy = runtime::make_tool_launch_policy(
+      *tools, {permission,
+               testing::available_application_launch_context(
+                   runtime::RestrictionLevel::medium),
+               {}});
+  REQUIRE(policy);
+  surfaces::ChatSessionDependencies create_dependencies;
+  create_dependencies.tools = *tools;
+  create_dependencies.tool_policy = *policy;
+  create_dependencies.permission_profile_id = permission;
+  create_dependencies.persona_source = &create_source;
+  auto created = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::create,
+       std::nullopt,
+       domain::RunProvenance{"test",
+                             "test",
+                             std::nullopt,
+                             make_id<domain::ModelId>("model"),
+                             std::nullopt,
+                             {},
+                             {},
+                             {}},
+       {persona::PersonaDirectiveKind::select, "alpha",
+        domain::PersonaSelectionSource::command_line}},
+      backend, backend, &store, nullptr, {}, {}, create_dependencies);
+  REQUIRE(created);
+  REQUIRE((*created)->select_tool_profile(
+      make_id<domain::ToolProfileId>("repository-read")));
+  const auto submitted = (*created)->submit("request a write");
+  REQUIRE(submitted);
+  const auto pending = drain_to_approval(**created);
+  const auto session_id = (*created)->session_id();
+  created->reset();
+
+  MutablePersonaSource resume_source{{{"alpha", original}}};
+  surfaces::ChatSessionDependencies resume_dependencies;
+  resume_dependencies.tools = *tools;
+  resume_dependencies.tool_policy = *policy;
+  resume_dependencies.permission_profile_id = permission;
+  resume_dependencies.persona_source = &resume_source;
+  auto resumed = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::resume, session_id},
+      backend, backend, &store, nullptr, {}, {}, resume_dependencies);
+  REQUIRE(resumed);
+  REQUIRE((*resumed)->pending_tool_approval());
+  const auto history_before = store.histories.at(session_id);
+  const auto backend_requests_before = backend.requests.size();
+  if (changed_after_open) {
+    resume_source.documents.insert_or_assign("alpha", changed);
+  }
+
+  const auto decided =
+      (*resumed)->decide_tool_approval(submitted->run_id, pending.invocation_id,
+                                       {domain::ApprovalDecision::denied, {}});
+  if (changed_after_open) {
+    REQUIRE_FALSE(decided);
+    REQUIRE(decided.error().code ==
+            surfaces::ChatSessionErrorCode::context_failed);
+    REQUIRE(store.histories.at(session_id) == history_before);
+    REQUIRE(backend.requests.size() == backend_requests_before);
+    REQUIRE(executor->recorded_invocations().empty());
+    const auto drained = (*resumed)->drain();
+    REQUIRE_FALSE(drained);
+    REQUIRE(drained.error().code ==
+            surfaces::ChatSessionErrorCode::context_failed);
+    REQUIRE(store.histories.at(session_id) == history_before);
+    REQUIRE(backend.requests.size() == backend_requests_before);
+    REQUIRE(executor->recorded_invocations().empty());
+  } else {
+    REQUIRE(decided);
+    REQUIRE_FALSE((*resumed)->pending_tool_approval());
+    REQUIRE(executor->recorded_invocations().empty());
+  }
+}
+
 TEST_CASE("interactive tool profiles fail closed and change only while idle",
           "[chat][tools][profiles][failure]") {
   const backend::ToolDeclaration ask_user{
@@ -1570,6 +1814,348 @@ TEST_CASE("interactive personas are attributed and retained per run",
   drain_to_end(**session);
 }
 
+TEST_CASE("interactive persona memory binds per run and never leaks authority",
+          "[chat][persona][memory][context][authority]") {
+  MemoryProposalBackend backend;
+  MemoryStore store;
+  const auto alpha = persona_document("Persona alpha");
+  const domain::PersonaDocument beta{
+      {make_id<domain::PersonaId>("persona:beta"),
+       "beta",
+       "personas/beta.md",
+       {"sha256", std::string(64, 'b'), std::size_t{12}}},
+      "Persona beta"};
+  testing::ScriptedPersonaSource personas{{},
+                                          {{"reviewer", alpha},
+                                           {"reviewer", alpha},
+                                           {"beta", beta},
+                                           {"beta", beta}}};
+  std::uint64_t suffix{};
+  runtime::MemoryController memories{
+      store, [&] { return ++suffix; },
+      [&] {
+        return domain::EventTimestamp{std::chrono::milliseconds{2000 + suffix}};
+      }};
+  runtime::ToolRegistry registry;
+  REQUIRE(runtime::register_memory_tool(
+      registry, {false, false, true, std::nullopt, {}}));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.tools = *tools;
+  dependencies.persona_source = &personas;
+  dependencies.memory_controller = &memories;
+  dependencies.memory_settings = {domain::MemoryCaptureMode::off,
+                                  domain::MemoryCaptureMode::off,
+                                  domain::MemoryCaptureMode::review, 2048};
+  dependencies.runtime_version = "test-runtime";
+  const domain::RunProvenance provenance{"test-runtime",
+                                         "test-backend",
+                                         std::nullopt,
+                                         make_id<domain::ModelId>("model"),
+                                         std::nullopt,
+                                         {},
+                                         {},
+                                         {}};
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::create,
+       std::nullopt,
+       provenance,
+       {persona::PersonaDirectiveKind::select, "reviewer",
+        domain::PersonaSelectionSource::command_line}},
+      backend, backend, &store, nullptr, {}, {}, dependencies);
+  REQUIRE(session);
+  REQUIRE((*session)->submit("alpha evidence"));
+  drain_to_end(**session);
+  REQUIRE(backend.requests.size() == 2);
+  REQUIRE(backend.requests.front().tools.size() == 1);
+  REQUIRE(backend.requests.front().tools.front().input_schema.data.contains(
+      R"("persona")"));
+
+  const runtime::MemoryMutationTarget alpha_target{
+      domain::MemoryOwner::persona(alpha.reference.persona_id)};
+  auto state = memories.inspect(alpha_target);
+  REQUIRE(state);
+  REQUIRE(state->proposals.size() == 1);
+  const auto proposal = state->proposals.front().projected;
+  REQUIRE(memories.accept({alpha_target, proposal.proposal.proposal_id,
+                           proposal.proposal_event_id, std::nullopt,
+                           std::nullopt, std::nullopt}));
+
+  REQUIRE((*session)->select_persona("beta"));
+  REQUIRE((*session)->submit("beta run"));
+  drain_to_end(**session);
+  REQUIRE(backend.requests.size() == 3);
+  const auto beta_evidence =
+      text_messages(backend.requests.back(), domain::Role::evidence);
+  REQUIRE(std::ranges::none_of(beta_evidence, [](const auto& text) {
+    return text.contains("Remember alpha");
+  }));
+
+  REQUIRE((*session)->disable_persona());
+  REQUIRE((*session)->submit("no persona run"));
+  drain_to_end(**session);
+  REQUIRE(backend.requests.size() == 4);
+  REQUIRE_FALSE(
+      backend.requests.back().tools.front().input_schema.data.contains(
+          R"("persona")"));
+  const auto unscoped_evidence =
+      text_messages(backend.requests.back(), domain::Role::evidence);
+  REQUIRE(std::ranges::none_of(unscoped_evidence, [](const auto& text) {
+    return text.contains("Remember alpha");
+  }));
+  state = memories.inspect(alpha_target);
+  REQUIRE(state);
+  REQUIRE(state->records.size() == 1);
+}
+
+TEST_CASE("recovery classification ignores child and video runs",
+          "[chat][recovery][persona][video][child]") {
+  const auto session_id = make_id<domain::SessionId>("recovery-session");
+  const auto parent = make_id<domain::RunId>("completed-parent");
+  const auto child = make_id<domain::RunId>("awaiting-child");
+  const auto video = make_id<domain::RunId>("running-video");
+  const auto primary = make_id<domain::RunId>("awaiting-primary");
+  domain::SessionEventLog log{session_id};
+  std::uint64_t sequence{};
+  const auto append =
+      [&](const domain::RunId& run_id, domain::RunEventPayload payload,
+          std::optional<domain::RunId> parent_run_id = std::nullopt) {
+        ++sequence;
+        auto appended = log.append(
+            {{make_id<domain::EventId>("recovery-event-" +
+                                       std::to_string(sequence)),
+              run_id, sequence, 1,
+              domain::EventTimestamp{std::chrono::milliseconds{sequence}},
+              std::nullopt, std::move(parent_run_id), std::nullopt},
+             std::move(payload)});
+        REQUIRE(appended);
+      };
+  const auto attributes = [](std::optional<domain::PersonaId> persona_id =
+                                 std::nullopt) {
+    return domain::RunStarted{make_id<domain::SurfaceId>("surface"),
+                              make_id<domain::WorkspaceId>("workspace"),
+                              make_id<domain::PermissionProfileId>("observe"),
+                              std::move(persona_id)};
+  };
+
+  append(parent, attributes());
+  append(parent, domain::RunCompleted{});
+  append(child, attributes(make_id<domain::PersonaId>("persona:child")),
+         parent);
+  append(child, domain::ChildRunCreated{child, std::nullopt}, parent);
+  append(child,
+         domain::RunAwaitingInput{make_id<domain::QuestionId>("child-input")},
+         parent);
+  append(video, attributes(make_id<domain::PersonaId>("persona:video")));
+  append(video, domain::VideoGenerationRequested{
+                    make_id<domain::VideoOperationId>("video-operation"),
+                    {make_id<domain::ModelId>("video-model"), "prompt",
+                     std::chrono::seconds{5}},
+                    make_id<domain::ArtifactId>("video-artifact")});
+
+  auto recoverable = runtime::classify_recoverable_run(log);
+  REQUIRE(recoverable);
+  REQUIRE_FALSE(*recoverable);
+
+  append(primary,
+         attributes(make_id<domain::PersonaId>("persona:recoverable")));
+  append(primary,
+         domain::RunAwaitingInput{make_id<domain::QuestionId>("user-input")});
+  recoverable = runtime::classify_recoverable_run(log);
+  REQUIRE(recoverable);
+  REQUIRE(*recoverable);
+  REQUIRE((*recoverable)->run_id == primary);
+  REQUIRE((*recoverable)->attributes.persona_id ==
+          make_id<domain::PersonaId>("persona:recoverable"));
+}
+
+TEST_CASE("recovered chat finishes with its exact persona before switching",
+          "[chat][recovery][persona][video][context]") {
+  const auto next_persona = GENERATE(true, false);
+  CAPTURE(next_persona);
+  QuestionBackend backend;
+  MemoryStore store;
+  const auto alpha = named_persona_document("persona:alpha-immutable", "alpha",
+                                            "Original alpha instructions.");
+  const auto beta = named_persona_document("persona:beta-immutable", "beta",
+                                           "Next beta instructions.");
+  MutablePersonaSource create_source{{{"alpha", alpha}}};
+  runtime::ToolRegistry registry;
+  REQUIRE(runtime::register_ask_user_tool(registry, true));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  surfaces::ChatSessionDependencies create_dependencies;
+  create_dependencies.tools = *tools;
+  create_dependencies.persona_source = &create_source;
+  auto created = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::create,
+       std::nullopt,
+       domain::RunProvenance{"test",
+                             "test",
+                             std::nullopt,
+                             make_id<domain::ModelId>("model"),
+                             std::nullopt,
+                             {},
+                             {},
+                             {}},
+       {persona::PersonaDirectiveKind::select, "alpha",
+        domain::PersonaSelectionSource::command_line}},
+      backend, backend, &store, nullptr, {}, {}, create_dependencies);
+  REQUIRE(created);
+  const auto session_id = (*created)->session_id();
+  REQUIRE((*created)->submit("ask before restart"));
+  const auto pending = drain_to_question(**created);
+  created->reset();
+
+  const auto video_run = make_id<domain::RunId>("interleaved-video");
+  const auto video_persona = named_persona_document(
+      "persona:video-immutable", "video", "Video instructions.");
+  const auto first_sequence = store.sessions.at(session_id).last_sequence + 1;
+  const auto video_event = [&](const std::uint64_t offset,
+                               domain::RunEventPayload payload) {
+    return domain::RunEvent{
+        {make_id<domain::EventId>("interleaved-video-event-" +
+                                  std::to_string(offset)),
+         video_run, first_sequence + offset, 2,
+         domain::EventTimestamp{
+             std::chrono::milliseconds{first_sequence + offset}},
+         std::nullopt, std::nullopt, std::nullopt},
+        std::move(payload)};
+  };
+  const std::vector video_events{
+      video_event(
+          0, domain::RunStarted{make_id<domain::SurfaceId>("video"),
+                                make_id<domain::WorkspaceId>("workspace"),
+                                make_id<domain::PermissionProfileId>("observe"),
+                                video_persona.reference.persona_id}),
+      video_event(1,
+                  domain::PersonaSelectionRecorded{
+                      {domain::PersonaSelectionAction::selected,
+                       domain::PersonaSelectionSource::command_line,
+                       video_persona.reference, std::nullopt}}),
+      video_event(2, domain::VideoGenerationRequested{
+                         make_id<domain::VideoOperationId>("video-operation"),
+                         {make_id<domain::ModelId>("video-model"), "prompt",
+                          std::chrono::seconds{5}},
+                         make_id<domain::ArtifactId>("video-artifact")})};
+  REQUIRE(store.append_events(session_id, video_events, {}));
+
+  MutablePersonaSource resume_source{{{"alpha", alpha}, {"beta", beta}}};
+  surfaces::ChatSessionDependencies resume_dependencies;
+  resume_dependencies.tools = *tools;
+  resume_dependencies.persona_source = &resume_source;
+  const auto directive =
+      next_persona
+          ? persona::
+                PersonaDirective{persona::PersonaDirectiveKind::select, "beta",
+                                 domain::PersonaSelectionSource::command_line}
+          : persona::PersonaDirective{
+                persona::PersonaDirectiveKind::disable, std::nullopt,
+                domain::PersonaSelectionSource::command_line};
+  auto resumed = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::resume, session_id,
+       domain::RunProvenance{"test",
+                             "test",
+                             std::nullopt,
+                             make_id<domain::ModelId>("model"),
+                             std::nullopt,
+                             {},
+                             {},
+                             {}},
+       directive},
+      backend, backend, &store, nullptr, {}, {}, resume_dependencies);
+  INFO((resumed ? std::string{} : resumed.error().message));
+  REQUIRE(resumed);
+  REQUIRE((*resumed)->persona_state().selected ==
+          (next_persona
+               ? std::optional<domain::PersonaReference>{beta.reference}
+               : std::nullopt));
+  REQUIRE((*resumed)->answer_questions(
+      pending.run_id, pending.invocation_id,
+      {{make_id<domain::QuestionId>("format"), {"short"}, std::nullopt}}));
+  drain_to_end(**resumed);
+  REQUIRE(backend.requests.size() == 2);
+  const auto continued_system =
+      text_messages(backend.requests[1], domain::Role::system);
+  REQUIRE(std::ranges::find(continued_system, alpha.text) !=
+          continued_system.end());
+  REQUIRE(std::ranges::find(continued_system, beta.text) ==
+          continued_system.end());
+
+  const auto next_submission = (*resumed)->submit("new run");
+  INFO((next_submission ? std::string{} : next_submission.error().message));
+  REQUIRE(next_submission);
+  drain_to_end(**resumed);
+  REQUIRE(backend.requests.size() == 3);
+  const auto next_system =
+      text_messages(backend.requests[2], domain::Role::system);
+  REQUIRE((std::ranges::find(next_system, beta.text) != next_system.end()) ==
+          next_persona);
+  REQUIRE(std::ranges::find(next_system, alpha.text) == next_system.end());
+}
+
+TEST_CASE("recovered chat rejects missing or changed originating persona",
+          "[chat][recovery][persona][storage][failure]") {
+  const auto missing = GENERATE(true, false);
+  CAPTURE(missing);
+  QuestionBackend backend;
+  MemoryStore store;
+  const auto alpha = named_persona_document("persona:alpha-immutable", "alpha",
+                                            "Original alpha instructions.");
+  MutablePersonaSource create_source{{{"alpha", alpha}}};
+  runtime::ToolRegistry registry;
+  REQUIRE(runtime::register_ask_user_tool(registry, true));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  surfaces::ChatSessionDependencies create_dependencies;
+  create_dependencies.tools = *tools;
+  create_dependencies.persona_source = &create_source;
+  auto created = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::create,
+       std::nullopt,
+       domain::RunProvenance{"test",
+                             "test",
+                             std::nullopt,
+                             make_id<domain::ModelId>("model"),
+                             std::nullopt,
+                             {},
+                             {},
+                             {}},
+       {persona::PersonaDirectiveKind::select, "alpha",
+        domain::PersonaSelectionSource::command_line}},
+      backend, backend, &store, nullptr, {}, {}, create_dependencies);
+  REQUIRE(created);
+  const auto session_id = (*created)->session_id();
+  REQUIRE((*created)->submit("ask before restart"));
+  drain_to_question(**created);
+  created->reset();
+  const auto history_before = store.histories.at(session_id);
+
+  MutablePersonaSource resume_source;
+  if (!missing) {
+    resume_source.documents.emplace(
+        "alpha", named_persona_document("persona:alpha-immutable", "alpha",
+                                        "Changed alpha instructions."));
+  }
+  surfaces::ChatSessionDependencies resume_dependencies;
+  resume_dependencies.tools = *tools;
+  resume_dependencies.persona_source = &resume_source;
+  const auto resumed = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::resume, session_id},
+      backend, backend, &store, nullptr, {}, {}, resume_dependencies);
+  REQUIRE_FALSE(resumed);
+  REQUIRE(resumed.error().code ==
+          surfaces::ChatSessionErrorCode::context_failed);
+  REQUIRE(backend.requests.size() == 1);
+  REQUIRE(store.histories.at(session_id) == history_before);
+}
+
 TEST_CASE(
     "persona changes between interactive selection and submit fail closed",
     "[chat][persona][failure]") {
@@ -1651,8 +2237,14 @@ TEST_CASE("interactive persona writes are idle-only and capability separated",
   const persona::PersonaCreate create_request{
       {"reviewer", persona::PersonaFileKind::markdown, "Review carefully."},
       {}};
+  const persona::PersonaCreate rebind_request{
+      {"restored", persona::PersonaFileKind::markdown, "Restored persona."},
+      {},
+      make_id<domain::PersonaId>("persona:dormant-reviewed")};
   testing::ScriptedPersonaEditor editor{
-      {{create_request, create_receipt(create_request)}}, {}};
+      {{create_request, create_receipt(create_request)},
+       {rebind_request, create_receipt(rebind_request)}},
+      {}};
   surfaces::ChatSessionDependencies dependencies;
   dependencies.persona_editor = &editor;
   auto session = surfaces::ChatSession::open(
@@ -1662,7 +2254,7 @@ TEST_CASE("interactive persona writes are idle-only and capability separated",
   REQUIRE(session);
 
   REQUIRE((*session)->submit("keep running"));
-  const auto rejected = (*session)->create_persona(create_request.draft);
+  const auto rejected = (*session)->create_persona(create_request);
   REQUIRE_FALSE(rejected);
   REQUIRE(rejected.error().code == surfaces::ChatSessionErrorCode::run_failed);
   REQUIRE(editor.recorded_creates().empty());
@@ -1679,7 +2271,7 @@ TEST_CASE("interactive persona writes are idle-only and capability separated",
   REQUIRE(editor.recorded_replaces().empty());
   drain_to_end(**session);
 
-  const auto created = (*session)->create_persona(create_request.draft);
+  const auto created = (*session)->create_persona(create_request);
   REQUIRE(created);
   REQUIRE(*created == create_receipt(create_request));
   REQUIRE(editor.recorded_creates() ==
@@ -1687,13 +2279,19 @@ TEST_CASE("interactive persona writes are idle-only and capability separated",
   REQUIRE_FALSE((*session)->persona_state().selected);
   REQUIRE_FALSE((*session)->persona_state().requires_attention);
 
+  const auto rebound = (*session)->create_persona(rebind_request);
+  REQUIRE(rebound);
+  REQUIRE(rebound->resulting.persona_id == *rebind_request.rebind_persona_id);
+  REQUIRE(editor.recorded_creates() ==
+          std::vector<persona::PersonaCreate>{create_request, rebind_request});
+
   surfaces::ChatSessionDependencies unavailable_dependencies;
   auto unavailable = surfaces::ChatSession::open(
       {make_id<domain::ModelId>("model"),
        surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
       backend, backend, nullptr, nullptr, {}, {}, unavailable_dependencies);
   REQUIRE(unavailable);
-  REQUIRE_FALSE((*unavailable)->create_persona(create_request.draft));
+  REQUIRE_FALSE((*unavailable)->create_persona(create_request));
 }
 
 TEST_CASE("editing the selected persona requires an explicit next decision",

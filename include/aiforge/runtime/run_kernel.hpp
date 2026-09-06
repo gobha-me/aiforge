@@ -66,6 +66,22 @@ struct DurableSessionOpen {
   auto operator==(const DurableSessionOpen&) const -> bool = default;
 };
 
+// The one primary run whose tool/input authority RunKernel can safely restore.
+// Ordinary running workflows (including video), terminal runs, and child runs
+// are intentionally not recovery candidates for the interactive kernel.
+struct RecoverableRun {
+  domain::RunId run_id;
+  domain::RunStarted attributes;
+  std::optional<domain::RunProvenance> provenance;
+  domain::RunStatus status{domain::RunStatus::not_started};
+  bool recovering_unstarted_authority{};
+  auto operator==(const RecoverableRun&) const -> bool = default;
+};
+
+[[nodiscard]] auto classify_recoverable_run(
+    const domain::SessionEventLog& event_log)
+    -> std::expected<std::optional<RecoverableRun>, RunKernelError>;
+
 struct ToolApprovalPresentationLimits {
   std::size_t maximum_tool_name_bytes{256};
   std::size_t maximum_effects{16};
@@ -294,6 +310,8 @@ class RunKernel final {
   auto operator=(RunKernel&&) -> RunKernel& = delete;
 
   [[nodiscard]] auto start(RunStart start)
+      -> std::expected<void, RunKernelError>;
+  [[nodiscard]] auto replace_available_tools(ToolRegistrySnapshot tools)
       -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto record_session_spend_ceiling(
       SessionSpendCeilingChange change) -> std::expected<void, RunKernelError>;

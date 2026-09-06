@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -12,16 +13,22 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/xattr.h>
+#endif
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -431,6 +438,28 @@ auto write_file(const std::filesystem::path& path, const std::string& bytes)
   REQUIRE(output);
   output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
   REQUIRE(output);
+}
+
+auto memory_identity_operations(
+    std::function<std::expected<std::size_t, int>(std::span<unsigned char>)>
+        entropy,
+    std::function<std::expected<void, int>(int)> synchronize = {})
+    -> adapters::PersonaIdentityOperations {
+  auto identity = std::make_shared<std::optional<std::string>>();
+  return {
+      .entropy = std::move(entropy),
+      .read =
+          [identity](int) -> std::expected<std::optional<std::string>, int> {
+        return *identity;
+      },
+      .create = [identity](int, const std::string_view value)
+          -> std::expected<void, int> {
+        if (*identity) return std::unexpected(EEXIST);
+        *identity = std::string{value};
+        return {};
+      },
+      .synchronize = std::move(synchronize),
+  };
 }
 
 auto read_file(const std::filesystem::path& path) -> std::string {
@@ -1518,7 +1547,8 @@ TEST_CASE("filesystem personas are deterministic bounded attributed text",
 
   const auto loaded = source.load("reviewer");
   REQUIRE(loaded);
-  REQUIRE(loaded->reference.persona_id.value() == "persona:reviewer");
+  REQUIRE(loaded->reference.persona_id.value().starts_with("persona:"));
+  REQUIRE(loaded->reference.persona_id.value() != "persona:reviewer");
   REQUIRE(loaded->reference.source_location == "personas/Reviewer.md");
   REQUIRE(loaded->reference.content_digest.algorithm == "sha256");
   REQUIRE(loaded->reference.content_digest.value ==
@@ -1538,6 +1568,324 @@ TEST_CASE("filesystem personas are deterministic bounded attributed text",
   REQUIRE_FALSE(bounded);
   REQUIRE(bounded.error().code ==
           persona::PersonaErrorCode::resource_exhausted);
+}
+
+TEST_CASE("persona identity entropy handles short EINTR and invalid results",
+          "[adapter][persona][identity][failure]") {
+#ifndef __linux__
+  SKIP("Linux persistent persona identity metadata contract");
+#else
+  SECTION("short reads and EINTR complete one generated identity") {
+    TempDirectory temporary{"aiforge-persona-entropy-short"};
+    const auto root = temporary.path() / "personas";
+    std::size_t calls{};
+    auto operations =
+        memory_identity_operations([&](const std::span<unsigned char> bytes)
+                                       -> std::expected<std::size_t, int> {
+          ++calls;
+          if (calls == 2) return std::unexpected(EINTR);
+          const auto count = calls == 1 ? std::min<std::size_t>(3, bytes.size())
+                                        : bytes.size();
+          std::ranges::fill(bytes.first(count),
+                            static_cast<unsigned char>(calls));
+          return count;
+        });
+    adapters::FilesystemPersonaSource source{root, {}, std::move(operations)};
+    const auto created = source.create(
+        {{"Reviewer", persona::PersonaFileKind::markdown, "safe"}, {}});
+    REQUIRE(created);
+    REQUIRE(calls == 3);
+    REQUIRE(created->resulting.persona_id.value() ==
+            "persona:01010103030303030303030303030303");
+  }
+
+  for (const auto mode : {0, 1, 2}) {
+    DYNAMIC_SECTION("invalid entropy result " << mode) {
+      TempDirectory temporary{"aiforge-persona-entropy-failure"};
+      const auto root = temporary.path() / "personas";
+      auto operations = memory_identity_operations(
+          [mode](const std::span<unsigned char> bytes)
+              -> std::expected<std::size_t, int> {
+            if (mode == 0) return std::size_t{};
+            if (mode == 1) return bytes.size() + 1U;
+            return std::unexpected(EIO);
+          });
+      adapters::FilesystemPersonaSource source{root, {}, std::move(operations)};
+      const auto rejected = source.create(
+          {{"Reviewer", persona::PersonaFileKind::markdown, "safe"}, {}});
+      REQUIRE_FALSE(rejected);
+      REQUIRE(rejected.error().code ==
+              persona::PersonaEditorErrorCode::io_failure);
+      REQUIRE_FALSE(rejected.error().may_have_applied);
+      REQUIRE_FALSE(std::filesystem::exists(root / "Reviewer.md"));
+    }
+  }
+#endif
+}
+
+TEST_CASE("persona identity metadata failures are classified and redacted",
+          "[adapter][persona][identity][failure]") {
+#ifndef __linux__
+  SKIP("Linux persistent persona identity metadata contract");
+#else
+  TempDirectory temporary{"aiforge-persona-xattr-failure"};
+  const auto root = temporary.path() / "personas";
+  REQUIRE(std::filesystem::create_directory(root));
+  write_file(root / "Reviewer.md", "safe");
+
+  for (const auto error : {EACCES, ENOTSUP, ERANGE}) {
+    DYNAMIC_SECTION("xattr read error " << error) {
+      adapters::PersonaIdentityOperations operations;
+      operations.read =
+          [error](int) -> std::expected<std::optional<std::string>, int> {
+        return std::unexpected(error);
+      };
+      adapters::FilesystemPersonaSource source{root, {}, std::move(operations)};
+      const auto loaded = source.load("Reviewer");
+      REQUIRE_FALSE(loaded);
+      REQUIRE(loaded.error().code ==
+              (error == EACCES ? persona::PersonaErrorCode::permission_denied
+                               : persona::PersonaErrorCode::unsupported_entry));
+      REQUIRE(loaded.error().message.find(root.string()) == std::string::npos);
+    }
+  }
+
+  for (const auto& malformed :
+       {std::string{}, std::string{"wrong-prefix"},
+        std::string{"persona:bad/value"}, std::string(129, 'x')}) {
+    DYNAMIC_SECTION("malformed xattr size " << malformed.size()) {
+      adapters::PersonaIdentityOperations operations;
+      operations.read =
+          [malformed](int) -> std::expected<std::optional<std::string>, int> {
+        return std::optional<std::string>{malformed};
+      };
+      adapters::FilesystemPersonaSource source{root, {}, std::move(operations)};
+      const auto loaded = source.load("Reviewer");
+      REQUIRE_FALSE(loaded);
+      REQUIRE(loaded.error().code ==
+              persona::PersonaErrorCode::unsupported_entry);
+    }
+  }
+#endif
+}
+
+TEST_CASE("persona identity creation accepts only the raced persisted winner",
+          "[adapter][persona][identity][race]") {
+#ifndef __linux__
+  SKIP("Linux persistent persona identity metadata contract");
+#else
+  TempDirectory temporary{"aiforge-persona-xattr-race"};
+  const auto root = temporary.path() / "personas";
+  REQUIRE(std::filesystem::create_directory(root));
+  write_file(root / "Reviewer.md", "safe");
+  std::size_t reads{};
+  adapters::PersonaIdentityOperations operations;
+  operations.entropy = [](const std::span<unsigned char> bytes)
+      -> std::expected<std::size_t, int> {
+    std::ranges::fill(bytes, static_cast<unsigned char>(0xab));
+    return bytes.size();
+  };
+  operations.read = [&](int) -> std::expected<std::optional<std::string>, int> {
+    ++reads;
+    if (reads == 1) return std::nullopt;
+    return std::optional<std::string>{"persona:raced-winner"};
+  };
+  operations.create = [](int, std::string_view) -> std::expected<void, int> {
+    return std::unexpected(EEXIST);
+  };
+  adapters::FilesystemPersonaSource source{root, {}, std::move(operations)};
+  const auto loaded = source.load("Reviewer");
+  REQUIRE(loaded);
+  REQUIRE(loaded->reference.persona_id.value() == "persona:raced-winner");
+  REQUIRE(reads >= 3);
+#endif
+}
+
+TEST_CASE("persona identity synchronization failure prevents publication",
+          "[adapter][persona][identity][durability][failure]") {
+#ifndef __linux__
+  SKIP("Linux persistent persona identity metadata contract");
+#else
+  SECTION("create cleans its unpublished temporary identity") {
+    TempDirectory temporary{"aiforge-persona-identity-fsync-create"};
+    const auto root = temporary.path() / "personas";
+    auto operations = memory_identity_operations(
+        [](const std::span<unsigned char> bytes)
+            -> std::expected<std::size_t, int> {
+          std::ranges::fill(bytes, static_cast<unsigned char>(1));
+          return bytes.size();
+        },
+        [](int) -> std::expected<void, int> { return std::unexpected(EIO); });
+    adapters::FilesystemPersonaSource source{root, {}, std::move(operations)};
+    const auto rejected = source.create(
+        {{"Reviewer", persona::PersonaFileKind::markdown, "safe"}, {}});
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error().code ==
+            persona::PersonaEditorErrorCode::durability_failure);
+    REQUIRE_FALSE(rejected.error().may_have_applied);
+    REQUIRE_FALSE(std::filesystem::exists(root / "Reviewer.md"));
+  }
+
+  SECTION("replace leaves the original intact") {
+    TempDirectory temporary{"aiforge-persona-identity-fsync-replace"};
+    const auto root = temporary.path() / "personas";
+    adapters::FilesystemPersonaSource source{root};
+    const auto created = source.create(
+        {{"Reviewer", persona::PersonaFileKind::markdown, "original"}, {}});
+    REQUIRE(created);
+    adapters::PersonaIdentityOperations operations;
+    operations.synchronize = [](int) -> std::expected<void, int> {
+      return std::unexpected(EIO);
+    };
+    adapters::FilesystemPersonaSource failing{root, {}, std::move(operations)};
+    const auto rejected =
+        failing.replace({created->resulting, "replacement", {}});
+    REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error().code ==
+            persona::PersonaEditorErrorCode::durability_failure);
+    REQUIRE_FALSE(rejected.error().may_have_applied);
+    const auto loaded = source.load("Reviewer");
+    REQUIRE(loaded);
+    REQUIRE(loaded->text == "original");
+    REQUIRE(loaded->reference.persona_id == created->resulting.persona_id);
+  }
+#endif
+}
+
+TEST_CASE("persona identity set failures prevent publication with exact class",
+          "[adapter][persona][identity][failure]") {
+#ifndef __linux__
+  SKIP("Linux persistent persona identity metadata contract");
+#else
+  for (const auto error : {EACCES, ENOTSUP}) {
+    DYNAMIC_SECTION("xattr create error " << error) {
+      TempDirectory temporary{"aiforge-persona-identity-set"};
+      const auto root = temporary.path() / "personas";
+      adapters::PersonaIdentityOperations operations;
+      operations.entropy = [](const std::span<unsigned char> bytes)
+          -> std::expected<std::size_t, int> {
+        std::ranges::fill(bytes, static_cast<unsigned char>(1));
+        return bytes.size();
+      };
+      operations.read =
+          [](int) -> std::expected<std::optional<std::string>, int> {
+        return std::nullopt;
+      };
+      operations.create =
+          [error](int, std::string_view) -> std::expected<void, int> {
+        return std::unexpected(error);
+      };
+      adapters::FilesystemPersonaSource source{root, {}, std::move(operations)};
+      const auto rejected = source.create(
+          {{"Reviewer", persona::PersonaFileKind::markdown, "safe"}, {}});
+      REQUIRE_FALSE(rejected);
+      REQUIRE(rejected.error().code ==
+              (error == EACCES
+                   ? persona::PersonaEditorErrorCode::permission_denied
+                   : persona::PersonaEditorErrorCode::unsupported_entry));
+      REQUIRE_FALSE(rejected.error().may_have_applied);
+      REQUIRE_FALSE(std::filesystem::exists(root / "Reviewer.md"));
+    }
+  }
+#endif
+}
+
+TEST_CASE("persona identity detects a pathname inode swap during verification",
+          "[adapter][persona][identity][race][failure]") {
+#ifndef __linux__
+  SKIP("Linux persistent persona identity metadata contract");
+#else
+  TempDirectory temporary{"aiforge-persona-identity-inode-swap"};
+  const auto root = temporary.path() / "personas";
+  REQUIRE(std::filesystem::create_directory(root));
+  const auto path = root / "Reviewer.md";
+  write_file(path, "safe");
+  std::size_t reads{};
+  adapters::PersonaIdentityOperations operations;
+  operations.read = [&](int) -> std::expected<std::optional<std::string>, int> {
+    if (++reads == 2) {
+      std::filesystem::rename(path, root / "detached.md");
+      write_file(path, "replacement");
+    }
+    return std::optional<std::string>{"persona:stable"};
+  };
+  adapters::FilesystemPersonaSource source{root, {}, std::move(operations)};
+  const auto loaded = source.load("Reviewer");
+  REQUIRE_FALSE(loaded);
+  REQUIRE(loaded.error().code == persona::PersonaErrorCode::unstable);
+#endif
+}
+
+TEST_CASE("persona identity cannot mask a same-inode content race",
+          "[adapter][persona][identity][race][failure]") {
+#ifndef __linux__
+  SKIP("Linux persistent persona identity metadata contract");
+#else
+  TempDirectory temporary{"aiforge-persona-identity-content-race"};
+  const auto root = temporary.path() / "personas";
+  REQUIRE(std::filesystem::create_directory(root));
+  const auto path = root / "Reviewer.md";
+  write_file(path, "safe");
+  struct stat original{};
+  REQUIRE(::stat(path.c_str(), &original) == 0);
+
+  bool mutated{};
+  adapters::PersonaIdentityOperations operations;
+  operations.read = [&](const int descriptor)
+      -> std::expected<std::optional<std::string>, int> {
+    const auto offset = ::lseek(descriptor, 0, SEEK_CUR);
+    REQUIRE(offset >= 0);
+    if (offset > 0 && !mutated) {
+      write_file(path, "evil");
+      const std::array<timespec, 2> timestamps{original.st_atim,
+                                               original.st_mtim};
+      REQUIRE(::utimensat(AT_FDCWD, path.c_str(), timestamps.data(), 0) == 0);
+      mutated = true;
+    }
+    return std::optional<std::string>{"persona:stable"};
+  };
+  adapters::FilesystemPersonaSource source{root, {}, std::move(operations)};
+  const auto loaded = source.load("Reviewer");
+  REQUIRE(mutated);
+  REQUIRE_FALSE(loaded);
+  REQUIRE(loaded.error().code == persona::PersonaErrorCode::unstable);
+
+  struct stat changed{};
+  REQUIRE(::stat(path.c_str(), &changed) == 0);
+  REQUIRE(changed.st_dev == original.st_dev);
+  REQUIRE(changed.st_ino == original.st_ino);
+  REQUIRE(changed.st_size == original.st_size);
+  REQUIRE(changed.st_mtim.tv_sec == original.st_mtim.tv_sec);
+  REQUIRE(changed.st_mtim.tv_nsec == original.st_mtim.tv_nsec);
+#endif
+}
+
+TEST_CASE("persona identity rejects hard links before mutating their inode",
+          "[adapter][persona][identity][path][failure]") {
+#ifndef __linux__
+  SKIP("Linux persistent persona identity metadata contract");
+#else
+  TempDirectory temporary{"aiforge-persona-identity-hard-link"};
+  const auto root = temporary.path() / "personas";
+  REQUIRE(std::filesystem::create_directory(root));
+  const auto outside = temporary.path() / "outside.md";
+  write_file(outside, "outside");
+  std::error_code link_error;
+  std::filesystem::create_hard_link(outside, root / "Reviewer.md", link_error);
+  REQUIRE_FALSE(link_error);
+  constexpr std::string_view attribute{"user.aiforge.persona_id"};
+  errno = 0;
+  REQUIRE(::getxattr(outside.c_str(), attribute.data(), nullptr, 0) == -1);
+  REQUIRE(errno == ENODATA);
+
+  adapters::FilesystemPersonaSource source{root};
+  const auto loaded = source.load("Reviewer");
+  REQUIRE_FALSE(loaded);
+  REQUIRE(loaded.error().code == persona::PersonaErrorCode::unsupported_entry);
+  errno = 0;
+  REQUIRE(::getxattr(outside.c_str(), attribute.data(), nullptr, 0) == -1);
+  REQUIRE(errno == ENODATA);
+#endif
 }
 
 TEST_CASE("filesystem personas fail closed on aliases symlinks and bad text",
@@ -1648,6 +1996,114 @@ TEST_CASE(
   REQUIRE_FALSE(alias_collision.error().may_have_applied);
   REQUIRE(std::filesystem::exists(root / "Reviewer.md"));
   REQUIRE_FALSE(std::filesystem::exists(root / "reviewer.txt"));
+}
+
+TEST_CASE(
+    "filesystem persona identity follows rename replace delete and rebind",
+    "[adapter][persona][identity][lifecycle]") {
+#ifndef __linux__
+  SKIP("Linux persistent persona identity metadata contract");
+#else
+  TempDirectory temporary{"aiforge-persona-identity-lifecycle"};
+  const auto root = temporary.path() / "personas";
+  unsigned char generation{};
+  adapters::PersonaIdentityOperations operations;
+  operations.entropy = [&](const std::span<unsigned char> bytes)
+      -> std::expected<std::size_t, int> {
+    std::ranges::fill(bytes, ++generation);
+    return bytes.size();
+  };
+  adapters::FilesystemPersonaSource source{root, {}, std::move(operations)};
+
+  const auto created = source.create(
+      {{"Reviewer", persona::PersonaFileKind::markdown, "original"}, {}});
+  REQUIRE(created);
+  const auto original_id = created->resulting.persona_id;
+  REQUIRE(original_id.value() == "persona:01010101010101010101010101010101");
+
+  std::filesystem::rename(root / "Reviewer.md", root / "Architect.md");
+  auto loaded = source.load("Architect");
+  REQUIRE(loaded);
+  REQUIRE(loaded->reference.persona_id == original_id);
+  const auto replaced = source.replace({loaded->reference, "replacement", {}});
+  REQUIRE(replaced);
+  REQUIRE(replaced->resulting.persona_id == original_id);
+
+  REQUIRE(std::filesystem::remove(root / "Architect.md"));
+  const auto recreated = source.create(
+      {{"Architect", persona::PersonaFileKind::markdown, "new"}, {}});
+  REQUIRE(recreated);
+  REQUIRE(recreated->resulting.persona_id != original_id);
+
+  REQUIRE(std::filesystem::remove(root / "Architect.md"));
+  const auto rebound = source.create(
+      {{"Architect", persona::PersonaFileKind::markdown, "rebound"},
+       {},
+       original_id});
+  REQUIRE(rebound);
+  REQUIRE(rebound->resulting.persona_id == original_id);
+
+  const auto active_collision =
+      source.create({{"Other", persona::PersonaFileKind::markdown, "collision"},
+                     {},
+                     original_id});
+  REQUIRE_FALSE(active_collision);
+  REQUIRE(active_collision.error().code ==
+          persona::PersonaEditorErrorCode::already_exists);
+  REQUIRE_FALSE(active_collision.error().may_have_applied);
+#endif
+}
+
+TEST_CASE("filesystem rejects duplicate active and generated persona IDs",
+          "[adapter][persona][identity][failure]") {
+#ifndef __linux__
+  SKIP("Linux persistent persona identity metadata contract");
+#else
+  SECTION("copied metadata blocks every source and editor view") {
+    TempDirectory temporary{"aiforge-persona-identity-duplicate"};
+    const auto root = temporary.path() / "personas";
+    adapters::FilesystemPersonaSource source{root};
+    const auto first = source.create(
+        {{"First", persona::PersonaFileKind::markdown, "first"}, {}});
+    const auto second = source.create(
+        {{"Second", persona::PersonaFileKind::markdown, "second"}, {}});
+    REQUIRE(first);
+    REQUIRE(second);
+    constexpr std::string_view attribute{"user.aiforge.persona_id"};
+    const auto copied = first->resulting.persona_id.value();
+    REQUIRE(::setxattr((root / "Second.md").c_str(), attribute.data(),
+                       copied.data(), copied.size(), 0) == 0);
+    REQUIRE_FALSE(source.list());
+    REQUIRE_FALSE(source.load("First"));
+    const auto create = source.create(
+        {{"Third", persona::PersonaFileKind::markdown, "third"}, {}});
+    REQUIRE_FALSE(create);
+    REQUIRE(create.error().code ==
+            persona::PersonaEditorErrorCode::unsupported_entry);
+    REQUIRE_FALSE(std::filesystem::exists(root / "Third.md"));
+  }
+
+  SECTION("a generated collision cannot publish") {
+    TempDirectory temporary{"aiforge-persona-identity-generated-collision"};
+    const auto root = temporary.path() / "personas";
+    adapters::PersonaIdentityOperations operations;
+    operations.entropy = [](const std::span<unsigned char> bytes)
+        -> std::expected<std::size_t, int> {
+      std::ranges::fill(bytes, static_cast<unsigned char>(0x11));
+      return bytes.size();
+    };
+    adapters::FilesystemPersonaSource source{root, {}, std::move(operations)};
+    REQUIRE(source.create(
+        {{"First", persona::PersonaFileKind::markdown, "first"}, {}}));
+    const auto collision = source.create(
+        {{"Second", persona::PersonaFileKind::markdown, "second"}, {}});
+    REQUIRE_FALSE(collision);
+    REQUIRE(collision.error().code ==
+            persona::PersonaEditorErrorCode::already_exists);
+    REQUIRE_FALSE(collision.error().may_have_applied);
+    REQUIRE_FALSE(std::filesystem::exists(root / "Second.md"));
+  }
+#endif
 }
 
 TEST_CASE("filesystem persona replacement checks the exact digest twice",

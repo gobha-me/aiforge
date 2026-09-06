@@ -2,6 +2,7 @@
 #include <aiforge/domain/tool_spend.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/runtime/context_builder.hpp>
+#include <aiforge/runtime/memory_tool.hpp>
 #include <aiforge/runtime/persona.hpp>
 #include <aiforge/runtime/tool_profiles.hpp>
 #include <aiforge/runtime/user_global_instructions.hpp>
@@ -174,6 +175,125 @@ struct PersonaSetup {
   std::optional<domain::PersonaSelection> next_selection;
   std::string attention;
 };
+
+[[nodiscard]] auto persona_error(const persona::PersonaError& value)
+    -> ChatSessionError;
+
+[[nodiscard]] auto legacy_persona_id(const std::string_view name)
+    -> std::optional<domain::PersonaId> {
+  std::string canonical{name};
+  std::ranges::transform(
+      canonical, canonical.begin(), [](const unsigned char character) {
+        return static_cast<char>(character >= 'A' && character <= 'Z'
+                                     ? character + ('a' - 'A')
+                                     : character);
+      });
+  auto identity = domain::PersonaId::from("persona:" + canonical);
+  if (!identity) return std::nullopt;
+  return std::move(*identity);
+}
+
+[[nodiscard]] auto persona_content_matches(
+    const domain::PersonaDocument& document,
+    const domain::ContentDigest& expected) -> bool {
+  if (expected.algorithm != "sha256" ||
+      document.text.size() != expected.byte_size) {
+    return false;
+  }
+  aiforge::detail::Sha256 digest;
+  digest.update(
+      std::as_bytes(std::span{document.text.data(), document.text.size()}));
+  return digest.finish() == expected.value;
+}
+
+[[nodiscard]] auto recovered_persona_selection(
+    const domain::SessionEventLog& event_log, const domain::RunId& run_id)
+    -> std::expected<std::optional<domain::PersonaSelection>,
+                     ChatSessionError> {
+  std::optional<domain::PersonaSelection> selection;
+  for (const auto& event : event_log.events()) {
+    if (event.metadata.run_id != run_id) continue;
+    const auto* recorded =
+        std::get_if<domain::PersonaSelectionRecorded>(&event.payload);
+    if (recorded == nullptr) continue;
+    if (selection) {
+      return error(ChatSessionErrorCode::session_failed,
+                   "recoverable run records multiple persona selections");
+    }
+    selection = recorded->selection;
+  }
+  return selection;
+}
+
+[[nodiscard]] auto persona_document_matches_reference(
+    const domain::PersonaDocument& document,
+    const domain::PersonaReference& expected) -> bool {
+  const auto legacy_id = legacy_persona_id(expected.name);
+  const bool legacy_identity =
+      legacy_id && expected.persona_id == *legacy_id &&
+      document.reference.name == expected.name &&
+      document.reference.source_location == expected.source_location &&
+      document.reference.content_digest == expected.content_digest;
+  return (document.reference == expected || legacy_identity) &&
+         persona_content_matches(document, expected.content_digest);
+}
+
+[[nodiscard]] auto recovered_persona_document(
+    persona::PersonaSource* source, const persona::PersonaLimits limits,
+    const domain::SessionEventLog& event_log,
+    const runtime::RecoverableRun& recoverable,
+    const std::stop_token stop_token)
+    -> std::expected<std::optional<domain::PersonaDocument>, ChatSessionError> {
+  auto selection = recovered_persona_selection(event_log, recoverable.run_id);
+  if (!selection) return std::unexpected(std::move(selection.error()));
+  if (!*selection) {
+    if (recoverable.attributes.persona_id) {
+      return error(ChatSessionErrorCode::context_failed,
+                   "recoverable run persona metadata is incomplete");
+    }
+    return std::optional<domain::PersonaDocument>{};
+  }
+  const auto& selected = **selection;
+  if (!domain::validate_persona_selection(selected)) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "recoverable run persona selection is invalid");
+  }
+  if (selected.action == domain::PersonaSelectionAction::disabled) {
+    if (recoverable.attributes.persona_id) {
+      return error(ChatSessionErrorCode::context_failed,
+                   "recoverable run disabled persona identity is invalid");
+    }
+    return std::optional<domain::PersonaDocument>{};
+  }
+  if (!selected.persona) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "recoverable run selected persona is missing");
+  }
+  const auto& recorded = *selected.persona;
+  if (recoverable.attributes.persona_id != recorded.persona_id) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "recoverable run persona identity is inconsistent");
+  }
+  if (source == nullptr) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "recorded persona source is unavailable");
+  }
+  auto loaded = source->load(recorded.name, limits, stop_token);
+  if (!loaded) return std::unexpected(persona_error(loaded.error()));
+  if (!domain::validate_persona_document(*loaded)) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "recorded persona document is invalid");
+  }
+  if (!persona_document_matches_reference(*loaded, recorded)) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "persona changed since this run started");
+  }
+  // Legacy pending runs used a name-derived identity. Preserve that recorded
+  // reference in their continuation context even if loading the untagged file
+  // assigned its new immutable identity.
+  loaded->reference = recorded;
+  return std::optional<domain::PersonaDocument>{std::move(*loaded)};
+}
 
 [[nodiscard]] auto persona_error(const persona::PersonaError& value)
     -> ChatSessionError {
@@ -573,6 +693,7 @@ struct ChatSession::Impl {
   std::optional<domain::RepositoryId> repository_id;
   std::string runtime_version;
   std::optional<domain::ContextBuildInput> active_context;
+  std::optional<domain::PersonaDocument> recovered_persona_document;
   bool recovered_pending_run_validation_required{};
   std::optional<domain::UserGlobalInstructionDocument>
       recovered_user_global_instruction;
@@ -595,20 +716,58 @@ ChatSession::ChatSession(std::unique_ptr<Impl> impl) : m_impl(std::move(impl)) {
 }
 ChatSession::~ChatSession() = default;
 
+namespace {
+
+[[nodiscard]] auto validate_recovered_persona_document(
+    persona::PersonaSource* source, const persona::PersonaLimits limits,
+    const domain::PersonaDocument& expected, const std::stop_token stop_token)
+    -> std::expected<void, ChatSessionError> {
+  if (source == nullptr) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "recorded persona source is unavailable");
+  }
+  auto loaded = source->load(expected.reference.name, limits, stop_token);
+  if (!loaded) return std::unexpected(persona_error(loaded.error()));
+  if (!domain::validate_persona_document(*loaded)) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "recorded persona document is invalid");
+  }
+  if (!persona_document_matches_reference(*loaded, expected.reference)) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "persona changed since this run started");
+  }
+  return {};
+}
+
+} // namespace
+
 auto ChatSession::validate_recovered_pending_run()
     -> std::expected<void, ChatSessionError> {
   if (!m_impl->recovered_pending_run_validation_required) return {};
   const auto run_id = m_impl->kernel->active_run_id();
   if (!run_id) {
     m_impl->recovered_pending_run_validation_required = false;
+    m_impl->recovered_persona_document.reset();
     m_impl->recovered_user_global_instruction.reset();
     return {};
+  }
+  if (m_impl->recovered_persona_document) {
+    auto validated = validate_recovered_persona_document(
+        m_impl->persona_source, m_impl->persona_limits,
+        *m_impl->recovered_persona_document, m_impl->stop_token);
+    if (!validated) return validated;
   }
   const auto expected =
       recorded_user_global_instruction(m_impl->kernel->event_log(), *run_id);
   if (!expected) {
-    m_impl->recovered_pending_run_validation_required = false;
     m_impl->recovered_user_global_instruction.reset();
+    return {};
+  }
+  if (m_impl->recovered_user_global_instruction) {
+    if (m_impl->recovered_user_global_instruction->reference != *expected) {
+      return error(ChatSessionErrorCode::context_failed,
+                   "user-global instruction changed since this run started");
+    }
     return {};
   }
   if (m_impl->user_global_instruction_source == nullptr) {
@@ -624,7 +783,6 @@ auto ChatSession::validate_recovered_pending_run()
                  "user-global instruction changed since this run started");
   }
   m_impl->recovered_user_global_instruction = std::move(**loaded);
-  m_impl->recovered_pending_run_validation_required = false;
   return {};
 }
 
@@ -753,6 +911,82 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
                            : runtime::default_tool_policy();
     const bool durable = request.mode != ChatSessionOpen::Mode::ephemeral &&
                          session_store != nullptr;
+    domain::SessionEventLog recovery_history{selected};
+    if (durable && request.mode != ChatSessionOpen::Mode::create) {
+      auto replayed = session_store->replay_events(selected, stop_token);
+      if (!replayed) {
+        return error(ChatSessionErrorCode::session_failed,
+                     "durable session could not be opened",
+                     replayed.error().retryable);
+      }
+      for (auto& event : *replayed) {
+        if (auto appended = recovery_history.append(std::move(event));
+            !appended) {
+          return error(ChatSessionErrorCode::session_failed,
+                       "durable session could not be opened");
+        }
+      }
+    }
+    auto recoverable = runtime::classify_recoverable_run(recovery_history);
+    if (!recoverable) {
+      return error(ChatSessionErrorCode::session_failed,
+                   "durable session could not be opened",
+                   recoverable.error().retryable);
+    }
+    std::optional<domain::PersonaDocument> recovered_persona;
+    if (*recoverable) {
+      auto loaded = recovered_persona_document(
+          dependencies.persona_source, dependencies.persona_limits,
+          recovery_history, **recoverable, stop_token);
+      if (!loaded) return std::unexpected(std::move(loaded.error()));
+      recovered_persona = std::move(*loaded);
+    }
+    const bool allow_persona_attention =
+        request.mode == ChatSessionOpen::Mode::resume ||
+        request.mode == ChatSessionOpen::Mode::continue_latest;
+    auto persona_setup = resolve_persona(
+        dependencies.persona_source, dependencies.persona_limits,
+        request.persona, recovery_history, stop_token, allow_persona_attention);
+    if (!persona_setup) {
+      return std::unexpected(std::move(persona_setup.error()));
+    }
+    const auto initial_persona_id =
+        persona_setup->document
+            ? std::optional<domain::PersonaId>{persona_setup->document
+                                                   ->reference.persona_id}
+            : std::nullopt;
+    const auto tool_persona_id = *recoverable
+                                     ? (*recoverable)->attributes.persona_id
+                                     : initial_persona_id;
+    std::optional<std::string> recovered_memory_digest;
+    if (*recoverable && (*recoverable)->provenance) {
+      const auto found = std::ranges::find(
+          (*recoverable)->provenance->tools, std::string_view{"propose_memory"},
+          [](const auto& tool) { return std::string_view{tool.tool_name}; });
+      if (found != (*recoverable)->provenance->tools.end()) {
+        recovered_memory_digest = found->registration_digest;
+      }
+    }
+    if (dependencies.memory_controller != nullptr &&
+        available_tools.find("propose_memory") != nullptr) {
+      auto bound = runtime::bind_memory_tool(
+          available_tools,
+          {dependencies.memory_settings.global_capture !=
+               domain::MemoryCaptureMode::off,
+           dependencies.repository_id &&
+               dependencies.memory_settings.project_capture !=
+                   domain::MemoryCaptureMode::off,
+           dependencies.memory_settings.persona_capture !=
+               domain::MemoryCaptureMode::off,
+           tool_persona_id,
+           {}},
+          std::move(recovered_memory_digest));
+      if (!bound) {
+        return error(ChatSessionErrorCode::session_failed,
+                     bound.error().message);
+      }
+      available_tools = std::move(*bound);
+    }
     std::unique_ptr<runtime::RunKernel> kernel;
     if (durable) {
       const auto mode = request.mode == ChatSessionOpen::Mode::create
@@ -764,7 +998,7 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
                std::chrono::system_clock::now())},
           *session_store, backend, wake_sink,
           std::move(dependencies.timestamp_source), dependencies.run_limits,
-          std::move(dependencies.tools), tool_policy);
+          available_tools, tool_policy);
       if (!opened) {
         return error(ChatSessionErrorCode::session_failed,
                      "durable session could not be opened",
@@ -775,24 +1009,8 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
       kernel = std::make_unique<runtime::RunKernel>(
           selected, backend, wake_sink,
           std::move(dependencies.timestamp_source), dependencies.run_limits,
-          std::move(dependencies.tools), tool_policy);
+          available_tools, tool_policy);
     }
-
-    const bool allow_persona_attention =
-        request.mode == ChatSessionOpen::Mode::resume ||
-        request.mode == ChatSessionOpen::Mode::continue_latest;
-    auto persona_setup = resolve_persona(dependencies.persona_source,
-                                         dependencies.persona_limits,
-                                         request.persona, kernel->event_log(),
-                                         stop_token, allow_persona_attention);
-    if (!persona_setup) {
-      return std::unexpected(std::move(persona_setup.error()));
-    }
-    const auto initial_persona_id =
-        persona_setup->document
-            ? std::optional<domain::PersonaId>{persona_setup->document
-                                                   ->reference.persona_id}
-            : std::nullopt;
     auto initial_selection = runtime::ToolProfileSelection{
         *initial_tool_profile, std::nullopt,
         profile_maximum(dependencies.model_tool_profile_maximums,
@@ -865,6 +1083,7 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              std::move(dependencies.repository_id),
              std::move(dependencies.runtime_version),
              std::nullopt,
+             std::move(recovered_persona),
              recovered_pending_run,
              std::nullopt,
              {},
@@ -894,6 +1113,30 @@ auto ChatSession::submit(std::string prompt)
     if (m_impl->kernel->active_run_id()) {
       return error(ChatSessionErrorCode::run_failed,
                    "another interactive run is active");
+    }
+    if (m_impl->memory_controller != nullptr &&
+        m_impl->available_tools.find("propose_memory") != nullptr) {
+      auto bound = runtime::bind_memory_tool(
+          m_impl->available_tools,
+          {m_impl->memory_settings.global_capture !=
+               domain::MemoryCaptureMode::off,
+           m_impl->repository_id && m_impl->memory_settings.project_capture !=
+                                        domain::MemoryCaptureMode::off,
+           m_impl->memory_settings.persona_capture !=
+               domain::MemoryCaptureMode::off,
+           m_impl->persona_document
+               ? std::optional<domain::PersonaId>{m_impl->persona_document
+                                                      ->reference.persona_id}
+               : std::nullopt,
+           {}});
+      if (!bound) {
+        return error(ChatSessionErrorCode::run_failed, bound.error().message);
+      }
+      if (auto replaced = m_impl->kernel->replace_available_tools(*bound);
+          !replaced) {
+        return std::unexpected(kernel_error(replaced.error()));
+      }
+      m_impl->available_tools = std::move(*bound);
     }
     auto tool_profile =
         resolve_profile(m_impl->available_tools, m_impl->tool_selection(),
@@ -1043,8 +1286,12 @@ auto ChatSession::submit(std::string prompt)
                                  : std::uint64_t{};
       auto memory = runtime::select_memory_context(
           *m_impl->memory_controller,
-          {m_impl->repository_id, m_impl->memory_settings.context_tokens,
-           available});
+          {m_impl->repository_id,
+           m_impl->persona_document
+               ? std::optional<domain::PersonaId>{m_impl->persona_document
+                                                      ->reference.persona_id}
+               : std::nullopt,
+           m_impl->memory_settings.context_tokens, available});
       if (!memory) {
         return error(ChatSessionErrorCode::context_failed,
                      memory.error().message, memory.error().retryable);
@@ -1079,9 +1326,13 @@ auto ChatSession::submit(std::string prompt)
           1,
           detail::runtime_contract.size()}},
         std::move(content)};
-    if (m_impl->persona_document) {
+    const auto& continuation_persona =
+        m_impl->recovered_pending_run_validation_required
+            ? m_impl->recovered_persona_document
+            : m_impl->persona_document;
+    if (continuation_persona) {
       auto persona_instruction = runtime::persona_instruction_input(
-          *m_impl->persona_document, m_impl->persona_document->text.size());
+          *continuation_persona, continuation_persona->text.size());
       if (!persona_instruction) {
         return error(ChatSessionErrorCode::context_failed,
                      persona_instruction.error().message);
@@ -1229,9 +1480,13 @@ auto ChatSession::continue_if_ready()
           1,
           detail::runtime_contract.size()}},
         std::move(*history)};
-    if (m_impl->persona_document) {
+    const auto& continuation_persona =
+        m_impl->recovered_pending_run_validation_required
+            ? m_impl->recovered_persona_document
+            : m_impl->persona_document;
+    if (continuation_persona) {
       auto persona_instruction = runtime::persona_instruction_input(
-          *m_impl->persona_document, m_impl->persona_document->text.size());
+          *continuation_persona, continuation_persona->text.size());
       if (!persona_instruction) {
         return error(ChatSessionErrorCode::context_failed,
                      persona_instruction.error().message);
@@ -1346,6 +1601,9 @@ auto ChatSession::continue_if_ready()
 
 auto ChatSession::drain()
     -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
+  if (auto validated = validate_recovered_pending_run(); !validated) {
+    return std::unexpected(std::move(validated.error()));
+  }
   auto drained = m_impl->kernel->drain();
   if (!drained) return std::unexpected(kernel_error(drained.error()));
   auto result = std::move(m_impl->pending_surface_events);
@@ -1376,6 +1634,7 @@ auto ChatSession::drain()
   if (!m_impl->kernel->active_run_id()) {
     m_impl->active_context.reset();
     m_impl->recovered_pending_run_validation_required = false;
+    m_impl->recovered_persona_document.reset();
     m_impl->recovered_user_global_instruction.reset();
   }
   return result;
@@ -1390,6 +1649,7 @@ auto ChatSession::cancel_active(std::optional<std::string> reason)
   if (!cancelled) return std::unexpected(kernel_error(cancelled.error()));
   m_impl->active_context.reset();
   m_impl->recovered_pending_run_validation_required = false;
+  m_impl->recovered_persona_document.reset();
   m_impl->recovered_user_global_instruction.reset();
   const auto events = m_impl->kernel->event_log().events();
   for (std::size_t index = before; index < events.size(); ++index) {
@@ -1558,7 +1818,7 @@ auto ChatSession::disable_persona() -> std::expected<void, ChatSessionError> {
   return {};
 }
 
-auto ChatSession::create_persona(persona::PersonaDraft draft)
+auto ChatSession::create_persona(persona::PersonaCreate request)
     -> std::expected<persona::PersonaWriteReceipt, ChatSessionError> {
   if (active()) {
     return error(ChatSessionErrorCode::run_failed,
@@ -1568,7 +1828,7 @@ auto ChatSession::create_persona(persona::PersonaDraft draft)
     return error(ChatSessionErrorCode::context_failed,
                  "persona editor is unavailable");
   }
-  persona::PersonaCreate request{std::move(draft), m_impl->persona_limits};
+  request.limits = m_impl->persona_limits;
   auto written = m_impl->persona_editor->create(request, m_impl->stop_token);
   if (!written) return std::unexpected(persona_editor_error(written.error()));
   if (auto valid = persona::validate_persona_write_receipt(request, *written);
