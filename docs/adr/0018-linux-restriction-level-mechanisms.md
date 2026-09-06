@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-09-04
+- Amended: 2026-09-06 (issue #212)
 
 ## Context
 
@@ -28,8 +29,10 @@ file-descriptor-based cgroup placement. The private-root rows also do not prove
 capability discard before payload execution. Issue #209's immutable
 supplemental schema v3 measures those direct-tree and capability properties.
 It does not measure execution requested from arbitrary same-UID or external
-brokers. That separate conjunct remains unproven, so every restricted level is
-incomplete even when all applicable v3 rows are enforced.
+brokers. The issue #212 review below concludes that no mechanism inside this
+ADR's accepted privilege boundary closes that separate conjunct. Every
+restricted level therefore remains unavailable even when all applicable v3
+rows are enforced.
 
 ## Decision
 
@@ -78,6 +81,71 @@ Capabilities obtained only inside the new private user namespace must not
 become host authority and must be discarded after private-root setup and before
 payload execution; schemas v1 and v2 do not prove that transition.
 
+### Same-UID broker execution confinement conclusion
+
+The `same_uid_broker_execution_confinement` conjunct requires a complete
+kernel-enforced authority boundary. A payload and every descendant must be
+unable to ask any pre-existing or newly reachable process outside the task
+cgroup to create or arrange executable work on their behalf. Blocking a list
+of service names, socket paths, or known brokers cannot satisfy that contract.
+
+The finite candidate mechanism review is:
+
+- cgroup v2 accounts for and controls member processes. It does not mediate
+  requests sent to a process that is already outside the task cgroup.
+- Descriptor closure removes inherited ambient channels but does not prevent
+  the payload from creating new filesystem, socket, shared-memory, message,
+  semaphore, signal, pidfd, or other process-directed rendezvous.
+- Landlock can restrict declared filesystem and network operations and, on
+  sufficiently new ABIs, scope signals and abstract or pathname Unix-socket
+  resolution. Its
+  [documented model and limitations](https://docs.kernel.org/userspace-api/landlock.html)
+  do not generically mediate every special object or prevent a permitted
+  writable host path from being observed by an unrestricted same-UID broker.
+- The architecture-checked classic seccomp-BPF filters selected by this ADR
+  reduce the available syscall surface but cannot dereference pointer arguments
+  or classify the authority and semantics of every permitted object. The
+  kernel documentation explicitly states that
+  [system-call filtering is not a sandbox](https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html).
+  A finite syscall or argument filter therefore cannot establish this
+  information-flow contract while ordinary filesystem and process execution
+  remain usable. Seccomp user notification would add an external supervising
+  broker that inspects or emulates operations; that mechanism is not in this
+  ADR's accepted mechanism family.
+- User, PID, mount, IPC, and network namespaces isolate selected kernel
+  resources. They neither create a distinct host credential for a UID mapped
+  to the launching user nor close rendezvous through every retained
+  host-visible writable object. Combining them with a private staged root
+  would also move `low` and `medium` to the stronger mechanism family currently
+  reserved for `high`, without proving the remaining host-principal boundary.
+- A distinct host security principal combined with a complete system MAC
+  policy, a privileged launcher or daemon, a container runtime, or a separate
+  virtual machine could define a stronger external boundary. Those mechanisms
+  are outside this ADR's accepted unprivileged `low` and `medium` contract and
+  may not be introduced without a separate accepted amendment.
+
+No candidate permitted by this ADR generically denies or contains all outbound
+authority by which a payload can request external same-UID execution. The
+conjunct is therefore architecturally unavailable, not positively enforced.
+No evidence schema v4, evaluator, artifact, or CI gate is created for this
+negative result. A future v4 requires a prior accepted amendment selecting a
+complete positive mechanism and its production revalidation contract.
+
+At application launch, a request for `low`, `medium`, or `high` must produce an
+immutable unavailable result naming
+`same_uid_broker_execution_confinement` and stable reason
+`mechanism_absent`. This happens before cgroup creation, helper or payload
+launch, broker interaction, or other setup mutation. The result carries no
+launcher, achieved level, restriction-policy identity, or downgrade. It retains
+the mechanism identity and any matcher-policy identity required by automatic
+approval. Approval mode, allow-list membership, persona state, restored
+sessions, replay, and model output cannot change restriction availability.
+Because there is no restricted launcher to invoke, identity or host drift
+cannot turn the result into availability; a later application launch must
+apply the same decision unless a newer accepted ADR selects a complete
+mechanism. `none` is unchanged and makes no operating-system filesystem or
+network confinement claim.
+
 ### Evidence input
 
 The noninstalled evidence assessor accepts one complete document for each of
@@ -97,7 +165,9 @@ incomplete. A required `probe_error` makes that level indeterminate. A required
 Assessment is deterministic. A required `cleanup_failed` row dominates other
 unmet rows for that level; otherwise assessment reports the first unmet
 conjunct in the order defined below. After all mapped rows pass, the assessor
-still reports the separate same-UID broker-execution conjunct as unproven. It
+still reports the separate same-UID broker-execution conjunct as unproven by
+evidence; the architectural review above separately establishes that the
+accepted mechanism family has no positive implementation for it. The assessor
 reviews retained engineering evidence only; it is not linked into installed
 targets and its answer is never runtime authority.
 
@@ -180,9 +250,11 @@ treated as proof of cgroup non-escape. Schema v3's
 V2 and v3 still do not prove that `low`, which permits new Unix sockets, cannot
 request execution from a same-UID service such as a user service manager or
 D-Bus broker outside the task cgroup. The assessor therefore retains
-`same_uid_broker_execution_confinement` as a separate unproven conjunct even
-when every applicable v3 row is enforced. Because levels are cumulative, that
-gap keeps `low`, `medium`, and `high` incomplete.
+`same_uid_broker_execution_confinement` as a separate unproven evidence
+conjunct even when every applicable v3 row is enforced. The mechanism review
+above concludes that this conjunct is unavailable under the accepted contract.
+Because levels are cumulative, that result keeps `low`, `medium`, and `high`
+unavailable.
 
 ### `medium`
 
@@ -283,8 +355,9 @@ for `low` and `medium`, but they do not make either level complete. They predate
 schema v3 and therefore contain no v3 direct process-tree cgroup non-escape or
 capability evidence. They also do not prove that `low` prevents execution
 requested from an arbitrary same-UID broker while allowing new Unix sockets;
-v3 deliberately makes no such claim. The separately unproven broker conjunct
-keeps `low`, `medium`, and `high` incomplete even after applicable v3 rows pass.
+v3 deliberately makes no such claim. The architecturally unavailable broker
+conjunct keeps `low`, `medium`, and `high` unavailable even after applicable v3
+rows pass.
 For both report pairs, the existing v2 high rows are
 independently incomplete first at
 `private_root_construction/unavailable/permission_denied`; the later
@@ -297,23 +370,27 @@ authority.
 
 ### Launch-time establishment
 
-Production must probe and establish the selected contract once per application
-launch and bind the result to an immutable launch context. Retained CI reports,
+Production evaluates the selected contract once per application launch and
+binds the result to an immutable launch context. Under this amendment,
+`low`, `medium`, and `high` take the immediate `mechanism_absent` path defined
+above and perform no restricted-mechanism probe or setup. Retained CI reports,
 the noninstalled assessor, a previous application run, durable session state,
 or a restored projection never grants availability.
 
-The launch probe uses the production mechanism and an adversarial fixed helper;
-it does not run a user command. It pins an explicitly configured delegated
-cgroup root by descriptor traversal, requires exclusive ownership and no
-foreign processes or subgroups, creates a supervisor leaf, moves the launcher
-there, enables `cpu`, `memory`, and `pids` on the pinned root, and closes the
-management descriptor in every payload. It never infers a delegation root from
-the current cgroup or `..`.
+The following positive establishment and setup requirements are retained for a
+future accepted amendment that selects a complete broker-confinement mechanism;
+they do not authorize an implementation today. Such a launch probe uses the
+production mechanism and an adversarial fixed helper; it does not run a user
+command. It pins an explicitly configured delegated cgroup root by descriptor
+traversal, requires exclusive ownership and no foreign processes or subgroups,
+creates a supervisor leaf, moves the launcher there, enables `cpu`, `memory`,
+and `pids` on the pinned root, and closes the management descriptor in every
+payload. It never infers a delegation root from the current cgroup or `..`.
 
-Each invocation then revalidates executable, working directory, requested
-roots, environment names, limits, and staged input identities against the
-immutable launch context before mutation. The child is placed atomically in a
-new task cgroup. Setup proceeds in this order:
+Each future positive invocation then revalidates executable, working directory,
+requested roots, environment names, limits, and staged input identities against
+the immutable launch context before mutation. The child is placed atomically in
+a new task cgroup. Setup proceeds in this order:
 
 1. create and configure the task cgroup and resource controls;
 2. atomically create the child in that cgroup;
@@ -393,15 +470,16 @@ not a generic Linux support claim.
 
 ## Consequences
 
-- `low` can be implemented only where exclusive cgroup-v2 delegation,
-  controller control, pidfds, no-new-privileges, descriptor-relative launch,
-  and the narrow Landlock management guard are all enforceable.
-- `medium` adds full Landlock scope and deny-all network filtering. Network
-  allowlisting remains unavailable.
-- `high` remains unavailable wherever private-root or private-mount propagation
-  evidence is absent, including the current reference environment.
+- `none` remains the only production-launchable level under this decision.
+- `low`, `medium`, and `high` return `mechanism_absent` on every host until an
+  accepted amendment selects and proves a complete same-UID broker boundary.
+  Existing cgroup, capability, filesystem, network, and private-root evidence
+  remains useful for its named subcontracts but cannot change that result.
+- Network allowlisting remains unavailable. A stronger principal, privileged
+  service, container, or virtual-machine boundary is a future product and
+  architecture decision, not an implicit extension of these levels.
 - Approval mode remains orthogonal. `prompt`, `auto`, and `allow-all` cannot
   change level availability or bypass any conjunct.
-- A later production child may implement this ADR without changing the
-  provider-neutral run kernel. Shell remains separately blocked on its stronger
-  executor contract.
+- A production adapter may implement `none` and the structured restricted-level
+  unavailability without changing the provider-neutral run kernel. Shell
+  remains separately blocked on its stronger executor contract.
