@@ -401,11 +401,9 @@ auto tool_profile_category_members(
     result.reserve(selected->tool_names.size());
     for (const auto& tool_name : selected->tool_names) {
       const auto* registered = full_registry.find(tool_name);
-      if (registered != nullptr && registered->category == category) {
-        result.push_back(tool_name);
-      } else if (const auto* unavailable =
-                     full_registry.find_unavailable(tool_name);
-                 unavailable != nullptr && unavailable->category == category) {
+      const auto* unavailable = full_registry.find_unavailable(tool_name);
+      if ((registered != nullptr && registered->category == category) ||
+          (unavailable != nullptr && unavailable->category == category)) {
         result.push_back(tool_name);
       }
     }

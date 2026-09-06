@@ -74,7 +74,7 @@ struct ToolProfileToolAvailability {
       std::string name, ToolProfileAvailabilityReason availability_reason,
       std::optional<ToolUnavailability> unavailable = {})
       : tool_name(std::move(name)), reason(availability_reason),
-        unavailability(std::move(unavailable)) {}
+        unavailability(unavailable) {}
   auto operator==(const ToolProfileToolAvailability&) const -> bool = default;
 };
 

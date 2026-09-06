@@ -192,8 +192,7 @@ struct ToolUnavailability {
   ToolUnavailability(
       ToolUnavailableReason unavailable_reason,
       std::optional<ToolRestrictionUnavailability> restriction_detail = {})
-      : reason(unavailable_reason), restriction(std::move(restriction_detail)) {
-  }
+      : reason(unavailable_reason), restriction(restriction_detail) {}
   auto operator==(const ToolUnavailability&) const -> bool = default;
 };
 

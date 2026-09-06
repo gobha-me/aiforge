@@ -438,7 +438,7 @@ auto ToolRegistry::declare_unavailable_tool(std::string name,
                             "tool name is already declared"});
     }
     m_unavailable_tools.push_back(
-        UnavailableTool{std::move(name), category, std::move(unavailability)});
+        UnavailableTool{std::move(name), category, unavailability});
     return {};
   } catch (...) {
     return std::unexpected(
