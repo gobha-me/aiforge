@@ -42,8 +42,7 @@ namespace {
     std::optional<runtime::ToolRestrictionUnavailability> restriction =
         std::nullopt) -> std::expected<void, ProcessChatAssemblyError> {
   auto declared = registry.declare_unavailable_tool(
-      "run_process", {reason, std::move(restriction)},
-      runtime::ToolCategory::process);
+      "run_process", {reason, restriction}, runtime::ToolCategory::process);
   if (!declared) return failure(declared.error().message);
   return {};
 }
@@ -54,7 +53,7 @@ namespace {
     std::optional<runtime::ToolRestrictionUnavailability> restriction =
         std::nullopt)
     -> std::expected<ProcessChatAssemblyResult, ProcessChatAssemblyError> {
-  auto declared = declare_unavailable(registry, reason, std::move(restriction));
+  auto declared = declare_unavailable(registry, reason, restriction);
   if (!declared) return std::unexpected(std::move(declared.error()));
   return ProcessChatAssemblyResult{std::move(context), false};
 }
@@ -116,6 +115,66 @@ namespace {
   };
 }
 
+struct LauncherEstablishment final {
+  std::optional<runtime::BoundProcessLauncher> launcher;
+  runtime::ApplicationLaunchContext context;
+  std::optional<LinuxProcessLauncherEstablishmentErrorCode> error;
+};
+
+[[nodiscard]] auto establish_launcher(ProcessChatAssemblyRequest& request)
+    -> std::expected<LauncherEstablishment, ProcessChatAssemblyError> {
+  if (!request.establish_launcher) {
+    return failure("process launcher establishment is unavailable");
+  }
+  const config::ProcessConfigLimits bounds =
+      request.settings ? request.settings->limits
+                       : config::ProcessConfigLimits{};
+  auto established = request.establish_launcher(
+      {.restriction = request.restriction,
+       .approval_mode = request.approval,
+       .matcher_policy_identity = request.matcher_policy_identity,
+       .bounds = launch_bounds(bounds)});
+
+  std::optional<runtime::BoundProcessLauncher> launcher;
+  std::optional<runtime::ApplicationLaunchContext> context;
+  std::optional<LinuxProcessLauncherEstablishmentErrorCode> error;
+  if (!established) {
+    error = established.error().code;
+    const auto reason =
+        established.error().code ==
+                LinuxProcessLauncherEstablishmentErrorCode::unsupported_platform
+            ? runtime::RestrictionUnavailableReason::unsupported_platform
+            : runtime::RestrictionUnavailableReason::internal_error;
+    auto unavailable =
+        unavailable_context(request.restriction, request.approval,
+                            request.matcher_policy_identity, reason);
+    if (!unavailable) return std::unexpected(std::move(unavailable.error()));
+    context.emplace(std::move(*unavailable));
+  } else if (auto* unavailable =
+                 std::get_if<LinuxProcessLauncherUnavailable>(&*established)) {
+    context.emplace(std::move(unavailable->context));
+  } else if (auto* bound =
+                 std::get_if<runtime::BoundProcessLauncher>(&*established)) {
+    context.emplace(bound->context());
+    launcher.emplace(std::move(*bound));
+  }
+
+  const bool context_matches =
+      context && context->selected_restriction() == request.restriction &&
+      context->approval_mode() == request.approval &&
+      context->matcher_policy_identity() == request.matcher_policy_identity;
+  if (!context_matches) {
+    launcher.reset();
+    auto unavailable = unavailable_context(
+        request.restriction, request.approval, request.matcher_policy_identity,
+        runtime::RestrictionUnavailableReason::internal_error);
+    if (!unavailable) return std::unexpected(std::move(unavailable.error()));
+    context.emplace(std::move(*unavailable));
+    error = LinuxProcessLauncherEstablishmentErrorCode::internal_failure;
+  }
+  return LauncherEstablishment{std::move(launcher), std::move(*context), error};
+}
+
 } // namespace
 
 auto configured_process_automatic_approval_rules(
@@ -148,64 +207,13 @@ auto assemble_process_chat_tool(runtime::ToolRegistry& registry,
         runtime::ToolCategory::process);
     if (!shell) return failure(shell.error().message);
 
-    const auto make_unavailable = [&](const auto reason) {
-      return unavailable_context(request.restriction, request.approval,
-                                 request.matcher_policy_identity, reason);
-    };
-    if (!request.establish_launcher) {
-      return failure("process launcher establishment is unavailable");
-    }
-    const config::ProcessConfigLimits bounds =
-        request.settings ? request.settings->limits
-                         : config::ProcessConfigLimits{};
-    auto established = request.establish_launcher(
-        {.restriction = request.restriction,
-         .approval_mode = request.approval,
-         .matcher_policy_identity = request.matcher_policy_identity,
-         .bounds = launch_bounds(bounds)});
-
-    std::optional<runtime::BoundProcessLauncher> launcher;
-    std::optional<runtime::ApplicationLaunchContext> launch_context;
-    std::optional<LinuxProcessLauncherEstablishmentErrorCode>
-        establishment_error;
-    if (!established) {
-      establishment_error = established.error().code;
-      const auto reason =
-          established.error().code ==
-                  LinuxProcessLauncherEstablishmentErrorCode::
-                      unsupported_platform
-              ? runtime::RestrictionUnavailableReason::unsupported_platform
-              : runtime::RestrictionUnavailableReason::internal_error;
-      auto context = make_unavailable(reason);
-      if (!context) return std::unexpected(std::move(context.error()));
-      launch_context.emplace(std::move(*context));
-    } else if (auto* unavailable = std::get_if<LinuxProcessLauncherUnavailable>(
-                   &*established)) {
-      launch_context.emplace(std::move(unavailable->context));
-    } else if (auto* bound =
-                   std::get_if<runtime::BoundProcessLauncher>(&*established)) {
-      launch_context.emplace(bound->context());
-      launcher.emplace(std::move(*bound));
-    }
-
-    const bool context_matches =
-        launch_context &&
-        launch_context->selected_restriction() == request.restriction &&
-        launch_context->approval_mode() == request.approval &&
-        launch_context->matcher_policy_identity() ==
-            request.matcher_policy_identity;
-    if (!context_matches) {
-      launcher.reset();
-      auto context = make_unavailable(
-          runtime::RestrictionUnavailableReason::internal_error);
-      if (!context) return std::unexpected(std::move(context.error()));
-      launch_context.emplace(std::move(*context));
-      establishment_error =
-          LinuxProcessLauncherEstablishmentErrorCode::internal_failure;
+    auto establishment = establish_launcher(request);
+    if (!establishment) {
+      return std::unexpected(std::move(establishment.error()));
     }
 
     const auto unavailable = [&](const runtime::ToolUnavailableReason reason) {
-      return unavailable_result(registry, reason, *launch_context);
+      return unavailable_result(registry, reason, establishment->context);
     };
     if (!request.settings) {
       return unavailable(runtime::ToolUnavailableReason::not_configured);
@@ -222,17 +230,17 @@ auto assemble_process_chat_tool(runtime::ToolRegistry& registry,
     }
 
     if (request.restriction != runtime::RestrictionLevel::none) {
-      const auto reason = launch_context->unavailable_reason().value_or(
+      const auto reason = establishment->context.unavailable_reason().value_or(
           runtime::RestrictionUnavailableReason::unsupported_combination);
       return unavailable_result(
           registry, runtime::ToolUnavailableReason::restriction_unavailable,
-          *launch_context,
+          establishment->context,
           runtime::ToolRestrictionUnavailability{request.restriction, reason});
     }
-    if (!launcher) {
+    if (!establishment->launcher) {
       const auto reason =
-          establishment_error == LinuxProcessLauncherEstablishmentErrorCode::
-                                     unsupported_platform
+          establishment->error == LinuxProcessLauncherEstablishmentErrorCode::
+                                      unsupported_platform
               ? runtime::ToolUnavailableReason::unsupported_platform
               : runtime::ToolUnavailableReason::
                     runtime_dependency_or_path_unavailable;
@@ -248,14 +256,14 @@ auto assemble_process_chat_tool(runtime::ToolRegistry& registry,
       return unavailable(runtime::ToolUnavailableReason::
                              runtime_dependency_or_path_unavailable);
     }
-    auto registered = register_process_tool(registry, *request.artifact_store,
-                                            std::move(*tool_configuration),
-                                            std::move(*launcher));
+    auto registered = register_process_tool(
+        registry, *request.artifact_store, std::move(*tool_configuration),
+        std::move(*establishment->launcher));
     if (!registered) {
       return unavailable(runtime::ToolUnavailableReason::
                              runtime_dependency_or_path_unavailable);
     }
-    return ProcessChatAssemblyResult{std::move(*launch_context), true};
+    return ProcessChatAssemblyResult{std::move(establishment->context), true};
   } catch (...) {
     return failure("process Chat tool assembly failed internally");
   }
