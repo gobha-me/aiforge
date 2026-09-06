@@ -55,6 +55,8 @@ struct ProcessLaunchRequest {
   std::vector<std::string> arguments;
   std::string working_directory;
   std::string working_directory_identity;
+  // Registration-time ceilings and the invocation-selected subset remain
+  // separate so adapters can prove their descriptor lineage at launch.
   std::vector<ProcessFilesystemRoot> configured_roots;
   std::vector<ProcessFilesystemRoot> requested_roots;
   std::vector<ProcessEnvironmentVariable> environment;

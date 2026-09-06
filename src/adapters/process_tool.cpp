@@ -1,8 +1,9 @@
 #include <aiforge/adapters/process_tool.hpp>
 
+#include <aiforge/adapters/linux_process_launcher.hpp>
+
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <climits>
@@ -23,6 +24,7 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -71,11 +73,13 @@ constexpr std::size_t result_excerpt_bytes{4096};
 
 [[nodiscard]] auto valid_environment_name(const std::string_view name) -> bool {
   if (name.empty() || name.size() > 255 || name.front() == '=' ||
-      std::isdigit(static_cast<unsigned char>(name.front())) != 0) {
+      (name.front() >= '0' && name.front() <= '9')) {
     return false;
   }
   return std::ranges::all_of(name, [](const unsigned char character) {
-    return std::isalnum(character) != 0 || character == '_';
+    return (character >= 'a' && character <= 'z') ||
+           (character >= 'A' && character <= 'Z') ||
+           (character >= '0' && character <= '9') || character == '_';
   });
 }
 
@@ -226,6 +230,8 @@ struct NormalizedConfiguration {
                                 {"maxItems", configuration.source.limits.roots},
                                 {"uniqueItems", true},
                                 {"items", path_schema}};
+  auto readable_root_schema = root_schema;
+  readable_root_schema["minItems"] = 1;
   const auto environment_schema =
       Json{{"type", "array"},
            {"maxItems", configuration.source.limits.environment_variables},
@@ -240,7 +246,7 @@ struct NormalizedConfiguration {
         {"maxItems", configuration.source.limits.arguments},
         {"items", {{"type", "string"}}}}},
       {"working_directory", path_schema},
-      {"readable_roots", root_schema},
+      {"readable_roots", std::move(readable_root_schema)},
       {"writable_roots", root_schema},
       {"environment", environment_schema},
       {"stdin", {{"const", "closed"}}},
@@ -624,7 +630,489 @@ class DuplicateJsonKey final : public std::exception {
       .value();
 }
 
-#ifndef _WIN32
+[[nodiscard]] auto scopes_cover(
+    const std::vector<domain::CapabilityScope>& granted,
+    const std::vector<domain::CapabilityScope>& requested) -> bool {
+  return std::ranges::all_of(requested, [&](const auto& scope) {
+    return std::ranges::any_of(granted, [&](const auto& grant) {
+      return runtime::capability_scope_covers(grant, scope);
+    });
+  });
+}
+
+[[nodiscard]] auto launch_error(const runtime::ProcessLaunchError& failure)
+    -> runtime::ToolExecutionError {
+  auto code = runtime::ToolExecutionErrorCode::unavailable;
+  std::string_view message{"process launcher is unavailable"};
+  switch (failure.code) {
+    case runtime::ProcessLaunchErrorCode::invalid_request:
+      code = runtime::ToolExecutionErrorCode::invalid_arguments;
+      message = "process launch request was rejected";
+      break;
+    case runtime::ProcessLaunchErrorCode::cancelled:
+      code = runtime::ToolExecutionErrorCode::cancelled;
+      message = "process launch cancelled";
+      break;
+    case runtime::ProcessLaunchErrorCode::timed_out:
+      code = runtime::ToolExecutionErrorCode::timed_out;
+      message = "process launch timed out";
+      break;
+    case runtime::ProcessLaunchErrorCode::output_limit:
+      code = runtime::ToolExecutionErrorCode::output_limit;
+      message = "process output limit was exceeded";
+      break;
+    case runtime::ProcessLaunchErrorCode::protocol_failure:
+      code = runtime::ToolExecutionErrorCode::protocol_failure;
+      message = "process launcher protocol failed";
+      break;
+    case runtime::ProcessLaunchErrorCode::internal_failure:
+      code = runtime::ToolExecutionErrorCode::internal_failure;
+      message = "process launcher failed internally";
+      break;
+    case runtime::ProcessLaunchErrorCode::contract_drift:
+      message = "process launcher contract changed";
+      break;
+    case runtime::ProcessLaunchErrorCode::spawn_failed:
+      message = "process could not be spawned";
+      break;
+    case runtime::ProcessLaunchErrorCode::cleanup_failed:
+      message = "process cleanup failed";
+      break;
+    case runtime::ProcessLaunchErrorCode::unavailable: break;
+  }
+  return execution_error(code, std::string{message}, failure.retryable);
+}
+
+[[nodiscard]] auto terminal_status(const runtime::ProcessTerminalKind kind)
+    -> std::string_view {
+  switch (kind) {
+    case runtime::ProcessTerminalKind::exited: return "exited";
+    case runtime::ProcessTerminalKind::signaled: return "signaled";
+    case runtime::ProcessTerminalKind::spawn_failed: return "spawn_failed";
+    case runtime::ProcessTerminalKind::timed_out: return "timed_out";
+    case runtime::ProcessTerminalKind::output_limit: return "output_limit";
+  }
+  return "spawn_failed";
+}
+
+[[nodiscard]] auto spawn_error_name(const runtime::ProcessSpawnError error)
+    -> std::string_view {
+  switch (error) {
+    case runtime::ProcessSpawnError::not_found: return "not_found";
+    case runtime::ProcessSpawnError::permission_denied:
+      return "permission_denied";
+    case runtime::ProcessSpawnError::invalid_format: return "invalid_format";
+    case runtime::ProcessSpawnError::operating_system_error:
+      return "operating_system_error";
+  }
+  return "operating_system_error";
+}
+
+class LauncherProcessStream final : public runtime::ToolExecutionStream {
+ public:
+  LauncherProcessStream(std::unique_ptr<runtime::ProcessLaunchStream> stream,
+                        ProcessRequest request,
+                        runtime::ProcessLaunchRequest launch_request,
+                        domain::InvocationId invocation_id,
+                        storage::ArtifactStore& artifact_store,
+                        ProcessToolLimits limits,
+                        std::vector<std::string> environment_values)
+      : m_stream(std::move(stream)), m_request(std::move(request)),
+        m_launch_request(std::move(launch_request)),
+        m_invocation_id(std::move(invocation_id)),
+        m_artifact_store(artifact_store), m_limits(limits),
+        m_environment_values(std::move(environment_values)) {}
+
+  auto next(const std::stop_token stop_token)
+      -> std::expected<std::optional<runtime::ToolExecutionEvent>,
+                       runtime::ToolExecutionError> override {
+    try {
+      if (m_terminal_emitted) {
+        return std::optional<runtime::ToolExecutionEvent>{};
+      }
+      for (;;) {
+        auto update = m_stream->next(stop_token);
+        if (!update) return std::unexpected(launch_error(update.error()));
+        if (!*update) {
+          return std::unexpected(
+              execution_error(runtime::ToolExecutionErrorCode::protocol_failure,
+                              "process launcher ended without a terminal"));
+        }
+        if (const auto* progress =
+                std::get_if<runtime::ProcessLaunchProgress>(&**update)) {
+          if (auto valid = runtime::validate_process_launch_progress(
+                  m_launch_request, *progress);
+              !valid) {
+            return std::unexpected(launch_error(valid.error()));
+          }
+          if (!m_environment_values.empty() ||
+              m_progress_events >= m_limits.progress_events) {
+            continue;
+          }
+          ++m_progress_events;
+          const std::string bytes(
+              reinterpret_cast<const char*>(progress->content.data()),
+              progress->content.size());
+          Json payload{
+              {"stream",
+               progress->stream == runtime::ProcessOutputStream::standard_output
+                   ? "stdout"
+                   : "stderr"},
+              {"encoding", "base64"},
+              {"data", base64(bytes)}};
+          return std::optional<runtime::ToolExecutionEvent>{
+              runtime::ToolProgress{{domain::StructuredDataBlock{
+                  "application/vnd.aiforge.process-progress+json",
+                  payload.dump()}}}};
+        }
+
+        const auto& terminal =
+            std::get<runtime::ProcessLaunchTerminal>(**update);
+        if (auto valid = runtime::validate_process_launch_terminal(
+                m_launch_request, terminal);
+            !valid) {
+          return std::unexpected(launch_error(valid.error()));
+        }
+        m_terminal_emitted = true;
+        auto end = m_stream->next({});
+        if (!end) return std::unexpected(launch_error(end.error()));
+        if (*end) {
+          return std::unexpected(
+              execution_error(runtime::ToolExecutionErrorCode::protocol_failure,
+                              "process launcher emitted data after terminal"));
+        }
+        return make_result(terminal, stop_token);
+      }
+    } catch (...) {
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::internal_failure,
+                          "process launcher stream failed internally"));
+    }
+  }
+
+ private:
+  [[nodiscard]] auto store_output(const std::string_view stream,
+                                  const std::string& output,
+                                  const bool force_artifact,
+                                  const std::stop_token stop_token)
+      -> std::expected<std::optional<domain::ArtifactMetadata>,
+                       runtime::ToolExecutionError> {
+    if (output.empty() ||
+        (!force_artifact && output.size() <= m_limits.inline_output_bytes &&
+         safe_utf8(output))) {
+      return std::optional<domain::ArtifactMetadata>{};
+    }
+    const auto artifact_id = artifact_id_for(m_invocation_id, stream);
+    auto stored = m_artifact_store.put(
+        {artifact_id, "application/octet-stream", m_invocation_id},
+        std::as_bytes(std::span{output.data(), output.size()}), stop_token);
+    if (!stored) {
+      return std::unexpected(execution_error(
+          stored.error().code == storage::ArtifactStoreErrorCode::cancelled
+              ? runtime::ToolExecutionErrorCode::cancelled
+              : runtime::ToolExecutionErrorCode::unavailable,
+          stored.error().code == storage::ArtifactStoreErrorCode::cancelled
+              ? "process output artifact storage cancelled"
+              : "process output artifact could not be stored",
+          stored.error().retryable));
+    }
+    if (stored->artifact_id != artifact_id ||
+        stored->media_type != "application/octet-stream" ||
+        stored->byte_size != output.size() || stored->digest.empty() ||
+        stored->producing_invocation_id != m_invocation_id || stored->width ||
+        stored->height) {
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::protocol_failure,
+                          "artifact store returned invalid process metadata"));
+    }
+    return std::optional<domain::ArtifactMetadata>{std::move(*stored)};
+  }
+
+  [[nodiscard]] auto make_result(const runtime::ProcessLaunchTerminal& terminal,
+                                 const std::stop_token stop_token)
+      -> std::expected<std::optional<runtime::ToolExecutionEvent>,
+                       runtime::ToolExecutionError> {
+    auto stdout_value = redact_environment_values(
+        std::string(
+            reinterpret_cast<const char*>(terminal.standard_output.data()),
+            terminal.standard_output.size()),
+        m_environment_values);
+    auto stderr_value = redact_environment_values(
+        std::string(
+            reinterpret_cast<const char*>(terminal.standard_error.data()),
+            terminal.standard_error.size()),
+        m_environment_values);
+    const bool force_artifact =
+        terminal.kind == runtime::ProcessTerminalKind::output_limit;
+    auto stdout_artifact =
+        store_output("stdout", stdout_value, force_artifact, stop_token);
+    if (!stdout_artifact) return std::unexpected(stdout_artifact.error());
+    auto stderr_artifact =
+        store_output("stderr", stderr_value, force_artifact, stop_token);
+    if (!stderr_artifact) return std::unexpected(stderr_artifact.error());
+
+    const auto stream_json = [&](const std::string& output,
+                                 const auto& artifact) {
+      Json result{{"bytes", output.size()},
+                  {"artifact_id", artifact ? Json(artifact->artifact_id.value())
+                                           : Json(nullptr)}};
+      if (!artifact && safe_utf8(output)) {
+        result["text"] = output;
+        result["excerpt_encoding"] = nullptr;
+        result["excerpt"] = nullptr;
+      } else {
+        const auto head_size =
+            std::min(output.size(), result_excerpt_bytes / 2U);
+        const auto tail_size =
+            std::min(output.size() - head_size, result_excerpt_bytes / 2U);
+        std::string excerpt = output.substr(0, head_size);
+        if (tail_size != 0) {
+          excerpt.append(output.substr(output.size() - tail_size));
+        }
+        result["text"] = nullptr;
+        result["excerpt_encoding"] = "base64";
+        result["excerpt"] = base64(excerpt);
+      }
+      return result;
+    };
+    Json result{
+        {"status", terminal_status(terminal.kind)},
+        {"exit_code",
+         terminal.exit_code ? Json(*terminal.exit_code) : Json(nullptr)},
+        {"signal", terminal.signal ? Json(*terminal.signal) : Json(nullptr)},
+        {"spawn_error", terminal.spawn_error
+                            ? Json(spawn_error_name(*terminal.spawn_error))
+                            : Json(nullptr)},
+        {"duration_ms", terminal.duration.count()},
+        {"output_limit", m_request.output_bytes},
+        {"stdout", stream_json(stdout_value, *stdout_artifact)},
+        {"stderr", stream_json(stderr_value, *stderr_artifact)}};
+    runtime::ToolResult tool_result{{domain::StructuredDataBlock{
+        "application/vnd.aiforge.process-result+json", result.dump()}}};
+    if (*stdout_artifact) {
+      tool_result.content.push_back(domain::ArtifactReferenceBlock{
+          (*stdout_artifact)->artifact_id, std::string{"stdout"}});
+      tool_result.created_artifacts.push_back(std::move(**stdout_artifact));
+    }
+    if (*stderr_artifact) {
+      tool_result.content.push_back(domain::ArtifactReferenceBlock{
+          (*stderr_artifact)->artifact_id, std::string{"stderr"}});
+      tool_result.created_artifacts.push_back(std::move(**stderr_artifact));
+    }
+    return std::optional<runtime::ToolExecutionEvent>{std::move(tool_result)};
+  }
+
+  std::unique_ptr<runtime::ProcessLaunchStream> m_stream;
+  ProcessRequest m_request;
+  runtime::ProcessLaunchRequest m_launch_request;
+  domain::InvocationId m_invocation_id;
+  storage::ArtifactStore& m_artifact_store;
+  ProcessToolLimits m_limits;
+  std::vector<std::string> m_environment_values;
+  std::size_t m_progress_events{};
+  bool m_terminal_emitted{};
+};
+
+class LauncherProcessExecutor final : public runtime::ToolExecutor {
+ public:
+  LauncherProcessExecutor(NormalizedConfiguration configuration,
+                          storage::ArtifactStore& artifact_store,
+                          runtime::BoundProcessLauncher launcher,
+                          std::map<std::string, std::string> path_identities)
+      : m_configuration(std::move(configuration)),
+        m_artifact_store(artifact_store), m_launcher(std::move(launcher)),
+        m_path_identities(std::move(path_identities)) {}
+
+  auto validate(const domain::StructuredDataBlock& arguments) const
+      -> std::expected<runtime::ValidatedToolArguments,
+                       runtime::ToolExecutionError> override {
+    try {
+      auto parsed = parse_request(arguments, m_configuration);
+      if (!parsed) return std::unexpected(std::move(parsed.error()));
+      return runtime::ValidatedToolArguments{
+          arguments, required_scopes(*parsed), required_effects(*parsed)};
+    } catch (...) {
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::internal_failure,
+                          "process validation failed internally"));
+    }
+  }
+
+  auto start(runtime::ToolInvocation invocation,
+             const std::stop_token stop_token)
+      -> std::expected<std::unique_ptr<runtime::ToolExecutionStream>,
+                       runtime::ToolExecutionError> override {
+    try {
+      if (stop_token.stop_requested()) {
+        return std::unexpected(
+            execution_error(runtime::ToolExecutionErrorCode::cancelled,
+                            "process start cancelled"));
+      }
+      auto parsed = parse_request(invocation.arguments.value, m_configuration);
+      if (!parsed) return std::unexpected(std::move(parsed.error()));
+      if (!scopes_cover(invocation.granted_scopes, required_scopes(*parsed))) {
+        return std::unexpected(
+            execution_error(runtime::ToolExecutionErrorCode::unavailable,
+                            "process authority changed before launch"));
+      }
+      auto current_executable = m_launcher.pin_path(
+          parsed->executable,
+          runtime::ProcessFilesystemTargetKind::regular_executable);
+      if (!current_executable ||
+          *current_executable != m_path_identities.at(parsed->executable)) {
+        return std::unexpected(execution_error(
+            runtime::ToolExecutionErrorCode::unavailable,
+            "configured process executable changed before launch"));
+      }
+      for (const auto& root : m_configuration.readable_roots) {
+        auto current = m_launcher.pin_path(
+            root, runtime::ProcessFilesystemTargetKind::directory);
+        if (!current || *current != m_path_identities.at(root)) {
+          return std::unexpected(
+              execution_error(runtime::ToolExecutionErrorCode::unavailable,
+                              "configured process root changed before launch"));
+        }
+      }
+      for (const auto& root : m_configuration.writable_roots) {
+        auto current = m_launcher.pin_path(
+            root, runtime::ProcessFilesystemTargetKind::directory);
+        if (!current || *current != m_path_identities.at(root)) {
+          return std::unexpected(
+              execution_error(runtime::ToolExecutionErrorCode::unavailable,
+                              "configured process root changed before launch"));
+        }
+      }
+
+      auto working_identity =
+          m_launcher.pin_path(parsed->working_directory,
+                              runtime::ProcessFilesystemTargetKind::directory);
+      if (!working_identity) {
+        return std::unexpected(launch_error(working_identity.error()));
+      }
+      if (const auto baseline =
+              m_path_identities.find(parsed->working_directory);
+          baseline != m_path_identities.end() &&
+          *working_identity != baseline->second) {
+        return std::unexpected(
+            execution_error(runtime::ToolExecutionErrorCode::unavailable,
+                            "configured process root changed before launch"));
+      }
+
+      std::vector<runtime::ProcessFilesystemRoot> configured_roots;
+      configured_roots.reserve(m_configuration.readable_roots.size() +
+                               m_configuration.writable_roots.size());
+      for (const auto& root : m_configuration.readable_roots) {
+        configured_roots.push_back(
+            {root, m_path_identities.at(root),
+             runtime::ProcessFilesystemAccess::read_only});
+      }
+      for (const auto& root : m_configuration.writable_roots) {
+        auto existing =
+            std::ranges::find_if(configured_roots, [&](const auto& value) {
+              return value.path == root;
+            });
+        if (existing != configured_roots.end()) {
+          existing->access = runtime::ProcessFilesystemAccess::read_write;
+        } else {
+          configured_roots.push_back(
+              {root, m_path_identities.at(root),
+               runtime::ProcessFilesystemAccess::read_write});
+        }
+      }
+
+      std::vector<runtime::ProcessFilesystemRoot> requested_roots;
+      requested_roots.reserve(parsed->readable_roots.size() +
+                              parsed->writable_roots.size());
+      for (const auto& root : parsed->readable_roots) {
+        auto identity = m_launcher.pin_path(
+            root, runtime::ProcessFilesystemTargetKind::directory);
+        if (!identity) return std::unexpected(launch_error(identity.error()));
+        if (const auto baseline = m_path_identities.find(root);
+            baseline != m_path_identities.end() &&
+            *identity != baseline->second) {
+          return std::unexpected(
+              execution_error(runtime::ToolExecutionErrorCode::unavailable,
+                              "configured process root changed before launch"));
+        }
+        requested_roots.push_back(
+            {root, std::move(*identity),
+             runtime::ProcessFilesystemAccess::read_only});
+      }
+      for (const auto& root : parsed->writable_roots) {
+        auto existing =
+            std::ranges::find_if(requested_roots, [&](const auto& value) {
+              return value.path == root;
+            });
+        if (existing != requested_roots.end()) {
+          existing->access = runtime::ProcessFilesystemAccess::read_write;
+        } else {
+          auto identity = m_launcher.pin_path(
+              root, runtime::ProcessFilesystemTargetKind::directory);
+          if (!identity) {
+            return std::unexpected(launch_error(identity.error()));
+          }
+          if (const auto baseline = m_path_identities.find(root);
+              baseline != m_path_identities.end() &&
+              *identity != baseline->second) {
+            return std::unexpected(execution_error(
+                runtime::ToolExecutionErrorCode::unavailable,
+                "configured process root changed before launch"));
+          }
+          requested_roots.push_back(
+              {root, std::move(*identity),
+               runtime::ProcessFilesystemAccess::read_write});
+        }
+      }
+      std::vector<runtime::ProcessEnvironmentVariable> environment;
+      std::vector<std::string> environment_values;
+      environment.reserve(parsed->environment.size());
+      environment_values.reserve(parsed->environment.size());
+      for (const auto& name : parsed->environment) {
+        const auto& value = m_configuration.environment.at(name);
+        environment.push_back({name, value});
+        environment_values.push_back(value);
+      }
+      runtime::ProcessLaunchRequest request{
+          invocation.invocation_id,
+          parsed->executable,
+          m_path_identities.at(parsed->executable),
+          parsed->arguments,
+          parsed->working_directory,
+          std::move(*working_identity),
+          std::move(configured_roots),
+          std::move(requested_roots),
+          std::move(environment),
+          {parsed->timeout, parsed->output_bytes,
+           std::min(m_configuration.source.limits.progress_chunk_bytes,
+                    parsed->output_bytes),
+           m_configuration.source.limits.termination_grace}};
+      if (auto valid = runtime::validate_process_launch_request(request);
+          !valid) {
+        return std::unexpected(launch_error(valid.error()));
+      }
+      auto launched = m_launcher.launch(request, stop_token);
+      if (!launched) return std::unexpected(launch_error(launched.error()));
+      for (auto& variable : request.environment)
+        variable.value.clear();
+      return std::make_unique<LauncherProcessStream>(
+          std::move(*launched), std::move(*parsed), std::move(request),
+          invocation.invocation_id, m_artifact_store,
+          m_configuration.source.limits, std::move(environment_values));
+    } catch (...) {
+      return std::unexpected(
+          execution_error(runtime::ToolExecutionErrorCode::internal_failure,
+                          "process launch failed internally"));
+    }
+  }
+
+ private:
+  NormalizedConfiguration m_configuration;
+  storage::ArtifactStore& m_artifact_store;
+  runtime::BoundProcessLauncher m_launcher;
+  std::map<std::string, std::string> m_path_identities;
+};
+
+#if !defined(_WIN32) && !defined(__linux__)
 
 class UniqueFd final {
  public:
@@ -799,16 +1287,6 @@ auto close_extra_descriptors(const int descriptor_limit) noexcept -> void {
   for (int descriptor = 5; descriptor < descriptor_limit; ++descriptor) {
     static_cast<void>(::close(descriptor));
   }
-}
-
-[[nodiscard]] auto scopes_cover(
-    const std::vector<domain::CapabilityScope>& granted,
-    const std::vector<domain::CapabilityScope>& requested) -> bool {
-  return std::ranges::all_of(requested, [&](const auto& scope) {
-    return std::ranges::any_of(granted, [&](const auto& grant) {
-      return runtime::capability_scope_covers(grant, scope);
-    });
-  });
 }
 
 struct PendingProgress {
@@ -1527,14 +2005,45 @@ auto register_process_tool(runtime::ToolRegistry& registry,
   try {
     auto normalized = normalize_configuration(configuration);
     if (!normalized) return std::unexpected(std::move(normalized.error()));
-    auto declaration = declaration_from(*normalized);
 #ifdef _WIN32
     static_cast<void>(registry);
     static_cast<void>(artifact_store);
     return std::unexpected(registry_error(
         runtime::ToolRegistryErrorCode::invalid_declaration,
         "the bounded process executor requires a POSIX platform"));
+#elif defined(__linux__)
+    const auto& limits = normalized->source.limits;
+    auto established = establish_linux_process_launcher(
+        {.restriction = runtime::RestrictionLevel::none,
+         .approval_mode = runtime::ApprovalMode::prompt,
+         .matcher_policy_identity = std::nullopt,
+         .bounds = {.maximum_arguments = limits.arguments,
+                    .maximum_argument_bytes = limits.argument_bytes,
+                    .maximum_roots = 2U * limits.roots,
+                    .maximum_environment_variables =
+                        limits.environment_variables,
+                    .maximum_path_bytes = maximum_path_bytes,
+                    .maximum_identity_bytes = 128,
+                    .maximum_wall_time = limits.timeout,
+                    .maximum_output_bytes = limits.output_bytes,
+                    .maximum_progress_chunk_bytes = limits.progress_chunk_bytes,
+                    .maximum_termination_grace = limits.termination_grace}});
+    if (!established) {
+      return std::unexpected(
+          registry_error(runtime::ToolRegistryErrorCode::invalid_declaration,
+                         "the native bounded process launcher is unavailable"));
+    }
+    auto* launcher = std::get_if<runtime::BoundProcessLauncher>(&*established);
+    if (launcher == nullptr) {
+      return std::unexpected(
+          registry_error(runtime::ToolRegistryErrorCode::invalid_declaration,
+                         "the native bounded process launcher is unavailable"));
+    }
+    return register_process_tool(registry, artifact_store,
+                                 std::move(configuration),
+                                 std::move(*launcher));
 #else
+    auto declaration = declaration_from(*normalized);
     auto prepared = prepare_configuration(std::move(*normalized));
     if (!prepared) return std::unexpected(std::move(prepared.error()));
     const auto& limits = prepared->normalized.source.limits;
@@ -1564,6 +2073,89 @@ auto register_process_tool(runtime::ToolRegistry& registry,
     return std::unexpected(
         registry_error(runtime::ToolRegistryErrorCode::internal_failure,
                        "process tool registration failed internally"));
+  }
+}
+
+auto register_process_tool(runtime::ToolRegistry& registry,
+                           storage::ArtifactStore& artifact_store,
+                           ProcessToolConfiguration configuration,
+                           runtime::BoundProcessLauncher launcher)
+    -> std::expected<void, runtime::ToolRegistryError> {
+  try {
+    auto normalized = normalize_configuration(configuration);
+    if (!normalized) return std::unexpected(std::move(normalized.error()));
+    if (launcher.context().selected_restriction() !=
+            runtime::RestrictionLevel::none ||
+        launcher.context().achieved_restriction() !=
+            runtime::RestrictionLevel::none ||
+        launcher.context().process_network_contract() !=
+            runtime::ProcessNetworkContract::unrestricted_new_sockets) {
+      return std::unexpected(
+          registry_error(runtime::ToolRegistryErrorCode::invalid_declaration,
+                         "process tool requires an achieved none launcher"));
+    }
+
+    std::map<std::string, std::string> path_identities;
+    const auto pin =
+        [&](const std::string& path,
+            const runtime::ProcessFilesystemTargetKind kind) -> bool {
+      auto identity = launcher.pin_path(path, kind);
+      return identity &&
+             path_identities.emplace(path, std::move(*identity)).second;
+    };
+    for (const auto& executable : normalized->executables) {
+      if (!pin(executable,
+               runtime::ProcessFilesystemTargetKind::regular_executable)) {
+        return std::unexpected(registry_error(
+            runtime::ToolRegistryErrorCode::invalid_declaration,
+            "configured executable could not be pinned by the launcher"));
+      }
+    }
+    for (const auto& root : normalized->readable_roots) {
+      if (!pin(root, runtime::ProcessFilesystemTargetKind::directory)) {
+        return std::unexpected(registry_error(
+            runtime::ToolRegistryErrorCode::invalid_declaration,
+            "configured process root could not be pinned by the launcher"));
+      }
+    }
+    for (const auto& root : normalized->writable_roots) {
+      if (!path_identities.contains(root) &&
+          !pin(root, runtime::ProcessFilesystemTargetKind::directory)) {
+        return std::unexpected(registry_error(
+            runtime::ToolRegistryErrorCode::invalid_declaration,
+            "configured process root could not be pinned by the launcher"));
+      }
+    }
+
+    auto declaration = declaration_from(*normalized);
+    const auto& limits = normalized->source.limits;
+    const auto maximum = std::numeric_limits<std::size_t>::max();
+    constexpr std::size_t result_budget{std::size_t{64} * 1024U};
+    if (limits.progress_events >
+        (maximum - result_budget - 2U * limits.inline_output_bytes) /
+            (2U * limits.progress_chunk_bytes)) {
+      return std::unexpected(
+          registry_error(runtime::ToolRegistryErrorCode::invalid_declaration,
+                         "process event budget overflows"));
+    }
+    const auto event_bytes =
+        result_budget + 2U * limits.inline_output_bytes +
+        limits.progress_events * (2U * limits.progress_chunk_bytes);
+    return registry.register_tool(
+        std::move(declaration),
+        std::make_shared<LauncherProcessExecutor>(
+            std::move(*normalized), artifact_store, std::move(launcher),
+            std::move(path_identities)),
+        runtime::ToolExecutionLimits{event_bytes, limits.progress_events,
+                                     limits.timeout +
+                                         4 * limits.termination_grace +
+                                         std::chrono::seconds{1}},
+        runtime::ToolExecutorContract{"aiforge.adapters.run_process", "1"},
+        runtime::ToolCategory::process);
+  } catch (...) {
+    return std::unexpected(
+        registry_error(runtime::ToolRegistryErrorCode::internal_failure,
+                       "process launcher registration failed internally"));
   }
 }
 

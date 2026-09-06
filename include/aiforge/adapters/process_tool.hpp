@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include <aiforge/runtime/process_launcher.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/storage/artifact_store.hpp>
 
@@ -51,6 +52,12 @@ struct ProcessToolConfiguration {
 [[nodiscard]] auto register_process_tool(runtime::ToolRegistry& registry,
                                          storage::ArtifactStore& artifact_store,
                                          ProcessToolConfiguration configuration)
+    -> std::expected<void, runtime::ToolRegistryError>;
+
+[[nodiscard]] auto register_process_tool(runtime::ToolRegistry& registry,
+                                         storage::ArtifactStore& artifact_store,
+                                         ProcessToolConfiguration configuration,
+                                         runtime::BoundProcessLauncher launcher)
     -> std::expected<void, runtime::ToolRegistryError>;
 
 } // namespace aiforge::adapters
