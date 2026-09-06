@@ -159,27 +159,12 @@ src/adapters/process_plan.cpp	bugprone-optional-value-conversion	3008d08ae15e461
 src/adapters/process_plan.cpp	readability-function-cognitive-complexity	a3f5c7da57fafe932d29	function 'execute' has cognitive complexity of 236 (threshold 20)
 src/adapters/process_plan.cpp	readability-function-cognitive-complexity	f7144daf2d91d2f0c572	function 'state_json' has cognitive complexity of 27 (threshold 20)
 src/adapters/process_repository.cpp	concurrency-mt-unsafe	d4cb7cd50206a2aa6b7c	function is not thread safe
-src/adapters/process_tool.cpp	concurrency-mt-unsafe	d2b8c38ed645e758ae70	function is not thread safe
 src/adapters/process_tool.cpp	cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays	64f6575b70fffd8124ff	do not declare C-style arrays, use 'std::array' instead
-src/adapters/process_tool.cpp	cppcoreguidelines-avoid-do-while	992ab6f1d58c7d6d0fe1	avoid do-while loops
-src/adapters/process_tool.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	da411e49b64498fafa82	do not use pointer arithmetic
-src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-reinterpret-cast	93844a502c2c1198b537	do not use reinterpret_cast
-src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	2702ce525156b607bcce	do not call c-style vararg functions
-src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	2fac2cd6556f69dee252	do not call c-style vararg functions
-src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	816a0abf1fd3e11c93ae	do not call c-style vararg functions
-src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	a19ee3487aa3e6b4853e	do not call c-style vararg functions
-src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	bd23a73286bc53425745	do not call c-style vararg functions
-src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	c0852e9f29ce9780243b	do not call c-style vararg functions
-src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	c7604c55b5aa04b48133	do not call c-style vararg functions
-src/adapters/process_tool.cpp	cppcoreguidelines-pro-type-vararg	fa1364a4429cf8f12543	do not call c-style vararg functions
 src/adapters/process_tool.cpp	modernize-deprecated-headers	4a21ab478f80ef15456a	inclusion of deprecated C++ header 'signal.h'; consider using 'csignal' instead
 src/adapters/process_tool.cpp	modernize-use-integer-sign-comparison	5ded5eda399a4faddc10	comparison between 'signed' and 'unsigned' integers
-src/adapters/process_tool.cpp	modernize-use-integer-sign-comparison	ea5f5864680ee2276142	comparison between 'signed' and 'unsigned' integers
 src/adapters/process_tool.cpp	modernize-use-nodiscard	747226726207b84b1e4c	function 'validate' should be marked [[nodiscard]]
 src/adapters/process_tool.cpp	readability-function-cognitive-complexity	11d1477af9f6d2197889	function 'parse_request' has cognitive complexity of 30 (threshold 20)
-src/adapters/process_tool.cpp	readability-function-cognitive-complexity	74be45432af52da94e58	function 'start' has cognitive complexity of 81 (threshold 20)
 src/adapters/process_tool.cpp	readability-function-cognitive-complexity	8da71f44118678272551	function 'safe_utf8' has cognitive complexity of 29 (threshold 20)
-src/adapters/process_tool.cpp	readability-function-cognitive-complexity	f3b0b87a654a7976b515	function 'make_result' has cognitive complexity of 23 (threshold 20)
 src/adapters/process_tool.cpp	readability-math-missing-parentheses	3823178d6963730833fa	'*' has higher precedence than '+'; add parentheses to explicitly specify the order of operations
 src/adapters/process_tool.cpp	readability-math-missing-parentheses	ce6abe3123ab50dd24c3	'*' has higher precedence than '+'; add parentheses to explicitly specify the order of operations
 src/adapters/termforge_image_renderer.cpp	bugprone-implicit-widening-of-multiplication-result	40c37c83633115e25498	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'

@@ -235,7 +235,7 @@ class ValidatingProcessLaunchStream final : public ProcessLaunchStream {
                            : m_standard_error;
         output.insert(output.end(), progress->content.begin(),
                       progress->content.end());
-        return std::optional<ProcessLaunchEvent>{std::move(**next)};
+        return std::move(*next);
       }
 
       const auto& terminal = std::get<ProcessLaunchTerminal>(**next);
@@ -259,7 +259,7 @@ class ValidatingProcessLaunchStream final : public ProcessLaunchStream {
             "process terminal output disagreed with emitted progress");
       }
       m_terminal_seen = true;
-      return std::optional<ProcessLaunchEvent>{std::move(**next)};
+      return std::move(*next);
     } catch (...) {
       m_ended = true;
       return launch_failure(ProcessLaunchErrorCode::internal_failure,
@@ -314,6 +314,7 @@ auto validate_process_launch_bounds(const ProcessLaunchBounds bounds)
   return {};
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Bounded checks.
 auto validate_process_launch_request(const ProcessLaunchRequest& request,
                                      const ProcessLaunchBounds bounds)
     -> std::expected<void, ProcessLaunchError> {

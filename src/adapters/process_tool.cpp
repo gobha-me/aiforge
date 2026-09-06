@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cerrno>
 #include <chrono>
 #include <climits>
@@ -608,6 +609,15 @@ class DuplicateJsonKey final : public std::exception {
   return output;
 }
 
+[[nodiscard]] auto bytes_as_string(const std::span<const std::byte> bytes)
+    -> std::string {
+  std::string result(bytes.size(), '\0');
+  std::ranges::transform(bytes, result.begin(), [](const std::byte value) {
+    return std::bit_cast<char>(value);
+  });
+  return result;
+}
+
 [[nodiscard]] auto artifact_id_for(const domain::InvocationId& invocation_id,
                                    const std::string_view stream)
     -> domain::ArtifactId {
@@ -723,6 +733,7 @@ class LauncherProcessStream final : public runtime::ToolExecutionStream {
         m_artifact_store(artifact_store), m_limits(limits),
         m_environment_values(std::move(environment_values)) {}
 
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- State machine.
   auto next(const std::stop_token stop_token)
       -> std::expected<std::optional<runtime::ToolExecutionEvent>,
                        runtime::ToolExecutionError> override {
@@ -750,9 +761,7 @@ class LauncherProcessStream final : public runtime::ToolExecutionStream {
             continue;
           }
           ++m_progress_events;
-          const std::string bytes(
-              reinterpret_cast<const char*>(progress->content.data()),
-              progress->content.size());
+          const auto bytes = bytes_as_string(progress->content);
           Json payload{
               {"stream",
                progress->stream == runtime::ProcessOutputStream::standard_output
@@ -833,15 +842,9 @@ class LauncherProcessStream final : public runtime::ToolExecutionStream {
       -> std::expected<std::optional<runtime::ToolExecutionEvent>,
                        runtime::ToolExecutionError> {
     auto stdout_value = redact_environment_values(
-        std::string(
-            reinterpret_cast<const char*>(terminal.standard_output.data()),
-            terminal.standard_output.size()),
-        m_environment_values);
+        bytes_as_string(terminal.standard_output), m_environment_values);
     auto stderr_value = redact_environment_values(
-        std::string(
-            reinterpret_cast<const char*>(terminal.standard_error.data()),
-            terminal.standard_error.size()),
-        m_environment_values);
+        bytes_as_string(terminal.standard_error), m_environment_values);
     const bool force_artifact =
         terminal.kind == runtime::ProcessTerminalKind::output_limit;
     auto stdout_artifact =
@@ -938,6 +941,7 @@ class LauncherProcessExecutor final : public runtime::ToolExecutor {
     }
   }
 
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Ordered flow.
   auto start(runtime::ToolInvocation invocation,
              const std::stop_token stop_token)
       -> std::expected<std::unique_ptr<runtime::ToolExecutionStream>,

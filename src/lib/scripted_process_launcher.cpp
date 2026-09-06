@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <iterator>
 #include <optional>
+#include <span>
 #include <utility>
 
 namespace aiforge::testing {
@@ -17,9 +18,12 @@ namespace {
 }
 
 auto erase_secret(std::string& value) noexcept -> void {
+  // clang-format off
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) -- Volatile writes prevent secret-clear elision.
   auto* bytes = reinterpret_cast<volatile char*>(value.data());
-  for (std::size_t index = 0; index < value.size(); ++index)
-    bytes[index] = 0;
+  // clang-format on
+  for (auto& byte : std::span<volatile char>{bytes, value.size()})
+    byte = 0;
   value.clear();
 }
 
