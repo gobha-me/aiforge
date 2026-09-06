@@ -2490,11 +2490,12 @@ struct RunKernel::Impl {
   }
 
   [[nodiscard]] auto record_policy_failure(Transaction& transaction,
+                                           ActiveRun& active,
                                            PendingInvocation& invocation,
                                            const domain::DomainError& error)
       -> std::expected<void, RunKernelError> {
     if (auto recorded =
-            record(transaction.active->run_id,
+            record(active.run_id,
                    domain::ToolPolicyFailed{invocation.invocation_id, error},
                    transaction, invocation.invocation_id);
         !recorded) {
@@ -2529,11 +2530,12 @@ struct RunKernel::Impl {
   }
 
   [[nodiscard]] auto record_policy_resolution(Transaction& transaction,
+                                              ActiveRun& active,
                                               PendingInvocation& invocation,
                                               ToolPolicyResolution resolution)
       -> std::expected<void, RunKernelError> {
     if (auto recorded = record(
-            transaction.active->run_id,
+            active.run_id,
             domain::ToolPolicyDecided{
                 invocation.invocation_id, resolution.decision,
                 resolution.scopes, std::move(resolution.redacted_reason),
@@ -2552,7 +2554,7 @@ struct RunKernel::Impl {
                                  policy_denied_error());
       case domain::PolicyDecision::require_approval:
         if (auto requested = record(
-                transaction.active->run_id,
+                active.run_id,
                 domain::ToolApprovalRequested{
                     invocation.invocation_id, resolution.scopes,
                     std::string{"Approval is required by runtime policy"}},
@@ -2567,6 +2569,7 @@ struct RunKernel::Impl {
   }
 
   [[nodiscard]] auto process_policy_resolution(Transaction& transaction,
+                                               ActiveRun& active,
                                                PendingInvocation& invocation,
                                                ToolPolicyResolution resolution)
       -> std::expected<void, RunKernelError> {
@@ -2574,37 +2577,33 @@ struct RunKernel::Impl {
       return fail_live_run(transaction, std::move(*error));
     }
     if (resolution.decision == domain::PolicyDecision::require_approval &&
-        !approval_presentation(transaction.active->run_id,
-                               transaction.active->permission_profile_id,
+        !approval_presentation(active.run_id, active.permission_profile_id,
                                invocation)) {
-      return record_policy_failure(transaction, invocation,
+      return record_policy_failure(transaction, active, invocation,
                                    policy_denied_error());
     }
-    return record_policy_resolution(transaction, invocation,
+    return record_policy_resolution(transaction, active, invocation,
                                     std::move(resolution));
   }
 
   [[nodiscard]] auto evaluate_pending_policies(Transaction& transaction)
       -> std::expected<void, RunKernelError> {
     if (!transaction.active || transaction.active->inference_id) return {};
-    for (const auto& invocation_id : transaction.active->invocation_order) {
-      auto& invocation = transaction.active->invocations.at(invocation_id);
+    auto& active = *transaction.active;
+    for (const auto& invocation_id : active.invocation_order) {
+      auto& invocation = active.invocations.at(invocation_id);
       if (invocation.state != InvocationState::proposed ||
           invocation.terminal_event_seen) {
         continue;
       }
       auto canonical_arguments = canonical_arguments_or_empty(
           invocation.arguments.value, limits.tool_argument_bytes);
-      invocation.policy_request =
-          ToolPolicyRequest{transaction.event_log.session_id(),
-                            transaction.active->run_id,
-                            invocation.invocation_id,
-                            transaction.active->permission_profile_id,
-                            invocation.declaration.name,
-                            invocation.requested_effects,
-                            invocation.requested_scopes,
-                            std::move(canonical_arguments),
-                            policy->selected_restriction()};
+      invocation.policy_request = ToolPolicyRequest{
+          transaction.event_log.session_id(), active.run_id,
+          invocation.invocation_id,           active.permission_profile_id,
+          invocation.declaration.name,        invocation.requested_effects,
+          invocation.requested_scopes,        std::move(canonical_arguments),
+          policy->selected_restriction()};
 
       std::expected<ToolPolicyResolution, ToolPolicyError> resolution =
           std::unexpected(ToolPolicyError{
@@ -2616,14 +2615,14 @@ struct RunKernel::Impl {
       }
       if (!resolution) {
         const auto domain_error = policy_failure_error(resolution.error());
-        if (auto failed =
-                record_policy_failure(transaction, invocation, domain_error);
+        if (auto failed = record_policy_failure(transaction, active, invocation,
+                                                domain_error);
             !failed)
           return failed;
         continue;
       }
-      if (auto processed = process_policy_resolution(transaction, invocation,
-                                                     std::move(*resolution));
+      if (auto processed = process_policy_resolution(
+              transaction, active, invocation, std::move(*resolution));
           !processed)
         return processed;
     }
