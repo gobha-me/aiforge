@@ -688,7 +688,9 @@ TEST_CASE("durable process replay invokes no external boundary",
   REQUIRE(replayed);
   REQUIRE((*replayed)->pending_tool_approval() == pending);
   REQUIRE_FALSE((*replayed)->active_inference_id());
-  REQUIRE(replay_policy->evaluations == 0);
+  // Resume re-evaluates the current in-memory policy to reject stale launch
+  // authority, but never crosses an executor or provider boundary.
+  REQUIRE(replay_policy->evaluations == 1);
   REQUIRE(replay_backend.recorded_requests().empty());
   REQUIRE(replay_backend.remaining_exchanges() == 0);
   REQUIRE(launcher->recorded_path_pins().size() == 2);
