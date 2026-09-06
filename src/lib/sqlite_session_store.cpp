@@ -6,6 +6,7 @@
 
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/domain/plan_projection.hpp>
+#include <aiforge/domain/video_projection.hpp>
 #include <aiforge/repository/review_receipt.hpp>
 #include <aiforge/repository/verification_evidence.hpp>
 
@@ -856,6 +857,55 @@ template <typename Enum>
       value.at("unit").get<std::string>(), *decimal);
   if (!amount) throw CodecFailure{"monetary unit is invalid"};
   return std::move(*amount);
+}
+
+[[nodiscard]] auto video_state_name(const domain::VideoJobState state)
+    -> std::string_view {
+  switch (state) {
+    case domain::VideoJobState::queued: return "queued";
+    case domain::VideoJobState::processing: return "processing";
+    case domain::VideoJobState::completed: return "completed";
+    case domain::VideoJobState::failed: return "failed";
+  }
+  throw CodecFailure{"video job state is invalid"};
+}
+
+[[nodiscard]] auto parse_video_state(const Json& value)
+    -> domain::VideoJobState {
+  const auto text = value.get<std::string>();
+  if (text == "queued") return domain::VideoJobState::queued;
+  if (text == "processing") return domain::VideoJobState::processing;
+  if (text == "completed") return domain::VideoJobState::completed;
+  if (text == "failed") return domain::VideoJobState::failed;
+  throw CodecFailure{"video job state is invalid"};
+}
+
+[[nodiscard]] auto video_spec_json(const domain::VideoGenerationSpec& spec)
+    -> Json {
+  if (!domain::validate_video_generation_spec(spec))
+    throw CodecFailure{"video generation spec is invalid"};
+  return {{"model_id", id_text(spec.model_id)},
+          {"prompt", spec.prompt},
+          {"duration_seconds", spec.duration.count()}};
+}
+
+[[nodiscard]] auto parse_video_spec(const Json& value)
+    -> domain::VideoGenerationSpec {
+  domain::VideoGenerationSpec result{
+      parse_id<domain::ModelId>(value.at("model_id")),
+      value.at("prompt").get<std::string>(),
+      std::chrono::seconds{value.at("duration_seconds").get<std::int64_t>()}};
+  if (!domain::validate_video_generation_spec(result))
+    throw CodecFailure{"video generation spec is invalid"};
+  return result;
+}
+
+[[nodiscard]] auto parse_positive_video_counter(const Json& value,
+                                                const char* message)
+    -> std::uint32_t {
+  const auto result = value.get<std::uint32_t>();
+  if (result == 0) throw CodecFailure{message};
+  return result;
 }
 
 [[nodiscard]] auto tool_spend_reservation_json(
@@ -3157,6 +3207,36 @@ auto parse_v2_tool_policy_fields(const Json& value,
           [](const domain::ArtifactRemovedFromView&) {
             return std::string{"artifact.removed_from_view"};
           },
+          [](const domain::VideoGenerationRequested&) {
+            return std::string{"video.generation_requested"};
+          },
+          [](const domain::VideoQuoteObserved&) {
+            return std::string{"video.quote_observed"};
+          },
+          [](const domain::VideoJobQueued&) {
+            return std::string{"video.job_queued"};
+          },
+          [](const domain::VideoJobStatusObserved&) {
+            return std::string{"video.job_status_observed"};
+          },
+          [](const domain::VideoArtifactPublished&) {
+            return std::string{"video.artifact_published"};
+          },
+          [](const domain::VideoCleanupPending&) {
+            return std::string{"video.cleanup_pending"};
+          },
+          [](const domain::VideoCleanupCompleted&) {
+            return std::string{"video.cleanup_completed"};
+          },
+          [](const domain::VideoCleanupFailed&) {
+            return std::string{"video.cleanup_failed"};
+          },
+          [](const domain::VideoTranscriptionRequested&) {
+            return std::string{"video.transcription_requested"};
+          },
+          [](const domain::VideoTranscriptionObserved&) {
+            return std::string{"video.transcription_observed"};
+          },
           [](const domain::VerificationEvidenceRecorded&) {
             return std::string{"verification.evidence_recorded"};
           },
@@ -3239,7 +3319,7 @@ auto parse_v2_tool_policy_fields(const Json& value,
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 69,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 79,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started",
@@ -3285,6 +3365,16 @@ auto parse_v2_tool_policy_fields(const Json& value,
       "artifact.referenced",
       "artifact.displayed",
       "artifact.removed_from_view",
+      "video.generation_requested",
+      "video.quote_observed",
+      "video.job_queued",
+      "video.job_status_observed",
+      "video.artifact_published",
+      "video.cleanup_pending",
+      "video.cleanup_completed",
+      "video.cleanup_failed",
+      "video.transcription_requested",
+      "video.transcription_observed",
       "verification.evidence_recorded",
       "review.receipt_drafted",
       "review.requested",
@@ -3531,6 +3621,65 @@ auto parse_v2_tool_policy_fields(const Json& value,
           [](const domain::ArtifactRemovedFromView& value) -> Json {
             return {{"artifact_id", id_text(value.artifact_id)},
                     {"view_id", id_text(value.view_id)}};
+          },
+          [](const domain::VideoGenerationRequested& value) -> Json {
+            return {{"operation_id", id_text(value.operation_id)},
+                    {"spec", video_spec_json(value.spec)},
+                    {"artifact_id", id_text(value.artifact_id)}};
+          },
+          [](const domain::VideoQuoteObserved& value) -> Json {
+            return {{"operation_id", id_text(value.operation_id)},
+                    {"quote", monetary_amount_json(value.quote)}};
+          },
+          [](const domain::VideoJobQueued& value) -> Json {
+            return {{"operation_id", id_text(value.operation_id)},
+                    {"job_id", id_text(value.job_id)}};
+          },
+          [](const domain::VideoJobStatusObserved& value) -> Json {
+            if (value.poll_number == 0)
+              throw CodecFailure{"video poll number is invalid"};
+            return {{"operation_id", id_text(value.operation_id)},
+                    {"job_id", id_text(value.job_id)},
+                    {"poll_number", value.poll_number},
+                    {"state", video_state_name(value.state)}};
+          },
+          [](const domain::VideoArtifactPublished& value) -> Json {
+            return {{"operation_id", id_text(value.operation_id)},
+                    {"job_id", id_text(value.job_id)},
+                    {"artifact", artifact_json(value.artifact)}};
+          },
+          [](const domain::VideoCleanupPending& value) -> Json {
+            if (value.attempt == 0)
+              throw CodecFailure{"video cleanup attempt is invalid"};
+            return {{"operation_id", id_text(value.operation_id)},
+                    {"job_id", id_text(value.job_id)},
+                    {"attempt", value.attempt}};
+          },
+          [](const domain::VideoCleanupCompleted& value) -> Json {
+            if (value.attempt == 0)
+              throw CodecFailure{"video cleanup attempt is invalid"};
+            return {{"operation_id", id_text(value.operation_id)},
+                    {"job_id", id_text(value.job_id)},
+                    {"attempt", value.attempt}};
+          },
+          [](const domain::VideoCleanupFailed& value) -> Json {
+            if (value.attempt == 0)
+              throw CodecFailure{"video cleanup attempt is invalid"};
+            return {{"operation_id", id_text(value.operation_id)},
+                    {"job_id", id_text(value.job_id)},
+                    {"attempt", value.attempt},
+                    {"error", domain_error_json(value.error)}};
+          },
+          [](const domain::VideoTranscriptionRequested& value) -> Json {
+            return {{"operation_id", id_text(value.operation_id)},
+                    {"model_id", id_text(value.model_id)}};
+          },
+          [](const domain::VideoTranscriptionObserved& value) -> Json {
+            if (!domain::validate_video_transcription(value))
+              throw CodecFailure{"video transcription is invalid"};
+            return {{"operation_id", id_text(value.operation_id)},
+                    {"text", value.text},
+                    {"language", optional_string_json(value.language)}};
           },
           [](const domain::VerificationEvidenceRecorded& value) -> Json {
             return {{"evidence", verification_json(value.evidence)}};
@@ -3965,6 +4114,72 @@ auto parse_v2_tool_policy_fields(const Json& value,
     return domain::ArtifactRemovedFromView{
         parse_id<domain::ArtifactId>(value.at("artifact_id")),
         parse_id<domain::ViewId>(value.at("view_id"))};
+  }
+  if (type == "video.generation_requested") {
+    return domain::VideoGenerationRequested{
+        parse_id<domain::VideoOperationId>(value.at("operation_id")),
+        parse_video_spec(value.at("spec")),
+        parse_id<domain::ArtifactId>(value.at("artifact_id"))};
+  }
+  if (type == "video.quote_observed") {
+    return domain::VideoQuoteObserved{
+        parse_id<domain::VideoOperationId>(value.at("operation_id")),
+        parse_monetary_amount(value.at("quote"))};
+  }
+  if (type == "video.job_queued") {
+    return domain::VideoJobQueued{
+        parse_id<domain::VideoOperationId>(value.at("operation_id")),
+        parse_id<domain::VideoJobId>(value.at("job_id"))};
+  }
+  if (type == "video.job_status_observed") {
+    return domain::VideoJobStatusObserved{
+        parse_id<domain::VideoOperationId>(value.at("operation_id")),
+        parse_id<domain::VideoJobId>(value.at("job_id")),
+        parse_positive_video_counter(value.at("poll_number"),
+                                     "video poll number is invalid"),
+        parse_video_state(value.at("state"))};
+  }
+  if (type == "video.artifact_published") {
+    return domain::VideoArtifactPublished{
+        parse_id<domain::VideoOperationId>(value.at("operation_id")),
+        parse_id<domain::VideoJobId>(value.at("job_id")),
+        parse_artifact(value.at("artifact"))};
+  }
+  if (type == "video.cleanup_pending") {
+    return domain::VideoCleanupPending{
+        parse_id<domain::VideoOperationId>(value.at("operation_id")),
+        parse_id<domain::VideoJobId>(value.at("job_id")),
+        parse_positive_video_counter(value.at("attempt"),
+                                     "video cleanup attempt is invalid")};
+  }
+  if (type == "video.cleanup_completed") {
+    return domain::VideoCleanupCompleted{
+        parse_id<domain::VideoOperationId>(value.at("operation_id")),
+        parse_id<domain::VideoJobId>(value.at("job_id")),
+        parse_positive_video_counter(value.at("attempt"),
+                                     "video cleanup attempt is invalid")};
+  }
+  if (type == "video.cleanup_failed") {
+    return domain::VideoCleanupFailed{
+        parse_id<domain::VideoOperationId>(value.at("operation_id")),
+        parse_id<domain::VideoJobId>(value.at("job_id")),
+        parse_positive_video_counter(value.at("attempt"),
+                                     "video cleanup attempt is invalid"),
+        parse_domain_error(value.at("error"))};
+  }
+  if (type == "video.transcription_requested") {
+    return domain::VideoTranscriptionRequested{
+        parse_id<domain::VideoOperationId>(value.at("operation_id")),
+        parse_id<domain::ModelId>(value.at("model_id"))};
+  }
+  if (type == "video.transcription_observed") {
+    domain::VideoTranscriptionObserved observed{
+        parse_id<domain::VideoOperationId>(value.at("operation_id")),
+        value.at("text").get<std::string>(),
+        parse_optional_string(value.at("language"))};
+    if (!domain::validate_video_transcription(observed))
+      throw CodecFailure{"video transcription is invalid"};
+    return observed;
   }
   if (type == "verification.evidence_recorded") {
     return domain::VerificationEvidenceRecorded{
@@ -4739,6 +4954,144 @@ class Transaction final {
       static_cast<std::uint64_t>(run_count)};
 }
 
+struct PreparedInitialEvents {
+  std::vector<EncodedPayload> payloads;
+  std::vector<sqlite3_int64> timestamps;
+};
+
+[[nodiscard]] auto prepare_initial_events(
+    const std::span<const domain::RunEvent> events,
+    const storage::SessionStoreLimits& limits)
+    -> std::expected<PreparedInitialEvents, SessionStoreError> {
+  if (events.empty() || events.size() > limits.maximum_batch_events) {
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::invalid_argument,
+                    "initial event batch must be nonempty and within the "
+                    "configured limit"));
+  }
+  if (events.front().metadata.sequence != 1) {
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::invalid_argument,
+                    "initial event batch must begin at session sequence one"));
+  }
+  PreparedInitialEvents prepared;
+  prepared.payloads.reserve(events.size());
+  prepared.timestamps.reserve(events.size());
+  std::set<domain::EventId> event_ids;
+  std::uint64_t previous_sequence{};
+  for (const auto& event : events) {
+    if (event.metadata.sequence == 0 || event.metadata.schema_version == 0 ||
+        event.metadata.sequence >
+            static_cast<std::uint64_t>(
+                std::numeric_limits<sqlite3_int64>::max()) ||
+        (!prepared.payloads.empty() &&
+         event.metadata.sequence <= previous_sequence) ||
+        !event_ids.insert(event.metadata.event_id).second) {
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::invalid_argument,
+                      "initial event batch envelope is invalid"));
+    }
+    auto payload = encode_payload(event);
+    if (!payload) return std::unexpected(std::move(payload.error()));
+    if (payload->document.size() > limits.maximum_payload_bytes) {
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::resource_exhausted,
+                      "initial event payload exceeds the configured limit"));
+    }
+    auto timestamp = timestamp_count(event.metadata.timestamp);
+    if (!timestamp) return std::unexpected(std::move(timestamp.error()));
+    prepared.payloads.push_back(std::move(*payload));
+    prepared.timestamps.push_back(*timestamp);
+    previous_sequence = event.metadata.sequence;
+  }
+  return prepared;
+}
+
+[[nodiscard]] auto bind_integer(sqlite3_stmt* statement, const int position,
+                                const sqlite3_int64 value)
+    -> std::expected<void, SessionStoreError> {
+  const auto result = sqlite3_bind_int64(statement, position, value);
+  if (result != SQLITE_OK) return std::unexpected(sqlite_error(result));
+  return {};
+}
+
+[[nodiscard]] auto insert_user_session(sqlite3* database,
+                                       const storage::SessionCreate& session,
+                                       const sqlite3_int64 created_at)
+    -> std::expected<void, SessionStoreError> {
+  auto statement = prepare(
+      database,
+      "INSERT INTO sessions(session_id,created_at_ms,storage_format_version) "
+      "VALUES(?1,?2,1)");
+  if (!statement) return std::unexpected(std::move(statement.error()));
+  auto bound = bind_text(statement->get(), 1, session.session_id.value());
+  if (!bound) return bound;
+  bound = bind_integer(statement->get(), 2, created_at);
+  if (!bound) return bound;
+  auto inserted = step_done(statement->get());
+  if (!inserted && inserted.error().code == SessionStoreErrorCode::conflict) {
+    return std::unexpected(store_error(SessionStoreErrorCode::already_exists,
+                                       "session already exists"));
+  }
+  return inserted;
+}
+
+[[nodiscard]] auto bind_event_row(sqlite3_stmt* statement,
+                                  const domain::SessionId& session_id,
+                                  const domain::RunEvent& event,
+                                  const EncodedPayload& payload,
+                                  const sqlite3_int64 timestamp)
+    -> std::expected<void, SessionStoreError> {
+  auto bound = bind_text(statement, 1, session_id.value());
+  if (!bound) return bound;
+  bound = bind_integer(statement, 2,
+                       static_cast<sqlite3_int64>(event.metadata.sequence));
+  if (!bound) return bound;
+  bound = bind_text(statement, 3, event.metadata.event_id.value());
+  if (!bound) return bound;
+  bound = bind_text(statement, 4, event.metadata.run_id.value());
+  if (!bound) return bound;
+  bound = bind_integer(statement, 5, event.metadata.schema_version);
+  if (!bound) return bound;
+  bound = bind_integer(statement, 6, timestamp);
+  if (!bound) return bound;
+  bound = bind_optional_id(statement, 7, event.metadata.caused_by_event_id);
+  if (!bound) return bound;
+  bound = bind_optional_id(statement, 8, event.metadata.parent_run_id);
+  if (!bound) return bound;
+  bound = bind_optional_id(statement, 9, event.metadata.invocation_id);
+  if (!bound) return bound;
+  bound = bind_text(statement, 10, payload.type);
+  if (!bound) return bound;
+  return bind_text(statement, 11, payload.document);
+}
+
+[[nodiscard]] auto insert_initial_events(
+    sqlite3* database, const domain::SessionId& session_id,
+    const std::span<const domain::RunEvent> events,
+    const PreparedInitialEvents& prepared, const std::stop_token stop_token)
+    -> std::expected<void, SessionStoreError> {
+  auto statement = prepare(
+      database,
+      "INSERT INTO events(session_id,sequence,event_id,run_id,schema_version,"
+      "timestamp_ms,caused_by_event_id,parent_run_id,invocation_id,payload_"
+      "type,"
+      "payload_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)");
+  if (!statement) return std::unexpected(std::move(statement.error()));
+  for (std::size_t index{}; index < events.size(); ++index) {
+    if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
+    static_cast<void>(sqlite3_reset(statement->get()));
+    static_cast<void>(sqlite3_clear_bindings(statement->get()));
+    auto bound =
+        bind_event_row(statement->get(), session_id, events[index],
+                       prepared.payloads[index], prepared.timestamps[index]);
+    if (!bound) return bound;
+    auto inserted = step_done(statement->get());
+    if (!inserted) return inserted;
+  }
+  return {};
+}
+
 constexpr std::string_view session_info_select{
     "SELECT s.session_id,s.created_at_ms,"
     "COALESCE((SELECT e.timestamp_ms FROM events e WHERE "
@@ -5000,6 +5353,40 @@ auto SqliteSessionStore::create_session(storage::SessionCreate session,
   } catch (...) {
     return std::unexpected(store_error(SessionStoreErrorCode::internal_failure,
                                        "session creation failed internally"));
+  }
+}
+
+auto SqliteSessionStore::create_session_with_events(
+    storage::SessionCreate session,
+    const std::span<const domain::RunEvent> initial_events,
+    const std::stop_token stop_token)
+    -> std::expected<void, storage::SessionStoreError> {
+  try {
+    if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
+    auto created_at = timestamp_count(session.created_at);
+    if (!created_at) return std::unexpected(std::move(created_at.error()));
+    auto prepared = prepare_initial_events(initial_events, m_impl->limits);
+    if (!prepared) return std::unexpected(std::move(prepared.error()));
+
+    std::lock_guard lock(m_impl->mutex);
+    auto begun = begin_immediate(m_impl->database);
+    if (!begun) return begun;
+    Transaction transaction{m_impl->database};
+    auto inserted_session =
+        insert_user_session(m_impl->database, session, *created_at);
+    if (!inserted_session) return inserted_session;
+    auto inserted_events =
+        insert_initial_events(m_impl->database, session.session_id,
+                              initial_events, *prepared, stop_token);
+    if (!inserted_events) return inserted_events;
+    if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
+    auto committed = commit(m_impl->database);
+    if (committed) transaction.complete();
+    return committed;
+  } catch (...) {
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::internal_failure,
+                    "session creation with initial events failed internally"));
   }
 }
 

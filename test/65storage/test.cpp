@@ -338,6 +338,25 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
           .value();
   auto reported_cost =
       domain::ReportedCost::create({std::move(usd), std::move(diem)}).value();
+  const auto video_operation =
+      make_id<domain::VideoOperationId>("video-operation");
+  const auto video_job = make_id<domain::VideoJobId>("video-job");
+  const domain::VideoGenerationSpec video_spec{
+      make_id<domain::ModelId>("video-model"), "video prompt",
+      std::chrono::seconds{5}};
+  const domain::ArtifactMetadata video_artifact{
+      make_id<domain::ArtifactId>("video-artifact"),
+      "video/mp4",
+      42,
+      "sha256:" + std::string(64, 'a'),
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt};
+  const auto video_quote =
+      domain::MonetaryAmount::create(
+          "USD", domain::DecimalAmount::from("1.25").value())
+          .value();
   return {
       started(),
       domain::RunProvenanceRecorded{run_provenance()},
@@ -504,6 +523,21 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
            domain::ProjectBacklogDecisionSource::policy,
            std::string{"completed by another session"},
            make_id<domain::EventId>("promotion-event")}},
+      domain::VideoGenerationRequested{video_operation, video_spec,
+                                       video_artifact.artifact_id},
+      domain::VideoQuoteObserved{video_operation, video_quote},
+      domain::VideoJobQueued{video_operation, video_job},
+      domain::VideoJobStatusObserved{video_operation, video_job, 1,
+                                     domain::VideoJobState::completed},
+      domain::VideoArtifactPublished{video_operation, video_job,
+                                     video_artifact},
+      domain::VideoCleanupPending{video_operation, video_job, 1},
+      domain::VideoCleanupCompleted{video_operation, video_job, 1},
+      domain::VideoCleanupFailed{video_operation, video_job, 2, error},
+      domain::VideoTranscriptionRequested{
+          video_operation, make_id<domain::ModelId>("transcription-model")},
+      domain::VideoTranscriptionObserved{video_operation, "transcript",
+                                         std::string{"en"}},
       domain::UnknownEvent{"future.event",
                            {"application/json", "{\"nested\":{\"value\":1}}"}},
   };
@@ -663,6 +697,45 @@ TEST_CASE("read-only SQLite replay neither creates nor changes state files",
   read_only->reset();
   CHECK(file_content(path) == before_content);
   CHECK(directory_entries(path.parent_path()) == before_entries);
+}
+
+TEST_CASE("SQLite creates a session and its initial events atomically",
+          "[storage][sqlite][create][crash][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = make_id<domain::SessionId>("atomic-session");
+  const std::array events{event(1, started(), "initial-event")};
+  auto invalid_events = events;
+  invalid_events.front().metadata.sequence = 2;
+  const auto invalid = store->create_session_with_events(
+      {session, domain::EventTimestamp{std::chrono::milliseconds{100}}},
+      invalid_events);
+  REQUIRE_FALSE(invalid);
+  CHECK(invalid.error().code ==
+        storage::SessionStoreErrorCode::invalid_argument);
+  REQUIRE_FALSE(store->open_session(session));
+
+  execute_sql(
+      path, "CREATE TRIGGER reject_initial_event BEFORE INSERT ON events "
+            "BEGIN SELECT RAISE(FAIL,'injected initial-event failure'); END;");
+
+  const auto failed = store->create_session_with_events(
+      {session, domain::EventTimestamp{std::chrono::milliseconds{100}}},
+      events);
+
+  REQUIRE_FALSE(failed);
+  const auto absent = store->open_session(session);
+  REQUIRE_FALSE(absent);
+  CHECK(absent.error().code == storage::SessionStoreErrorCode::not_found);
+
+  execute_sql(path, "DROP TRIGGER reject_initial_event;");
+  REQUIRE(store->create_session_with_events(
+      {session, domain::EventTimestamp{std::chrono::milliseconds{100}}},
+      events));
+  const auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  CHECK(std::ranges::equal(*replayed, events));
 }
 
 TEST_CASE("SQLite storage version one migrates backlog indexes transactionally",
@@ -904,6 +977,77 @@ TEST_CASE("malformed persisted reported cost fails replay explicitly",
               "\"inference_id\":\"inference\","
               "\"cost\":{\"amounts\":[{\"unit\":\"USD\",\"amount\":\"-1\"}]}}' "
               "WHERE event_id='cost-event'");
+  store = open_store(path);
+  const auto replayed = store->replay_events(session);
+  REQUIRE_FALSE(replayed);
+  REQUIRE(replayed.error().code == storage::SessionStoreErrorCode::corrupt);
+}
+
+TEST_CASE("video codecs reject invalid writes without poisoning replay",
+          "[storage][sqlite][video][failure]") {
+  TemporaryDirectory temporary;
+  auto store = open_store(temporary.path() / "aiforge" / "sessions.sqlite3");
+  const auto session = create(*store, "invalid-video-write", 100);
+  const auto operation = make_id<domain::VideoOperationId>("operation");
+  const auto job = make_id<domain::VideoJobId>("job");
+  auto invalid = event(
+      1,
+      domain::VideoGenerationRequested{operation,
+                                       {make_id<domain::ModelId>("video-model"),
+                                        "prompt", std::chrono::seconds::zero()},
+                                       make_id<domain::ArtifactId>("artifact")},
+      "invalid-video");
+
+  SECTION("generation spec") {
+  }
+  SECTION("poll number") {
+    invalid.payload = domain::VideoJobStatusObserved{
+        operation, job, 0, domain::VideoJobState::queued};
+  }
+  SECTION("cleanup pending attempt") {
+    invalid.payload = domain::VideoCleanupPending{operation, job, 0};
+  }
+  SECTION("cleanup completed attempt") {
+    invalid.payload = domain::VideoCleanupCompleted{operation, job, 0};
+  }
+  SECTION("cleanup failed attempt") {
+    invalid.payload = domain::VideoCleanupFailed{
+        operation, job, 0, {domain::ErrorCode::backend, "redacted", true}};
+  }
+  SECTION("transcription") {
+    invalid.payload = domain::VideoTranscriptionObserved{operation, "", {}};
+  }
+
+  const auto rejected = store->append_events(session, std::array{invalid});
+  REQUIRE_FALSE(rejected);
+  REQUIRE(rejected.error().code ==
+          storage::SessionStoreErrorCode::invalid_argument);
+  const auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  REQUIRE(replayed->empty());
+}
+
+TEST_CASE("malformed persisted video payload fails replay explicitly",
+          "[storage][sqlite][video][corrupt][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "video-session", 100);
+  const auto operation = make_id<domain::VideoOperationId>("operation");
+  const domain::VideoGenerationSpec spec{
+      make_id<domain::ModelId>("video-model"), "prompt",
+      std::chrono::seconds{5}};
+  REQUIRE(store->append_events(
+      session, std::array{event(1,
+                                domain::VideoGenerationRequested{
+                                    operation, spec,
+                                    make_id<domain::ArtifactId>("artifact")},
+                                "video-event")}));
+  store.reset();
+
+  execute_sql(path,
+              "UPDATE events SET payload_json=json_set(payload_json, "
+              "'$.spec.duration_seconds',0) WHERE event_id='video-event'");
   store = open_store(path);
   const auto replayed = store->replay_events(session);
   REQUIRE_FALSE(replayed);

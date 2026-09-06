@@ -69,6 +69,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   scripted_session_store.cpp
   scripted_tool_executor.cpp
   scripted_user_global_instruction_source.cpp
+  scripted_video_service.cpp
   slash_commands.cpp
   sqlite_session_store.cpp
   task_scheduler.cpp
@@ -83,6 +84,9 @@ add_library(${PROJECT_NAME}_lib STATIC
   user_global_instructions.cpp
   verification_evidence.cpp
   video_artifacts.cpp
+  video.cpp
+  video_coordinator.cpp
+  video_service.cpp
   wav.cpp
 )
 add_library(${PROJECT_NAME}::lib ALIAS ${PROJECT_NAME}_lib)
