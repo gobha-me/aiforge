@@ -35,6 +35,8 @@ TEST_CASE("agent protocol rejects malformed or authority-bearing requests",
       R"({"version":1,"operation":"submit","profile":"dev","tools":["run_process"],"prompt":"x","approval":"allow-all"})",
       R"({"version":1,"operation":"replay","session_id":"session"})"
       "\n{}",
+      R"({"version":1,"operation":"replay","session_id":"session"})"
+      "\r",
       R"({"version":1,"operation":"replay","session_id":"session\ncontrol"})",
       std::string(1024U * 1024U + 1, ' '),
       std::string(100, '[') + "0" + std::string(100, ']')};
@@ -793,7 +795,7 @@ TEST_CASE("agent cleanup deadline cannot claim a still-running tool is drained",
   CHECK_FALSE(session->active());
 }
 
-TEST_CASE("agent exact automatic rule executes once then refuses exhaustion",
+TEST_CASE("agent exact automatic rule executes once then denies exhaustion",
           "[agent][tools][approval]") {
   auto executor = std::make_shared<Executor>();
   executor->gate->released = true;
@@ -819,12 +821,23 @@ TEST_CASE("agent exact automatic rule executes once then refuses exhaustion",
   const auto refused = surfaces::run_agent_session(*session, bound, exhausted);
   INFO((refused ? refused->reason : refused.error().message));
   REQUIRE(refused);
-  CHECK(refused->status == surfaces::AgentStatus::interaction_required);
+  // Automatic policy exhaustion denies the tool. It does not become prompt
+  // approval: the provider may finish the run after observing that denial.
+  CHECK(refused->status == surfaces::AgentStatus::completed);
   CHECK(refused->durable_terminal);
   CHECK(executor->invocations.size() == 1);
-  CHECK(fixture.backend.requests.size() == 3);
+  CHECK(fixture.backend.requests.size() == 4);
   CHECK(count<domain::ToolStarted>(events) == 1);
-  CHECK(count<domain::RunCancelled>(events) == 1);
+  CHECK(count<domain::ToolErrored>(events) == 1);
+  CHECK(count<domain::ToolApprovalRequested>(events) == 0);
+  CHECK(count<domain::RunCancelled>(events) == 0);
+  CHECK(count<domain::RunCompleted>(events) == 2);
+  CHECK(std::ranges::count_if(events, [](const auto& event) {
+          const auto* decided =
+              std::get_if<domain::ToolPolicyDecided>(&event.payload);
+          return decided != nullptr &&
+                 decided->decision == domain::PolicyDecision::deny;
+        }) == 1);
 }
 
 TEST_CASE("agent tool result persistence failure cannot report durable cleanup",
