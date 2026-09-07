@@ -32,7 +32,8 @@ constexpr std::array kToolCategories{
 // Artifact context is a metadata-only projection. In particular, labels and
 // blob bytes are not loaded or promoted to instructions by this boundary.
 constexpr std::size_t kMaximumContinuationArtifactReferences{32};
-constexpr std::size_t kMaximumContinuationArtifactBytes{32U * 1024U};
+constexpr std::size_t kMaximumContinuationArtifactBytes{std::size_t{32} *
+                                                        1024U};
 
 [[nodiscard]] auto artifact_context_error()
     -> std::unexpected<ToolExecutionError> {
@@ -121,7 +122,7 @@ constexpr std::size_t kMaximumContinuationArtifactBytes{32U * 1024U};
         {"producing_tool", producer->tool_name},
         {"content",
          "omitted; metadata only; bytes and image pixels not inspected"}};
-    if (artifact.width) {
+    if (artifact.width && artifact.height) {
       metadata["width"] = *artifact.width;
       metadata["height"] = *artifact.height;
     }
@@ -136,6 +137,42 @@ constexpr std::size_t kMaximumContinuationArtifactBytes{32U * 1024U};
         std::move(serialized)});
   }
   return content;
+}
+
+[[nodiscard]] auto project_continuation_artifacts(
+    std::vector<domain::Message> messages,
+    const std::span<const domain::RunEvent> events)
+    -> std::expected<std::vector<domain::Message>, ToolExecutionError> {
+  std::map<domain::ArtifactId, const domain::RunEvent*> artifacts;
+  std::set<domain::ArtifactId> ambiguous_artifacts;
+  for (const auto& event : events) {
+    if (const auto* created =
+            std::get_if<domain::ArtifactCreated>(&event.payload)) {
+      if (!artifacts.emplace(created->artifact.artifact_id, &event).second) {
+        ambiguous_artifacts.insert(created->artifact.artifact_id);
+      }
+    } else if (const auto* recorded =
+                   std::get_if<domain::ToolResultRecorded>(&event.payload)) {
+      if (!recorded->result_message_id) return artifact_context_error();
+      auto message = std::ranges::find(messages, *recorded->result_message_id,
+                                       &domain::Message::message_id);
+      // Incomplete turns remain withheld; empty results keep the builder's
+      // existing text fallback.
+      if (message == messages.end() || recorded->content.empty()) continue;
+      const auto assistant =
+          std::ranges::find_if(messages, [&](const auto& item) {
+            return std::ranges::find(item.tool_calls, recorded->invocation_id,
+                                     &domain::ToolCall::invocation_id) !=
+                   item.tool_calls.end();
+          });
+      if (assistant == messages.end()) return artifact_context_error();
+      auto content = artifact_context_content(*recorded, event, *assistant,
+                                              artifacts, ambiguous_artifacts);
+      if (!content) return std::unexpected(std::move(content.error()));
+      message->content = std::move(*content);
+    }
+  }
+  return messages;
 }
 
 auto append_registration_field(detail::Sha256& digest,
@@ -724,8 +761,6 @@ auto tool_continuation_messages(std::span<const domain::RunEvent> events)
     -> std::expected<std::vector<domain::Message>, ToolExecutionError> {
   try {
     std::vector<domain::Message> result;
-    std::map<domain::ArtifactId, const domain::RunEvent*> artifacts;
-    std::set<domain::ArtifactId> ambiguous_artifacts;
     std::optional<domain::Message> assistant;
     std::optional<domain::InferenceId> assistant_inference;
     bool assistant_finished{};
@@ -774,14 +809,8 @@ auto tool_continuation_messages(std::span<const domain::RunEvent> events)
     };
 
     for (const auto& event : events) {
-      if (const auto* created =
-              std::get_if<domain::ArtifactCreated>(&event.payload)) {
-        if (!artifacts.emplace(created->artifact.artifact_id, &event).second) {
-          ambiguous_artifacts.insert(created->artifact.artifact_id);
-        }
-      } else if (const auto* started =
-                     std::get_if<domain::AssistantContentStarted>(
-                         &event.payload)) {
+      if (const auto* started =
+              std::get_if<domain::AssistantContentStarted>(&event.payload)) {
         if (assistant) {
           return std::unexpected(ToolExecutionError{
               ToolExecutionErrorCode::protocol_failure,
@@ -814,13 +843,9 @@ auto tool_continuation_messages(std::span<const domain::RunEvent> events)
             proposed->invocation_id, proposed->tool_name, proposed->arguments});
       } else if (const auto* recorded =
                      std::get_if<domain::ToolResultRecorded>(&event.payload)) {
-        if (!assistant) return artifact_context_error();
-        auto content = artifact_context_content(*recorded, event, *assistant,
-                                                artifacts, ambiguous_artifacts);
-        if (!content) return std::unexpected(std::move(content.error()));
         auto message =
             terminal_message(recorded->invocation_id,
-                             recorded->result_message_id, std::move(*content));
+                             recorded->result_message_id, recorded->content);
         if (!message) return std::unexpected(std::move(message.error()));
         if (!assistant) {
           return std::unexpected(ToolExecutionError{
@@ -878,7 +903,7 @@ auto tool_continuation_messages(std::span<const domain::RunEvent> events)
           ToolExecutionErrorCode::protocol_failure,
           "tool continuation history ends inside an inference", false});
     }
-    return result;
+    return project_continuation_artifacts(std::move(result), events);
   } catch (...) {
     return std::unexpected(ToolExecutionError{
         ToolExecutionErrorCode::internal_failure,
