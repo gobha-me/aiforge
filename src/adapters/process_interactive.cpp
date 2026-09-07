@@ -1025,6 +1025,13 @@ class ChatAppImpl final : public InteractiveChatApp {
   auto on_start() -> void override {
     if (m_rendered_output != nullptr) driver().set_output(m_rendered_output);
     sync_composer_focus();
+    auto drained = m_session->drain();
+    if (!drained) {
+      fail(session_error(drained.error()));
+      return;
+    }
+    if (!apply_events(*drained)) return;
+    show_recovery_block();
     if (ensure_tool_approval_dialog() && !m_tool_approval_dialog_active &&
         ensure_question_dialog() && !m_question_dialog_active) {
       ensure_plan_review();
@@ -1099,7 +1106,10 @@ class ChatAppImpl final : public InteractiveChatApp {
       if (key->ctrl && key->key == termforge::Key::Char && key->ch == U'c') {
         if (m_session->active()) {
           auto cancelled = m_session->cancel_active("interrupt");
-          if (!cancelled) fail(session_error(cancelled.error()));
+          if (!cancelled) {
+            m_status = "Cancellation failed: " + cancelled.error().message +
+                       "; Ctrl+C retries";
+          }
         } else if (m_composer.text().empty()) {
           m_status = "Draft is already empty";
         } else {
@@ -1170,6 +1180,7 @@ class ChatAppImpl final : public InteractiveChatApp {
       }
       if (!apply_events(*drained)) return;
     }
+    show_recovery_block();
     if (!ensure_tool_approval_dialog()) return;
     if (!m_tool_approval_dialog_active && !ensure_question_dialog()) return;
     if (!m_tool_approval_dialog_active && !m_question_dialog_active) {
@@ -4294,7 +4305,27 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
+  auto show_recovery_block() -> void {
+    const auto& blocked = m_session->blocked_recovery();
+    if (!blocked) return;
+    if (m_question_dialog_active || m_tool_approval_dialog_active) {
+      pop_modal();
+      m_question_dialog_active = false;
+      m_tool_approval_dialog_active = false;
+      m_question_controller.reset();
+      m_question_dialog.reset();
+      m_tool_approval_controller.reset();
+      m_tool_approval_dialog.reset();
+    }
+    if (m_status.starts_with("Cancellation failed:")) return;
+    m_status = "Recovery blocked: session " +
+               std::string{blocked->session_id.value()} + " run " +
+               std::string{blocked->run_id.value()} + ": " +
+               blocked->reason.message + "; Ctrl+C cancels this run";
+  }
+
   auto ensure_tool_approval_dialog() -> bool {
+    if (m_session->blocked_recovery()) return true;
     if (m_tool_approval_dialog_active) return true;
     const auto pending = m_session->pending_tool_approval();
     if (!pending) return true;
@@ -4357,6 +4388,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   }
 
   auto ensure_question_dialog() -> bool {
+    if (m_session->blocked_recovery()) return true;
     if (m_question_dialog_active) return true;
     const auto pending = m_session->pending_question_input();
     if (!pending) return true;

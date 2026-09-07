@@ -77,6 +77,13 @@ struct ChatPersonaState {
   auto operator==(const ChatPersonaState&) const -> bool = default;
 };
 
+struct ChatRecoveryBlock {
+  domain::SessionId session_id;
+  domain::RunId run_id;
+  ChatSessionError reason;
+  auto operator==(const ChatRecoveryBlock&) const -> bool = default;
+};
+
 struct ChatSubmission {
   domain::RunId run_id;
   std::vector<domain::RunEvent> committed_events;
@@ -187,6 +194,8 @@ class ChatSession final {
   [[nodiscard]] auto cancel_active(
       std::optional<std::string> reason = std::nullopt)
       -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto blocked_recovery() const
+      -> const std::optional<ChatRecoveryBlock>&;
   [[nodiscard]] auto pending_question_input() const
       -> std::optional<runtime::PendingQuestionInput>;
   [[nodiscard]] auto pending_tool_approval() const
@@ -313,6 +322,8 @@ class ChatSession final {
   struct Impl;
   explicit ChatSession(std::unique_ptr<Impl> impl);
   [[nodiscard]] auto validate_recovered_pending_run()
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto load_recovered_pending_sources()
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto continue_if_ready()
       -> std::expected<std::vector<domain::RunEvent>, ChatSessionError>;
