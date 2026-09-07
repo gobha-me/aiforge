@@ -279,7 +279,14 @@ class ToolRegistry final {
     -> std::expected<std::vector<domain::Message>, ToolExecutionError>;
 
 // Reconstructs provider-neutral assistant tool-call turns and their terminal
-// tool messages in durable event order for a follow-up inference.
+// tool messages in durable event order for a follow-up inference. Artifact
+// references resolve against preceding creation events from the producing tool
+// invocation and become bounded metadata-only JSON (at most 32 references and
+// 32 KiB metadata per result). Repeated references are deduplicated. No
+// artifact bytes or labels are read; existing tool excerpts remain unchanged.
+// Durable events and tool_result_messages retain typed references. Invalid or
+// ambiguous artifact provenance fails closed; unknown media stays opaque
+// metadata.
 [[nodiscard]] auto tool_continuation_messages(
     std::span<const domain::RunEvent> events)
     -> std::expected<std::vector<domain::Message>, ToolExecutionError>;

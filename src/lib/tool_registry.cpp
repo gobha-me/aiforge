@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <iterator>
+#include <map>
 #include <ranges>
 #include <set>
 #include <utility>
@@ -27,6 +28,115 @@ constexpr std::size_t kMaximumExecutorContractBytes{128};
 constexpr std::array kToolCategories{
     ToolCategory::interaction, ToolCategory::memory, ToolCategory::repository,
     ToolCategory::process,     ToolCategory::media,  ToolCategory::other};
+
+// Artifact context is a metadata-only projection. In particular, labels and
+// blob bytes are not loaded or promoted to instructions by this boundary.
+constexpr std::size_t kMaximumContinuationArtifactReferences{32};
+constexpr std::size_t kMaximumContinuationArtifactBytes{32U * 1024U};
+
+[[nodiscard]] auto artifact_context_error()
+    -> std::unexpected<ToolExecutionError> {
+  return std::unexpected(ToolExecutionError{
+      ToolExecutionErrorCode::protocol_failure,
+      "tool artifact context has missing, invalid, or ambiguous provenance",
+      false});
+}
+
+[[nodiscard]] auto valid_artifact_context_metadata(
+    const domain::ArtifactMetadata& artifact) -> bool {
+  const auto token = [](const std::string_view value) {
+    return !value.empty() && std::ranges::all_of(value, [](const char ch) {
+      return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+             (ch >= '0' && ch <= '9') || ch == '!' || ch == '#' || ch == '$' ||
+             ch == '&' || ch == '-' || ch == '^' || ch == '_' || ch == '.' ||
+             ch == '+';
+    });
+  };
+  const std::string_view media = artifact.media_type;
+  const auto slash = media.find('/');
+  return artifact.byte_size != 0 && media.size() <= 128 &&
+         slash != std::string_view::npos && token(media.substr(0, slash)) &&
+         token(media.substr(slash + 1)) && artifact.digest.size() == 71 &&
+         artifact.digest.starts_with("sha256:") &&
+         std::ranges::all_of(std::string_view{artifact.digest}.substr(7),
+                             [](const char ch) {
+                               return (ch >= '0' && ch <= '9') ||
+                                      (ch >= 'a' && ch <= 'f');
+                             }) &&
+         artifact.producing_invocation_id && !artifact.producing_inference_id &&
+         detail::is_safe_utf8_text(artifact.artifact_id.value()) &&
+         detail::is_safe_utf8_text(artifact.producing_invocation_id->value()) &&
+         artifact.width.has_value() == artifact.height.has_value() &&
+         (!artifact.width || (*artifact.width != 0 && *artifact.height != 0));
+}
+
+[[nodiscard]] auto artifact_context_content(
+    const domain::ToolResultRecorded& recorded,
+    const domain::RunEvent& result_event, const domain::Message& assistant,
+    const std::map<domain::ArtifactId, const domain::RunEvent*>& artifacts,
+    const std::set<domain::ArtifactId>& ambiguous_artifacts)
+    -> std::expected<std::vector<domain::ContentBlock>, ToolExecutionError> {
+  std::vector<domain::ContentBlock> content;
+  std::set<domain::ArtifactId> projected;
+  std::size_t reference_count{};
+  std::size_t metadata_bytes{};
+  for (const auto& block : recorded.content) {
+    const auto* reference = std::get_if<domain::ArtifactReferenceBlock>(&block);
+    if (reference == nullptr) {
+      content.push_back(block);
+      continue;
+    }
+    if (++reference_count > kMaximumContinuationArtifactReferences) {
+      return artifact_context_error();
+    }
+    const auto found = artifacts.find(reference->artifact_id);
+    const auto producer =
+        std::ranges::find(assistant.tool_calls, recorded.invocation_id,
+                          &domain::ToolCall::invocation_id);
+    if (found == artifacts.end() ||
+        ambiguous_artifacts.contains(reference->artifact_id) ||
+        producer == assistant.tool_calls.end() || producer->tool_name.empty() ||
+        producer->tool_name.size() > kMaximumToolNameBytes ||
+        !detail::is_safe_utf8_text(producer->tool_name)) {
+      return artifact_context_error();
+    }
+    const auto& created_event = *found->second;
+    const auto& artifact =
+        std::get<domain::ArtifactCreated>(created_event.payload).artifact;
+    if (!valid_artifact_context_metadata(artifact) ||
+        result_event.metadata.invocation_id != recorded.invocation_id ||
+        artifact.producing_invocation_id != recorded.invocation_id ||
+        created_event.metadata.invocation_id != recorded.invocation_id ||
+        created_event.metadata.run_id != result_event.metadata.run_id ||
+        created_event.metadata.sequence >= result_event.metadata.sequence) {
+      return artifact_context_error();
+    }
+    if (!projected.insert(reference->artifact_id).second) continue;
+    nlohmann::json metadata{
+        {"artifact_id", artifact.artifact_id.value()},
+        {"media_type", artifact.media_type},
+        {"byte_size", artifact.byte_size},
+        {"digest", artifact.digest},
+        {"producing_invocation_id", recorded.invocation_id.value()},
+        {"producing_tool", producer->tool_name},
+        {"content",
+         "omitted; metadata only; bytes and image pixels not inspected"}};
+    if (artifact.width) {
+      metadata["width"] = *artifact.width;
+      metadata["height"] = *artifact.height;
+    }
+    auto serialized = metadata.dump();
+    if (serialized.size() >
+        kMaximumContinuationArtifactBytes - metadata_bytes) {
+      return artifact_context_error();
+    }
+    metadata_bytes += serialized.size();
+    content.emplace_back(domain::StructuredDataBlock{
+        "application/vnd.aiforge.artifact-context+json",
+        std::move(serialized)});
+  }
+  return content;
+}
 
 auto append_registration_field(detail::Sha256& digest,
                                const std::string_view value) -> void {
@@ -614,6 +724,8 @@ auto tool_continuation_messages(std::span<const domain::RunEvent> events)
     -> std::expected<std::vector<domain::Message>, ToolExecutionError> {
   try {
     std::vector<domain::Message> result;
+    std::map<domain::ArtifactId, const domain::RunEvent*> artifacts;
+    std::set<domain::ArtifactId> ambiguous_artifacts;
     std::optional<domain::Message> assistant;
     std::optional<domain::InferenceId> assistant_inference;
     bool assistant_finished{};
@@ -662,8 +774,14 @@ auto tool_continuation_messages(std::span<const domain::RunEvent> events)
     };
 
     for (const auto& event : events) {
-      if (const auto* started =
-              std::get_if<domain::AssistantContentStarted>(&event.payload)) {
+      if (const auto* created =
+              std::get_if<domain::ArtifactCreated>(&event.payload)) {
+        if (!artifacts.emplace(created->artifact.artifact_id, &event).second) {
+          ambiguous_artifacts.insert(created->artifact.artifact_id);
+        }
+      } else if (const auto* started =
+                     std::get_if<domain::AssistantContentStarted>(
+                         &event.payload)) {
         if (assistant) {
           return std::unexpected(ToolExecutionError{
               ToolExecutionErrorCode::protocol_failure,
@@ -696,9 +814,13 @@ auto tool_continuation_messages(std::span<const domain::RunEvent> events)
             proposed->invocation_id, proposed->tool_name, proposed->arguments});
       } else if (const auto* recorded =
                      std::get_if<domain::ToolResultRecorded>(&event.payload)) {
+        if (!assistant) return artifact_context_error();
+        auto content = artifact_context_content(*recorded, event, *assistant,
+                                                artifacts, ambiguous_artifacts);
+        if (!content) return std::unexpected(std::move(content.error()));
         auto message =
             terminal_message(recorded->invocation_id,
-                             recorded->result_message_id, recorded->content);
+                             recorded->result_message_id, std::move(*content));
         if (!message) return std::unexpected(std::move(message.error()));
         if (!assistant) {
           return std::unexpected(ToolExecutionError{

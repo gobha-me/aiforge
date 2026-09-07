@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -47,7 +48,9 @@
 #include <aiforge/adapters/venice_generation_options.hpp>
 #include <aiforge/adapters/venice_model_catalog_source.hpp>
 #include <aiforge/runtime/ask_user_tool.hpp>
+#include <aiforge/surfaces/chat_session.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
+#include <aiforge/testing/scripted_tool_executor.hpp>
 
 namespace {
 
@@ -131,12 +134,14 @@ class LocalServer final {
                        const bool duplicate_finish = false,
                        const bool omit_finish = false,
                        const bool reasoning_state = false,
-                       std::optional<std::string> custom_stream = std::nullopt)
+                       std::optional<std::string> custom_stream = std::nullopt,
+                       std::optional<std::string> initial_tool = std::nullopt)
       : m_echoed_error(std::move(echoed_error)),
         m_duplicate_cost(duplicate_cost), m_duplicate_finish(duplicate_finish),
         m_omit_finish(omit_finish), m_reasoning_state(reasoning_state),
         m_cost_value(std::move(cost_value)),
-        m_custom_stream(std::move(custom_stream)) {
+        m_custom_stream(std::move(custom_stream)),
+        m_initial_tool(std::move(initial_tool)) {
     m_server.Get("/api/v1/models", [this](const httplib::Request& request,
                                           httplib::Response& response) {
       {
@@ -164,6 +169,34 @@ class LocalServer final {
           if (m_custom_stream) {
             response.set_content(*m_custom_stream, "text/event-stream");
             return;
+          }
+          if (m_initial_tool) {
+            const auto messages =
+                nlohmann::json::parse(request.body).at("messages");
+            const bool continued =
+                std::ranges::any_of(messages, [](const auto& message) {
+                  return message.at("role") == "tool";
+                });
+            if (!continued) {
+              response.set_content(
+                  sse_stream({{{"id", "artifact-response"},
+                               {"choices",
+                                {{{"delta",
+                                   {{"role", "assistant"},
+                                    {"tool_calls",
+                                     {{{"index", 0},
+                                       {"id", "artifact-call"},
+                                       {"type", "function"},
+                                       {"function",
+                                        {{"name", *m_initial_tool},
+                                         {"arguments", "{}"}}}}}}}}}}}},
+                              {{"id", "artifact-response"},
+                               {"choices",
+                                {{{"delta", nlohmann::json::object()},
+                                  {"finish_reason", "tool_calls"}}}}}}),
+                  "text/event-stream");
+              return;
+            }
           }
           std::string stream =
               "data: "
@@ -263,6 +296,17 @@ class LocalServer final {
   bool m_reasoning_state{};
   std::string m_cost_value;
   std::optional<std::string> m_custom_stream;
+  std::optional<std::string> m_initial_tool;
+};
+
+class ArtifactModelContext final : public backend::ModelContextProvider {
+ public:
+  auto lookup(const domain::ModelId& model, std::stop_token)
+      -> std::expected<backend::ModelContextInfo,
+                       backend::BackendError> override {
+    return backend::ModelContextInfo{
+        model, 100000, 4096, std::nullopt, {{"tools", true}}};
+  }
 };
 
 struct CharacterReply {
@@ -3948,4 +3992,113 @@ TEST_CASE("process credential resolution uses environment then XDG storage",
   REQUIRE_FALSE(resolved->credential);
   REQUIRE(diagnostics.str().find("mode 0600") != std::string::npos);
   REQUIRE(diagnostics.str().find("stored-process-secret") == std::string::npos);
+}
+
+TEST_CASE(
+    "Chat artifact tool results complete a subsequent Venice assistant turn",
+    "[adapter][venice][chat][tools][artifact][continuation]") {
+  for (const auto* tool_name : {"generate_image", "execute_process"}) {
+    for (const bool artifact_only : {false, true}) {
+      CAPTURE(tool_name, artifact_only);
+      LocalServer server{std::nullopt, false, "0",          false,
+                         false,        false, std::nullopt, tool_name};
+      adapters::VeniceBackend backend{secret("test-secret"),
+                                      {server.base_url(), 1s, 1s, 1s, 8}};
+      ArtifactModelContext models;
+      const auto invocation = make_id<domain::InvocationId>("artifact-call");
+      const bool image = std::string_view{tool_name} == "generate_image";
+      runtime::ToolResult result;
+      if (!artifact_only) {
+        result.content.push_back(domain::StructuredDataBlock{
+            image ? "application/json"
+                  : "application/vnd.aiforge.process-result+json",
+            image
+                ? R"({"status":"generated","artifact_id":"image"})"
+                : R"({"status":"exited","exit_code":0,"stdout":{"excerpt_encoding":"base64","excerpt":"YWJj"},"stderr":{"excerpt_encoding":"base64","excerpt":"ZGVm"}})"});
+      }
+      const std::vector<std::string> artifact_names =
+          image ? std::vector<std::string>{"image"}
+                : std::vector<std::string>{"stdout", "stderr"};
+      for (const auto& name : artifact_names) {
+        const auto artifact = make_id<domain::ArtifactId>(name);
+        result.created_artifacts.push_back(
+            {artifact, image ? "image/png" : "application/octet-stream", 65536,
+             "sha256:" + std::string(64, 'a'), invocation,
+             image ? std::optional<std::uint32_t>{128} : std::nullopt,
+             image ? std::optional<std::uint32_t>{128} : std::nullopt});
+        result.content.push_back(
+            domain::ArtifactReferenceBlock{artifact, name});
+      }
+      const runtime::ToolInvocation expected{
+          invocation, std::nullopt, tool_name, {{"application/json", "{}"}}, {},
+          {}};
+      auto executor = std::make_shared<testing::ScriptedToolExecutor>(
+          std::vector<testing::ScriptedToolExchange>{
+              {expected,
+               testing::ToolStreamScript{{runtime::ToolExecutionEvent{result},
+                                          testing::ToolEndOfStream{}}}}});
+      runtime::ToolRegistry registry;
+      REQUIRE(registry.register_tool(
+          {tool_name,
+           "Produce an artifact",
+           {"application/schema+json", R"({"type":"object"})"},
+           {},
+           {}},
+          executor));
+      auto tools = registry.snapshot();
+      REQUIRE(tools);
+      surfaces::ChatSessionDependencies dependencies;
+      dependencies.tools = std::move(*tools);
+      auto session = surfaces::ChatSession::open(
+          {make_id<domain::ModelId>("test-model"),
+           surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
+          backend, models, nullptr, nullptr, {}, {}, std::move(dependencies));
+      REQUIRE(session);
+      const auto submitted =
+          (*session)->submit("produce output then explain it");
+      REQUIRE(submitted);
+      const auto deadline = std::chrono::steady_clock::now() + 5s;
+      while ((*session)->active() &&
+             std::chrono::steady_clock::now() < deadline) {
+        const auto drained = (*session)->drain();
+        REQUIRE(drained);
+        if (drained->empty()) std::this_thread::sleep_for(2ms);
+      }
+      REQUIRE_FALSE((*session)->active());
+      const auto& events = (*session)->event_log().events();
+      REQUIRE(std::ranges::any_of(events, [](const auto& event) {
+        return std::holds_alternative<domain::RunCompleted>(event.payload);
+      }));
+      REQUIRE(executor->recorded_invocations().size() == 1);
+      REQUIRE(executor->remaining_exchanges() == 0);
+      const auto created = std::ranges::count_if(events, [](const auto& event) {
+        return std::holds_alternative<domain::ArtifactCreated>(event.payload);
+      });
+      CHECK(static_cast<std::size_t>(created) == artifact_names.size());
+      const auto durable = runtime::tool_result_messages(events);
+      REQUIRE(durable);
+      REQUIRE(durable->size() == 1);
+      CHECK(durable->front().content == result.content);
+      const auto wire = nlohmann::json::parse(server.body());
+      const auto& messages = wire.at("messages");
+      const auto tool_message =
+          std::ranges::find_if(messages, [](const auto& message) {
+            return message.at("role") == "tool";
+          });
+      REQUIRE(tool_message != messages.end());
+      CHECK(tool_message->at("tool_call_id") == "artifact-call");
+      const auto content = tool_message->at("content").get<std::string>();
+      CHECK(content.find("metadata only") != std::string::npos);
+      CHECK(content.find("pixels not inspected") != std::string::npos);
+      CHECK(content.find(tool_name) != std::string::npos);
+      CHECK(content.find("test-secret") == std::string::npos);
+      CHECK(content.find('\x1b') == std::string::npos);
+      for (const auto& name : artifact_names)
+        CHECK(content.find(name) != std::string::npos);
+      if (!image && !artifact_only) {
+        CHECK(content.find("YWJj") != std::string::npos);
+        CHECK(content.find("ZGVm") != std::string::npos);
+      }
+    }
+  }
 }
