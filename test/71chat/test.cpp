@@ -2166,7 +2166,14 @@ TEST_CASE("recovered chat exposes blocked persona history and cancellation",
       {make_id<domain::ModelId>("model"),
        surfaces::ChatSessionOpen::Mode::resume,
        session_id,
-       std::nullopt,
+       domain::RunProvenance{"test",
+                             "test",
+                             std::nullopt,
+                             make_id<domain::ModelId>("model"),
+                             std::nullopt,
+                             {},
+                             {},
+                             {}},
        {directive,
         directive == persona::PersonaDirectiveKind::select
             ? std::optional<std::string>{"beta"}
@@ -2215,7 +2222,14 @@ TEST_CASE("recovered chat exposes blocked persona history and cancellation",
         {make_id<domain::ModelId>("model"),
          surfaces::ChatSessionOpen::Mode::resume,
          session_id,
-         std::nullopt,
+         domain::RunProvenance{"test",
+                               "test",
+                               std::nullopt,
+                               make_id<domain::ModelId>("model"),
+                               std::nullopt,
+                               {},
+                               {},
+                               {}},
          {directive,
           directive == persona::PersonaDirectiveKind::select
               ? std::optional<std::string>{"beta"}
@@ -2235,7 +2249,9 @@ TEST_CASE("recovered chat exposes blocked persona history and cancellation",
     if (directive != persona::PersonaDirectiveKind::select) {
       REQUIRE((*resumed)->disable_persona());
     }
-    REQUIRE((*resumed)->submit("new run under current selection"));
+    const auto next = (*resumed)->submit("new run under current selection");
+    INFO((next ? std::string{} : next.error().message));
+    REQUIRE(next);
     drain_to_end(**resumed);
     REQUIRE(backend.requests.size() == 2);
     const auto system =
