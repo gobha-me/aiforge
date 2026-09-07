@@ -215,6 +215,10 @@ class Stream final : public backend::BackendStream {
       case 1:
         return backend::BackendEvent{backend::UsageObserved{{7, 3, 0, 0}}};
       case 2:
+        if (token.stop_requested()) {
+          m_step = 4;
+          return backend::BackendEvent{backend::ResponseCancelled{"cancelled"}};
+        }
         if (m_calls_tool)
           return backend::BackendEvent{
               backend::ToolCallDelta{id<domain::InvocationId>("agent-read"),
