@@ -108,6 +108,7 @@ struct MemorySelection {
   std::uint64_t maximum_tokens{};
   std::uint64_t available_tokens{};
   std::vector<MemorySelectionEntry> entries;
+  std::optional<ContentDigest> admission_digest{};
   auto operator==(const MemorySelection&) const -> bool = default;
 };
 
@@ -187,6 +188,8 @@ struct MemoryError {
 [[nodiscard]] auto memory_evidence_input(const MemoryRecord& record,
                                          std::uint64_t order)
     -> std::expected<ContextContentInput, MemoryError>;
+[[nodiscard]] auto seal_memory_selection(MemorySelection& selection)
+    -> std::expected<void, MemoryError>;
 [[nodiscard]] auto validate_memory_selection(const MemorySelection& selection)
     -> std::expected<void, MemoryError>;
 [[nodiscard]] auto memory_selection_matches_context(

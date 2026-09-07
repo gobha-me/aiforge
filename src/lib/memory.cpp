@@ -250,7 +250,9 @@ auto memory_evidence_input(const MemoryRecord& record,
   }
 }
 
-auto validate_memory_selection(const MemorySelection& selection)
+namespace {
+
+auto validate_memory_selection_shape(const MemorySelection& selection)
     -> std::expected<void, MemoryError> {
   try {
     // Bound the whole reference envelope as well as individual records.
@@ -303,6 +305,80 @@ auto validate_memory_selection(const MemorySelection& selection)
   } catch (...) {
     return failure(MemoryErrorCode::internal_failure,
                    "saved memory selection validation failed");
+  }
+}
+
+auto memory_selection_digest(const MemorySelection& selection)
+    -> ContentDigest {
+  detail::Sha256 hash;
+  std::uint64_t size{};
+  const auto add = [&](const std::string_view value) {
+    const auto length = std::to_string(value.size()) + ":";
+    hash.update(std::as_bytes(std::span{length.data(), length.size()}));
+    hash.update(std::as_bytes(std::span{value.data(), value.size()}));
+    size += length.size() + value.size();
+  };
+  const auto digest = [&](const ContentDigest& value) {
+    add(value.algorithm);
+    add(value.value);
+    add(std::to_string(value.byte_size));
+  };
+  add("aiforge.memory-selection.v1");
+  add(std::to_string(selection.version));
+  add(selection.repository_id ? selection.repository_id->value() : "");
+  add(selection.persona_id ? selection.persona_id->value() : "");
+  add(std::to_string(selection.maximum_tokens));
+  add(std::to_string(selection.available_tokens));
+  add(std::to_string(selection.entries.size()));
+  for (const auto& entry : selection.entries) {
+    add(entry.journal_session_id.value());
+    add(entry.record_id.value());
+    add(entry.record_event_id.value());
+    add(std::to_string(static_cast<int>(entry.owner.kind)));
+    add(entry.owner.repository_id ? entry.owner.repository_id->value() : "");
+    add(entry.owner.persona_id ? entry.owner.persona_id->value() : "");
+    add(entry.source.session_id.value());
+    add(entry.source.run_id.value());
+    add(entry.source.invocation_id.value());
+    add(std::to_string(entry.source.event_ids.size()));
+    for (const auto& id : entry.source.event_ids)
+      add(id.value());
+    digest(entry.record_digest);
+    digest(entry.evidence_digest);
+    add(std::to_string(entry.order));
+    add(std::to_string(entry.estimated_tokens));
+  }
+  return {"sha256", hash.finish(), size};
+}
+
+} // namespace
+
+auto seal_memory_selection(MemorySelection& selection)
+    -> std::expected<void, MemoryError> {
+  try {
+    if (auto valid = validate_memory_selection_shape(selection); !valid)
+      return valid;
+    selection.admission_digest = memory_selection_digest(selection);
+    return {};
+  } catch (...) {
+    return failure(MemoryErrorCode::internal_failure,
+                   "saved memory selection could not be sealed");
+  }
+}
+
+auto validate_memory_selection(const MemorySelection& selection)
+    -> std::expected<void, MemoryError> {
+  try {
+    if (auto valid = validate_memory_selection_shape(selection); !valid)
+      return valid;
+    if (!selection.admission_digest ||
+        *selection.admission_digest != memory_selection_digest(selection))
+      return failure(MemoryErrorCode::invalid_record,
+                     "saved memory selection integrity check failed");
+    return {};
+  } catch (...) {
+    return failure(MemoryErrorCode::internal_failure,
+                   "saved memory selection integrity could not be checked");
   }
 }
 

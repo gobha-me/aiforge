@@ -3483,7 +3483,8 @@ auto parse_v2_tool_policy_fields(const Json& value,
           {"persona_id", optional_id_json(selection.persona_id)},
           {"maximum_tokens", selection.maximum_tokens},
           {"available_tokens", selection.available_tokens},
-          {"entries", std::move(entries)}};
+          {"entries", std::move(entries)},
+          {"admission_digest", digest_json(*selection.admission_digest)}};
 }
 
 [[nodiscard]] auto parse_memory_selection(const Json& value)
@@ -3510,6 +3511,7 @@ auto parse_v2_tool_policy_fields(const Json& value,
          entry.at("order").get<std::uint64_t>(),
          entry.at("estimated_tokens").get<std::uint64_t>()});
   }
+  selection.admission_digest = parse_digest(value.at("admission_digest"));
   if (!domain::validate_memory_selection(selection))
     throw CodecFailure{"invalid memory selection"};
   return selection;

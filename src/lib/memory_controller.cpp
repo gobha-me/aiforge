@@ -110,6 +110,44 @@ template <typename Id>
   return "unknown";
 }
 
+[[nodiscard]] auto recovery_journal(
+    storage::SessionStore& store,
+    std::map<domain::SessionId, domain::MemoryProjection>& journals,
+    const domain::SessionId& session_id, const domain::MemoryLimits& limits,
+    const std::stop_token stop_token)
+    -> std::expected<const domain::MemoryProjection*, MemoryControllerError> {
+  auto journal = journals.find(session_id);
+  if (journal == journals.end()) {
+    auto events = store.replay_events(session_id, stop_token);
+    if (!events) return storage_failure(events.error());
+    auto projected = domain::MemoryProjection::rebuild(*events, limits);
+    if (!projected)
+      return failure(MemoryControllerErrorCode::invalid_source,
+                     projected.error().message);
+    journal = journals.emplace(session_id, std::move(*projected)).first;
+  }
+  return &journal->second;
+}
+
+[[nodiscard]] auto recovery_source_available(
+    storage::SessionStore& store,
+    std::map<domain::SessionId, std::vector<domain::RunEvent>>& sources,
+    const domain::MemorySource& reference, const std::stop_token stop_token)
+    -> std::expected<bool, MemoryControllerError> {
+  auto source = sources.find(reference.session_id);
+  if (source == sources.end()) {
+    auto events = store.replay_events(reference.session_id, stop_token);
+    if (!events) return storage_failure(events.error());
+    source = sources.emplace(reference.session_id, std::move(*events)).first;
+  }
+  return std::ranges::all_of(reference.event_ids, [&](const auto& id) {
+    return std::ranges::any_of(source->second, [&](const auto& event) {
+      return event.metadata.event_id == id &&
+             event.metadata.run_id == reference.run_id;
+    });
+  });
+}
+
 } // namespace
 
 struct MemoryController::Journal {
@@ -148,8 +186,12 @@ auto select_memory_context_with_provenance(MemoryController& controller,
                                 request.available_tokens,
                                 {}},
                                {}};
-  if (request.maximum_tokens == 0 || request.available_tokens == 0)
+  if (request.maximum_tokens == 0 || request.available_tokens == 0) {
+    if (auto valid = domain::seal_memory_selection(result.selection); !valid)
+      return failure(MemoryControllerErrorCode::invalid_configuration,
+                     valid.error().message);
     return result;
+  }
   auto records =
       controller.current_for_context(request.repository_id, request.persona_id);
   if (!records) return std::unexpected(std::move(records.error()));
@@ -227,7 +269,7 @@ auto select_memory_context_with_provenance(MemoryController& controller,
          std::move(entry.message), std::move(entry.provenance), entry.order,
          entry.estimated_tokens});
   }
-  if (auto valid = domain::validate_memory_selection(result.selection); !valid)
+  if (auto valid = domain::seal_memory_selection(result.selection); !valid)
     return failure(MemoryControllerErrorCode::invalid_configuration,
                    valid.error().message);
   return result;
@@ -633,30 +675,19 @@ auto MemoryController::restore_context(const domain::MemorySelection& selection)
     std::map<domain::SessionId, std::vector<domain::RunEvent>> sources;
     std::vector<domain::ContextContentInput> result;
     for (const auto& reference : selection.entries) {
-      auto journal = journals.find(reference.journal_session_id);
-      if (journal == journals.end()) {
-        auto events =
-            m_store.replay_events(reference.journal_session_id, m_stop_token);
-        if (!events) return storage_failure(events.error());
-        auto projected = domain::MemoryProjection::rebuild(*events, m_limits);
-        if (!projected)
-          return failure(MemoryControllerErrorCode::invalid_source,
-                         projected.error().message);
-        journal =
-            journals
-                .emplace(reference.journal_session_id, std::move(*projected))
-                .first;
-      }
-      const auto* record = journal->second.find_record(reference.record_id);
+      auto journal =
+          recovery_journal(m_store, journals, reference.journal_session_id,
+                           m_limits, m_stop_token);
+      if (!journal) return std::unexpected(std::move(journal.error()));
+      const auto* record = (*journal)->find_record(reference.record_id);
       if (record == nullptr ||
           record->record_event_id != reference.record_event_id ||
           record->state != domain::ProjectedMemoryRecordState::current ||
           record->record.owner != reference.owner ||
           record->record.source != reference.source ||
-          std::ranges::any_of(journal->second.records(),
-                              [&](const auto& value) {
-                                return value.record.owner != reference.owner;
-                              }))
+          std::ranges::any_of((*journal)->records(), [&](const auto& value) {
+            return value.record.owner != reference.owner;
+          }))
         return failure(
             MemoryControllerErrorCode::stale_state,
             "original selected memory version is no longer available");
@@ -665,21 +696,10 @@ auto MemoryController::restore_context(const domain::MemorySelection& selection)
         return failure(
             MemoryControllerErrorCode::stale_state,
             "original selected memory content or provenance changed");
-      auto source = sources.find(reference.source.session_id);
-      if (source == sources.end()) {
-        auto events =
-            m_store.replay_events(reference.source.session_id, m_stop_token);
-        if (!events) return storage_failure(events.error());
-        source =
-            sources.emplace(reference.source.session_id, std::move(*events))
-                .first;
-      }
-      if (!std::ranges::all_of(reference.source.event_ids, [&](const auto& id) {
-            return std::ranges::any_of(source->second, [&](const auto& event) {
-              return event.metadata.event_id == id &&
-                     event.metadata.run_id == reference.source.run_id;
-            });
-          }))
+      auto available = recovery_source_available(
+          m_store, sources, reference.source, m_stop_token);
+      if (!available) return std::unexpected(std::move(available.error()));
+      if (!*available)
         return failure(
             MemoryControllerErrorCode::invalid_source,
             "original selected memory source events are unavailable");

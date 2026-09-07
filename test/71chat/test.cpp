@@ -2918,3 +2918,382 @@ TEST_CASE("durable interactive resume rebuilds history without inference",
           std::vector<std::string>{"persisted"});
   REQUIRE(backend.requests.size() == requests_before);
 }
+
+namespace {
+
+auto seed_recovery_memory(MemoryStore& store, const domain::MemoryOwner& owner,
+                          const std::string& suffix) -> void {
+  const auto source =
+      make_id<domain::SessionId>("memory-source-session-" + suffix);
+  const auto run = make_id<domain::RunId>("memory-source-run-" + suffix);
+  const auto invocation =
+      make_id<domain::InvocationId>("memory-source-call-" + suffix);
+  const auto user_event =
+      make_id<domain::EventId>("memory-source-user-" + suffix);
+  REQUIRE(store.create_session({source, {}}, {}));
+  const domain::RunEvent source_event{
+      {user_event, run, 1, 1, {}, {}, {}, {}},
+      domain::UserContentAdded{
+          {make_id<domain::MessageId>("memory-user-" + suffix),
+           domain::Role::user,
+           {domain::TextBlock{"Prefer " + suffix}},
+           {}}}};
+  REQUIRE(store.append_events(source, std::span{&source_event, 1}, {}));
+  auto journal = store.open_or_create_memory_journal(
+      {make_id<domain::SessionId>("memory-journal-" + suffix), owner, {}}, {});
+  REQUIRE(journal);
+  const auto proposal_event =
+      make_id<domain::EventId>("memory-proposed-" + suffix);
+  const domain::MemoryProposal proposal{
+      make_id<domain::MemoryProposalId>("memory-proposal-" + suffix),
+      make_id<domain::MemoryRecordId>("memory-record-" + suffix),
+      owner,
+      domain::MemoryKind::user_preference,
+      "Prefer " + suffix,
+      "Retain this preference",
+      "Prefer " + suffix,
+      {source, run, invocation, {user_event}},
+      {make_id<domain::ModelId>("model"), "test", "1"},
+      {},
+      {}};
+  REQUIRE(domain::validate_memory_proposal(proposal));
+  const domain::MemoryRecord record{
+      proposal.record_id, proposal.proposal_id, owner,
+      proposal.kind,      proposal.content,     proposal.rationale,
+      proposal.source,    proposal.producer};
+  const std::vector<domain::RunEvent> events{
+      {{proposal_event,
+        run,
+        journal->last_sequence + 1,
+        2,
+        {},
+        {},
+        {},
+        invocation},
+       domain::MemoryProposed{proposal}},
+      {{make_id<domain::EventId>("memory-accepted-" + suffix),
+        run,
+        journal->last_sequence + 2,
+        2,
+        {},
+        {},
+        {},
+        invocation},
+       domain::MemoryAccepted{
+           {record, domain::MemoryDecisionSource::user, proposal_event}}}};
+  REQUIRE(store.append_events(journal->session_id, events, {}));
+}
+
+class MemoryRecoveryBackend final : public backend::Backend,
+                                    public backend::ModelContextProvider {
+ public:
+  explicit MemoryRecoveryBackend(const bool approval) : m_approval(approval) {}
+  auto lookup(const domain::ModelId& model, std::stop_token)
+      -> std::expected<backend::ModelContextInfo,
+                       backend::BackendError> override {
+    return backend::ModelContextInfo{
+        model, context_window_tokens, 4096, std::nullopt,
+        backend::ModelCapabilityMap{{"tools", true}}};
+  }
+  auto start(backend::BackendRequest request, std::stop_token)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    requests.push_back(request);
+    if (requests.size() == 1) {
+      if (m_approval) return std::make_unique<ApprovalStream>();
+      return std::make_unique<QuestionStream>(request.assistant_message_id,
+                                              true);
+    }
+    return std::make_unique<Stream>(request.assistant_message_id, "done",
+                                    std::nullopt);
+  }
+  std::uint64_t context_window_tokens{100000};
+  std::vector<backend::BackendRequest> requests;
+
+ private:
+  bool m_approval;
+};
+
+struct MemoryRecoveryFixture {
+  explicit MemoryRecoveryFixture(const bool approval, const int owners = 7)
+      : backend(approval), memories(
+                               store, [this] { return ++suffix; },
+                               [] { return domain::EventTimestamp{}; }),
+        personas({{"alpha", alpha}, {"beta", beta}}) {
+    runtime::ToolRegistry registry;
+    if (approval) {
+      executor = std::make_shared<testing::ScriptedToolExecutor>(
+          std::vector<testing::ScriptedToolExchange>{});
+      REQUIRE(registry.register_tool(
+          {"read_repository_file",
+           "Read file",
+           {"application/schema+json", R"({"type":"object"})"},
+           {domain::Effect::read},
+           {{domain::Effect::read, "filesystem.root", "/repo"}}},
+          executor, {},
+          runtime::ToolExecutorContract{"test.read_repository_file", "1"},
+          runtime::ToolCategory::repository));
+    } else {
+      REQUIRE(runtime::register_ask_user_tool(registry, true));
+    }
+    auto tools = registry.snapshot();
+    REQUIRE(tools);
+    dependencies.tools = *tools;
+    if (approval) {
+      const auto permission =
+          make_id<domain::PermissionProfileId>("tools-medium-prompt-v1");
+      auto policy = runtime::make_tool_launch_policy(
+          *tools, {permission,
+                   testing::available_application_launch_context(
+                       runtime::RestrictionLevel::medium),
+                   {}});
+      REQUIRE(policy);
+      dependencies.tool_policy = *policy;
+      dependencies.permission_profile_id = permission;
+    }
+    dependencies.persona_source = &personas;
+    dependencies.memory_controller = &memories;
+    dependencies.repository_id = repository;
+    if ((owners & 1) != 0)
+      seed_recovery_memory(store, domain::MemoryOwner::global(), "global");
+    if ((owners & 2) != 0)
+      seed_recovery_memory(store, domain::MemoryOwner::repository(repository),
+                           "repository");
+    if ((owners & 4) != 0)
+      seed_recovery_memory(
+          store, domain::MemoryOwner::persona(alpha.reference.persona_id),
+          "alpha");
+    seed_recovery_memory(
+        store, domain::MemoryOwner::persona(beta.reference.persona_id), "beta");
+  }
+  auto open(std::optional<domain::SessionId> session = {})
+      -> std::expected<std::unique_ptr<surfaces::ChatSession>,
+                       surfaces::ChatSessionError> {
+    return surfaces::ChatSession::open(
+        {make_id<domain::ModelId>("model"),
+         session ? surfaces::ChatSessionOpen::Mode::resume
+                 : surfaces::ChatSessionOpen::Mode::create,
+         session,
+         domain::RunProvenance{"test",
+                               "test",
+                               {},
+                               make_id<domain::ModelId>("model"),
+                               {},
+                               {},
+                               {},
+                               {}},
+         {persona::PersonaDirectiveKind::select, session ? "beta" : "alpha",
+          domain::PersonaSelectionSource::command_line}},
+        backend, backend, &store, nullptr, {}, {}, dependencies);
+  }
+  MemoryStore store;
+  MemoryRecoveryBackend backend;
+  std::uint64_t suffix{};
+  runtime::MemoryController memories;
+  const domain::RepositoryId repository =
+      make_id<domain::RepositoryId>("origin-repository");
+  const domain::PersonaDocument alpha =
+      named_persona_document("persona:alpha", "alpha", "Alpha instructions");
+  const domain::PersonaDocument beta =
+      named_persona_document("persona:beta", "beta", "Beta instructions");
+  MutablePersonaSource personas;
+  std::shared_ptr<testing::ScriptedToolExecutor> executor;
+  surfaces::ChatSessionDependencies dependencies;
+};
+
+auto admitted_memory(const backend::BackendRequest& request)
+    -> std::vector<domain::ContextEntry> {
+  std::vector<domain::ContextEntry> result;
+  for (const auto& entry : request.context.entries)
+    if (entry.entry_id.value().starts_with("memory-entry-"))
+      result.push_back(entry);
+  return result;
+}
+
+} // namespace
+
+TEST_CASE(
+    "recovered memory failures block questions approvals and side effects",
+    "[chat][memory][recovery][failure]") {
+  const bool approval = GENERATE(false, true);
+  MemoryRecoveryFixture fixture{approval};
+  auto created = fixture.open();
+  REQUIRE(created);
+  if (approval)
+    REQUIRE((*created)->select_tool_profile(
+        make_id<domain::ToolProfileId>("repository-read")));
+  REQUIRE((*created)->submit("pause this run"));
+  if (approval)
+    static_cast<void>(drain_to_approval(**created));
+  else
+    static_cast<void>(drain_to_question(**created));
+  const auto session = (*created)->session_id();
+  const auto run = (*created)->event_log().events().front().metadata.run_id;
+  auto& history = fixture.store.histories.at(session);
+  const auto started = std::ranges::find_if(history, [](const auto& event) {
+    return std::holds_alternative<domain::RunStarted>(event.payload);
+  });
+  REQUIRE(started != history.end());
+  auto& selection =
+      std::get<domain::RunStarted>(started->payload).memory_selection;
+  REQUIRE(selection);
+  REQUIRE(selection->entries.size() == 3);
+  const auto reference = selection->entries.front();
+  created->reset();
+  SECTION("smaller current model capacity") {
+    fixture.backend.context_window_tokens = 4097;
+  }
+  SECTION("expired record") {
+    REQUIRE(fixture.memories.expire({{reference.owner},
+                                     reference.record_id,
+                                     reference.record_event_id,
+                                     "expired"}));
+  }
+  SECTION("missing journal") {
+    fixture.store.sessions.erase(reference.journal_session_id);
+  }
+  SECTION("missing source") {
+    fixture.store.sessions.erase(reference.source.session_id);
+  }
+  SECTION("unavailable memory controller") {
+    fixture.dependencies.memory_controller = nullptr;
+  }
+  SECTION("legacy selection absent") {
+    selection.reset();
+    started->metadata.schema_version = 1;
+  }
+  SECTION("corrupt fingerprint") {
+    selection->entries.front().record_digest.value[0] = 'z';
+  }
+  SECTION("stale acceptance event") {
+    selection->entries.front().record_event_id =
+        make_id<domain::EventId>("stale");
+  }
+  SECTION("admission budget corrupted") {
+    selection->maximum_tokens = 1;
+  }
+  auto resumed = fixture.open(session);
+  REQUIRE(resumed);
+  REQUIRE((*resumed)->drain());
+  REQUIRE((*resumed)->blocked_recovery());
+  const auto before = (*resumed)->event_log().events();
+  if (approval) {
+    const auto pending = (*resumed)->pending_tool_approval();
+    REQUIRE(pending);
+    REQUIRE_FALSE((*resumed)->decide_tool_approval(
+        run, pending->invocation_id, {domain::ApprovalDecision::denied, {}}));
+    CHECK(fixture.executor->recorded_invocations().empty());
+  } else {
+    const auto pending = (*resumed)->pending_question_input();
+    REQUIRE(pending);
+    REQUIRE_FALSE((*resumed)->answer_questions(
+        pending->run_id, pending->invocation_id,
+        {{make_id<domain::QuestionId>("format"), {"short"}, {}}}));
+  }
+  CHECK((*resumed)->event_log().events() == before);
+  CHECK(fixture.backend.requests.size() == 1);
+  REQUIRE((*resumed)->cancel_active("discard unavailable memory context"));
+  CHECK_FALSE((*resumed)->active());
+  CHECK_FALSE((*resumed)->blocked_recovery());
+}
+
+TEST_CASE("restarted and uninterrupted requests retain exact admitted memory",
+          "[chat][memory][recovery]") {
+  const bool approval = GENERATE(false, true);
+  const bool restart = GENERATE(false, true);
+  const int owners = GENERATE(1, 2, 4, 7);
+  const int budget = GENERATE(0, 1, 2048);
+  MemoryRecoveryFixture fixture{approval, owners};
+  if (budget == 0) fixture.dependencies.memory_settings.context_tokens = 0;
+  if (budget == 1) {
+    auto selected = runtime::select_memory_context(
+        fixture.memories,
+        {fixture.repository, fixture.alpha.reference.persona_id, 2048, 99999});
+    REQUIRE(selected);
+    REQUIRE_FALSE(selected->empty());
+    fixture.dependencies.memory_settings.context_tokens =
+        selected->front().estimated_tokens;
+  }
+  auto session = fixture.open();
+  REQUIRE(session);
+  if (approval)
+    REQUIRE((*session)->select_tool_profile(
+        make_id<domain::ToolProfileId>("repository-read")));
+  REQUIRE((*session)->submit("pause this run"));
+  if (approval)
+    static_cast<void>(drain_to_approval(**session));
+  else
+    static_cast<void>(drain_to_question(**session));
+  REQUIRE(fixture.backend.requests.size() == 1);
+  const auto original = admitted_memory(fixture.backend.requests.front());
+  CHECK((original.empty()) == (budget == 0));
+  if (budget == 1) CHECK(original.size() == 1);
+  for (const auto& entry : original) {
+    CHECK(entry.kind == domain::ContextEntryKind::evidence);
+    CHECK(entry.message.role == domain::Role::evidence);
+    CHECK_FALSE(entry.instruction_layer);
+  }
+  seed_recovery_memory(
+      fixture.store,
+      domain::MemoryOwner::persona(fixture.alpha.reference.persona_id),
+      "late-alpha");
+  const auto session_id = (*session)->session_id();
+  if (restart) {
+    session->reset();
+    fixture.dependencies.memory_settings.context_tokens = 99999;
+    fixture.dependencies.repository_id =
+        make_id<domain::RepositoryId>("other-repository");
+    session = fixture.open(session_id);
+    REQUIRE(session);
+  }
+  if (approval) {
+    const auto pending = (*session)->pending_tool_approval();
+    REQUIRE(pending);
+    const auto active =
+        runtime::classify_recoverable_run((*session)->event_log());
+    REQUIRE(active);
+    REQUIRE(*active);
+    REQUIRE((*session)->decide_tool_approval(
+        (*active)->run_id, pending->invocation_id,
+        {domain::ApprovalDecision::denied, {}}));
+    CHECK(fixture.executor->recorded_invocations().empty());
+  } else {
+    const auto pending = (*session)->pending_question_input();
+    REQUIRE(pending);
+    REQUIRE((*session)->answer_questions(
+        pending->run_id, pending->invocation_id,
+        {{make_id<domain::QuestionId>("format"), {"short"}, {}}}));
+  }
+  // Once pending input has been durably resolved, later lifecycle drift must
+  // not prevent draining the tool result, inference output, or accounting.
+  if (restart && !original.empty()) {
+    const auto started = std::ranges::find_if(
+        (*session)->event_log().events(), [](const auto& event) {
+          return std::holds_alternative<domain::RunStarted>(event.payload);
+        });
+    REQUIRE(started != (*session)->event_log().events().end());
+    const auto& selection =
+        std::get<domain::RunStarted>(started->payload).memory_selection;
+    REQUIRE(selection);
+    const auto& reference = selection->entries.front();
+    REQUIRE(fixture.memories.expire({{reference.owner},
+                                     reference.record_id,
+                                     reference.record_event_id,
+                                     "expired after resolution"}));
+  }
+  drain_to_end(**session);
+  REQUIRE(fixture.backend.requests.size() == 2);
+  CHECK(admitted_memory(fixture.backend.requests.back()) == original);
+  if (restart) {
+    REQUIRE((*session)->submit("later new run"));
+    drain_to_end(**session);
+    REQUIRE(fixture.backend.requests.size() == 3);
+    const auto later =
+        text_messages(fixture.backend.requests.back(), domain::Role::evidence);
+    CHECK(std::ranges::any_of(
+        later, [](const auto& text) { return text.contains("Prefer beta"); }));
+    CHECK(std::ranges::none_of(later, [](const auto& text) {
+      return text.contains("Prefer late-alpha");
+    }));
+  }
+}

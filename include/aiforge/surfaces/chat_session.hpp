@@ -323,6 +323,10 @@ class ChatSession final {
   explicit ChatSession(std::unique_ptr<Impl> impl);
   [[nodiscard]] auto validate_recovered_pending_run()
       -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto load_recovered_memory()
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto validate_recovered_memory_capacity()
+      -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto load_recovered_pending_sources()
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto continue_if_ready()

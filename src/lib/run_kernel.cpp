@@ -4277,11 +4277,20 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
         }
       }
     }
-    if (start.attributes.memory_selection &&
-        (start.attributes.memory_selection->persona_id !=
-             start.attributes.persona_id ||
-         !domain::memory_selection_matches_context(
-             *start.attributes.memory_selection, start.request.context))) {
+    domain::MemorySelection empty_memory;
+    if (!domain::seal_memory_selection(empty_memory)) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "empty memory selection could not be validated"));
+    }
+    if ((start.attributes.memory_selection &&
+         start.attributes.memory_selection->persona_id !=
+             start.attributes.persona_id) ||
+        !domain::memory_selection_matches_context(
+            start.attributes.memory_selection
+                ? *start.attributes.memory_selection
+                : empty_memory,
+            start.request.context)) {
       return std::unexpected(kernel_error(
           RunKernelErrorCode::invalid_start,
           "run memory selection does not match constructed context"));
