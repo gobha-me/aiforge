@@ -821,7 +821,8 @@ auto ChatSession::validate_recovered_memory_capacity()
 auto ChatSession::load_recovered_memory()
     -> std::expected<void, ChatSessionError> {
   const auto run_id = m_impl->kernel->active_run_id();
-  if (!m_impl->recovered_run || m_impl->recovered_run->run_id != *run_id ||
+  if (!run_id || !m_impl->recovered_run ||
+      m_impl->recovered_run->run_id != *run_id ||
       !m_impl->recovered_run->attributes.memory_selection) {
     return error(ChatSessionErrorCode::context_failed,
                  "original saved memory selection is unavailable for this "
