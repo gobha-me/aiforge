@@ -20,7 +20,7 @@ if (UNIX)
   target_link_libraries(111agent-session-fixture PRIVATE aiforge::adapters)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME 111agent-subprocess
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/subprocess.py
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/agent_subprocess.py
             $<TARGET_FILE:${PROJECT_NAME}> $<TARGET_FILE:111agent-session-fixture>)
   set_tests_properties(111agent-subprocess PROPERTIES TIMEOUT 30)
 endif ()
