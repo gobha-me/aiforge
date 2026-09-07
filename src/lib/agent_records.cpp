@@ -95,8 +95,13 @@ class Record final {
     m_remaining -= value.size() * 6;
     return std::string{value};
   }
-  auto count(const std::size_t size) -> void {
-    if (size > 256) throw RecordLimit{};
+  auto count(const std::size_t size, const std::size_t maximum = 256) -> void {
+    // Charge object keys, punctuation, and JSON node overhead before building
+    // each collection. Text-only accounting misses nested short/empty values.
+    constexpr std::size_t entry_budget = 512;
+    if (size > maximum || size > m_remaining / entry_budget)
+      throw RecordLimit{};
+    m_remaining -= size * entry_budget;
   }
   template <class Id> auto optional_id(const std::optional<Id>& value) -> Json {
     return value ? text(value->value()) : Json(nullptr);
@@ -186,7 +191,7 @@ class Record final {
   }
   auto scopes(const std::vector<domain::CapabilityScope>& scopes,
               const std::size_t maximum = 256) -> Json {
-    if (scopes.size() > maximum) throw RecordLimit{};
+    count(scopes.size(), maximum);
     auto result = Json::array();
     for (const auto& scope : scopes)
       result.push_back({{"effect", effect_name(scope.effect)},

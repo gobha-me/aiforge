@@ -146,6 +146,32 @@ TEST_CASE("agent records exclude config credentials and opaque provider data",
       R"({"content":{"kind":"unsupported"},"inference_id":"inference","kind":"assistant_content","message_id":"message"})");
 }
 
+TEST_CASE("agent records bound nested collections before JSON allocation",
+          "[agent][records][failure]") {
+  // Every individual collection and string fits. Their combined structural
+  // cost must still consume the same per-record budget as text.
+  const std::vector<domain::CapabilityScope> scopes(
+      64, {domain::Effect::read, "", ""});
+  SECTION("accepted declarations") {
+    const backend::ToolDeclaration tool{
+        "x", "", {"application/schema+json", "{}"}, {}, scopes};
+    const auto result = surfaces::agent_accepted_record(
+        id<domain::SessionId>("session"), id<domain::RunId>("run"),
+        std::vector<backend::ToolDeclaration>(64, tool));
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == surfaces::AgentErrorCode::resource_exhausted);
+  }
+  SECTION("durable provenance") {
+    auto value = provenance();
+    value.tools.resize(64, value.tools.front());
+    for (auto& tool : value.tools)
+      tool.capability_scopes = scopes;
+    const auto result = encode(domain::RunProvenanceRecorded{std::move(value)});
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == surfaces::AgentErrorCode::resource_exhausted);
+  }
+}
+
 TEST_CASE("agent records preserve typed errors and exact correlation",
           "[agent][records][errors]") {
   const domain::DomainError failure{domain::ErrorCode::unavailable,
