@@ -60,8 +60,14 @@ run ID when known, and a reason. Replay `completed` describes the replay
 operation only, with `durable_terminal: false`; historical runs retain their
 recorded outcomes.
 
-A run has a five-minute deadline, reported as failure rather than user
-cancellation. Cancellation has a separate two-second accounting-drain deadline;
+Work has a five-minute deadline beginning before selection and submission,
+covering accepted output and every event write, including final event delivery.
+Expiry stops event delivery and cancels work, followed by separately bounded
+cleanup and one terminal-report phase. It is failure rather than user
+cancellation. If the run already completed durably, a delivery deadline can
+report `failed` with `durable_terminal: true` without rewriting that outcome.
+The transport deadline bounds synchronous write overrun; arbitrary custom C++
+sinks cannot be preempted. Cancellation has a separate two-second accounting-drain deadline;
 exhaustion returns `cleanup_incomplete` and requires reopening rather than
 claiming durable completion. Tests inject shorter positive deadlines. This
 bounds surface waiting and reporting, not arbitrary C++ executor destruction;

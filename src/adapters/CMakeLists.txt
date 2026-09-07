@@ -1,4 +1,6 @@
 add_library(${PROJECT_NAME}_adapters STATIC
+  agent_transport.cpp
+  process_agent.cpp
   audio_device_gate.cpp
   audio_backend.cpp
   capture_device.cpp
