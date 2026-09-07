@@ -2885,12 +2885,24 @@ auto blocked_recovery_factory() -> testing::TuiScenarioTargetFactory {
     };
     surfaces::ChatSessionOpen seed{make_id<domain::ModelId>("model"),
                                    surfaces::ChatSessionOpen::Mode::create};
+    seed.provenance = domain::RunProvenance{"test-revision",
+                                            "scenario",
+                                            std::nullopt,
+                                            seed.model_id,
+                                            std::nullopt,
+                                            {},
+                                            {{"aiforge", "test-revision"}},
+                                            {},
+                                            {}};
     seed.persona = {persona::PersonaDirectiveKind::select, "recovery",
                     domain::PersonaSelectionSource::command_line};
     auto session = surfaces::ChatSession::open(
         seed, *backend, *backend, store.get(), nullptr, {}, {}, dependencies);
     REQUIRE(session);
-    REQUIRE((*session)->submit("Durable question before restart"));
+    const auto submitted =
+        (*session)->submit("Durable question before restart");
+    INFO((submitted ? "seed run submitted" : submitted.error().message));
+    REQUIRE(submitted);
     const auto deadline = std::chrono::steady_clock::now() + 2s;
     while (!(*session)->pending_question_input() &&
            std::chrono::steady_clock::now() < deadline) {
