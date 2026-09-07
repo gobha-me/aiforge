@@ -6,6 +6,7 @@
 #include <optional>
 #include <ostream>
 #include <ranges>
+#include <set>
 #include <span>
 #include <string>
 #include <utility>
@@ -175,14 +176,40 @@ struct Stores {
     const std::span<const domain::RunEvent> events)
     -> std::vector<domain::ArtifactMetadata> {
   std::vector<domain::ArtifactMetadata> result;
+  std::set<std::pair<domain::RunId, domain::InferenceId>> inferences;
+  std::set<std::pair<domain::RunId, domain::InvocationId>> invocations;
   for (const auto& event : events) {
-    const auto* created = std::get_if<domain::ArtifactCreated>(&event.payload);
-    if (created != nullptr && created->artifact.producing_inference_id &&
-        (created->artifact.media_type == "image/png" ||
-         created->artifact.media_type == "image/jpeg" ||
-         created->artifact.media_type == "image/webp")) {
-      result.push_back(created->artifact);
+    const auto& envelope = event.metadata;
+    if (const auto* started =
+            std::get_if<domain::InferenceStarted>(&event.payload)) {
+      inferences.emplace(envelope.run_id, started->inference_id);
     }
+    if (const auto* started = std::get_if<domain::ToolStarted>(&event.payload);
+        started != nullptr &&
+        envelope.invocation_id == started->invocation_id) {
+      invocations.emplace(envelope.run_id, started->invocation_id);
+    }
+    const auto* created = std::get_if<domain::ArtifactCreated>(&event.payload);
+    if (created == nullptr) continue;
+    const auto& artifact = created->artifact;
+    if (artifact.media_type != "image/png" &&
+        artifact.media_type != "image/jpeg" &&
+        artifact.media_type != "image/webp") {
+      continue;
+    }
+    // Replay accepts either established producer without rewriting provenance.
+    // The producer must precede this artifact in the same durable run.
+    const bool inference_produced =
+        artifact.producing_inference_id && !artifact.producing_invocation_id &&
+        !envelope.invocation_id &&
+        inferences.contains(
+            {envelope.run_id, *artifact.producing_inference_id});
+    const bool tool_produced =
+        artifact.producing_invocation_id && !artifact.producing_inference_id &&
+        envelope.invocation_id == artifact.producing_invocation_id &&
+        invocations.contains(
+            {envelope.run_id, *artifact.producing_invocation_id});
+    if (inference_produced || tool_produced) result.push_back(artifact);
   }
   return result;
 }
