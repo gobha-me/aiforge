@@ -1,5 +1,6 @@
 #include <aiforge/surfaces/agent.hpp>
 
+#include <aiforge/runtime/automatic_approval_matcher.hpp>
 #include <aiforge/runtime/tool_launch_policy.hpp>
 #include <aiforge/testing/application_launch_context.hpp>
 #include <aiforge/testing/scripted_tool_executor.hpp>
@@ -107,7 +108,7 @@ class MemoryStore final : public storage::SessionStore {
   auto append_events(const domain::SessionId& session_id,
                      std::span<const domain::RunEvent> events, std::stop_token)
       -> std::expected<void, storage::SessionStoreError> override {
-    if (fail_appends) {
+    if (fail_appends || (reject_append && reject_append(events))) {
       return std::unexpected(
           storage::SessionStoreError{storage::SessionStoreErrorCode::io_failure,
                                      "injected append failure", true});
@@ -163,6 +164,7 @@ class MemoryStore final : public storage::SessionStore {
   }
 
   bool fail_appends{};
+  std::function<bool(std::span<const domain::RunEvent>)> reject_append;
   std::map<domain::SessionId, storage::SessionInfo> sessions;
   std::map<domain::SessionId, std::vector<domain::RunEvent>> histories;
   std::vector<std::pair<domain::MemoryOwner, domain::SessionId>>
@@ -188,16 +190,18 @@ struct Gate {
   bool entered{};
   bool cancelled{};
   bool released{};
+  int step{1};
 };
 class Stream final : public backend::BackendStream {
  public:
-  Stream(domain::MessageId message, bool calls_tool, std::shared_ptr<Gate> gate)
+  Stream(domain::MessageId message, bool calls_tool, std::shared_ptr<Gate> gate,
+         std::size_t request_number)
       : m_message(std::move(message)), m_calls_tool(calls_tool),
-        m_gate(std::move(gate)) {}
+        m_gate(std::move(gate)), m_request_number(request_number) {}
   auto next(std::stop_token token)
       -> std::expected<std::optional<backend::BackendEvent>,
                        backend::BackendError> override {
-    if (m_gate && m_step == 1) {
+    if (m_gate && m_step == m_gate->step) {
       std::stop_callback cancelled(token, [this] {
         std::lock_guard guard(m_gate->mutex);
         m_gate->cancelled = true;
@@ -220,9 +224,10 @@ class Stream final : public backend::BackendStream {
           return backend::BackendEvent{backend::ResponseCancelled{"cancelled"}};
         }
         if (m_calls_tool)
-          return backend::BackendEvent{
-              backend::ToolCallDelta{id<domain::InvocationId>("agent-read"),
-                                     "read_repository_file", "{}"}};
+          return backend::BackendEvent{backend::ToolCallDelta{
+              id<domain::InvocationId>("agent-read-" +
+                                       std::to_string(m_request_number)),
+              "read_repository_file", "{}"}};
         return backend::BackendEvent{
             backend::ContentDelta{m_message, domain::TextBlock{"answer"}}};
       case 3:
@@ -238,6 +243,7 @@ class Stream final : public backend::BackendStream {
   bool m_calls_tool{};
   std::shared_ptr<Gate> m_gate;
   int m_step{};
+  std::size_t m_request_number{};
 };
 class Backend final : public backend::Backend,
                       public backend::ModelContextProvider {
@@ -257,15 +263,78 @@ class Backend final : public backend::Backend,
                        backend::BackendError> override {
     requests.push_back(request);
     return std::make_unique<Stream>(request.assistant_message_id,
-                                    calls_tool && requests.size() == 1, gate);
+                                    calls_tool && requests.size() % 2 == 1,
+                                    gate, requests.size());
   }
 };
+class ToolStream final : public runtime::ToolExecutionStream {
+ public:
+  explicit ToolStream(std::shared_ptr<Gate> gate) : m_gate(std::move(gate)) {}
+  auto next(std::stop_token token)
+      -> std::expected<std::optional<runtime::ToolExecutionEvent>,
+                       runtime::ToolExecutionError> override {
+    if (m_finished) return std::optional<runtime::ToolExecutionEvent>{};
+    std::stop_callback cancelled(token, [this] {
+      std::lock_guard lock(m_gate->mutex);
+      m_gate->cancelled = true;
+      m_gate->changed.notify_all();
+    });
+    std::unique_lock lock(m_gate->mutex);
+    m_gate->entered = true;
+    m_gate->changed.notify_all();
+    m_gate->changed.wait(lock, [this] { return m_gate->released; });
+    m_finished = true;
+    if (token.stop_requested())
+      return std::unexpected(runtime::ToolExecutionError{
+          runtime::ToolExecutionErrorCode::cancelled, "gated tool cancelled",
+          false});
+    return runtime::ToolExecutionEvent{
+        runtime::ToolResult{{domain::TextBlock{"source contents"}}}};
+  }
+
+ private:
+  std::shared_ptr<Gate> m_gate;
+  bool m_finished{};
+};
+class Executor final : public runtime::ToolExecutor {
+ public:
+  std::shared_ptr<Gate> gate{std::make_shared<Gate>()};
+  std::vector<runtime::ToolInvocation> invocations;
+  auto validate(const domain::StructuredDataBlock& arguments) const
+      -> std::expected<runtime::ValidatedToolArguments,
+                       runtime::ToolExecutionError> override {
+    return runtime::ValidatedToolArguments{arguments};
+  }
+  auto start(runtime::ToolInvocation invocation, std::stop_token)
+      -> std::expected<std::unique_ptr<runtime::ToolExecutionStream>,
+                       runtime::ToolExecutionError> override {
+    invocations.push_back(std::move(invocation));
+    return std::make_unique<ToolStream>(gate);
+  }
+};
+auto release_after_cancel(const std::shared_ptr<Gate>& gate,
+                          std::chrono::milliseconds delay = 20ms)
+    -> std::jthread {
+  return std::jthread([gate, delay] {
+    std::unique_lock lock(gate->mutex);
+    gate->changed.wait_for(lock, 1s, [&] { return gate->cancelled; });
+    lock.unlock();
+    std::this_thread::sleep_for(delay);
+    lock.lock();
+    gate->released = true;
+    gate->changed.notify_all();
+  });
+}
+auto await_entered(const std::shared_ptr<Gate>& gate) -> bool {
+  std::unique_lock lock(gate->mutex);
+  return gate->changed.wait_for(lock, 1s, [&] { return gate->entered; });
+}
 struct Fixture {
   Backend backend;
   MemoryStore store;
   surfaces::ChatSessionDependencies dependencies;
   std::shared_ptr<testing::ScriptedToolExecutor> executor;
-  Fixture() {
+  explicit Fixture(std::shared_ptr<Executor> executing = {}) {
     runtime::ToolRegistry registry;
     executor = std::make_shared<testing::ScriptedToolExecutor>(
         std::vector<testing::ScriptedToolExchange>{});
@@ -275,16 +344,35 @@ struct Fixture {
          {"application/schema+json", R"({"type":"object"})"},
          {domain::Effect::read},
          {{domain::Effect::read, "filesystem.root", "/repo"}}},
-        executor, {}, runtime::ToolExecutorContract{"test.agent.read", "1"},
+        executing ? std::static_pointer_cast<runtime::ToolExecutor>(executing)
+                  : executor,
+        {}, runtime::ToolExecutorContract{"test.agent.read", "1"},
         runtime::ToolCategory::repository));
     dependencies.tools = registry.snapshot().value();
     const auto permission =
         id<domain::PermissionProfileId>("agent-prompt-policy");
+    std::shared_ptr<runtime::AutomaticApprovalMatcher> matcher;
+    if (executing) {
+      auto compiled = runtime::compile_automatic_approval_matcher(
+          {runtime::ExactToolArgumentsApprovalRule{
+              "read_repository_file",
+              runtime::canonicalize_validated_tool_arguments(
+                  {"application/json", "{}"})
+                  .value(),
+              {{runtime::RestrictionLevel::medium}, 1, {}, 0}}});
+      REQUIRE(compiled);
+      matcher = *compiled;
+    }
     auto policy = runtime::make_tool_launch_policy(
-        dependencies.tools, {permission,
-                             testing::available_application_launch_context(
-                                 runtime::RestrictionLevel::medium),
-                             {}});
+        dependencies.tools,
+        {permission,
+         testing::available_application_launch_context(
+             runtime::RestrictionLevel::medium,
+             matcher ? runtime::ApprovalMode::automatic
+                     : runtime::ApprovalMode::prompt,
+             matcher ? std::optional{std::string{matcher->identity()}}
+                     : std::nullopt),
+         matcher});
     INFO((policy ? "policy ready" : policy.error().message));
     REQUIRE(policy);
     dependencies.tool_policy = *policy;
@@ -449,4 +537,309 @@ TEST_CASE("agent records bound escaped content before serialization",
   REQUIRE(record);
   CHECK(record->back() == '\n');
   CHECK(std::ranges::count(*record, '\n') == 1);
+}
+
+TEST_CASE(
+    "agent rejects invalid and overflow-sized deadlines before submission",
+    "[agent][deadline][failure]") {
+  Fixture fixture;
+  auto session = fixture.open();
+  Sink sink;
+  for (const auto limits : std::vector<surfaces::AgentRunLimits>{
+           {0ms, 1s},
+           {-1ms, 1s},
+           {1s, 0ms},
+           {std::chrono::milliseconds::max(), 1s},
+           {1s, std::chrono::milliseconds::max()}}) {
+    const auto outcome =
+        surfaces::run_agent_session(*session, request(), sink, {}, limits);
+    REQUIRE_FALSE(outcome);
+    CHECK(outcome.error().code == surfaces::AgentErrorCode::invalid_request);
+  }
+  CHECK(fixture.backend.requests.empty());
+  CHECK(sink.records.empty());
+}
+
+TEST_CASE("agent refuses recovered approval without draining or appending",
+          "[agent][recovery][failure]") {
+  Fixture fixture;
+  fixture.backend.calls_tool = true;
+  auto original = fixture.open();
+  REQUIRE(original->select_tool_profile(id<domain::ToolProfileId>("dev")));
+  REQUIRE(original->submit("pending read"));
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (!original->pending_tool_approval() &&
+         std::chrono::steady_clock::now() < deadline) {
+    REQUIRE(original->drain());
+    std::this_thread::sleep_for(1ms);
+  }
+  REQUIRE(original->pending_tool_approval());
+  const auto session_id = original->session_id();
+  original.reset();
+  auto session =
+      fixture.open(surfaces::ChatSessionOpen::Mode::resume, session_id);
+  const auto before = fixture.store.histories.at(session_id);
+  const auto requests = fixture.backend.requests.size();
+  Sink sink;
+  const auto outcome = surfaces::run_agent_session(*session, request(), sink);
+  INFO((outcome ? outcome->reason : outcome.error().message));
+  REQUIRE(outcome);
+  CHECK(outcome->status == surfaces::AgentStatus::recovery_required);
+  CHECK_FALSE(outcome->durable_terminal);
+  CHECK(sink.records.size() == 1);
+  CHECK(fixture.backend.requests.size() == requests);
+  CHECK(fixture.executor->recorded_invocations().empty());
+  CHECK(fixture.store.histories.at(session_id) == before);
+}
+
+TEST_CASE("agent reports mid-run persistence loss without claiming accounting",
+          "[agent][storage][failure]") {
+  Fixture fixture;
+  auto session = fixture.open();
+  Sink sink;
+  sink.reject = [&](std::string_view record) {
+    if (record.find("accepted") != std::string_view::npos)
+      fixture.store.fail_appends = true;
+    return false;
+  };
+  const auto outcome = surfaces::run_agent_session(*session, request(), sink);
+  INFO((outcome ? outcome->reason : outcome.error().message));
+  REQUIRE(outcome);
+  CHECK(outcome->status == surfaces::AgentStatus::failed);
+  CHECK_FALSE(outcome->durable_terminal);
+  CHECK(outcome->reason.find("reopen") != std::string::npos);
+  const auto& events = fixture.store.histories.at(session->session_id());
+  CHECK(count<domain::RunCompleted>(events) == 0);
+  CHECK(count<domain::UsageRecorded>(events) == 0);
+  CHECK_FALSE(sink.records.empty());
+  CHECK(sink.records.back().find("terminal") != std::string::npos);
+}
+
+TEST_CASE("agent drains terminal provider EOF after output failure or stop",
+          "[agent][output][cancel][failure]") {
+  Fixture fixture;
+  fixture.backend.gate = std::make_shared<Gate>();
+  fixture.backend.gate->step = 4;
+  const auto gate = fixture.backend.gate;
+  auto session = fixture.open();
+  Sink sink;
+  std::stop_source stop;
+  bool reject_output = false;
+  SECTION("output failed after durable completion") {
+    reject_output = true;
+  }
+  SECTION("stop after durable completion") {
+  }
+  sink.reject = [&](std::string_view record) {
+    if (record.find("run_completed") == std::string_view::npos) return false;
+    REQUIRE(await_entered(gate));
+    stop.request_stop();
+    return reject_output;
+  };
+  // A terminal stream cannot be cancelled again. Release EOF independently,
+  // after the sink has observed completion and requested cleanup.
+  std::jthread release([&] {
+    while (!stop.stop_requested())
+      std::this_thread::sleep_for(1ms);
+    std::this_thread::sleep_for(20ms);
+    std::lock_guard lock(gate->mutex);
+    gate->released = true;
+    gate->changed.notify_all();
+  });
+  const auto outcome =
+      surfaces::run_agent_session(*session, request(), sink, stop.get_token());
+  if (reject_output) {
+    REQUIRE_FALSE(outcome);
+    CHECK(outcome.error().code == surfaces::AgentErrorCode::output_failed);
+  } else {
+    INFO((outcome ? outcome->reason : outcome.error().message));
+    REQUIRE(outcome);
+    CHECK(outcome->status == surfaces::AgentStatus::cancelled);
+    CHECK(outcome->durable_terminal);
+  }
+  CHECK_FALSE(session->active());
+  const auto& events = fixture.store.histories.at(session->session_id());
+  CHECK(count<domain::RunCompleted>(events) == 1);
+  CHECK(count<domain::RunCancelled>(events) == 0);
+  CHECK(count<domain::UsageRecorded>(events) == 1);
+}
+
+TEST_CASE("agent work deadline includes accepted and final event writes",
+          "[agent][deadline][failure]") {
+  Fixture fixture;
+  auto session = fixture.open();
+  Sink sink;
+  bool final_event = false;
+  SECTION("accepted record consumes the work budget") {
+  }
+  SECTION("final durable event consumes the work budget") {
+    final_event = true;
+  }
+  bool delayed = false;
+  sink.reject = [&](std::string_view record) {
+    const auto target = final_event ? "run_completed" : "accepted";
+    if (!delayed && record.find(target) != std::string_view::npos) {
+      delayed = true;
+      std::this_thread::sleep_for(80ms);
+    }
+    return false;
+  };
+  const auto outcome =
+      surfaces::run_agent_session(*session, request(), sink, {}, {40ms, 1s});
+  INFO((outcome ? outcome->reason : outcome.error().message));
+  REQUIRE(outcome);
+  REQUIRE(delayed);
+  CHECK(outcome->status == surfaces::AgentStatus::failed);
+  CHECK(outcome->reason == "run deadline exceeded");
+  CHECK(outcome->durable_terminal);
+  CHECK_FALSE(session->active());
+  CHECK(sink.records.back().find("terminal") != std::string::npos);
+  if (final_event) {
+    const auto& events = fixture.store.histories.at(session->session_id());
+    CHECK(count<domain::RunCompleted>(events) == 1);
+    CHECK(count<domain::RunCancelled>(events) == 0);
+    CHECK(std::ranges::count_if(sink.records, [](const auto& record) {
+            return record.find("run_completed") != std::string::npos;
+          }) == 1);
+  }
+}
+
+TEST_CASE("agent cancellation and output failure drain a real gated tool",
+          "[agent][tools][cancel][failure]") {
+  auto executor = std::make_shared<Executor>();
+  Fixture fixture{executor};
+  fixture.backend.calls_tool = true;
+  auto session = fixture.open();
+  Sink sink;
+  std::stop_source stop;
+  bool reject_output = false;
+  SECTION("stop during tool execution") {
+  }
+  SECTION("output failure during tool execution") {
+    reject_output = true;
+  }
+  sink.reject = [&](std::string_view record) {
+    if (record.find("tool_started") == std::string_view::npos) return false;
+    REQUIRE(await_entered(executor->gate));
+    stop.request_stop();
+    return reject_output;
+  };
+  auto release = release_after_cancel(executor->gate);
+  const auto outcome =
+      surfaces::run_agent_session(*session, request(), sink, stop.get_token());
+  if (reject_output) {
+    REQUIRE_FALSE(outcome);
+    CHECK(outcome.error().code == surfaces::AgentErrorCode::output_failed);
+  } else {
+    INFO((outcome ? outcome->reason : outcome.error().message));
+    REQUIRE(outcome);
+    CHECK(outcome->status == surfaces::AgentStatus::cancelled);
+    CHECK(outcome->durable_terminal);
+  }
+  CHECK_FALSE(session->active());
+  REQUIRE(executor->invocations.size() == 1);
+  CHECK(executor->gate->cancelled);
+  const auto& events = fixture.store.histories.at(session->session_id());
+  CHECK(count<domain::ToolStarted>(events) == 1);
+  CHECK(count<domain::ToolErrored>(events) == 1);
+  CHECK(count<domain::RunCancelled>(events) == 1);
+  CHECK(count<domain::UsageRecorded>(events) == 1);
+  CHECK(fixture.backend.requests.size() == 1);
+}
+
+TEST_CASE("agent cleanup deadline cannot claim a still-running tool is drained",
+          "[agent][tools][deadline][failure]") {
+  auto executor = std::make_shared<Executor>();
+  Fixture fixture{executor};
+  fixture.backend.calls_tool = true;
+  auto session = fixture.open();
+  Sink sink;
+  std::stop_source stop;
+  sink.reject = [&](std::string_view record) {
+    if (record.find("tool_started") != std::string_view::npos) {
+      REQUIRE(await_entered(executor->gate));
+      stop.request_stop();
+    }
+    return false;
+  };
+  auto release = release_after_cancel(executor->gate, 100ms);
+  const auto outcome = surfaces::run_agent_session(
+      *session, request(), sink, stop.get_token(), {1s, 10ms});
+  INFO((outcome ? outcome->reason : outcome.error().message));
+  REQUIRE(outcome);
+  CHECK(outcome->status == surfaces::AgentStatus::failed);
+  CHECK_FALSE(outcome->durable_terminal);
+  CHECK(outcome->reason.find("reopen") != std::string::npos);
+  CHECK(session->active());
+  CHECK(count<domain::RunCancelled>(
+            fixture.store.histories.at(session->session_id())) == 1);
+  release.join();
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (session->active() && std::chrono::steady_clock::now() < deadline) {
+    REQUIRE(session->drain());
+    std::this_thread::sleep_for(1ms);
+  }
+  CHECK_FALSE(session->active());
+}
+
+TEST_CASE("agent exact automatic rule executes once then refuses exhaustion",
+          "[agent][tools][approval]") {
+  auto executor = std::make_shared<Executor>();
+  executor->gate->released = true;
+  Fixture fixture{executor};
+  fixture.backend.calls_tool = true;
+  auto session = fixture.open();
+  auto bound = request();
+  bound.session_id = session->session_id();
+  bound.model = session->model_id();
+  Sink first;
+  const auto completed = surfaces::run_agent_session(*session, bound, first);
+  INFO((completed ? completed->reason : completed.error().message));
+  REQUIRE(completed);
+  CHECK(completed->status == surfaces::AgentStatus::completed);
+  CHECK(completed->durable_terminal);
+  REQUIRE(executor->invocations.size() == 1);
+  CHECK(fixture.backend.requests.size() == 2);
+  const auto& events = fixture.store.histories.at(session->session_id());
+  CHECK(count<domain::ToolStarted>(events) == 1);
+  CHECK(count<domain::ToolResultRecorded>(events) == 1);
+  CHECK(count<domain::UsageRecorded>(events) == 2);
+  Sink exhausted;
+  const auto refused = surfaces::run_agent_session(*session, bound, exhausted);
+  INFO((refused ? refused->reason : refused.error().message));
+  REQUIRE(refused);
+  CHECK(refused->status == surfaces::AgentStatus::interaction_required);
+  CHECK(refused->durable_terminal);
+  CHECK(executor->invocations.size() == 1);
+  CHECK(fixture.backend.requests.size() == 3);
+  CHECK(count<domain::ToolStarted>(events) == 1);
+  CHECK(count<domain::RunCancelled>(events) == 1);
+}
+
+TEST_CASE("agent tool result persistence failure cannot report durable cleanup",
+          "[agent][tools][storage][failure]") {
+  auto executor = std::make_shared<Executor>();
+  executor->gate->released = true;
+  Fixture fixture{executor};
+  fixture.backend.calls_tool = true;
+  auto session = fixture.open();
+  fixture.store.reject_append = [](std::span<const domain::RunEvent> events) {
+    return std::ranges::any_of(events, [](const auto& event) {
+      return std::holds_alternative<domain::ToolResultRecorded>(event.payload);
+    });
+  };
+  Sink sink;
+  const auto outcome = surfaces::run_agent_session(*session, request(), sink);
+  INFO((outcome ? outcome->reason : outcome.error().message));
+  REQUIRE(outcome);
+  CHECK(outcome->status == surfaces::AgentStatus::failed);
+  CHECK_FALSE(outcome->durable_terminal);
+  CHECK(outcome->reason.find("reopen") != std::string::npos);
+  CHECK(executor->invocations.size() == 1);
+  CHECK(fixture.backend.requests.size() == 1);
+  const auto& events = fixture.store.histories.at(session->session_id());
+  CHECK(count<domain::ToolStarted>(events) == 1);
+  CHECK(count<domain::ToolResultRecorded>(events) == 0);
+  CHECK(count<domain::RunCompleted>(events) == 0);
+  CHECK(count<domain::UsageRecorded>(events) == 1);
 }
