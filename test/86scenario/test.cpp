@@ -2830,8 +2830,17 @@ class RecoveryQuestionStream final : public backend::BackendStream {
   int m_step{};
 };
 
-class RecoveryQuestionBackend final : public backend::Backend {
+class RecoveryQuestionBackend final : public backend::Backend,
+                                      public backend::ModelContextProvider {
  public:
+  auto lookup(const domain::ModelId& model_id, std::stop_token)
+      -> std::expected<backend::ModelContextInfo,
+                       backend::BackendError> override {
+    return backend::ModelContextInfo{
+        model_id, 8192, 1024, pricing_observation(),
+        backend::ModelCapabilityMap{{"tools", true}}};
+  }
+
   auto start(backend::BackendRequest, std::stop_token)
       -> std::expected<std::unique_ptr<backend::BackendStream>,
                        backend::BackendError> override {
@@ -2849,8 +2858,6 @@ auto blocked_recovery_factory() -> testing::TuiScenarioTargetFactory {
     REQUIRE(pipe->ok());
     auto store = std::make_shared<SessionScenarioStore>();
     auto backend = std::make_shared<RecoveryQuestionBackend>();
-    auto model =
-        std::make_shared<GatedBackend>(std::make_shared<GatedBackendState>());
     auto editor = std::make_shared<NoEditor>();
     const std::string text{"Original persona instructions."};
     detail::Sha256 digest;
@@ -2881,13 +2888,15 @@ auto blocked_recovery_factory() -> testing::TuiScenarioTargetFactory {
     seed.persona = {persona::PersonaDirectiveKind::select, "recovery",
                     domain::PersonaSelectionSource::command_line};
     auto session = surfaces::ChatSession::open(
-        seed, *backend, *model, store.get(), nullptr, {}, {}, dependencies);
+        seed, *backend, *backend, store.get(), nullptr, {}, {}, dependencies);
     REQUIRE(session);
     REQUIRE((*session)->submit("Durable question before restart"));
     const auto deadline = std::chrono::steady_clock::now() + 2s;
     while (!(*session)->pending_question_input() &&
            std::chrono::steady_clock::now() < deadline) {
-      REQUIRE((*session)->drain());
+      const auto drained = (*session)->drain();
+      INFO((drained ? "seed run drained" : drained.error().message));
+      REQUIRE(drained);
       std::this_thread::sleep_for(1ms);
     }
     REQUIRE((*session)->pending_question_input());
@@ -2911,8 +2920,9 @@ auto blocked_recovery_factory() -> testing::TuiScenarioTargetFactory {
                                      session_id};
     resume.persona = {persona::PersonaDirectiveKind::disable, std::nullopt,
                       domain::PersonaSelectionSource::command_line};
-    auto app = adapters::make_interactive_chat_app(
-        *backend, *model, store.get(), resume, *editor, {}, std::move(options));
+    auto app = adapters::make_interactive_chat_app(*backend, *backend,
+                                                   store.get(), resume, *editor,
+                                                   {}, std::move(options));
     REQUIRE(app->ready());
     auto* raw = app.get();
     return testing::TuiScenarioTarget{
@@ -2921,9 +2931,8 @@ auto blocked_recovery_factory() -> testing::TuiScenarioTargetFactory {
           return raw->configure_terminal_for_scenario(
               termforge::TerminalIo{pipe->read_fd(), -1}, capabilities);
         },
-        [raw, backend, model, store, editor] {
+        [raw, backend, store, editor] {
           static_cast<void>(backend);
-          static_cast<void>(model);
           static_cast<void>(store);
           static_cast<void>(editor);
           return raw->run();

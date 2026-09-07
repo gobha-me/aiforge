@@ -1811,7 +1811,13 @@ auto ChatSession::drain()
 auto ChatSession::cancel_active(std::optional<std::string> reason)
     -> std::expected<void, ChatSessionError> {
   const auto run = m_impl->kernel->active_run_id();
-  if (!run) return {};
+  if (!run) {
+    if (m_impl->recovery_block) {
+      return error(ChatSessionErrorCode::session_failed,
+                   "reopen the session before retrying blocked cancellation");
+    }
+    return {};
+  }
   const auto before = m_impl->kernel->event_log().events().size();
   auto cancelled = m_impl->kernel->cancel_run(*run, std::move(reason));
   if (!cancelled) return std::unexpected(kernel_error(cancelled.error()));

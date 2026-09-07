@@ -2164,7 +2164,7 @@ TEST_CASE("recovered chat exposes blocked persona history and cancellation",
   surfaces::ChatSessionDependencies resume_dependencies;
   resume_dependencies.tools = *tools;
   resume_dependencies.persona_source = &resume_source;
-  const auto resumed = surfaces::ChatSession::open(
+  auto resumed = surfaces::ChatSession::open(
       {make_id<domain::ModelId>("model"),
        surfaces::ChatSessionOpen::Mode::resume,
        session_id,
@@ -2200,13 +2200,29 @@ TEST_CASE("recovered chat exposes blocked persona history and cancellation",
         text_messages(backend.requests.back(), domain::Role::system);
     REQUIRE(std::ranges::find(system, alpha.text) != system.end());
   }
-  SECTION("cancellation remains retryable after a persistence failure") {
+  SECTION("cancellation can be retried after reopening a failed store") {
     store.fail_appends = true;
     REQUIRE_FALSE((*resumed)->cancel_active("cancel blocked run"));
-    REQUIRE((*resumed)->active());
+    REQUIRE_FALSE((*resumed)->active());
     REQUIRE((*resumed)->blocked_recovery());
+    REQUIRE_FALSE((*resumed)->cancel_active("retry before reopening"));
     REQUIRE(store.histories.at(session_id) == history_before);
     store.fail_appends = false;
+    resumed->reset();
+    resumed = surfaces::ChatSession::open(
+        {make_id<domain::ModelId>("model"),
+         surfaces::ChatSessionOpen::Mode::resume,
+         session_id,
+         std::nullopt,
+         {directive,
+          directive == persona::PersonaDirectiveKind::select
+              ? std::optional<std::string>{"beta"}
+              : std::nullopt,
+          domain::PersonaSelectionSource::command_line}},
+        backend, backend, &store, nullptr, {}, {}, resume_dependencies);
+    REQUIRE(resumed);
+    REQUIRE((*resumed)->drain());
+    REQUIRE((*resumed)->blocked_recovery());
     REQUIRE((*resumed)->cancel_active("cancel blocked run"));
     REQUIRE_FALSE((*resumed)->active());
     REQUIRE_FALSE((*resumed)->blocked_recovery());
