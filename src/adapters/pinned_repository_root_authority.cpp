@@ -1,6 +1,7 @@
 #include <aiforge/adapters/pinned_repository_root_authority.hpp>
 
 #include <aiforge/adapters/git_exact_source_editor.hpp>
+#include <aiforge/adapters/git_project_instruction_source.hpp>
 #include <aiforge/adapters/git_repository_snapshot_source.hpp>
 
 #include <algorithm>
@@ -341,6 +342,65 @@ class PinnedRepositoryRootAuthority final
     }
   }
 
+  [[nodiscard]] auto coupled_instructions(
+      const GitProjectInstructionSource& source) const noexcept -> bool {
+    return source.guarantees_read_only_discovery() &&
+           source.is_coupled_to(m_snapshot_source);
+  }
+
+  [[nodiscard]] auto observe_current(
+      repository::RepositorySnapshotLimits limits, std::stop_token stop) const
+      -> std::expected<domain::RepositorySnapshot,
+                       repository::RepositorySnapshotError> {
+    if (!verify_root())
+      return std::unexpected(repository::RepositorySnapshotError{
+          repository::RepositorySnapshotErrorCode::unstable,
+          "pinned repository root changed or is unavailable", true});
+    auto result = m_snapshot_source.observe_pinned(
+        m_descriptor.get(), m_canonical_root, limits, stop);
+    if (!verify_root())
+      return std::unexpected(repository::RepositorySnapshotError{
+          repository::RepositorySnapshotErrorCode::unstable,
+          "pinned repository root changed or is unavailable", true});
+    return result;
+  }
+
+  [[nodiscard]] auto read_current(repository::ExactSourceReadRequest request,
+                                  std::stop_token stop) const
+      -> std::expected<repository::ExactSourceReadResult,
+                       repository::ExactSourceEditError> {
+    if (!m_baseline || request.baseline.root != m_baseline->root ||
+        !verify_root())
+      return root_read_failure();
+    auto result = m_exact_source.read_pinned(std::move(request),
+                                             m_descriptor.get(), stop);
+    if (!verify_root()) return root_read_failure();
+    return result;
+  }
+
+  [[nodiscard]] auto discover_current(
+      GitProjectInstructionSource& source,
+      repository::ProjectInstructionRequest request, std::stop_token stop) const
+      -> std::expected<domain::ProjectInstructionDiscovery,
+                       repository::ProjectInstructionError> {
+    if (!m_baseline || request.baseline.root != m_baseline->root ||
+        !coupled_instructions(source) || !verify_root())
+      return std::unexpected(repository::ProjectInstructionError{
+          repository::ProjectInstructionErrorCode::unstable,
+          "pinned repository root changed or is unavailable",
+          {},
+          true});
+    auto result =
+        source.discover_pinned(std::move(request), m_descriptor.get(), stop);
+    if (!verify_root())
+      return std::unexpected(repository::ProjectInstructionError{
+          repository::ProjectInstructionErrorCode::unstable,
+          "pinned repository root changed or is unavailable",
+          {},
+          true});
+    return result;
+  }
+
  private:
   [[nodiscard]] static auto root_read_failure()
       -> std::unexpected<repository::ExactSourceEditError> {
@@ -450,6 +510,68 @@ class PinnedRepositoryRootAuthority final
   std::optional<domain::RepositorySnapshot> m_baseline;
 };
 
+class PinnedRepositoryContextSource final
+    : public runtime::RepositoryContextSource {
+ public:
+  PinnedRepositoryContextSource(
+      std::shared_ptr<const PinnedRepositoryRootAuthority> root,
+      GitProjectInstructionSource& instructions)
+      : m_root(std::move(root)), m_instructions(instructions) {}
+  [[nodiscard]] auto identity() const noexcept -> std::string_view override {
+    return m_root->identity();
+  }
+  [[nodiscard]] auto guarantees_pinned_read_only_sources() const noexcept
+      -> bool override {
+    return m_root->coupled_instructions(m_instructions);
+  }
+  [[nodiscard]] auto observe(repository::RepositorySnapshotLimits limits,
+                             std::stop_token stop)
+      -> std::expected<domain::RepositorySnapshot,
+                       repository::RepositorySnapshotError> override {
+    try {
+      return m_root->observe_current(limits, stop);
+    } catch (...) {
+      return std::unexpected(repository::RepositorySnapshotError{
+          repository::RepositorySnapshotErrorCode::internal_failure,
+          "repository context observation failed internally"});
+    }
+  }
+  [[nodiscard]] auto discover(repository::ProjectInstructionRequest request,
+                              std::stop_token stop)
+      -> std::expected<domain::ProjectInstructionDiscovery,
+                       repository::ProjectInstructionError> override {
+    try {
+      return m_root->discover_current(m_instructions, std::move(request), stop);
+    } catch (...) {
+      return std::unexpected(repository::ProjectInstructionError{
+          repository::ProjectInstructionErrorCode::internal_failure,
+          "repository context discovery failed internally",
+          {},
+          false});
+    }
+  }
+  [[nodiscard]] auto read(repository::ExactSourceReadRequest request,
+                          std::stop_token stop)
+      -> std::expected<repository::ExactSourceReadResult,
+                       repository::ExactSourceEditError> override {
+    try {
+      return m_root->read_current(std::move(request), stop);
+    } catch (...) {
+      return std::unexpected(repository::ExactSourceEditError{
+          repository::ExactSourceEditErrorCode::internal_failure,
+          "repository context read failed internally",
+          {},
+          {},
+          false,
+          false});
+    }
+  }
+
+ private:
+  std::shared_ptr<const PinnedRepositoryRootAuthority> m_root;
+  GitProjectInstructionSource& m_instructions;
+};
+
 } // namespace
 
 auto open_pinned_repository_root_authority(
@@ -490,6 +612,26 @@ auto open_pinned_repository_root_authority(
   } catch (...) {
     return failure(ErrorCode::internal_failure,
                    "repository approval root pinning failed internally");
+  }
+}
+
+auto make_pinned_repository_context_source(
+    std::shared_ptr<const runtime::PinnedRepositoryReadAuthority> authority,
+    GitProjectInstructionSource& instructions)
+    -> std::expected<std::shared_ptr<runtime::RepositoryContextSource>, Error> {
+  try {
+    auto root = std::dynamic_pointer_cast<const PinnedRepositoryRootAuthority>(
+        std::move(authority));
+    if (!root || !root->coupled_instructions(instructions))
+      return failure(ErrorCode::invalid_configuration,
+                     "repository context sources are not coupled to the pinned "
+                     "read-only root");
+    return std::shared_ptr<runtime::RepositoryContextSource>{
+        std::make_shared<PinnedRepositoryContextSource>(std::move(root),
+                                                        instructions)};
+  } catch (...) {
+    return failure(ErrorCode::internal_failure,
+                   "repository context source creation failed internally");
   }
 }
 

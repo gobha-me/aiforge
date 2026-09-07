@@ -10,6 +10,7 @@
 
 #include <aiforge/domain/project_instructions.hpp>
 #include <aiforge/domain/repository.hpp>
+#include <aiforge/repository/snapshot_source.hpp>
 
 namespace aiforge::repository {
 
@@ -59,6 +60,14 @@ struct ProjectInstructionError {
 class ProjectInstructionSource {
  public:
   virtual ~ProjectInstructionSource() = default;
+  [[nodiscard]] virtual auto guarantees_read_only_discovery() const noexcept
+      -> bool {
+    return false;
+  }
+  [[nodiscard]] virtual auto is_coupled_to(
+      const RepositorySnapshotSource&) const noexcept -> bool {
+    return false;
+  }
 
   [[nodiscard]] virtual auto discover(ProjectInstructionRequest request,
                                       std::stop_token stop_token = {})

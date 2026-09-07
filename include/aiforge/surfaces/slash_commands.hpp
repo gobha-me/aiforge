@@ -53,6 +53,14 @@ enum class SlashCommandAction {
   show_plan,
   show_tasks,
   manage_memory,
+  show_dev,
+  retry_dev_context,
+  select_dev_target,
+  disable_dev,
+  show_context,
+  add_context_evidence,
+  remove_context_evidence,
+  clear_context_evidence,
 };
 
 struct SlashCommandResult {

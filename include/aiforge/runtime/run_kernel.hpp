@@ -82,6 +82,13 @@ struct RecoverableRun {
     const domain::SessionEventLog& event_log)
     -> std::expected<std::optional<RecoverableRun>, RunKernelError>;
 
+// Inspects only durable facts. A malformed/missing Dev admission is reported
+// separately so a surface can preserve history inspection and cancellation.
+[[nodiscard]] auto recorded_repository_context_admission(
+    const domain::SessionEventLog& event_log, const domain::RunId& run_id)
+    -> std::expected<std::optional<domain::RepositoryContextAdmission>,
+                     RunKernelError>;
+
 struct ToolApprovalPresentationLimits {
   std::size_t maximum_tool_name_bytes{256};
   std::size_t maximum_effects{16};
@@ -130,6 +137,7 @@ struct RunStart {
   // or inference identity. The kernel records the create/reference facts in
   // the same durable transaction as run start.
   std::vector<domain::ArtifactMetadata> imported_artifacts{};
+  std::optional<domain::RepositoryContextAdmission> repository_admission{};
   auto operator==(const RunStart&) const -> bool = default;
 };
 
@@ -356,6 +364,8 @@ class RunKernel final {
   [[nodiscard]] auto continue_run(
       const domain::RunId& run_id, backend::BackendRequest request,
       std::optional<domain::PricingObservation> pricing_observation =
+          std::nullopt,
+      std::optional<domain::RepositoryContextAdmission> repository_admission =
           std::nullopt) -> std::expected<void, RunKernelError>;
 
   // Drain worker observations and apply their run events on the calling

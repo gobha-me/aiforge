@@ -431,6 +431,63 @@ using ToolTargetValidator = auto (*)(std::string_view) -> bool;
       arguments.empty() ? std::nullopt : std::optional<std::string>{arguments}};
 }
 
+[[nodiscard]] auto inspection_available(const SlashCommandContext&) -> bool {
+  return true;
+}
+
+[[nodiscard]] auto repository_context_handler(
+    std::string_view arguments, const SlashCommandContext& context,
+    const bool dev) -> std::expected<SlashCommandResult, SlashCommandError> {
+  arguments = trim_arguments(arguments);
+  if (arguments.empty())
+    return SlashCommandResult{dev ? SlashCommandAction::show_dev
+                                  : SlashCommandAction::show_context,
+                              std::nullopt};
+  if (dev && arguments == "retry")
+    return SlashCommandResult{SlashCommandAction::retry_dev_context,
+                              std::nullopt};
+  if (context.run_active)
+    return command_error(
+        SlashCommandErrorCode::unavailable_command,
+        "Repository selection changes require an idle session");
+  const auto action = take_argument(arguments);
+  if ((dev && action == "off") || (!dev && action == "clear")) {
+    return no_arguments(arguments,
+                        dev ? SlashCommandAction::disable_dev
+                            : SlashCommandAction::clear_context_evidence);
+  }
+  if (arguments.empty())
+    return command_error(SlashCommandErrorCode::invalid_arguments,
+                         "Repository command requires an argument");
+  {
+    if (dev && action == "target")
+      return SlashCommandResult{SlashCommandAction::select_dev_target,
+                                std::string{arguments}};
+    if (!dev && action == "add")
+      return SlashCommandResult{SlashCommandAction::add_context_evidence,
+                                std::string{arguments}};
+    if (!dev && action == "remove" &&
+        arguments.find_first_of(" \t") == std::string_view::npos)
+      return SlashCommandResult{SlashCommandAction::remove_context_evidence,
+                                std::string{arguments}};
+  }
+  return command_error(
+      SlashCommandErrorCode::invalid_arguments,
+      dev ? "Use /dev [target <subtree> | off | retry]"
+          : "Use /context [add <path> | remove <selection-id> | clear]");
+}
+
+[[nodiscard]] auto dev_handler(std::string_view arguments,
+                               const SlashCommandContext& context)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  return repository_context_handler(arguments, context, true);
+}
+[[nodiscard]] auto context_handler(std::string_view arguments,
+                                   const SlashCommandContext& context)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  return repository_context_handler(arguments, context, false);
+}
+
 [[nodiscard]] auto builtin_specs() -> std::vector<SlashCommandSpec> {
   return {
       {"help", "help", "[command]", "Show available slash commands.",
@@ -479,6 +536,12 @@ using ToolTargetValidator = auto (*)(std::string_view) -> bool;
        "accept|edit|reject|expire|accept-all|reject-all ...]",
        "Inspect and manage proposed, saved, and historical memory.",
        idle_available, memory_handler},
+      {"dev", "dev", "[target <subtree> | off | retry]",
+       "Inspect Dev context or select its directory for future runs.",
+       inspection_available, dev_handler},
+      {"context", "context", "[add <path> | remove <selection-id> | clear]",
+       "Inspect or select exact repository evidence for future runs.",
+       inspection_available, context_handler},
   };
 }
 

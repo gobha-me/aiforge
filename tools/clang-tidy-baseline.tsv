@@ -338,7 +338,6 @@ src/lib/review_receipt.cpp	readability-implicit-bool-conversion	931f541ab28b5159
 src/lib/run_kernel.cpp	bugprone-empty-catch	117003ae82267c76a50e	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-empty-catch	4845d7502acb85565c5e	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-empty-catch	4de7fc5ab4243f6558b4	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
-src/lib/run_kernel.cpp	bugprone-empty-catch	55bb095f09cee5c1c8af	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-empty-catch	b7793445ee89c997204d	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-empty-catch	b84fc3739cee09bebc71	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	0b5338e47fbcca98791d	unchecked access to optional value
@@ -352,7 +351,6 @@ src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	476b058506525184a3ee	u
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	49df6ded2928a44210e2	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	4aa47b64507dbe92ff31	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	569a24a14226ea70c72d	unchecked access to optional value
-src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	6fcbf1404c69f900108f	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	75d754ebea4decf8f016	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8634384da1ead018866e	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8c1e43403bdfb3c78a3f	unchecked access to optional value
@@ -374,7 +372,6 @@ src/lib/run_kernel.cpp	readability-function-cognitive-complexity	3a7e9f2435eb44b
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	3d85f609b90077c24657	function 'cancel_run' has cognitive complexity of 49 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	87a60ae0ea874695253e	function 'valid_question_answers' has cognitive complexity of 27 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	8bcc548cf36e891cfb4b	function 'process_child_result' has cognitive complexity of 25 (threshold 20)
-src/lib/run_kernel.cpp	readability-function-cognitive-complexity	9783d0140f61cd2e8374	function 'decide_approval' has cognitive complexity of 35 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	9d500c9fef0ef4da1dfa	function 'decide_plan' has cognitive complexity of 36 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	bb99b5aae5f74e09593f	function 'continue_run' has cognitive complexity of 22 (threshold 20)
 src/lib/run_kernel.cpp	readability-implicit-bool-conversion	3fa0b8b0af4af3d82b9b	implicit conversion 'const aiforge::domain::ReviewReceiptDrafted *' -> 'bool'

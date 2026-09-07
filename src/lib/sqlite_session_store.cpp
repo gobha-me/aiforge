@@ -3143,6 +3143,9 @@ auto parse_v2_tool_policy_fields(const Json& value,
   return std::visit(
       Overloaded{
           [](const domain::RunStarted&) { return std::string{"run.started"}; },
+          [](const domain::RepositoryContextAdmitted&) {
+            return std::string{"run.repository_context_admitted"};
+          },
           [](const domain::RunProvenanceRecorded&) {
             return std::string{"run.provenance_recorded"};
           },
@@ -3377,11 +3380,12 @@ auto parse_v2_tool_policy_fields(const Json& value,
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 79,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 80,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started",
       "run.provenance_recorded",
+      "run.repository_context_admitted",
       "persona.selection_recorded",
       "session.spend_ceiling_set",
       "run.awaiting_input",
@@ -3518,6 +3522,140 @@ auto parse_v2_tool_policy_fields(const Json& value,
   return selection;
 }
 
+[[nodiscard]] auto repository_decision_name(
+    const domain::RepositoryContextDecision decision) -> std::string_view {
+  switch (decision) {
+    case domain::RepositoryContextDecision::admitted: return "admitted";
+    case domain::RepositoryContextDecision::omitted_budget:
+      return "omitted_budget";
+    case domain::RepositoryContextDecision::omitted_class_budget:
+      return "omitted_class_budget";
+  }
+  throw CodecFailure{"invalid repository context decision"};
+}
+
+[[nodiscard]] auto parse_repository_decision(const Json& value)
+    -> domain::RepositoryContextDecision {
+  if (value == "admitted") return domain::RepositoryContextDecision::admitted;
+  if (value == "omitted_budget")
+    return domain::RepositoryContextDecision::omitted_budget;
+  if (value == "omitted_class_budget")
+    return domain::RepositoryContextDecision::omitted_class_budget;
+  throw CodecFailure{"invalid repository context decision"};
+}
+
+[[nodiscard]] auto repository_admission_json(
+    const domain::RepositoryContextAdmission& admission) -> Json {
+  if (!domain::validate_repository_context_admission(admission) ||
+      !admission.admission_digest)
+    throw CodecFailure{"invalid repository context admission"};
+  auto instructions = Json::array();
+  for (const auto& item : admission.instructions) {
+    instructions.push_back({{"instruction_id", id_text(item.instruction_id)},
+                            {"source", source_json(item.source)},
+                            {"applicable_subtree", item.applicable_subtree},
+                            {"specificity", item.specificity},
+                            {"order", item.order},
+                            {"estimated_tokens", item.estimated_tokens},
+                            {"text_digest", digest_json(item.text_digest)}});
+  }
+  auto evidence = Json::array();
+  for (const auto& item : admission.evidence) {
+    evidence.push_back({{"evidence_id", id_text(item.evidence_id)},
+                        {"entry_id", id_text(item.entry_id)},
+                        {"message_id", id_text(item.message_id)},
+                        {"source_id", id_text(item.source_id)},
+                        {"source", source_json(item.source)},
+                        {"order", item.order},
+                        {"estimated_tokens", item.estimated_tokens},
+                        {"decision", repository_decision_name(item.decision)},
+                        {"text_digest", digest_json(item.text_digest)}});
+  }
+  return {
+      {"version", admission.version},
+      {"root_binding", admission.root_binding},
+      {"source_snapshot", snapshot_json(admission.source_snapshot)},
+      {"target_subtree", admission.target_subtree},
+      {"selection_revision", admission.selection_revision},
+      {"capacity",
+       {{"context_window_tokens", admission.capacity.context_window_tokens},
+        {"reserved_output_tokens", admission.capacity.reserved_output_tokens},
+        {"reserved_input_tokens", admission.capacity.reserved_input_tokens}}},
+      {"instructions", std::move(instructions)},
+      {"evidence", std::move(evidence)},
+      {"admission_digest", digest_json(*admission.admission_digest)}};
+}
+
+auto validate_repository_json_shape(const Json& value, std::size_t remaining)
+    -> void {
+  std::vector<std::pair<const Json*, unsigned>> pending{{&value, 0U}};
+  while (!pending.empty()) {
+    const auto [item, depth] = pending.back();
+    pending.pop_back();
+    if (remaining == 0 || depth > 12 ||
+        (item->is_number() && !item->is_number_unsigned()))
+      throw CodecFailure{"repository context metadata exceeds shape bounds"};
+    --remaining;
+    if (!item->is_object() && !item->is_array()) continue;
+    // Charge all queued children before growing the explicit traversal stack.
+    if (item->size() > remaining - pending.size())
+      throw CodecFailure{"repository context metadata exceeds shape bounds"};
+    for (const auto& child : *item)
+      pending.emplace_back(&child, depth + 1);
+  }
+}
+
+[[nodiscard]] auto parse_repository_admission(const Json& value)
+    -> domain::RepositoryContextAdmission {
+  std::size_t remaining = 16384;
+  validate_repository_json_shape(value, remaining);
+  const auto& instructions = value.at("instructions");
+  const auto& evidence = value.at("evidence");
+  if (!instructions.is_array() || !evidence.is_array() ||
+      instructions.size() > domain::repository_context_maximum_instructions ||
+      evidence.size() > domain::repository_context_maximum_evidence)
+    throw CodecFailure{"repository context reference count exceeds limits"};
+  const auto& capacity = value.at("capacity");
+  domain::RepositoryContextAdmission result{
+      value.at("version").get<std::uint32_t>(),
+      value.at("root_binding").get<std::string>(),
+      parse_snapshot(value.at("source_snapshot")),
+      value.at("target_subtree").get<std::string>(),
+      value.at("selection_revision").get<std::uint64_t>(),
+      {capacity.at("context_window_tokens").get<std::uint64_t>(),
+       capacity.at("reserved_output_tokens").get<std::uint64_t>(),
+       capacity.at("reserved_input_tokens").get<std::uint64_t>()},
+      {},
+      {},
+      parse_digest(value.at("admission_digest"))};
+  for (const auto& item : instructions) {
+    result.instructions.push_back(
+        {parse_id<domain::ProjectInstructionId>(item.at("instruction_id")),
+         parse_source(item.at("source")),
+         item.at("applicable_subtree").get<std::string>(),
+         item.at("specificity").get<std::uint32_t>(),
+         item.at("order").get<std::uint64_t>(),
+         item.at("estimated_tokens").get<std::uint64_t>(),
+         parse_digest(item.at("text_digest"))});
+  }
+  for (const auto& item : evidence) {
+    result.evidence.push_back(
+        {parse_id<domain::EvidenceId>(item.at("evidence_id")),
+         parse_id<domain::ContextEntryId>(item.at("entry_id")),
+         parse_id<domain::MessageId>(item.at("message_id")),
+         parse_id<domain::ContextSourceId>(item.at("source_id")),
+         parse_source(item.at("source")), item.at("order").get<std::uint64_t>(),
+         item.at("estimated_tokens").get<std::uint64_t>(),
+         parse_repository_decision(item.at("decision")),
+         parse_digest(item.at("text_digest"))});
+  }
+  // The canonical writer also validates the seal. Reject additional fields and
+  // numeric coercion rather than silently accepting another representation.
+  if (repository_admission_json(result) != value)
+    throw CodecFailure{"noncanonical repository context admission"};
+  return result;
+}
+
 [[nodiscard]] auto known_payload_schema(const std::string_view type,
                                         const std::uint32_t schema_version)
     -> bool {
@@ -3550,6 +3688,10 @@ auto parse_v2_tool_policy_fields(const Json& value,
               result["memory_selection"] =
                   memory_selection_json(*value.memory_selection);
             return result;
+          },
+          [](const domain::RepositoryContextAdmitted& value) -> Json {
+            return {{"inference_id", id_text(value.inference_id)},
+                    {"admission", repository_admission_json(value.admission)}};
           },
           [](const domain::RunProvenanceRecorded& value) -> Json {
             return {{"provenance", run_provenance_json(value.provenance)}};
@@ -3996,6 +4138,13 @@ auto parse_v2_tool_policy_fields(const Json& value,
             ? std::optional<domain::MemorySelection>{parse_memory_selection(
                   value.at("memory_selection"))}
             : std::nullopt};
+  }
+  if (type == "run.repository_context_admitted") {
+    if (!value.is_object() || value.size() != 2)
+      throw CodecFailure{"invalid repository admission envelope"};
+    return domain::RepositoryContextAdmitted{
+        parse_id<domain::InferenceId>(value.at("inference_id")),
+        parse_repository_admission(value.at("admission"))};
   }
   if (type == "run.provenance_recorded") {
     return domain::RunProvenanceRecorded{

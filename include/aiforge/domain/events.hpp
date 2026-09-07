@@ -11,6 +11,7 @@
 #include <aiforge/domain/pricing.hpp>
 #include <aiforge/domain/project_backlog.hpp>
 #include <aiforge/domain/provenance.hpp>
+#include <aiforge/domain/repository_context.hpp>
 #include <aiforge/domain/review_receipt.hpp>
 #include <aiforge/domain/tool_spend.hpp>
 #include <aiforge/domain/verification_evidence.hpp>
@@ -120,6 +121,14 @@ struct InferenceStarted {
   InferenceId inference_id;
   ModelId model_id;
   auto operator==(const InferenceStarted&) const -> bool = default;
+};
+
+// Exact source admission for the immediately following inference. Its seal
+// checks metadata integrity; current filesystem validation belongs to runtime.
+struct RepositoryContextAdmitted {
+  InferenceId inference_id;
+  RepositoryContextAdmission admission;
+  auto operator==(const RepositoryContextAdmitted&) const -> bool = default;
 };
 
 struct InferencePricingObserved {
@@ -576,8 +585,8 @@ using RunEventPayload = std::variant<
     RunCompletionRequested, RunCompleted, RunFailed, RunCancelRequested,
     RunCancelled, UserContentAdded, AssistantContentStarted,
     AssistantContentDeltaAdded, AssistantContentFinished, InferenceStarted,
-    InferencePricingObserved, ReasoningMetadataAdded, UsageRecorded,
-    InferenceCostRecorded, InferenceFinished, InferenceFailed,
+    RepositoryContextAdmitted, InferencePricingObserved, ReasoningMetadataAdded,
+    UsageRecorded, InferenceCostRecorded, InferenceFinished, InferenceFailed,
     InferenceCancelled, ToolProposed, ToolPolicyDecided, ToolApprovalRequested,
     ToolApprovalDecided, ToolPolicyFailed, ToolSpendReserved, ToolStarted,
     ToolProgressed, ToolSpendReleased, ToolSpendFinalized,

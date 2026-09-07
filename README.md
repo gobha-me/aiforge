@@ -1008,7 +1008,43 @@ rebuilds the receipt without redispatching a reviewer. This is a neutral runtime
 boundary with a deterministic fake; selecting a production reviewer executor or
 surface remains separate work.
 
-## Project instruction discovery
+## Dev repository context
+
+Interactive Chat can select a repository and a task subtree explicitly:
+
+```bash
+aiforge --repository /path/to/repository --target src
+```
+
+`--repository` binds the repository for this application launch and starts Dev
+context; its default target is the repository root. `--target` can also select
+a subtree of the observed launch repository. With neither option, ordinary Chat
+remains the default. Selecting Dev does not enable a tool profile or grant
+process or write permission; `/tools profile dev` remains a separate choice.
+
+Use `/dev` to inspect the target and `/dev target <relative-directory>` to
+change it while idle. `/context add <relative-file>` selects exact tracked
+regular UTF-8 source. `/context` shows selected paths, source identities and
+inclusion or omission; `/context remove <selection-id>` and `/context clear`
+change the selection. `/dev off` disables Dev context for future runs. Changing
+repository roots requires a new application launch.
+
+Preparation is cancellable and runs outside the UI thread. Failed or stale
+preparation preserves the previous selection and draft. Selected evidence is
+bounded to 64 files, 256 KiB per file and 2 MiB total; empty files currently
+report that exact inline evidence is unavailable. Project instructions are
+mandatory context, while optional evidence can be omitted with a visible budget
+reason. Saved memory is selected after accounting for mandatory instructions.
+
+Each Dev inference records an exact repository context admission. Unrelated
+repository changes allow continuation only after the original selected source
+bytes and applicable instruction chain have been revalidated. Changed selected
+files or instructions block new continuation and approvals; completed tool
+results and usage still drain. Restore the exact sources and use `/dev retry`
+to revalidate, or cancel the run and start a new one with current inputs. Retry
+does not answer a pending question or approve a tool. Recovery restores the
+recorded inputs rather than the current UI selection, and pure replay performs
+no source reads or tool calls. See [ADR 0021](docs/adr/0021-dev-repository-context.md).
 
 `aiforge::repository::ProjectInstructionSource` discovers bounded `AGENTS.md`
 documents from the repository root toward a selected target subtree while
@@ -1020,8 +1056,10 @@ scripted source supports deterministic callers.
 The runtime handoff admits these documents only through the accepted project
 instruction layer and requires both a current matching repository snapshot and
 explicit target-model token estimates. Project text does not grant capabilities
-or replace runtime-owned policy. Surface integration remains deferred until the
-Code workspace has an explicit target-selection flow.
+or replace runtime-owned policy. Production Dev context uses the same pinned
+repository root for discovery and exact evidence reads. It checks the complete
+instruction chain again after evidence reads, including instructions ignored by
+Git; a Git status fingerprint alone cannot establish their freshness.
 
 The default toolchain respects `CXX`. Sanitizer toolchains are opt-in:
 

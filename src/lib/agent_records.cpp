@@ -109,6 +109,18 @@ class Record final {
   auto optional_text(const std::optional<std::string>& value) -> Json {
     return value ? text(*value) : Json(nullptr);
   }
+  auto digest(const domain::ContentDigest& value) -> Json {
+    return {{"algorithm", text(value.algorithm)},
+            {"value", text(value.value)},
+            {"bytes", value.byte_size}};
+  }
+  auto repository_source(const domain::RepositorySourceIdentity& value)
+      -> Json {
+    return {{"repository_id", text(value.snapshot.repository_id.value())},
+            {"snapshot", digest(value.snapshot.fingerprint)},
+            {"relative_path", text(value.relative_path)},
+            {"content_digest", digest(value.content_digest)}};
+  }
   auto effects(const std::vector<domain::Effect>& values) -> Json {
     count(values.size());
     auto result = Json::array();
@@ -291,6 +303,65 @@ auto payload_json(const domain::InferenceStarted& value, Record& record)
   return {{"kind", "inference_started"},
           {"inference_id", record.text(value.inference_id.value())},
           {"model_id", record.text(value.model_id.value())}};
+}
+
+auto repository_decision_name(const domain::RepositoryContextDecision decision)
+    -> std::string_view {
+  switch (decision) {
+    case domain::RepositoryContextDecision::admitted: return "admitted";
+    case domain::RepositoryContextDecision::omitted_budget:
+      return "omitted_budget";
+    case domain::RepositoryContextDecision::omitted_class_budget:
+      return "omitted_class_budget";
+  }
+  throw RecordLimit{};
+}
+
+auto payload_json(const domain::RepositoryContextAdmitted& value,
+                  Record& record) -> Json {
+  const auto& admission = value.admission;
+  if (!domain::validate_repository_context_admission(admission) ||
+      !admission.admission_digest)
+    throw RecordLimit{};
+  record.count(admission.instructions.size());
+  record.count(admission.evidence.size());
+  auto instructions = Json::array();
+  for (const auto& item : admission.instructions) {
+    instructions.push_back(
+        {{"instruction_id", record.text(item.instruction_id.value())},
+         {"source", record.repository_source(item.source)},
+         {"applicable_subtree", record.text(item.applicable_subtree)},
+         {"specificity", item.specificity},
+         {"order", item.order},
+         {"estimated_tokens", item.estimated_tokens},
+         {"text_digest", record.digest(item.text_digest)}});
+  }
+  auto evidence = Json::array();
+  for (const auto& item : admission.evidence) {
+    evidence.push_back({{"evidence_id", record.text(item.evidence_id.value())},
+                        {"entry_id", record.text(item.entry_id.value())},
+                        {"message_id", record.text(item.message_id.value())},
+                        {"source_id", record.text(item.source_id.value())},
+                        {"source", record.repository_source(item.source)},
+                        {"order", item.order},
+                        {"estimated_tokens", item.estimated_tokens},
+                        {"decision", repository_decision_name(item.decision)},
+                        {"text_digest", record.digest(item.text_digest)}});
+  }
+  return {{"kind", "repository_context_admitted"},
+          {"inference_id", record.text(value.inference_id.value())},
+          {"version", admission.version},
+          {"repository_id",
+           record.text(admission.source_snapshot.repository_id.value())},
+          {"snapshot", record.digest(admission.source_snapshot.fingerprint)},
+          {"target_subtree", record.text(admission.target_subtree)},
+          {"selection_revision", admission.selection_revision},
+          {"context_window_tokens", admission.capacity.context_window_tokens},
+          {"reserved_output_tokens", admission.capacity.reserved_output_tokens},
+          {"reserved_input_tokens", admission.capacity.reserved_input_tokens},
+          {"instructions", std::move(instructions)},
+          {"evidence", std::move(evidence)},
+          {"admission_digest", record.digest(*admission.admission_digest)}};
 }
 
 auto payload_json(const domain::InferenceFinished& value, Record& record)
