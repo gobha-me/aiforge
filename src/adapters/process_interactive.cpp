@@ -3,6 +3,7 @@
 #include <aiforge/adapters/filesystem_persona_source.hpp>
 #include <aiforge/adapters/filesystem_user_global_instruction_source.hpp>
 #include <aiforge/adapters/git_exact_source_editor.hpp>
+#include <aiforge/adapters/git_project_instruction_source.hpp>
 #include <aiforge/adapters/image_tool.hpp>
 #include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
@@ -31,6 +32,7 @@
 #include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/runtime/memory_controller.hpp>
 #include <aiforge/runtime/memory_tool.hpp>
+#include <aiforge/runtime/repository_context_controller.hpp>
 #include <aiforge/runtime/repository_read_tool.hpp>
 #include <aiforge/runtime/tool_launch_policy.hpp>
 #include <aiforge/runtime/tool_profiles.hpp>
@@ -49,6 +51,7 @@
 #include <functional>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <ostream>
 #include <span>
@@ -59,6 +62,7 @@
 #include <termforge/widgets/detail/width.hpp>
 #include <termforge/widgets/focus_ring.hpp>
 #include <termforge/widgets/text_box.hpp>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <version.hpp>
@@ -893,7 +897,9 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_editor(editor), m_stop_token(stop_token),
         m_rendered_output(options.rendered_output),
         m_rendered_frame(std::move(options.rendered_frame)),
-        m_poll_worker_updates(options.poll_worker_updates) {
+        m_poll_worker_updates(options.poll_worker_updates),
+        m_repository_root_display(std::move(options.repository_root_display)),
+        m_repository_context_source(options.repository_context_source) {
     set_frame_ms(33);
     m_composer.set_max_height(8);
     m_focus.add(&m_composer);
@@ -946,6 +952,11 @@ class ChatAppImpl final : public InteractiveChatApp {
                    ? "Ready with persona " + persona.selected->name
                    : "Ready";
     sync_composer_focus();
+  }
+
+  ~ChatAppImpl() override {
+    m_repository_worker.request_stop();
+    if (m_repository_worker.joinable()) m_repository_worker.join();
   }
 
   [[nodiscard]] auto ready() const noexcept -> bool override {
@@ -1008,6 +1019,11 @@ class ChatAppImpl final : public InteractiveChatApp {
     return m_status;
   }
 
+  [[nodiscard]] auto repository_preparation_ready() const noexcept
+      -> bool override {
+    return m_repository_ready.load();
+  }
+
   [[nodiscard]] auto configure_terminal_for_scenario(
       const termforge::TerminalIo io,
       const termforge::Capabilities& capabilities)
@@ -1032,6 +1048,7 @@ class ChatAppImpl final : public InteractiveChatApp {
       return;
     }
     if (!apply_events(*drained)) return;
+    service_repository_work();
     show_recovery_block();
     if (ensure_tool_approval_dialog() && !m_tool_approval_dialog_active &&
         ensure_question_dialog() && !m_question_dialog_active) {
@@ -1044,6 +1061,17 @@ class ChatAppImpl final : public InteractiveChatApp {
   auto on_event(const termforge::Event& event) -> void override {
     // clang-format on
     if (!m_session) return;
+    if (cancel_repository_event(event)) return;
+    service_repository_work();
+    if (m_stop_token.stop_requested()) return;
+    if (const auto* key = std::get_if<termforge::KeyEvent>(&event);
+        key != nullptr && key->action == termforge::KeyAction::Press &&
+        key->ctrl && key->key == termforge::Key::Char && key->ch == U'g' &&
+        !modal()) {
+      show_repository_context(false);
+      return;
+    }
+
     if (m_question_dialog_active || m_tool_approval_dialog_active) {
       if (const auto* key = std::get_if<termforge::KeyEvent>(&event);
           key != nullptr && key->action == termforge::KeyAction::Press &&
@@ -1161,10 +1189,13 @@ class ChatAppImpl final : public InteractiveChatApp {
       }
     }
 
-    if (!m_session->active() && m_focus.handle_key(event)) return;
+    if ((!m_session->active() || m_session->blocked_recovery()) &&
+        m_focus.handle_key(event))
+      return;
     if (const auto* key = std::get_if<termforge::KeyEvent>(&event);
         key != nullptr && key->action == termforge::KeyAction::Press &&
-        key->key == termforge::Key::Enter && !m_session->active()) {
+        key->key == termforge::Key::Enter &&
+        (!m_session->active() || m_session->blocked_recovery())) {
       submit();
       return;
     }
@@ -1173,6 +1204,7 @@ class ChatAppImpl final : public InteractiveChatApp {
 
   auto on_tick(std::chrono::duration<double>) -> void override {
     if (!m_session) return;
+    service_repository_work();
     if (m_poll_worker_updates) {
       auto drained = m_session->drain();
       if (!drained) {
@@ -1181,6 +1213,7 @@ class ChatAppImpl final : public InteractiveChatApp {
       }
       if (!apply_events(*drained)) return;
     }
+    service_repository_work();
     show_recovery_block();
     if (!ensure_tool_approval_dialog()) return;
     if (!m_tool_approval_dialog_active && !ensure_question_dialog()) return;
@@ -1207,14 +1240,7 @@ class ChatAppImpl final : public InteractiveChatApp {
       m_composer.set_geometry({0, 0, columns, 1});
       m_composer.draw(screen);
       if (rows == 2) {
-        std::string footer =
-            m_session->active()
-                ? "Running — Esc/Ctrl+C cancel | Ctrl+D unavailable"
-            : m_help_visible
-                ? "Slash command help — Esc closes | Ctrl+D exits"
-                : "Enter submit | Tab | Ctrl+C clear | Ctrl+D exit | ^E "
-                  "editor | /help";
-        if (!m_status.empty()) footer += " | " + m_status;
+        const auto footer = chat_footer();
         screen.write_text(0, 1, footer, termforge::theme::kDim,
                           termforge::theme::kBg);
       }
@@ -1232,6 +1258,11 @@ class ChatAppImpl final : public InteractiveChatApp {
     } else if (persona.selected) {
       header += " | persona " + persona.selected->name;
     }
+    const auto repository_context = m_session->repository_context_state();
+    if (repository_context.enabled)
+      header += " | Dev " + (repository_context.target_subtree.empty()
+                                 ? std::string{"."}
+                                 : repository_context.target_subtree);
     header += " | " + usage_header_text(m_usage_ledger, m_tool_spend_ledger,
                                         m_spend_ceiling);
     screen.write_text(0, 0,
@@ -1252,18 +1283,198 @@ class ChatAppImpl final : public InteractiveChatApp {
     }
     m_composer.draw(screen);
 
-    std::string footer =
-        m_session->active() ? "Running — Esc/Ctrl+C cancel | Ctrl+D unavailable"
-        : m_help_visible    ? "Slash command help — Esc closes | Ctrl+D exits"
-                         : "Enter submit | Tab | Ctrl+C clear | Ctrl+D exit | "
-                           "^E editor | /help";
-    if (!m_status.empty()) footer += " | " + m_status;
+    const auto footer = chat_footer();
     screen.write_text(0, rows - 1, footer, termforge::theme::kDim,
                       termforge::theme::kBg);
     if (m_rendered_frame) m_rendered_frame(screen);
   }
 
  private:
+  [[nodiscard]] auto chat_footer() const -> std::string {
+    std::string footer =
+        m_session->active() ? "Running — Esc/Ctrl+C cancel | Ctrl+D unavailable"
+        : m_help_visible    ? "Slash command help — Esc closes | Ctrl+D exits"
+                         : "Enter submit | Tab | Ctrl+C clear | Ctrl+D exit | "
+                           "^E editor | /help";
+    if (!m_status.empty()) footer += " | " + m_status;
+    return footer;
+  }
+
+  static auto append_repository_admission(
+      std::vector<std::string>& lines,
+      const domain::RepositoryContextAdmission& admission) -> void {
+    lines.push_back(
+        "Repository: " +
+        std::string{admission.source_snapshot.repository_id.value()});
+    lines.push_back("Snapshot: " + admission.source_snapshot.fingerprint.value);
+    for (const auto& instruction : admission.instructions)
+      lines.push_back("Instruction: " + instruction.source.relative_path +
+                      " | " + instruction.source.content_digest.value);
+    for (const auto& evidence : admission.evidence) {
+      const auto decision =
+          evidence.decision == domain::RepositoryContextDecision::admitted
+              ? "admitted"
+          : evidence.decision ==
+                  domain::RepositoryContextDecision::omitted_budget
+              ? "omitted: input budget"
+              : "omitted: evidence budget";
+      lines.push_back(std::string{evidence.evidence_id.value()} + " | " +
+                      evidence.source.relative_path + " | " +
+                      evidence.source.content_digest.value + " | " + decision);
+    }
+  }
+
+  auto show_repository_context(const bool dev) -> void {
+    const auto state = m_session->repository_context_state();
+    std::vector<std::string> lines;
+    lines.push_back("Root: " + (m_repository_root_display.empty()
+                                    ? std::string{"unavailable"}
+                                    : m_repository_root_display));
+    lines.push_back(std::string{"Workspace: "} +
+                    (state.enabled ? "Dev" : "Chat"));
+    lines.push_back("Target: " + (state.target_subtree.empty()
+                                      ? std::string{"."}
+                                      : state.target_subtree));
+    lines.push_back("Selection revision: " +
+                    std::to_string(state.selection_revision));
+    if (!state.message.empty()) lines.push_back(state.message);
+    if (state.busy)
+      lines.push_back(
+          "Exact source preparation is in progress; Esc/Ctrl+C cancels.");
+    if (state.admission) append_repository_admission(lines, *state.admission);
+    if (state.evidence_paths.empty())
+      lines.push_back("No repository files selected.");
+    else
+      for (const auto& path : state.evidence_paths)
+        lines.push_back("Selected: " + path);
+    if (!state.available)
+      lines.push_back("Repository context is unavailable for this launch.");
+    lines.push_back(
+        "/dev target <subtree> | /dev off | /dev retry | /context add <path> | "
+        "remove <selection-id> | clear");
+    show_panel(dev ? "Dev repository context" : "Selected repository evidence",
+               std::move(lines),
+               "Inspection changes no authority or durable history; Ctrl+G "
+               "opens context");
+  }
+
+  auto change_repository_context(surfaces::ChatRepositoryChange change)
+      -> bool {
+    auto requested = m_session->request_repository_change(std::move(change));
+    if (!requested) {
+      m_status = requested.error().message;
+      return false;
+    }
+    if (m_session->pending_repository_work()) {
+      m_repository_draft = std::string{m_composer.text()};
+      m_status = "Preparing repository selection — Esc/Ctrl+C cancel";
+      service_repository_work();
+    } else {
+      m_composer.clear();
+      show_repository_context(true);
+    }
+    sync_composer_focus();
+    return true;
+  }
+
+  auto cancel_repository_event(const termforge::Event& event) -> bool {
+    if (!m_session->pending_repository_work()) return false;
+    const auto* key = std::get_if<termforge::KeyEvent>(&event);
+    if (key == nullptr || key->action != termforge::KeyAction::Press)
+      return false;
+    const bool interrupt =
+        key->ctrl && key->key == termforge::Key::Char && key->ch == U'c';
+    if (key->key != termforge::Key::Escape && !interrupt) return false;
+    m_repository_worker.request_stop();
+    auto cancelled = m_session->cancel_active("interrupt");
+    m_status = cancelled ? "Repository preparation cancelled"
+                         : cancelled.error().message;
+    m_repository_draft.reset();
+    sync_composer_focus();
+    return true;
+  }
+
+  auto commit_repository_completion(
+      surfaces::ChatRepositoryWorkCompletion completion) -> void {
+    auto result = m_session->complete_repository_work(std::move(completion));
+    if (!result)
+      m_status = result.error().message;
+    else if (apply_events(result->events)) {
+      if (result->submitted || result->selection_changed) {
+        if (m_repository_draft && m_composer.text() == *m_repository_draft)
+          m_composer.clear();
+        if (result->submitted) {
+          m_help_visible = false;
+          sync_history();
+          m_transcript.widget().scroll_to_bottom();
+          m_status = "Running";
+        } else
+          show_repository_context(true);
+      }
+    }
+    m_repository_draft.reset();
+    sync_composer_focus();
+  }
+
+  auto launch_repository_work(surfaces::ChatRepositoryWork work) -> void {
+    auto* controller = m_session_dependencies.repository_context_controller;
+    if (controller == nullptr) return;
+    m_repository_job = work.token;
+    m_repository_worker = std::jthread{[this, controller,
+                                        work = std::move(work)](
+                                           std::stop_token stop) mutable {
+      auto result = [&]() -> std::expected<runtime::PreparedRepositoryContext,
+                                           domain::RepositoryContextError> {
+        try {
+          if (const auto* request =
+                  std::get_if<runtime::RepositoryContextRequest>(&work.input))
+            return controller->prepare(*request, stop);
+          return controller->revalidate(
+              std::get<domain::RepositoryContextAdmission>(work.input), stop);
+        } catch (...) {
+          return std::unexpected(domain::RepositoryContextError{
+              domain::RepositoryContextErrorCode::internal_failure,
+              "Repository preparation failed internally"});
+        }
+      }();
+      const std::lock_guard lock{m_repository_mutex};
+      m_repository_completion.emplace(surfaces::ChatRepositoryWorkCompletion{
+          work.token, std::move(result)});
+      m_repository_ready.store(true);
+      // The regular UI tick consumes completion; no widget or application
+      // access is needed here.
+    }};
+  }
+
+  auto service_repository_work() -> void {
+    if (m_stop_token.stop_requested()) {
+      m_repository_worker.request_stop();
+      m_session->cancel_repository_work();
+    }
+    auto pending = m_session->pending_repository_work();
+    if (m_repository_worker.joinable() &&
+        (!pending || !m_repository_job || pending->token != *m_repository_job))
+      m_repository_worker.request_stop();
+    std::optional<surfaces::ChatRepositoryWorkCompletion> completion;
+    {
+      const std::lock_guard lock{m_repository_mutex};
+      completion = std::move(m_repository_completion);
+      m_repository_completion.reset();
+      m_repository_ready.store(false);
+    }
+    if (completion) {
+      if (m_repository_worker.joinable()) m_repository_worker.join();
+      m_repository_job.reset();
+      if (pending && pending->token == completion->token &&
+          !m_stop_token.stop_requested())
+        commit_repository_completion(std::move(*completion));
+      pending = m_session->pending_repository_work();
+    }
+    if (pending && !m_repository_worker.joinable() &&
+        !m_stop_token.stop_requested())
+      launch_repository_work(std::move(*pending));
+  }
+
   auto request_edit() -> void {
     m_pending_edit = true;
     sync_composer_focus();
@@ -1271,8 +1482,10 @@ class ChatAppImpl final : public InteractiveChatApp {
   }
 
   auto sync_composer_focus() -> void {
-    m_composer.set_focused(m_session != nullptr && !m_session->active() &&
-                           !modal() && !m_pending_edit);
+    m_composer.set_focused(
+        m_session != nullptr &&
+        (!m_session->active() || m_session->blocked_recovery()) && !modal() &&
+        !m_pending_edit);
   }
 
   auto push_modal(termforge::Widget& widget, termforge::OverlayOptions options)
@@ -1679,6 +1892,11 @@ class ChatAppImpl final : public InteractiveChatApp {
 
   [[nodiscard]] auto repository_snapshot()
       -> std::expected<domain::RepositorySnapshot, std::string> {
+    if (m_repository_context_source != nullptr) {
+      auto snapshot = m_repository_context_source->observe({}, m_stop_token);
+      if (!snapshot) return std::unexpected(snapshot.error().message);
+      return std::move(*snapshot);
+    }
     return observe_process_repository(m_stop_token);
   }
 
@@ -2227,6 +2445,8 @@ class ChatAppImpl final : public InteractiveChatApp {
       return false;
     }
 
+    m_repository_worker.request_stop();
+    m_repository_draft.reset();
     m_session = std::move(*candidate);
     m_request_setting_overrides = {};
     m_usage_ledger = std::move(*candidate_usage);
@@ -2509,6 +2729,43 @@ class ChatAppImpl final : public InteractiveChatApp {
                        : "Reasoning text hidden";
         return true;
       }
+      case surfaces::SlashCommandAction::retry_dev_context: {
+        auto requested = m_session->retry_repository_context();
+        if (!requested) {
+          m_status = requested.error().message;
+          return false;
+        }
+        m_composer.clear();
+        m_status = "Revalidating the recorded repository context";
+        service_repository_work();
+        return true;
+      }
+      case surfaces::SlashCommandAction::show_dev:
+        show_repository_context(true);
+        m_composer.clear();
+        return true;
+      case surfaces::SlashCommandAction::show_context:
+        show_repository_context(false);
+        m_composer.clear();
+        return true;
+      case surfaces::SlashCommandAction::select_dev_target:
+        return change_repository_context(
+            {surfaces::ChatRepositoryChangeKind::select_target,
+             command.subject.value_or("")});
+      case surfaces::SlashCommandAction::disable_dev:
+        return change_repository_context(
+            {surfaces::ChatRepositoryChangeKind::disable, {}});
+      case surfaces::SlashCommandAction::add_context_evidence:
+        return change_repository_context(
+            {surfaces::ChatRepositoryChangeKind::add_evidence,
+             command.subject.value_or("")});
+      case surfaces::SlashCommandAction::remove_context_evidence:
+        return change_repository_context(
+            {surfaces::ChatRepositoryChangeKind::remove_evidence,
+             command.subject.value_or("")});
+      case surfaces::SlashCommandAction::clear_context_evidence:
+        return change_repository_context(
+            {surfaces::ChatRepositoryChangeKind::clear_evidence, {}});
       case surfaces::SlashCommandAction::show_usage:
         show_usage();
         m_composer.clear();
@@ -2546,6 +2803,18 @@ class ChatAppImpl final : public InteractiveChatApp {
     }
     if (command->has_value()) {
       static_cast<void>(execute_command(**command));
+      return;
+    }
+    if (m_session->repository_context_state().enabled) {
+      auto requested = m_session->request_repository_submit(draft);
+      if (!requested) {
+        m_status = requested.error().message;
+        return;
+      }
+      m_repository_draft = draft;
+      m_status = "Preparing exact repository context — Esc/Ctrl+C cancel";
+      service_repository_work();
+      sync_composer_focus();
       return;
     }
     auto submitted = m_session->submit(draft);
@@ -4326,6 +4595,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   }
 
   auto ensure_tool_approval_dialog() -> bool {
+    if (m_session->pending_repository_work()) return true;
     if (m_session->blocked_recovery()) return true;
     if (m_tool_approval_dialog_active) return true;
     const auto pending = m_session->pending_tool_approval();
@@ -4389,6 +4659,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   }
 
   auto ensure_question_dialog() -> bool {
+    if (m_session->pending_repository_work()) return true;
     if (m_session->blocked_recovery()) return true;
     if (m_question_dialog_active) return true;
     const auto pending = m_session->pending_question_input();
@@ -4511,6 +4782,14 @@ class ChatAppImpl final : public InteractiveChatApp {
   termforge::Composer m_composer;
   termforge::FocusRing m_focus;
   std::unique_ptr<surfaces::ChatSession> m_session;
+  std::string m_repository_root_display;
+  runtime::RepositoryContextSource* m_repository_context_source{};
+  std::optional<std::string> m_repository_draft;
+  std::optional<surfaces::ChatRepositoryWorkToken> m_repository_job;
+  std::atomic<bool> m_repository_ready{};
+  std::mutex m_repository_mutex;
+  std::optional<surfaces::ChatRepositoryWorkCompletion> m_repository_completion;
+  std::jthread m_repository_worker;
   std::optional<cli::CommandFailure> m_setup_error;
   std::optional<cli::CommandFailure> m_failure;
   std::string m_status;
@@ -4939,16 +5218,27 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
     std::optional<domain::RepositorySnapshot> repository_snapshot;
     auto observed_repository =
         [&]() -> std::expected<domain::RepositorySnapshot, std::string> {
-      if (agent == nullptr || !agent->repository)
+      if (agent != nullptr && !agent->repository)
         return observe_process_repository(environment.stop_token);
-      auto source = open_process_repository_source();
+      auto source = open_process_repository_source(
+          agent == nullptr ? GitCommandPolicy::isolated_read_only
+                           : GitCommandPolicy::standard);
       if (!source) return std::unexpected(std::move(source.error()));
+      std::error_code path_error;
+      const auto selected_root =
+          agent != nullptr ? agent->repository : request.repository;
+      auto root = selected_root ? std::filesystem::path{*selected_root}
+                                : std::filesystem::current_path(path_error);
+      if (path_error)
+        return std::unexpected("Current repository path is unavailable");
       auto snapshot =
-          source->observe({*agent->repository, {}}, environment.stop_token);
+          source->observe({root.string(), {}}, environment.stop_token);
       if (!snapshot) return std::unexpected(snapshot.error().message);
       return std::move(*snapshot);
     }();
-    if (agent != nullptr && agent->repository && !observed_repository)
+    if (((agent != nullptr && agent->repository) || request.repository ||
+         request.target) &&
+        !observed_repository)
       return failure(cli::CommandFailureKind::runtime,
                      observed_repository.error());
     if (auto& snapshot = observed_repository; snapshot) {
@@ -4966,6 +5256,10 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
             });
     std::optional<GitRepositorySnapshotSource> repository_source;
     std::optional<GitExactSourceEditor> repository_editor;
+    std::optional<GitProjectInstructionSource> project_instruction_source;
+    std::shared_ptr<runtime::RepositoryContextSource> repository_context_source;
+    std::unique_ptr<runtime::RepositoryContextController>
+        repository_context_controller;
     std::unique_ptr<runtime::MemoryController> memory_controller;
     runtime::ToolRegistry tool_registry;
     runtime::ToolRegistrySnapshot tools;
@@ -5007,7 +5301,7 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
         repository_editor.emplace(
             *repository_source,
             GitExactSourceReadPolicy::tracked_regular_files);
-        if (needs_repository_root) {
+        if (needs_repository_root || agent == nullptr) {
           auto pinned = open_pinned_repository_root_authority(
               repository_snapshot->root.canonical_path, *repository_source,
               *repository_editor);
@@ -5028,16 +5322,32 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
           repository_snapshot = pinned_baseline;
           repository_id = pinned_baseline.root.repository_id;
         }
+        if (agent == nullptr && repository_read_root) {
+          project_instruction_source.emplace(*repository_source);
+          auto context_source = make_pinned_repository_context_source(
+              repository_read_root, *project_instruction_source);
+          if (!context_source)
+            return failure(cli::CommandFailureKind::runtime,
+                           context_source.error().message);
+          repository_context_source = std::move(*context_source);
+          repository_context_controller =
+              std::make_unique<runtime::RepositoryContextController>(
+                  *repository_context_source, repository_snapshot->root);
+        }
         if (auto registered = runtime::register_repository_read_tool(
                 tool_registry, *repository_source, *repository_editor,
                 {repository_snapshot->root.canonical_path},
-                repository_read_root);
+                needs_repository_root ? repository_read_root : nullptr);
             !registered) {
           return failure(cli::CommandFailureKind::runtime,
                          registered.error().message);
         }
       }
     }
+    if ((request.repository || request.target) &&
+        !repository_context_controller)
+      return failure(cli::CommandFailureKind::runtime,
+                     "Dev context requires an available Git repository root");
     if (needs_repository_root && !repository_read_root) {
       return failure(cli::CommandFailureKind::runtime,
                      "automatic approval repository root is unavailable");
@@ -5272,6 +5582,17 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
         memory_controller.get();
     app_options.session_dependencies.memory_settings = *memory_settings;
     app_options.session_dependencies.repository_id = repository_id;
+    app_options.repository_root_display =
+        repository_snapshot ? repository_snapshot->root.canonical_path
+                            : std::string{};
+    app_options.repository_context_source = repository_context_source.get();
+    app_options.session_dependencies.repository_context_controller =
+        repository_context_controller.get();
+    app_options.session_dependencies.async_repository_preparation = true;
+    if (request.repository || request.target)
+      app_options.session_dependencies.repository_context_selection =
+          runtime::RepositoryContextRequest{
+              request.target.value_or("."), 1, {}};
     app_options.session_dependencies.runtime_version = runtime_version();
     auto app = make_interactive_chat_app(
         *backend, (*catalog)->service(), store.get(), std::move(open), editor,

@@ -46,6 +46,8 @@ add_library(${PROJECT_NAME}_lib STATIC
   presentation_video.cpp
   project_instructions.cpp
   provenance.cpp
+  repository_context.cpp
+  repository_context_controller.cpp
   repository_knowledge.cpp
   repository_read_tool.cpp
   repository_snapshot.cpp

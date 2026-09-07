@@ -2172,336 +2172,472 @@ auto GitExactSourceEditor::apply(repository::ExactSourceEditRequest request,
   }
 }
 
+namespace {
+[[nodiscard]] auto validate_pinned_instruction_target(
+    const int root_descriptor, const std::string& subtree)
+    -> std::expected<void, repository::ProjectInstructionError> {
+#ifndef _WIN32
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX lease dup.
+  int current = ::fcntl(root_descriptor, F_DUPFD_CLOEXEC, 0);
+  if (current < 0)
+    return project_failure(repository::ProjectInstructionErrorCode::io_failure,
+                           "pinned instruction root is unavailable");
+  for (const auto& part : std::filesystem::path{subtree}) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX openat.
+    const int next = ::openat(current, part.c_str(),
+                              O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
+    static_cast<void>(::close(current));
+    if (next < 0)
+      return project_failure(
+          repository::ProjectInstructionErrorCode::outside_repository,
+          "instruction target is unavailable or traverses a symbolic link",
+          subtree);
+    current = next;
+    struct stat marker{};
+    const int inspected =
+        ::fstatat(current, ".git", &marker, AT_SYMLINK_NOFOLLOW);
+    if (inspected == 0 || errno != ENOENT) {
+      static_cast<void>(::close(current));
+      return project_failure(
+          repository::ProjectInstructionErrorCode::outside_repository,
+          "instruction target enters an independent repository or is "
+          "unavailable",
+          subtree);
+    }
+  }
+  static_cast<void>(::close(current));
+  return {};
+#else
+  static_cast<void>(root_descriptor);
+  static_cast<void>(subtree);
+  return project_failure(
+      repository::ProjectInstructionErrorCode::io_failure,
+      "pinned project instruction reads are unavailable on this platform");
+#endif
+}
+} // namespace
+
 auto GitProjectInstructionSource::discover(
     repository::ProjectInstructionRequest request,
     const std::stop_token stop_token)
     -> std::expected<domain::ProjectInstructionDiscovery,
                      repository::ProjectInstructionError> {
-  using ProjectCode = repository::ProjectInstructionErrorCode;
-  try {
-    constexpr repository::ProjectInstructionLimits maximums;
-    if (request.limits.maximum_documents == 0 ||
-        request.limits.maximum_path_bytes == 0 ||
-        request.limits.maximum_document_bytes == 0 ||
-        request.limits.maximum_total_bytes == 0 ||
-        request.limits.timeout <= std::chrono::milliseconds::zero() ||
-        request.limits.maximum_documents > maximums.maximum_documents ||
-        request.limits.maximum_path_bytes > maximums.maximum_path_bytes ||
-        request.limits.maximum_document_bytes >
-            maximums.maximum_document_bytes ||
-        request.limits.maximum_total_bytes > maximums.maximum_total_bytes ||
-        request.limits.timeout > maximums.timeout ||
-        request.limits.maximum_document_bytes >
-            request.limits.maximum_total_bytes ||
-        !valid_project_subtree(request.target_subtree,
-                               request.limits.maximum_path_bytes)) {
-      return project_failure(ProjectCode::invalid_request,
-                             "project instruction request is invalid");
+  return discover_impl(std::move(request), stop_token, -1);
+}
+
+auto GitProjectInstructionSource::discover_pinned(
+    repository::ProjectInstructionRequest request, const int root_descriptor,
+    const std::stop_token stop_token)
+    -> std::expected<domain::ProjectInstructionDiscovery,
+                     repository::ProjectInstructionError> {
+  if (root_descriptor < 0 || !guarantees_read_only_discovery())
+    return project_failure(
+        repository::ProjectInstructionErrorCode::invalid_request,
+        "pinned instruction source is unavailable");
+  return discover_impl(std::move(request), stop_token, root_descriptor);
+}
+
+namespace {
+using ProjectError = repository::ProjectInstructionError;
+using ProjectCode = repository::ProjectInstructionErrorCode;
+
+#ifndef _WIN32
+class ProjectFileDescriptor final {
+ public:
+  explicit ProjectFileDescriptor(int value) : m_value(value) {}
+  ProjectFileDescriptor(const ProjectFileDescriptor&) = delete;
+  auto operator=(const ProjectFileDescriptor&)
+      -> ProjectFileDescriptor& = delete;
+  ProjectFileDescriptor(ProjectFileDescriptor&& other) noexcept
+      : m_value(std::exchange(other.m_value, -1)) {}
+  auto operator=(ProjectFileDescriptor&& other) noexcept
+      -> ProjectFileDescriptor& {
+    if (this != &other) {
+      close();
+      m_value = std::exchange(other.m_value, -1);
     }
-    const auto validated =
-        repository::validate_repository_snapshot(request.baseline);
-    if (!validated) {
-      return project_failure(ProjectCode::invalid_request,
-                             "project instruction baseline is invalid");
+    return *this;
+  }
+  ~ProjectFileDescriptor() { close(); }
+  [[nodiscard]] auto get() const -> int { return m_value; }
+
+ private:
+  auto close() const -> void {
+    if (m_value >= 0) static_cast<void>(::close(m_value));
+  }
+  int m_value{-1};
+};
+
+[[nodiscard]] auto project_open_root(const std::filesystem::path& root,
+                                     const int pinned) -> int {
+  if (pinned >= 0) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX lease dup.
+    return ::fcntl(pinned, F_DUPFD_CLOEXEC, 0);
+  }
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX root open.
+  return ::open(root.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
+}
+
+[[nodiscard]] auto project_open_directory(const std::filesystem::path& root,
+                                          const std::string& subtree,
+                                          const int pinned)
+    -> std::expected<ProjectFileDescriptor, ProjectError> {
+  ProjectFileDescriptor current{project_open_root(root, pinned)};
+  if (current.get() < 0)
+    return project_path_error(std::error_code{errno, std::generic_category()},
+                              "project instruction root could not be opened",
+                              subtree);
+  for (const auto& part : std::filesystem::path{subtree}) {
+    ProjectFileDescriptor next{
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX openat.
+        ::openat(current.get(), part.c_str(),
+                 O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)};
+    if (next.get() < 0)
+      return project_path_error(
+          std::error_code{errno, std::generic_category()},
+          "project instruction target could not be opened", subtree);
+    current = std::move(next);
+  }
+  return current;
+}
+
+[[nodiscard]] auto project_read_bytes(const int descriptor,
+                                      const std::string& relative_path,
+                                      const std::uint64_t maximum,
+                                      const ObservationDeadline deadline,
+                                      const std::stop_token stop)
+    -> std::expected<std::string, ProjectError> {
+  std::string content;
+  std::array<char, 8192> buffer{};
+  while (true) {
+    if (stop.stop_requested())
+      return project_failure(ProjectCode::cancelled,
+                             "project instruction discovery cancelled",
+                             relative_path);
+    if (std::chrono::steady_clock::now() >= deadline)
+      return project_failure(ProjectCode::timed_out,
+                             "project instruction discovery timed out",
+                             relative_path, true);
+    const auto count = ::read(descriptor, buffer.data(), buffer.size());
+    if (count == 0) return content;
+    if (count < 0) {
+      if (errno == EINTR) continue;
+      return project_path_error(std::error_code{errno, std::generic_category()},
+                                "project instruction file could not be read",
+                                relative_path);
     }
-    if (stop_token.stop_requested()) {
+    const auto bytes = static_cast<std::size_t>(count);
+    if (bytes > maximum - content.size())
+      return project_failure(ProjectCode::resource_exhausted,
+                             "project instruction content exceeds its budget",
+                             relative_path);
+    content.append(buffer.data(), bytes);
+  }
+}
+
+[[nodiscard]] auto project_read_document(const std::filesystem::path& root,
+                                         const std::string& subtree,
+                                         const std::uint64_t maximum,
+                                         const ObservationDeadline deadline,
+                                         const std::stop_token stop,
+                                         const int pinned)
+    -> std::expected<std::optional<std::string>, ProjectError> {
+  const auto path =
+      subtree.empty() ? std::string{"AGENTS.md"} : subtree + "/AGENTS.md";
+  auto directory = project_open_directory(root, subtree, pinned);
+  if (!directory) return std::unexpected(std::move(directory.error()));
+  struct stat listed{};
+  if (::fstatat(directory->get(), "AGENTS.md", &listed, AT_SYMLINK_NOFOLLOW) !=
+      0) {
+    if (errno == ENOENT) return std::nullopt;
+    return project_path_error(std::error_code{errno, std::generic_category()},
+                              "project instruction file could not be inspected",
+                              path);
+  }
+  if (!S_ISREG(listed.st_mode))
+    return project_failure(ProjectCode::unsupported_entry,
+                           "project instruction path is not a regular file",
+                           path);
+  ProjectFileDescriptor file{
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX openat.
+      ::openat(directory->get(), "AGENTS.md",
+               O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)};
+  if (file.get() < 0)
+    return project_path_error(std::error_code{errno, std::generic_category()},
+                              "project instruction file could not be opened",
+                              path);
+  struct stat before{};
+  if (::fstat(file.get(), &before) != 0 || !S_ISREG(before.st_mode) ||
+      before.st_dev != listed.st_dev || before.st_ino != listed.st_ino)
+    return project_failure(ProjectCode::unstable,
+                           "project instruction file identity changed", path,
+                           true);
+  if (std::cmp_less(before.st_size, 0) ||
+      std::cmp_greater(before.st_size, maximum))
+    return project_failure(ProjectCode::resource_exhausted,
+                           "project instruction content exceeds its budget",
+                           path);
+  auto content = project_read_bytes(file.get(), path, maximum, deadline, stop);
+  if (!content) return std::unexpected(std::move(content.error()));
+  struct stat after{};
+  if (::fstat(file.get(), &after) != 0 || before.st_dev != after.st_dev ||
+      before.st_ino != after.st_ino || before.st_size != after.st_size ||
+      before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+      before.st_mtim.tv_nsec != after.st_mtim.tv_nsec)
+    return project_failure(ProjectCode::unstable,
+                           "project instruction changed while being read", path,
+                           true);
+  if (content->empty() && pinned < 0) return std::nullopt;
+  if (content->empty() || !valid_utf8_instruction(*content))
+    return project_failure(
+        ProjectCode::malformed_text,
+        "project instruction is not nonempty bounded UTF-8 text", path);
+  return std::optional<std::string>{std::move(*content)};
+}
+
+#else
+[[nodiscard]] auto project_read_document(const std::filesystem::path&,
+                                         const std::string&, std::uint64_t,
+                                         ObservationDeadline, std::stop_token,
+                                         int)
+    -> std::expected<std::optional<std::string>, ProjectError> {
+  return project_failure(
+      ProjectCode::io_failure,
+      "project instruction reads are unavailable on this platform");
+}
+#endif
+
+[[nodiscard]] auto project_request_valid(
+    const repository::ProjectInstructionRequest& request) -> bool {
+  constexpr repository::ProjectInstructionLimits maximums;
+  const auto& limits = request.limits;
+  return limits.maximum_documents != 0 && limits.maximum_path_bytes != 0 &&
+         limits.maximum_document_bytes != 0 &&
+         limits.maximum_total_bytes != 0 &&
+         limits.timeout > std::chrono::milliseconds::zero() &&
+         limits.maximum_documents <= maximums.maximum_documents &&
+         limits.maximum_path_bytes <= maximums.maximum_path_bytes &&
+         limits.maximum_document_bytes <= maximums.maximum_document_bytes &&
+         limits.maximum_total_bytes <= maximums.maximum_total_bytes &&
+         limits.timeout <= maximums.timeout &&
+         limits.maximum_document_bytes <= limits.maximum_total_bytes &&
+         valid_project_subtree(request.target_subtree,
+                               limits.maximum_path_bytes);
+}
+
+[[nodiscard]] auto project_observe(
+    GitRepositorySnapshotSource& source,
+    const repository::ProjectInstructionRequest& request,
+    const ObservationDeadline deadline, const std::stop_token stop,
+    const int pinned)
+    -> std::expected<domain::RepositorySnapshot, ProjectError> {
+  const auto now = std::chrono::steady_clock::now();
+  if (now >= deadline)
+    return project_failure(ProjectCode::timed_out,
+                           "project instruction discovery timed out", {}, true);
+  auto remaining = std::max(
+      std::chrono::milliseconds{1},
+      std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now));
+  repository::RepositorySnapshotLimits limits;
+  limits.maximum_path_bytes = request.limits.maximum_path_bytes;
+  limits.observation_timeout = std::min(remaining, limits.observation_timeout);
+  limits.command_timeout =
+      std::min(limits.command_timeout, limits.observation_timeout);
+  auto snapshot =
+      pinned >= 0
+          ? source.observe_pinned(pinned, request.baseline.root.canonical_path,
+                                  limits, stop)
+          : source.observe({request.baseline.root.canonical_path, limits},
+                           stop);
+  if (!snapshot) return std::unexpected(project_error(snapshot.error()));
+  return std::move(*snapshot);
+}
+
+[[nodiscard]] auto project_validate_target(
+    const repository::ProjectInstructionRequest& request, const int pinned)
+    -> std::expected<void, ProjectError> {
+  if (pinned >= 0)
+    return validate_pinned_instruction_target(pinned, request.target_subtree);
+  std::filesystem::path target{request.baseline.root.canonical_path};
+  for (const auto& part : std::filesystem::path{request.target_subtree}) {
+    target /= part;
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(target, error);
+    if (error)
+      return project_path_error(
+          error, "project instruction target could not be inspected",
+          request.target_subtree);
+    if (std::filesystem::is_symlink(status))
+      return project_failure(
+          ProjectCode::outside_repository,
+          "project instruction target cannot traverse a symbolic link",
+          request.target_subtree);
+    if (!std::filesystem::is_directory(status))
+      return project_failure(ProjectCode::not_found,
+                             "project instruction target is not a directory",
+                             request.target_subtree);
+  }
+  return {};
+}
+struct ProjectScope {
+  std::string relative_path;
+  std::uint32_t specificity{};
+};
+[[nodiscard]] auto project_scopes(const std::string& target)
+    -> std::vector<ProjectScope> {
+  std::vector<ProjectScope> scopes{{"", 0}};
+  std::string subtree;
+  std::uint32_t specificity{};
+  for (const auto& part : std::filesystem::path{target}) {
+    if (!subtree.empty()) subtree.push_back('/');
+    subtree.append(part.generic_string());
+    scopes.push_back({subtree, ++specificity});
+  }
+  return scopes;
+}
+[[nodiscard]] auto same_project_snapshot(
+    const domain::RepositorySnapshot& left,
+    const domain::RepositorySnapshot& right) -> bool {
+  return left.root == right.root && left.vcs == right.vcs &&
+         left.changes == right.changes &&
+         domain::same_source_state(left, right);
+}
+} // namespace
+
+auto GitProjectInstructionSource::instruction_document(
+    const repository::ProjectInstructionRequest& request,
+    const std::string& subtree, const std::uint32_t specificity,
+    const std::uint64_t discovery_order, std::string content,
+    const std::stop_token stop_token, const int root_descriptor,
+    const std::chrono::steady_clock::time_point deadline)
+    -> std::expected<domain::ProjectInstructionDocument,
+                     repository::ProjectInstructionError> {
+  const auto relative_path =
+      subtree.empty() ? std::string{"AGENTS.md"} : subtree + "/AGENTS.md";
+  repository::RepositorySnapshotLimits hash_limits;
+  hash_limits.maximum_path_bytes = request.limits.maximum_path_bytes;
+  hash_limits.maximum_file_bytes = request.limits.maximum_document_bytes;
+  hash_limits.maximum_total_bytes = request.limits.maximum_total_bytes;
+  hash_limits.command_timeout =
+      std::min(hash_limits.command_timeout,
+               std::chrono::duration_cast<std::chrono::milliseconds>(
+                   deadline - std::chrono::steady_clock::now()));
+  if (hash_limits.command_timeout <= std::chrono::milliseconds::zero()) {
+    return project_failure(ProjectCode::timed_out,
+                           "project instruction discovery timed out", {}, true);
+  }
+  auto digest = m_snapshot_source.m_impl->hash_bytes(
+      content, request.baseline.root.canonical_path,
+      request.baseline.fingerprint.algorithm, hash_limits, stop_token, deadline,
+      root_descriptor);
+  if (!digest) {
+    return std::unexpected(project_error(digest.error()));
+  }
+  auto instruction_id = domain::ProjectInstructionId::from(
+      "project:" + std::to_string(specificity) + ":" + digest->value);
+  if (!instruction_id) {
+    return project_failure(ProjectCode::internal_failure,
+                           "project instruction identity is invalid",
+                           relative_path);
+  }
+  return domain::ProjectInstructionDocument{
+      std::move(*instruction_id),
+      domain::RepositorySourceIdentity{
+          domain::snapshot_identity(request.baseline), relative_path,
+          std::move(*digest), std::nullopt},
+      subtree,
+      std::move(content),
+      specificity,
+      discovery_order};
+}
+
+auto GitProjectInstructionSource::instruction_documents(
+    const repository::ProjectInstructionRequest& request,
+    const std::stop_token stop_token, const int root_descriptor,
+    const std::chrono::steady_clock::time_point deadline)
+    -> std::expected<std::vector<domain::ProjectInstructionDocument>,
+                     repository::ProjectInstructionError> {
+  const auto scopes = project_scopes(request.target_subtree);
+  if (scopes.size() > request.limits.maximum_documents)
+    return project_failure(ProjectCode::resource_exhausted,
+                           "project instruction ancestry is too deep");
+  std::vector<domain::ProjectInstructionDocument> documents;
+  std::uint64_t total_bytes{};
+  for (const auto& scope : scopes) {
+    if (stop_token.stop_requested())
       return project_failure(ProjectCode::cancelled,
                              "project instruction discovery cancelled");
-    }
+    if (std::chrono::steady_clock::now() >= deadline)
+      return project_failure(ProjectCode::timed_out,
+                             "project instruction discovery timed out", {},
+                             true);
+    auto content = project_read_document(
+        request.baseline.root.canonical_path, scope.relative_path,
+        std::min(request.limits.maximum_document_bytes,
+                 request.limits.maximum_total_bytes - total_bytes),
+        deadline, stop_token, root_descriptor);
+    if (!content) return std::unexpected(std::move(content.error()));
+    if (!*content) continue;
+    total_bytes += (**content).size();
+    auto document = instruction_document(
+        request, scope.relative_path, scope.specificity, documents.size() + 1,
+        std::move(**content), stop_token, root_descriptor, deadline);
+    if (!document) return std::unexpected(std::move(document.error()));
+    documents.push_back(std::move(*document));
+  }
+  return documents;
+}
 
+auto GitProjectInstructionSource::discover_impl(
+    repository::ProjectInstructionRequest request,
+    const std::stop_token stop_token, const int root_descriptor)
+    -> std::expected<domain::ProjectInstructionDiscovery,
+                     repository::ProjectInstructionError> {
+  try {
+    if (!project_request_valid(request) ||
+        !repository::validate_repository_snapshot(request.baseline))
+      return project_failure(
+          ProjectCode::invalid_request,
+          "project instruction request or baseline is invalid");
+    if (stop_token.stop_requested())
+      return project_failure(ProjectCode::cancelled,
+                             "project instruction discovery cancelled");
     const auto deadline =
         std::chrono::steady_clock::now() + request.limits.timeout;
-    auto observe = [&]() -> std::expected<domain::RepositorySnapshot,
-                                          repository::ProjectInstructionError> {
-      const auto now = std::chrono::steady_clock::now();
-      if (now >= deadline) {
-        return project_failure(ProjectCode::timed_out,
-                               "project instruction discovery timed out", {},
-                               true);
-      }
-      auto remaining =
-          std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
-      if (remaining <= std::chrono::milliseconds::zero()) {
-        remaining = std::chrono::milliseconds{1};
-      }
-      repository::RepositorySnapshotLimits limits;
-      limits.maximum_path_bytes = request.limits.maximum_path_bytes;
-      limits.observation_timeout =
-          std::min(remaining, limits.observation_timeout);
-      limits.command_timeout =
-          std::min(limits.command_timeout, limits.observation_timeout);
-      auto snapshot = m_snapshot_source.observe(
-          {request.baseline.root.canonical_path, limits}, stop_token);
-      if (!snapshot) return std::unexpected(project_error(snapshot.error()));
-      return std::move(*snapshot);
-    };
-
-    const std::filesystem::path root{request.baseline.root.canonical_path};
-    std::filesystem::path target = root;
-    if (!request.target_subtree.empty()) {
-      for (const auto& part : std::filesystem::path{request.target_subtree}) {
-        target /= part;
-        std::error_code error;
-        const auto status = std::filesystem::symlink_status(target, error);
-        if (error) {
-          return project_path_error(
-              error, "project instruction target could not be inspected",
-              request.target_subtree);
-        }
-        if (std::filesystem::is_symlink(status)) {
-          return project_failure(
-              ProjectCode::outside_repository,
-              "project instruction target cannot traverse a symbolic link",
-              request.target_subtree);
-        }
-        if (!std::filesystem::is_directory(status)) {
-          return project_failure(
-              ProjectCode::not_found,
-              "project instruction target is not a directory",
-              request.target_subtree);
-        }
-      }
-    }
-
-    auto before = observe();
+    auto target = project_validate_target(request, root_descriptor);
+    if (!target) return std::unexpected(std::move(target.error()));
+    auto before = project_observe(m_snapshot_source, request, deadline,
+                                  stop_token, root_descriptor);
     if (!before) return std::unexpected(std::move(before.error()));
-    if (before->root != request.baseline.root ||
-        before->vcs != request.baseline.vcs ||
-        before->changes != request.baseline.changes ||
-        !domain::same_source_state(*before, request.baseline)) {
+    if (!same_project_snapshot(*before, request.baseline))
       return project_failure(ProjectCode::stale_snapshot,
                              "repository changed before instruction discovery",
                              {}, true);
+    auto documents =
+        instruction_documents(request, stop_token, root_descriptor, deadline);
+    if (!documents) return std::unexpected(std::move(documents.error()));
+    // Git status excludes ignored instructions. Repeat the exact complete
+    // chain, including absent locations, so Git-visible equality cannot conceal
+    // drift.
+    if (root_descriptor >= 0) {
+      auto verified =
+          instruction_documents(request, stop_token, root_descriptor, deadline);
+      if (!verified) return std::unexpected(std::move(verified.error()));
+      if (*verified != *documents)
+        return project_failure(
+            ProjectCode::unstable,
+            "project instruction chain changed during discovery", {}, true);
     }
-
-    struct Scope {
-      std::string relative_path;
-      std::uint32_t specificity{};
-    };
-    std::vector<Scope> scopes{{"", 0}};
-    std::string subtree;
-    std::uint32_t specificity{};
-    if (!request.target_subtree.empty()) {
-      for (const auto& part : std::filesystem::path{request.target_subtree}) {
-        if (!subtree.empty()) subtree.push_back('/');
-        subtree.append(part.generic_string());
-        ++specificity;
-        scopes.push_back({subtree, specificity});
-      }
-    }
-    if (scopes.size() > request.limits.maximum_documents) {
-      return project_failure(ProjectCode::resource_exhausted,
-                             "project instruction ancestry is too deep");
-    }
-
-    std::vector<domain::ProjectInstructionDocument> documents;
-    std::uint64_t total_bytes{};
-    std::uint64_t discovery_order{};
-    for (const auto& scope : scopes) {
-      if (stop_token.stop_requested()) {
-        return project_failure(ProjectCode::cancelled,
-                               "project instruction discovery cancelled");
-      }
-      if (std::chrono::steady_clock::now() >= deadline) {
-        return project_failure(ProjectCode::timed_out,
-                               "project instruction discovery timed out", {},
-                               true);
-      }
-      const auto relative_path = scope.relative_path.empty()
-                                     ? std::string{"AGENTS.md"}
-                                     : scope.relative_path + "/AGENTS.md";
-
-#ifdef _WIN32
-      return project_failure(
-          ProjectCode::io_failure,
-          "project instruction reads are unavailable on this platform",
-          relative_path);
-#else
-      int directory_descriptor =
-          ::open(root.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
-      if (directory_descriptor < 0) {
-        return project_path_error(
-            std::error_code{errno, std::generic_category()},
-            "project instruction root could not be opened", relative_path);
-      }
-      bool directory_failed{};
-      int directory_error{};
-      if (!scope.relative_path.empty()) {
-        for (const auto& part : std::filesystem::path{scope.relative_path}) {
-          const int child =
-              ::openat(directory_descriptor, part.c_str(),
-                       O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
-          if (child < 0) {
-            directory_failed = true;
-            directory_error = errno;
-            break;
-          }
-          static_cast<void>(::close(directory_descriptor));
-          directory_descriptor = child;
-        }
-      }
-      if (directory_failed) {
-        static_cast<void>(::close(directory_descriptor));
-        if (directory_error == ELOOP) {
-          return project_failure(
-              ProjectCode::outside_repository,
-              "project instruction target cannot traverse a symbolic link",
-              scope.relative_path);
-        }
-        return project_path_error(
-            std::error_code{directory_error, std::generic_category()},
-            "project instruction target could not be opened",
-            scope.relative_path);
-      }
-      const int descriptor = ::openat(directory_descriptor, "AGENTS.md",
-                                      O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-      const int open_error = errno;
-      static_cast<void>(::close(directory_descriptor));
-      if (descriptor < 0) {
-        if (open_error == ENOENT) continue;
-        if (open_error == ELOOP) {
-          return project_failure(
-              ProjectCode::unsupported_entry,
-              "project instruction file cannot be a symbolic link",
-              relative_path);
-        }
-        return project_path_error(
-            std::error_code{open_error, std::generic_category()},
-            "project instruction file could not be opened", relative_path);
-      }
-      struct stat before_read{};
-      if (::fstat(descriptor, &before_read) != 0) {
-        const auto saved_errno = errno;
-        static_cast<void>(::close(descriptor));
-        return project_path_error(
-            std::error_code{saved_errno, std::generic_category()},
-            "project instruction file could not be identified", relative_path);
-      }
-      if (!S_ISREG(before_read.st_mode)) {
-        static_cast<void>(::close(descriptor));
-        return project_failure(ProjectCode::unsupported_entry,
-                               "project instruction path is not a regular file",
-                               relative_path);
-      }
-      if (before_read.st_size < 0 ||
-          static_cast<std::uint64_t>(before_read.st_size) >
-              request.limits.maximum_document_bytes ||
-          static_cast<std::uint64_t>(before_read.st_size) >
-              request.limits.maximum_total_bytes - total_bytes) {
-        static_cast<void>(::close(descriptor));
-        return project_failure(ProjectCode::resource_exhausted,
-                               "project instruction content exceeds its budget",
-                               relative_path);
-      }
-      std::string content;
-      content.reserve(static_cast<std::size_t>(before_read.st_size));
-      std::array<char, 8192> buffer{};
-      while (true) {
-        if (stop_token.stop_requested()) {
-          static_cast<void>(::close(descriptor));
-          return project_failure(ProjectCode::cancelled,
-                                 "project instruction discovery cancelled",
-                                 relative_path);
-        }
-        if (std::chrono::steady_clock::now() >= deadline) {
-          static_cast<void>(::close(descriptor));
-          return project_failure(ProjectCode::timed_out,
-                                 "project instruction discovery timed out",
-                                 relative_path, true);
-        }
-        const auto count = ::read(descriptor, buffer.data(), buffer.size());
-        if (count == 0) break;
-        if (count < 0) {
-          if (errno == EINTR) continue;
-          const auto error = std::error_code{errno, std::generic_category()};
-          static_cast<void>(::close(descriptor));
-          return project_path_error(
-              error, "project instruction file could not be read",
-              relative_path);
-        }
-        const auto bytes = static_cast<std::size_t>(count);
-        if (bytes > request.limits.maximum_document_bytes - content.size() ||
-            bytes > request.limits.maximum_total_bytes - total_bytes -
-                        content.size()) {
-          static_cast<void>(::close(descriptor));
-          return project_failure(
-              ProjectCode::resource_exhausted,
-              "project instruction content exceeds its budget", relative_path);
-        }
-        content.append(buffer.data(), bytes);
-      }
-      struct stat after_read{};
-      const bool stable =
-          ::fstat(descriptor, &after_read) == 0 &&
-          before_read.st_dev == after_read.st_dev &&
-          before_read.st_ino == after_read.st_ino &&
-          before_read.st_size == after_read.st_size &&
-          before_read.st_mtim.tv_sec == after_read.st_mtim.tv_sec &&
-          before_read.st_mtim.tv_nsec == after_read.st_mtim.tv_nsec;
-      static_cast<void>(::close(descriptor));
-      if (!stable) {
-        return project_failure(ProjectCode::unstable,
-                               "project instruction changed while being read",
-                               relative_path, true);
-      }
-      if (content.empty()) continue;
-      if (!valid_utf8_instruction(content)) {
-        return project_failure(ProjectCode::malformed_text,
-                               "project instruction is not bounded UTF-8 text",
-                               relative_path);
-      }
-
-      repository::RepositorySnapshotLimits hash_limits;
-      hash_limits.maximum_path_bytes = request.limits.maximum_path_bytes;
-      hash_limits.maximum_file_bytes = request.limits.maximum_document_bytes;
-      hash_limits.maximum_total_bytes = request.limits.maximum_total_bytes;
-      hash_limits.command_timeout =
-          std::min(hash_limits.command_timeout,
-                   std::chrono::duration_cast<std::chrono::milliseconds>(
-                       deadline - std::chrono::steady_clock::now()));
-      if (hash_limits.command_timeout <= std::chrono::milliseconds::zero()) {
-        return project_failure(ProjectCode::timed_out,
-                               "project instruction discovery timed out", {},
-                               true);
-      }
-      auto digest = m_snapshot_source.m_impl->hash_bytes(
-          content, request.baseline.root.canonical_path,
-          request.baseline.fingerprint.algorithm, hash_limits, stop_token,
-          deadline);
-      if (!digest) {
-        return std::unexpected(project_error(digest.error()));
-      }
-      total_bytes += content.size();
-      ++discovery_order;
-      auto instruction_id = domain::ProjectInstructionId::from(
-          "project:" + std::to_string(scope.specificity) + ":" + digest->value);
-      if (!instruction_id) {
-        return project_failure(ProjectCode::internal_failure,
-                               "project instruction identity is invalid",
-                               relative_path);
-      }
-      documents.push_back(domain::ProjectInstructionDocument{
-          std::move(*instruction_id),
-          domain::RepositorySourceIdentity{
-              domain::snapshot_identity(request.baseline), relative_path,
-              std::move(*digest), std::nullopt},
-          scope.relative_path, std::move(content), scope.specificity,
-          discovery_order});
-#endif
-    }
-
-    auto after = observe();
+    auto after = project_observe(m_snapshot_source, request, deadline,
+                                 stop_token, root_descriptor);
     if (!after) return std::unexpected(std::move(after.error()));
-    if (after->root != before->root || after->vcs != before->vcs ||
-        after->changes != before->changes ||
-        !domain::same_source_state(*after, *before)) {
+    if (!same_project_snapshot(*before, *after))
       return project_failure(ProjectCode::unstable,
                              "repository changed during instruction discovery",
                              {}, true);
-    }
     return domain::ProjectInstructionDiscovery{
         domain::snapshot_identity(request.baseline),
-        std::move(request.target_subtree), std::move(documents)};
+        std::move(request.target_subtree), std::move(*documents)};
   } catch (const std::filesystem::filesystem_error&) {
     return project_failure(
         ProjectCode::io_failure,

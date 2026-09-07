@@ -249,6 +249,18 @@ auto one_shot_handler(CommandContext& context,
       context.invocation, std::string{option_prefix} + "tool-restriction");
   const auto requested_tool_approval = parsed_text_values(
       context.invocation, std::string{option_prefix} + "tool-approval");
+  const auto requested_repository =
+      parsed_text_values(context.invocation, "root.repository");
+  const auto requested_target =
+      parsed_text_values(context.invocation, "root.target");
+  for (const auto* selected : {&requested_repository, &requested_target}) {
+    if (*selected &&
+        ((*selected)->size() != 1 || (*selected)->front().empty())) {
+      context.error
+          << "aiforge: repository and target selectors must be nonempty\n";
+      return usage_exit_code;
+    }
+  }
   const bool no_persona =
       parsed_argument(context.invocation,
                       std::string{option_prefix} + "no-persona") != nullptr;
@@ -362,6 +374,12 @@ auto one_shot_handler(CommandContext& context,
                : std::nullopt,
            requested_tool_approval
                ? std::optional<std::string>{requested_tool_approval->front()}
+               : std::nullopt,
+           requested_repository
+               ? std::optional<std::string>{requested_repository->front()}
+               : std::nullopt,
+           requested_target
+               ? std::optional<std::string>{requested_target->front()}
                : std::nullopt},
           context.environment, context.output, context.error);
       if (result) return success_exit_code;
@@ -381,7 +399,8 @@ auto one_shot_handler(CommandContext& context,
     context.error << "aiforge: prompt must be nonempty\n";
     return usage_exit_code;
   }
-  if (requested_tool_restriction || requested_tool_approval) {
+  if (requested_tool_restriction || requested_tool_approval ||
+      requested_repository || requested_target) {
     context.error << "aiforge: tool launch controls require interactive mode\n";
     return usage_exit_code;
   }
@@ -1072,6 +1091,35 @@ auto render_help(const CommandRegistry& registry,
   return std::move(output).str();
 }
 
+namespace {
+[[nodiscard]] auto incompatible_repository_selector(
+    const ParsedInvocation& invocation) -> bool {
+  return invocation.command_path.size() > 1 &&
+         (parsed_argument(invocation, "root.repository") != nullptr ||
+          parsed_argument(invocation, "root.target") != nullptr);
+}
+[[nodiscard]] auto dispatch_invocation(const CommandRegistry& registry,
+                                       ParsedInvocation& invocation,
+                                       CommandEnvironment& environment,
+                                       std::ostream& output,
+                                       std::ostream& error) -> int {
+  if (incompatible_repository_selector(invocation)) {
+    safe_write(error, "aiforge: repository and target selectors require "
+                      "interactive mode\n");
+    return usage_exit_code;
+  }
+  auto located = locate_command(registry, invocation.command_path);
+  if (!located || located->command->handler == nullptr) {
+    safe_write(error,
+               registry.program_name + ": internal command registry error\n");
+    return failure_exit_code;
+  }
+  CommandContext context{invocation, environment, output, error};
+  const auto result = located->command->handler(context);
+  return output && error ? result : failure_exit_code;
+}
+} // namespace
+
 auto CommandDispatcher::dispatch(
     const CommandRegistry& registry,
     const std::span<const std::string_view> arguments, std::ostream& output,
@@ -1128,15 +1176,8 @@ auto CommandDispatcher::dispatch(
     }
 
     auto& invocation = std::get<ParsedInvocation>(*parsed);
-    auto located = locate_command(registry, invocation.command_path);
-    if (!located || located->command->handler == nullptr) {
-      safe_write(error,
-                 registry.program_name + ": internal command registry error\n");
-      return failure_exit_code;
-    }
-    CommandContext context{invocation, environment, output, error};
-    const auto result = located->command->handler(context);
-    return output && error ? result : failure_exit_code;
+    return dispatch_invocation(registry, invocation, environment, output,
+                               error);
   } catch (const std::exception&) {
     write_internal_failure(error, registry.program_name);
     return failure_exit_code;
@@ -1230,7 +1271,23 @@ auto builtin_command_registry() -> const CommandRegistry& {
        "",
        "AIForge terminal AI client.",
        false,
-       session_options("root"),
+       [&] {
+         auto options = session_options("root");
+         options.push_back({{"root.repository",
+                             {"--repository"},
+                             ArgumentValueKind::text,
+                             0,
+                             1},
+                            "path",
+                            "Select the fixed interactive repository root "
+                            "without granting tools."});
+         options.push_back(
+             {{"root.target", {"--target"}, ArgumentValueKind::text, 0, 1},
+              "subtree",
+              "Start Dev context for a relative directory (. means repository "
+              "root)."});
+         return options;
+       }(),
        {{{"root.prompt", "prompt", ArgumentValueKind::text, 0, 1},
          "Prompt text for a one-shot request."}},
        {{"audio",

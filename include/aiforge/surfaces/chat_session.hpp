@@ -10,6 +10,7 @@
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/runtime/tool_profiles.hpp>
 #include <aiforge/storage/session_store.hpp>
+#include <aiforge/surfaces/chat_repository_context.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -117,6 +118,10 @@ struct ChatSessionDependencies {
   std::optional<domain::RepositoryId> repository_id;
   std::string runtime_version{"unknown"};
   ChatSurfaceKind surface_kind{ChatSurfaceKind::interactive};
+  runtime::RepositoryContextController* repository_context_controller{};
+  std::optional<runtime::RepositoryContextRequest>
+      repository_context_selection{};
+  bool async_repository_preparation{};
 };
 
 class PreparedChatGenerationOptions final {
@@ -192,6 +197,20 @@ class ChatSession final {
 
   [[nodiscard]] auto submit(std::string prompt)
       -> std::expected<ChatSubmission, ChatSessionError>;
+  [[nodiscard]] auto request_repository_change(ChatRepositoryChange change)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto request_repository_submit(std::string prompt)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto pending_repository_work() const
+      -> std::optional<ChatRepositoryWork>;
+  [[nodiscard]] auto complete_repository_work(
+      ChatRepositoryWorkCompletion completion)
+      -> std::expected<ChatRepositoryWorkOutcome, ChatSessionError>;
+  auto cancel_repository_work() -> void;
+  [[nodiscard]] auto retry_repository_context()
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto repository_context_state() const
+      -> ChatRepositoryContextState;
   [[nodiscard]] auto drain()
       -> std::expected<std::vector<domain::RunEvent>, ChatSessionError>;
   [[nodiscard]] auto cancel_active(
@@ -334,6 +353,28 @@ class ChatSession final {
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto continue_if_ready()
       -> std::expected<std::vector<domain::RunEvent>, ChatSessionError>;
+  [[nodiscard]] auto apply_repository_change(
+      runtime::RepositoryContextRequest& request,
+      const ChatRepositoryChange& change)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto validate_repository_completion(
+      const ChatRepositoryWork& work,
+      const runtime::PreparedRepositoryContext& prepared) const
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto apply_repository_completion(
+      ChatRepositoryWork work, runtime::PreparedRepositoryContext prepared,
+      std::optional<std::string> prompt,
+      std::function<std::expected<void, ChatSessionError>()> action)
+      -> std::expected<ChatRepositoryWorkOutcome, ChatSessionError>;
+  [[nodiscard]] auto prepare_recovered_repository()
+      -> std::expected<bool, ChatSessionError>;
+  [[nodiscard]] auto validate_active_repository(
+      ChatRepositoryWorkPurpose purpose)
+      -> std::expected<bool, ChatSessionError>;
+  [[nodiscard]] auto submit_prepared(
+      std::string prompt,
+      std::optional<runtime::PreparedRepositoryContext> prepared)
+      -> std::expected<ChatSubmission, ChatSessionError>;
   std::unique_ptr<Impl> m_impl;
 };
 

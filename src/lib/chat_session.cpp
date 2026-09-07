@@ -684,7 +684,6 @@ struct ChatSession::Impl {
   std::shared_ptr<runtime::ToolPolicy> tool_policy;
   std::optional<domain::PermissionProfileId> permission_profile_id;
   ChatSessionLimits limits;
-  bool is_durable{};
   ChatIdentitySuffixSource identity_suffix_source;
   std::optional<domain::RunProvenance> provenance;
   persona::PersonaSource* persona_source{};
@@ -693,7 +692,6 @@ struct ChatSession::Impl {
   instructions::UserGlobalInstructionSource* user_global_instruction_source{};
   instructions::UserGlobalInstructionEditor* user_global_instruction_editor{};
   instructions::UserGlobalInstructionLimits user_global_instruction_limits{};
-  bool user_global_instructions_enabled{};
   std::stop_token stop_token;
   std::optional<domain::PersonaDocument> persona_document;
   std::optional<domain::PersonaSelection> next_persona_selection;
@@ -705,7 +703,6 @@ struct ChatSession::Impl {
   std::string runtime_version;
   std::optional<domain::ContextBuildInput> active_context;
   std::optional<domain::PersonaDocument> recovered_persona_document;
-  bool recovered_pending_run_validation_required{};
   std::optional<domain::UserGlobalInstructionDocument>
       recovered_user_global_instruction;
   std::vector<domain::RunEvent> pending_surface_events;
@@ -714,8 +711,25 @@ struct ChatSession::Impl {
   std::optional<ChatRecoveryBlock> recovery_block;
   std::optional<runtime::RecoverableRun> recovered_run;
   std::vector<domain::ContextContentInput> recovered_memory_context{};
-  bool recovered_sources_pinned{};
+  runtime::RepositoryContextController* repository_controller{};
+  std::optional<runtime::RepositoryContextRequest> repository_selection{};
+  std::uint64_t repository_generation{};
+  std::optional<ChatRepositoryWork> repository_work{};
+  std::optional<std::string> repository_prompt{};
+  std::optional<runtime::PreparedRepositoryContext> repository_prepared{};
+  std::optional<domain::RepositoryContextAdmission> repository_admission{};
+  std::optional<ChatRecoveryBlock> repository_block{};
+  std::function<std::expected<void, ChatSessionError>()> repository_action{};
+  std::string repository_message{};
+
   ChatSurfaceKind surface_kind{ChatSurfaceKind::interactive};
+  bool is_durable{};
+  bool user_global_instructions_enabled{};
+  bool recovered_pending_run_validation_required{};
+  bool recovered_sources_pinned{};
+  bool async_repository_preparation{};
+  bool repository_proof_ready{};
+  bool repository_recovery_pinned{};
 
   [[nodiscard]] auto tool_selection() const -> runtime::ToolProfileSelection {
     return {tool_profile_id, desired_tool_names,
@@ -731,6 +745,369 @@ struct ChatSession::Impl {
 ChatSession::ChatSession(std::unique_ptr<Impl> impl) : m_impl(std::move(impl)) {
 }
 ChatSession::~ChatSession() = default;
+
+auto ChatSession::pending_repository_work() const
+    -> std::optional<ChatRepositoryWork> {
+  return m_impl->repository_work;
+}
+
+auto ChatSession::cancel_repository_work() -> void {
+  m_impl->repository_work.reset();
+  m_impl->repository_prompt.reset();
+  m_impl->repository_action = {};
+  m_impl->repository_proof_ready = false;
+  if (m_impl->repository_generation !=
+      std::numeric_limits<std::uint64_t>::max())
+    ++m_impl->repository_generation;
+}
+
+auto ChatSession::repository_context_state() const
+    -> ChatRepositoryContextState {
+  ChatRepositoryContextState result;
+  result.available = m_impl->repository_controller != nullptr;
+  result.busy = m_impl->repository_work.has_value();
+  result.enabled = m_impl->repository_selection.has_value();
+  if (m_impl->repository_selection) {
+    result.selection_revision =
+        m_impl->repository_selection->selection_revision;
+    result.target_subtree = m_impl->repository_selection->target_subtree;
+    result.evidence_paths = m_impl->repository_selection->evidence_paths;
+  }
+  result.admission = m_impl->repository_admission;
+  if (!result.admission && m_impl->repository_prepared)
+    result.admission = m_impl->repository_prepared->admission;
+  result.message = m_impl->repository_message;
+  return result;
+}
+
+auto ChatSession::apply_repository_change(
+    runtime::RepositoryContextRequest& request,
+    const ChatRepositoryChange& change)
+    -> std::expected<void, ChatSessionError> {
+  switch (change.kind) {
+    case ChatRepositoryChangeKind::select_target:
+      request.target_subtree = change.subject;
+      break;
+    case ChatRepositoryChangeKind::add_evidence:
+      if (!m_impl->repository_selection)
+        return error(ChatSessionErrorCode::invalid_input,
+                     "select a Dev target before adding evidence");
+      if (std::ranges::find(request.evidence_paths, change.subject) !=
+          request.evidence_paths.end())
+        return error(ChatSessionErrorCode::invalid_input,
+                     "repository evidence is already selected");
+      request.evidence_paths.push_back(change.subject);
+      break;
+    case ChatRepositoryChangeKind::remove_evidence: {
+      auto path = change.subject;
+      if (m_impl->repository_prepared) {
+        for (const auto& ref : m_impl->repository_prepared->admission.evidence)
+          if (ref.evidence_id.value() == change.subject)
+            path = ref.source.relative_path;
+      }
+      const auto found = std::ranges::find(request.evidence_paths, path);
+      if (found == request.evidence_paths.end())
+        return error(ChatSessionErrorCode::invalid_input,
+                     "repository evidence selection was not found");
+      request.evidence_paths.erase(found);
+      break;
+    }
+    case ChatRepositoryChangeKind::clear_evidence:
+      if (!m_impl->repository_selection)
+        return error(ChatSessionErrorCode::invalid_input,
+                     "Dev context is not enabled");
+      request.evidence_paths.clear();
+      break;
+    case ChatRepositoryChangeKind::disable: break;
+  }
+  return {};
+}
+
+auto ChatSession::request_repository_change(ChatRepositoryChange change)
+    -> std::expected<void, ChatSessionError> {
+  try {
+    if (active())
+      return error(ChatSessionErrorCode::run_failed,
+                   "repository selection is available only while idle");
+    if (m_impl->repository_controller == nullptr)
+      return error(ChatSessionErrorCode::context_failed,
+                   "repository context is unavailable");
+    if (change.kind == ChatRepositoryChangeKind::disable) {
+      cancel_repository_work();
+      m_impl->repository_selection.reset();
+      m_impl->repository_prepared.reset();
+      m_impl->repository_admission.reset();
+      m_impl->repository_message = "Dev context is off";
+      return {};
+    }
+    auto request = m_impl->repository_selection.value_or(
+        runtime::RepositoryContextRequest{});
+    if (request.selection_revision ==
+            std::numeric_limits<std::uint64_t>::max() ||
+        m_impl->repository_generation ==
+            std::numeric_limits<std::uint64_t>::max())
+      return error(ChatSessionErrorCode::context_failed,
+                   "repository selection revision exhausted");
+    auto changed = apply_repository_change(request, change);
+    if (!changed) return changed;
+    ++request.selection_revision;
+    m_impl->repository_work = ChatRepositoryWork{
+        {session_id(), m_impl->model_id, ++m_impl->repository_generation,
+         m_impl->repository_selection
+             ? m_impl->repository_selection->selection_revision
+             : 0,
+         ChatRepositoryWorkPurpose::selection},
+        std::move(request)};
+    m_impl->repository_message = "Preparing repository context";
+    return {};
+  } catch (...) {
+    return error(ChatSessionErrorCode::internal_failure,
+                 "repository selection failed internally");
+  }
+}
+
+auto ChatSession::request_repository_submit(std::string prompt)
+    -> std::expected<void, ChatSessionError> {
+  try {
+    if (active())
+      return error(ChatSessionErrorCode::run_failed,
+                   "a run or context preparation is already active");
+    if (!m_impl->repository_selection ||
+        m_impl->repository_controller == nullptr)
+      return error(ChatSessionErrorCode::context_failed,
+                   "Dev context is not enabled");
+    if (prompt.empty() || !valid_text(prompt))
+      return error(ChatSessionErrorCode::invalid_input,
+                   "prompt must be nonempty UTF-8 text without controls");
+    if (prompt.size() > m_impl->limits.maximum_input_bytes)
+      return error(ChatSessionErrorCode::input_too_large,
+                   "prompt exceeds the configured input limit");
+    if (m_impl->repository_generation ==
+        std::numeric_limits<std::uint64_t>::max())
+      return error(ChatSessionErrorCode::context_failed,
+                   "repository preparation identity exhausted");
+    m_impl->repository_work = ChatRepositoryWork{
+        {session_id(), m_impl->model_id, ++m_impl->repository_generation,
+         m_impl->repository_selection->selection_revision,
+         ChatRepositoryWorkPurpose::submit},
+        *m_impl->repository_selection};
+    m_impl->repository_prompt = std::move(prompt);
+    m_impl->repository_message = "Validating repository inputs";
+    return {};
+  } catch (...) {
+    return error(ChatSessionErrorCode::internal_failure,
+                 "repository submission preparation failed internally");
+  }
+}
+
+auto ChatSession::validate_active_repository(
+    const ChatRepositoryWorkPurpose purpose)
+    -> std::expected<bool, ChatSessionError> {
+  try {
+    const auto run = m_impl->kernel->active_run_id();
+    if (!run) return true;
+    if (m_impl->repository_proof_ready) {
+      m_impl->repository_proof_ready = false;
+      return true;
+    }
+    if (m_impl->repository_work) return false;
+    auto recorded = runtime::recorded_repository_context_admission(
+        m_impl->kernel->event_log(), *run);
+    if (!recorded) {
+      auto failure = kernel_error(recorded.error());
+      m_impl->repository_block = ChatRecoveryBlock{session_id(), *run, failure};
+      return std::unexpected(std::move(failure));
+    }
+    if (!*recorded) return true;
+    if (m_impl->repository_controller == nullptr) {
+      ChatSessionError failure{ChatSessionErrorCode::context_failed,
+                               "recorded repository context is unavailable"};
+      m_impl->repository_block = ChatRecoveryBlock{session_id(), *run, failure};
+      return std::unexpected(std::move(failure));
+    }
+    if (m_impl->async_repository_preparation) {
+      if (m_impl->repository_generation ==
+          std::numeric_limits<std::uint64_t>::max())
+        return error(ChatSessionErrorCode::context_failed,
+                     "repository preparation identity exhausted");
+      m_impl->repository_work = ChatRepositoryWork{
+          {session_id(), m_impl->model_id, ++m_impl->repository_generation,
+           m_impl->repository_selection
+               ? m_impl->repository_selection->selection_revision
+               : 0,
+           purpose},
+          **recorded};
+      return false;
+    }
+    auto prepared = m_impl->repository_controller->revalidate(
+        **recorded, m_impl->stop_token);
+    if (!prepared) {
+      ChatSessionError failure{ChatSessionErrorCode::context_failed,
+                               prepared.error().message};
+      m_impl->repository_block = ChatRecoveryBlock{session_id(), *run, failure};
+      return std::unexpected(std::move(failure));
+    }
+    m_impl->repository_admission = prepared->admission;
+    m_impl->repository_prepared = std::move(*prepared);
+    m_impl->repository_block.reset();
+    return true;
+  } catch (...) {
+    m_impl->repository_proof_ready = false;
+    return error(ChatSessionErrorCode::internal_failure,
+                 "repository source validation failed internally");
+  }
+}
+
+auto ChatSession::retry_repository_context()
+    -> std::expected<void, ChatSessionError> {
+  try {
+    if (!m_impl->kernel->active_run_id())
+      return error(
+          ChatSessionErrorCode::run_failed,
+          "reopen the session before retrying blocked source validation");
+    if (m_impl->repository_work)
+      return error(ChatSessionErrorCode::run_failed,
+                   "repository source validation is already pending");
+    const auto purpose = m_impl->recovered_pending_run_validation_required ||
+                                 m_impl->kernel->pending_question_input() ||
+                                 m_impl->kernel->pending_tool_approval()
+                             ? ChatRepositoryWorkPurpose::recovery
+                             : ChatRepositoryWorkPurpose::continuation;
+    auto ready = validate_active_repository(purpose);
+    if (!ready) return std::unexpected(std::move(ready.error()));
+    return {};
+  } catch (...) {
+    return error(ChatSessionErrorCode::internal_failure,
+                 "repository source retry failed internally");
+  }
+}
+
+auto ChatSession::validate_repository_completion(
+    const ChatRepositoryWork& work,
+    const runtime::PreparedRepositoryContext& prepared) const
+    -> std::expected<void, ChatSessionError> {
+  if (const auto* request =
+          std::get_if<runtime::RepositoryContextRequest>(&work.input)) {
+    const auto target = request->target_subtree == "."
+                            ? std::string{}
+                            : request->target_subtree;
+    if (prepared.admission.target_subtree != target ||
+        prepared.admission.selection_revision != request->selection_revision ||
+        prepared.admission.evidence.size() != request->evidence_paths.size())
+      return error(ChatSessionErrorCode::context_failed,
+                   "repository preparation does not match selection");
+    for (std::size_t index{}; index < request->evidence_paths.size(); ++index)
+      if (prepared.admission.evidence[index].source.relative_path !=
+          request->evidence_paths[index])
+        return error(
+            ChatSessionErrorCode::context_failed,
+            "repository evidence preparation does not match selection");
+  } else if (!domain::repository_context_admission_successor(
+                 std::get<domain::RepositoryContextAdmission>(work.input),
+                 prepared.admission)) {
+    return error(ChatSessionErrorCode::context_failed,
+                 "repository continuation preparation changed recorded inputs");
+  }
+  if (m_impl->repository_id &&
+      prepared.snapshot.root.repository_id != *m_impl->repository_id)
+    return error(ChatSessionErrorCode::context_failed,
+                 "repository preparation belongs to another repository");
+  return {};
+}
+
+auto ChatSession::apply_repository_completion(
+    ChatRepositoryWork work, runtime::PreparedRepositoryContext prepared,
+    std::optional<std::string> prompt,
+    std::function<std::expected<void, ChatSessionError>()> action)
+    -> std::expected<ChatRepositoryWorkOutcome, ChatSessionError> {
+  ChatRepositoryWorkOutcome outcome;
+  m_impl->repository_message.clear();
+  if (work.token.purpose == ChatRepositoryWorkPurpose::selection) {
+    auto request = std::get<runtime::RepositoryContextRequest>(work.input);
+    request.target_subtree = prepared.admission.target_subtree;
+    m_impl->repository_selection = std::move(request);
+    m_impl->repository_prepared = std::move(prepared);
+    m_impl->repository_admission.reset();
+    outcome.selection_changed = true;
+    return outcome;
+  }
+  if (work.token.purpose == ChatRepositoryWorkPurpose::submit) {
+    if (!prompt)
+      return error(ChatSessionErrorCode::internal_failure,
+                   "repository submission draft is unavailable");
+    auto submitted = submit_prepared(std::move(*prompt), std::move(prepared));
+    if (!submitted) return std::unexpected(std::move(submitted.error()));
+    outcome.events = std::move(submitted->committed_events);
+    outcome.submitted = true;
+    return outcome;
+  }
+  m_impl->repository_admission = prepared.admission;
+  m_impl->repository_prepared = std::move(prepared);
+  m_impl->repository_block.reset();
+  m_impl->repository_proof_ready = true;
+  struct ClearProof {
+    bool& ready;
+    ~ClearProof() { ready = false; }
+  } clear_proof{m_impl->repository_proof_ready};
+  if (action) {
+    auto applied = action();
+    if (!applied) return std::unexpected(std::move(applied.error()));
+  }
+  auto events = drain();
+  if (!events) return std::unexpected(std::move(events.error()));
+  outcome.events = std::move(*events);
+  m_impl->repository_proof_ready = false;
+  return outcome;
+}
+
+auto ChatSession::complete_repository_work(
+    ChatRepositoryWorkCompletion completion)
+    -> std::expected<ChatRepositoryWorkOutcome, ChatSessionError> {
+  try {
+    if (m_impl->stop_token.stop_requested()) {
+      cancel_repository_work();
+      return error(ChatSessionErrorCode::cancelled,
+                   "repository preparation was cancelled");
+    }
+    const auto revision = m_impl->repository_selection
+                              ? m_impl->repository_selection->selection_revision
+                              : 0;
+    if (!m_impl->repository_work ||
+        m_impl->repository_work->token != completion.token ||
+        completion.token.session_id != session_id() ||
+        completion.token.model_id != m_impl->model_id ||
+        completion.token.selection_revision != revision)
+      return error(ChatSessionErrorCode::context_failed,
+                   "repository preparation became stale");
+    auto work = std::move(*m_impl->repository_work);
+    m_impl->repository_work.reset();
+    auto prompt = std::move(m_impl->repository_prompt);
+    m_impl->repository_prompt.reset();
+    auto action = std::move(m_impl->repository_action);
+    m_impl->repository_action = {};
+    if (!completion.result) {
+      m_impl->repository_message = completion.result.error().message;
+      ChatSessionError failure{
+          completion.result.error().code ==
+                  domain::RepositoryContextErrorCode::cancelled
+              ? ChatSessionErrorCode::cancelled
+              : ChatSessionErrorCode::context_failed,
+          m_impl->repository_message};
+      if (const auto run = m_impl->kernel->active_run_id())
+        m_impl->repository_block =
+            ChatRecoveryBlock{session_id(), *run, failure};
+      return std::unexpected(std::move(failure));
+    }
+    auto prepared = std::move(*completion.result);
+    auto matched = validate_repository_completion(work, prepared);
+    if (!matched) return std::unexpected(std::move(matched.error()));
+    return apply_repository_completion(std::move(work), std::move(prepared),
+                                       std::move(prompt), std::move(action));
+  } catch (...) {
+    return error(ChatSessionErrorCode::internal_failure,
+                 "repository preparation completion failed internally");
+  }
+}
 
 namespace {
 
@@ -760,8 +1137,11 @@ namespace {
 auto ChatSession::validate_recovered_pending_run()
     -> std::expected<void, ChatSessionError> {
   const auto run_id = m_impl->kernel->active_run_id();
-  if (!run_id && m_impl->recovery_block) {
-    return std::unexpected(m_impl->recovery_block->reason);
+  if (!run_id) {
+    if (m_impl->repository_block)
+      return std::unexpected(m_impl->repository_block->reason);
+    if (m_impl->recovery_block)
+      return std::unexpected(m_impl->recovery_block->reason);
   }
   if (m_impl->recovered_sources_pinned) return {};
   auto validated = load_recovered_pending_sources();
@@ -776,11 +1156,70 @@ auto ChatSession::validate_recovered_pending_run()
   return validated;
 }
 
+namespace {
+struct RecoveryCapacityBudget {
+  std::uint64_t remaining{};
+  bool fits{true};
+  auto consume(const std::uint64_t tokens) -> void {
+    if (tokens > remaining) {
+      fits = false;
+      return;
+    }
+    remaining -= tokens;
+  }
+};
+
+[[nodiscard]] auto consume_recovered_tool_messages(
+    const domain::SessionEventLog& log,
+    const std::optional<domain::RunId>& run_id, RecoveryCapacityBudget& budget)
+    -> std::expected<void, ChatSessionError> {
+  try {
+    if (!run_id)
+      return error(ChatSessionErrorCode::context_failed,
+                   "original tool continuation has no active run");
+    std::vector<domain::RunEvent> run_events;
+    for (const auto& event : log.events())
+      if (event.metadata.run_id == *run_id) run_events.push_back(event);
+    // The pending group can still be awaiting input or approval. Reuse the
+    // continuation projector so only complete assistant/tool groups consume
+    // capacity, with exactly the same accounting as the later request.
+    auto messages = runtime::tool_continuation_messages(run_events);
+    if (!messages)
+      return error(ChatSessionErrorCode::context_failed,
+                   "original tool continuation cannot be reconstructed",
+                   messages.error().retryable);
+    for (const auto& message : *messages) {
+      auto tokens = estimated_message_tokens(message);
+      if (!tokens) return std::unexpected(std::move(tokens.error()));
+      budget.consume(*tokens);
+    }
+    return {};
+  } catch (...) {
+    return error(ChatSessionErrorCode::internal_failure,
+                 "tool continuation capacity validation failed internally");
+  }
+}
+
+[[nodiscard]] auto consume_recovered_repository(
+    const std::optional<domain::RepositoryContextAdmission>& admission,
+    const domain::ContextCapacity capacity, RecoveryCapacityBudget& budget)
+    -> std::expected<void, ChatSessionError> {
+  if (!admission) return {};
+  if (admission->capacity != capacity)
+    return error(ChatSessionErrorCode::context_failed,
+                 "original repository context model capacity changed");
+  for (const auto& instruction : admission->instructions)
+    budget.consume(instruction.estimated_tokens);
+  for (const auto& evidence : admission->evidence)
+    if (evidence.decision == domain::RepositoryContextDecision::admitted)
+      budget.consume(evidence.estimated_tokens);
+  return {};
+}
+} // namespace
+
 auto ChatSession::validate_recovered_memory_capacity()
     -> std::expected<void, ChatSessionError> {
-  if (!m_impl->recovered_pending_run_validation_required ||
-      m_impl->recovered_memory_context.empty())
-    return {};
+  if (!m_impl->recovered_pending_run_validation_required) return {};
   auto history = detail::replayed_conversation(m_impl->kernel->event_log(), 0);
   if (!history)
     return error(ChatSessionErrorCode::context_failed,
@@ -791,22 +1230,22 @@ auto ChatSession::validate_recovered_memory_capacity()
                  "original saved memory tool context is unavailable");
   auto declarations = tool_declaration_tokens(*tools);
   if (!declarations) return std::unexpected(declarations.error());
-  const auto capacity = m_impl->model.context_window_tokens;
-  auto remaining = capacity;
-  const auto consume = [&](const std::uint64_t tokens) {
-    if (tokens > remaining) return false;
-    remaining -= tokens;
-    return true;
-  };
-  bool fits = consume(m_impl->output_tokens) && consume(*declarations) &&
-              consume(detail::runtime_contract.size());
+  RecoveryCapacityBudget budget{m_impl->model.context_window_tokens};
+  budget.consume(m_impl->output_tokens);
+  budget.consume(*declarations);
+  budget.consume(detail::runtime_contract.size());
   for (const auto& entry : *history)
-    fits = fits && consume(entry.estimated_tokens);
+    budget.consume(entry.estimated_tokens);
   if (m_impl->recovered_persona_document)
-    fits = fits && consume(m_impl->recovered_persona_document->text.size());
+    budget.consume(m_impl->recovered_persona_document->text.size());
   if (m_impl->recovered_user_global_instruction)
-    fits =
-        fits && consume(m_impl->recovered_user_global_instruction->text.size());
+    budget.consume(m_impl->recovered_user_global_instruction->text.size());
+  auto repository_fits =
+      consume_recovered_repository(m_impl->repository_admission,
+                                   {m_impl->model.context_window_tokens,
+                                    m_impl->output_tokens, *declarations},
+                                   budget);
+  if (!repository_fits) return repository_fits;
   auto count = history->size();
   for (const auto& memory : m_impl->recovered_memory_context) {
     if (memory.order == 0 || memory.order > count + 1)
@@ -814,9 +1253,12 @@ auto ChatSession::validate_recovered_memory_capacity()
           ChatSessionErrorCode::context_failed,
           "original saved memory admission order cannot be reconstructed");
     ++count;
-    fits = fits && consume(memory.estimated_tokens);
+    budget.consume(memory.estimated_tokens);
   }
-  if (!fits)
+  auto continuation_fits = consume_recovered_tool_messages(
+      m_impl->kernel->event_log(), m_impl->kernel->active_run_id(), budget);
+  if (!continuation_fits) return continuation_fits;
+  if (!budget.fits)
     return error(ChatSessionErrorCode::context_failed,
                  "original saved memory no longer fits model context capacity");
   return {};
@@ -1196,7 +1638,6 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              std::move(tool_policy),
              std::move(dependencies.permission_profile_id),
              limits,
-             durable,
              std::move(dependencies.identity_suffix_source),
              std::move(request.provenance),
              dependencies.persona_source,
@@ -1205,7 +1646,6 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              dependencies.user_global_instruction_source,
              dependencies.user_global_instruction_editor,
              dependencies.user_global_instruction_limits,
-             dependencies.user_global_instructions_enabled,
              stop_token,
              std::move(persona_setup->document),
              std::move(persona_setup->next_selection),
@@ -1217,14 +1657,25 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              std::move(dependencies.runtime_version),
              std::nullopt,
              std::move(recovered_persona),
-             recovered_pending_run,
              std::nullopt,
              {},
              std::move(kernel),
              0,
              std::nullopt,
              std::move(*recoverable)});
+    impl->is_durable = durable;
+    impl->user_global_instructions_enabled =
+        dependencies.user_global_instructions_enabled;
+    impl->recovered_pending_run_validation_required = recovered_pending_run;
     impl->surface_kind = dependencies.surface_kind;
+    impl->repository_controller = dependencies.repository_context_controller;
+    impl->repository_selection =
+        std::move(dependencies.repository_context_selection);
+    impl->async_repository_preparation =
+        dependencies.async_repository_preparation;
+    if (impl->repository_selection && impl->repository_controller == nullptr)
+      return error(ChatSessionErrorCode::context_failed,
+                   "Dev repository context is unavailable");
     return std::unique_ptr<ChatSession>{new ChatSession{std::move(impl)}};
   } catch (...) {
     return error(ChatSessionErrorCode::internal_failure,
@@ -1232,9 +1683,41 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
   }
 }
 
+auto ChatSession::submit(std::string prompt)
+    -> std::expected<ChatSubmission, ChatSessionError> {
+  try {
+    if (prompt.empty() || !valid_text(prompt))
+      return error(ChatSessionErrorCode::invalid_input,
+                   "prompt must be nonempty UTF-8 text without controls");
+    if (prompt.size() > m_impl->limits.maximum_input_bytes)
+      return error(ChatSessionErrorCode::input_too_large,
+                   "prompt exceeds the configured input limit");
+    if (active())
+      return error(ChatSessionErrorCode::run_failed,
+                   "a run or context preparation is already active");
+    std::optional<runtime::PreparedRepositoryContext> prepared;
+    if (m_impl->repository_selection) {
+      auto result = m_impl->repository_controller->prepare(
+          *m_impl->repository_selection, m_impl->stop_token);
+      if (!result)
+        return error(result.error().code ==
+                             domain::RepositoryContextErrorCode::cancelled
+                         ? ChatSessionErrorCode::cancelled
+                         : ChatSessionErrorCode::context_failed,
+                     result.error().message);
+      prepared = std::move(*result);
+    }
+    return submit_prepared(std::move(prompt), std::move(prepared));
+  } catch (...) {
+    return error(ChatSessionErrorCode::internal_failure,
+                 "repository submission failed internally");
+  }
+}
+
 // clang-format off
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicitly stages interactive run admission and durable startup.
-auto ChatSession::submit(std::string prompt)
+auto ChatSession::submit_prepared(std::string prompt,
+    std::optional<runtime::PreparedRepositoryContext> prepared)
     -> std::expected<ChatSubmission, ChatSessionError> {
   // clang-format on
   try {
@@ -1362,6 +1845,13 @@ auto ChatSession::submit(std::string prompt)
                                                        : "interactive",
         suffix);
     auto workspace_id = make_id<domain::WorkspaceId>("chat", suffix);
+    if (prepared) {
+      auto dev_workspace = domain::WorkspaceId::from("code");
+      if (!dev_workspace)
+        return error(ChatSessionErrorCode::internal_failure,
+                     "Dev workspace identity is invalid");
+      workspace_id = std::move(*dev_workspace);
+    }
     auto permission_id = m_impl->permission_profile_id;
     if (!permission_id) {
       auto generated_permission_id =
@@ -1422,6 +1912,10 @@ auto ChatSession::submit(std::string prompt)
       if (user_global_instruction) {
         bounded =
             bounded && add_mandatory(user_global_instruction->text.size());
+      }
+      if (prepared) {
+        for (const auto& instruction : prepared->instructions)
+          bounded = bounded && add_mandatory(instruction.estimated_tokens);
       }
       if (!bounded) {
         return error(ChatSessionErrorCode::context_failed,
@@ -1501,11 +1995,63 @@ auto ChatSession::submit(std::string prompt)
         return std::unexpected(std::move(appended.error()));
       }
     }
+    if (prepared)
+      input.instructions.insert(input.instructions.end(),
+                                prepared->instructions.begin(),
+                                prepared->instructions.end());
     auto continuation_context = input;
-    auto context = runtime::ContextBuilder{}.build(std::move(input));
-    if (!context) {
-      return error(ChatSessionErrorCode::context_failed,
-                   "prompt exceeds model context capacity");
+    std::optional<domain::RepositoryContextAdmission> repository_admission;
+    std::optional<domain::ConstructedContext> context;
+    if (prepared) {
+      runtime::ContextSelectionRequest selection;
+      selection.capacity = input.capacity;
+      selection.instructions = input.instructions;
+      for (const auto& content_entry : input.content) {
+        selection.candidates.push_back(
+            {content_entry,
+             content_entry.kind == domain::ContextContentKind::tool_result
+                 ? runtime::ContextBudgetClass::tool_result
+                 : runtime::ContextBudgetClass::conversation,
+             runtime::ContextRepresentation::direct,
+             domain::EvidenceFreshness::current, true});
+      }
+      for (std::size_t index{}; index < prepared->evidence.items.size();
+           ++index) {
+        const auto order =
+            static_cast<std::uint64_t>(input.content.size() + index + 1);
+        prepared->evidence.items[index].order = order;
+        prepared->admission.evidence[index].order = order;
+      }
+      if (!prepared->evidence.items.empty())
+        selection.parcels.push_back(prepared->evidence);
+      auto selected =
+          runtime::ContextBuilder{}.select_and_build(std::move(selection));
+      if (!selected)
+        return error(ChatSessionErrorCode::context_failed,
+                     selected.error().message);
+      auto admission =
+          runtime::finalize_repository_context_admission(*prepared, *selected);
+      if (!admission)
+        return error(ChatSessionErrorCode::context_failed,
+                     admission.error().message);
+      repository_admission = std::move(*admission);
+      for (const auto& entry : selected->context.entries) {
+        if (std::ranges::any_of(repository_admission->evidence,
+                                [&](const auto& ref) {
+                                  return ref.entry_id == entry.entry_id;
+                                }))
+          continuation_context.content.push_back(
+              {entry.entry_id, domain::ContextContentKind::evidence,
+               entry.message, entry.provenance, entry.order,
+               entry.estimated_tokens});
+      }
+      context = std::move(selected->context);
+    } else {
+      auto built = runtime::ContextBuilder{}.build(std::move(input));
+      if (!built)
+        return error(ChatSessionErrorCode::context_failed,
+                     "prompt exceeds model context capacity");
+      context = std::move(*built);
     }
 
     const auto before = m_impl->kernel->event_log().events().size();
@@ -1552,9 +2098,15 @@ auto ChatSession::submit(std::string prompt)
          std::move(backend_request),
          std::move(provenance),
          m_impl->next_persona_selection,
-         m_impl->model.pricing_observation});
+         m_impl->model.pricing_observation,
+         {},
+         repository_admission});
     if (!started) return std::unexpected(kernel_error(started.error()));
     m_impl->active_context = std::move(continuation_context);
+    m_impl->repository_admission = std::move(repository_admission);
+    m_impl->repository_prepared = std::move(prepared);
+    m_impl->repository_block.reset();
+    m_impl->repository_recovery_pinned = false;
     ++m_impl->tool_profile_revision;
 
     if (m_impl->persona_document) {
@@ -1706,6 +2258,45 @@ auto ChatSession::continue_if_ready()
                  tool_messages.error().retryable);
   }
   if (tool_messages->empty()) return std::vector<domain::RunEvent>{};
+  if (m_impl->repository_block) return std::vector<domain::RunEvent>{};
+  auto repository_ready =
+      validate_active_repository(ChatRepositoryWorkPurpose::continuation);
+  if (!repository_ready) {
+    if (m_impl->repository_block) return std::vector<domain::RunEvent>{};
+    return std::unexpected(std::move(repository_ready.error()));
+  }
+  if (!*repository_ready) return std::vector<domain::RunEvent>{};
+  if (m_impl->repository_admission && m_impl->repository_prepared) {
+    const auto& prepared = *m_impl->repository_prepared;
+    for (const auto& instruction : prepared.instructions)
+      if (std::ranges::none_of(base.instructions, [&](const auto& entry) {
+            return entry.entry_id == instruction.entry_id;
+          }))
+        base.instructions.push_back(instruction);
+    for (const auto& ref : m_impl->repository_admission->evidence) {
+      if (ref.decision != domain::RepositoryContextDecision::admitted ||
+          std::ranges::any_of(base.content, [&](const auto& entry) {
+            return entry.entry_id == ref.entry_id;
+          }))
+        continue;
+      const auto item =
+          std::ranges::find(prepared.evidence.parcel.items, ref.evidence_id,
+                            &domain::ContextParcelItem::evidence_id);
+      if (item == prepared.evidence.parcel.items.end())
+        return error(ChatSessionErrorCode::context_failed,
+                     "recorded repository evidence is unavailable");
+      base.content.push_back({ref.entry_id,
+                              domain::ContextContentKind::evidence,
+                              {ref.message_id, domain::Role::evidence,
+                               item->content, std::nullopt},
+                              {ref.source_id, ref.source.relative_path,
+                               ref.source.content_digest.algorithm + ":" +
+                                   ref.source.content_digest.value},
+                              ref.order,
+                              ref.estimated_tokens});
+    }
+    m_impl->active_context = base;
+  }
 
   for (auto& message : *tool_messages) {
     const auto message_suffix = m_impl->identity_suffix_source();
@@ -1754,7 +2345,7 @@ auto ChatSession::continue_if_ready()
       {*inference_id, *assistant_message_id, m_impl->model_id,
        std::move(*context), *active_tools, m_impl->generation_options,
        std::move(*continuation_state)},
-      m_impl->model.pricing_observation);
+      m_impl->model.pricing_observation, m_impl->repository_admission);
   if (!continued) {
     if (continued.error().code ==
         runtime::RunKernelErrorCode::continuation_not_ready) {
@@ -1772,12 +2363,41 @@ auto ChatSession::continue_if_ready()
   return committed;
 }
 
+auto ChatSession::prepare_recovered_repository()
+    -> std::expected<bool, ChatSessionError> {
+  if (!m_impl->recovered_pending_run_validation_required ||
+      m_impl->repository_recovery_pinned)
+    return true;
+  if (m_impl->repository_block) return false;
+  auto ready = validate_active_repository(ChatRepositoryWorkPurpose::recovery);
+  if (!ready) {
+    if (m_impl->repository_block) return false;
+    return std::unexpected(std::move(ready.error()));
+  }
+  if (!*ready) return false;
+  auto fits = validate_recovered_memory_capacity();
+  if (!fits) {
+    if (const auto run = m_impl->kernel->active_run_id())
+      m_impl->repository_block =
+          ChatRecoveryBlock{session_id(), *run, fits.error()};
+    return false;
+  }
+  m_impl->repository_recovery_pinned = true;
+  return true;
+}
+
 auto ChatSession::drain()
     -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
   if (auto validated = validate_recovered_pending_run(); !validated) {
-    if (m_impl->recovery_block) return std::vector<domain::RunEvent>{};
+    m_impl->repository_proof_ready = false;
+    if (m_impl->recovery_block || m_impl->repository_block)
+      return std::vector<domain::RunEvent>{};
     return std::unexpected(std::move(validated.error()));
   }
+  auto repository_ready = prepare_recovered_repository();
+  if (!repository_ready)
+    return std::unexpected(std::move(repository_ready.error()));
+  if (!*repository_ready) return std::vector<domain::RunEvent>{};
   if (m_impl->recovered_pending_run_validation_required &&
       !m_impl->kernel->pending_question_input() &&
       !m_impl->kernel->pending_tool_approval())
@@ -1822,9 +2442,10 @@ auto ChatSession::drain()
 
 auto ChatSession::cancel_active(std::optional<std::string> reason)
     -> std::expected<void, ChatSessionError> {
+  cancel_repository_work();
   const auto run = m_impl->kernel->active_run_id();
   if (!run) {
-    if (m_impl->recovery_block) {
+    if (m_impl->recovery_block || m_impl->repository_block) {
       return error(ChatSessionErrorCode::session_failed,
                    "reopen the session before retrying blocked cancellation");
     }
@@ -1834,10 +2455,15 @@ auto ChatSession::cancel_active(std::optional<std::string> reason)
   auto cancelled = m_impl->kernel->cancel_run(*run, std::move(reason));
   if (!cancelled) {
     auto failure = kernel_error(cancelled.error());
-    if (m_impl->recovery_block && !m_impl->kernel->active_run_id()) {
-      m_impl->recovery_block->reason = failure;
-      m_impl->recovery_block->reason.message =
-          "cancellation persistence failed; reopen the session before retrying";
+    if (!m_impl->kernel->active_run_id()) {
+      auto* block = m_impl->repository_block ? &*m_impl->repository_block
+                    : m_impl->recovery_block ? &*m_impl->recovery_block
+                                             : nullptr;
+      if (block != nullptr) {
+        block->reason = failure;
+        block->reason.message = "cancellation persistence failed; reopen the "
+                                "session before retrying";
+      }
     }
     return std::unexpected(std::move(failure));
   }
@@ -1848,6 +2474,9 @@ auto ChatSession::cancel_active(std::optional<std::string> reason)
   m_impl->recovered_persona_document.reset();
   m_impl->recovered_user_global_instruction.reset();
   m_impl->recovery_block.reset();
+  m_impl->repository_block.reset();
+  m_impl->repository_admission.reset();
+  m_impl->repository_recovery_pinned = false;
   const auto events = m_impl->kernel->event_log().events();
   for (std::size_t index = before; index < events.size(); ++index) {
     m_impl->pending_surface_events.push_back(events[index]);
@@ -1857,7 +2486,8 @@ auto ChatSession::cancel_active(std::optional<std::string> reason)
 
 auto ChatSession::blocked_recovery() const
     -> const std::optional<ChatRecoveryBlock>& {
-  return m_impl->recovery_block;
+  return m_impl->repository_block ? m_impl->repository_block
+                                  : m_impl->recovery_block;
 }
 
 auto ChatSession::pending_question_input() const
@@ -1874,6 +2504,23 @@ auto ChatSession::decide_tool_approval(
     const domain::RunId& run_id, const domain::InvocationId& invocation_id,
     runtime::ToolApprovalResolution resolution)
     -> std::expected<void, ChatSessionError> {
+  if (m_impl->repository_work)
+    return error(ChatSessionErrorCode::run_failed,
+                 "repository source validation is already pending");
+  {
+    auto ready =
+        validate_active_repository(ChatRepositoryWorkPurpose::approval);
+    if (!ready) return std::unexpected(std::move(ready.error()));
+    if (!*ready) {
+      m_impl->repository_action = [this, run_id, invocation_id,
+                                   resolution =
+                                       std::move(resolution)]() mutable {
+        return decide_tool_approval(run_id, invocation_id,
+                                    std::move(resolution));
+      };
+      return {};
+    }
+  }
   if (auto validated = validate_recovered_pending_run(); !validated) {
     return std::unexpected(std::move(validated.error()));
   }
@@ -1881,8 +2528,10 @@ auto ChatSession::decide_tool_approval(
   auto decided = m_impl->kernel->decide_approval(run_id, invocation_id,
                                                  std::move(resolution));
   if (!decided) return std::unexpected(kernel_error(decided.error()));
-  if (m_impl->recovered_pending_run_validation_required)
+  if (m_impl->recovered_pending_run_validation_required) {
     m_impl->recovered_sources_pinned = true;
+    m_impl->repository_recovery_pinned = true;
+  }
   const auto events = m_impl->kernel->event_log().events();
   for (std::size_t index = before; index < events.size(); ++index) {
     m_impl->pending_surface_events.push_back(events[index]);
@@ -1894,6 +2543,18 @@ auto ChatSession::answer_questions(const domain::RunId& run_id,
                                    const domain::InvocationId& invocation_id,
                                    std::vector<domain::QuestionAnswer> answers)
     -> std::expected<void, ChatSessionError> {
+  if (m_impl->repository_work)
+    return error(ChatSessionErrorCode::run_failed,
+                 "repository source validation is already pending");
+  auto ready = validate_active_repository(ChatRepositoryWorkPurpose::answer);
+  if (!ready) return std::unexpected(std::move(ready.error()));
+  if (!*ready) {
+    m_impl->repository_action = [this, run_id, invocation_id,
+                                 answers = std::move(answers)]() mutable {
+      return answer_questions(run_id, invocation_id, std::move(answers));
+    };
+    return {};
+  }
   if (auto validated = validate_recovered_pending_run(); !validated) {
     return std::unexpected(std::move(validated.error()));
   }
@@ -1901,8 +2562,10 @@ auto ChatSession::answer_questions(const domain::RunId& run_id,
   auto answered = m_impl->kernel->answer_questions(run_id, invocation_id,
                                                    std::move(answers));
   if (!answered) return std::unexpected(kernel_error(answered.error()));
-  if (m_impl->recovered_pending_run_validation_required)
+  if (m_impl->recovered_pending_run_validation_required) {
     m_impl->recovered_sources_pinned = true;
+    m_impl->repository_recovery_pinned = true;
+  }
   const auto events = m_impl->kernel->event_log().events();
   for (std::size_t index = before; index < events.size(); ++index) {
     m_impl->pending_surface_events.push_back(events[index]);
@@ -1914,6 +2577,18 @@ auto ChatSession::cancel_questions(const domain::RunId& run_id,
                                    const domain::InvocationId& invocation_id,
                                    std::optional<std::string> reason)
     -> std::expected<void, ChatSessionError> {
+  if (m_impl->repository_work)
+    return error(ChatSessionErrorCode::run_failed,
+                 "repository source validation is already pending");
+  auto ready = validate_active_repository(ChatRepositoryWorkPurpose::answer);
+  if (!ready) return std::unexpected(std::move(ready.error()));
+  if (!*ready) {
+    m_impl->repository_action = [this, run_id, invocation_id,
+                                 reason = std::move(reason)]() mutable {
+      return cancel_questions(run_id, invocation_id, std::move(reason));
+    };
+    return {};
+  }
   if (auto validated = validate_recovered_pending_run(); !validated) {
     return std::unexpected(std::move(validated.error()));
   }
@@ -1921,8 +2596,10 @@ auto ChatSession::cancel_questions(const domain::RunId& run_id,
   auto cancelled = m_impl->kernel->cancel_questions(run_id, invocation_id,
                                                     std::move(reason));
   if (!cancelled) return std::unexpected(kernel_error(cancelled.error()));
-  if (m_impl->recovered_pending_run_validation_required)
+  if (m_impl->recovered_pending_run_validation_required) {
     m_impl->recovered_sources_pinned = true;
+    m_impl->repository_recovery_pinned = true;
+  }
   const auto events = m_impl->kernel->event_log().events();
   for (std::size_t index = before; index < events.size(); ++index) {
     m_impl->pending_surface_events.push_back(events[index]);
@@ -2705,7 +3382,8 @@ auto ChatSession::durable() const noexcept -> bool {
 }
 
 auto ChatSession::active() const noexcept -> bool {
-  return m_impl->kernel->active_run_id().has_value();
+  return m_impl->kernel->active_run_id().has_value() ||
+         m_impl->repository_work.has_value();
 }
 
 } // namespace aiforge::surfaces

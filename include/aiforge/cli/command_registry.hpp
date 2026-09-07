@@ -78,6 +78,8 @@ class InteractiveCommand {
     std::optional<std::string> web_search;
     std::optional<std::string> tool_restriction;
     std::optional<std::string> tool_approval;
+    std::optional<std::string> repository;
+    std::optional<std::string> target;
   };
 
   [[nodiscard]] virtual auto execute(Request request,

@@ -85,16 +85,11 @@ src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-bounds-poi
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-const-cast	f339047fc9b91f6da5f6	do not use const_cast to remove const qualifier
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-const-cast	fe3941382bf327a68181	do not use const_cast to remove const qualifier
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	077de43c2f64f087ce2e	do not call c-style vararg functions
-src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	0be3f4e87b76fa44dfa0	do not call c-style vararg functions
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	0d54941187af3f869f8f	do not call c-style vararg functions
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	3402b2b65ec808ca8d4f	do not call c-style vararg functions
-src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	4a94538fb7d7dacd2ca7	do not call c-style vararg functions
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	559847b11a3c8df9d9bd	do not call c-style vararg functions
-src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	ad1351ed1d0ecfaf0cc3	do not call c-style vararg functions
 src/adapters/git_repository_snapshot_source.cpp	modernize-use-integer-sign-comparison	26b24ff743c699515bd0	comparison between 'signed' and 'unsigned' integers
-src/adapters/git_repository_snapshot_source.cpp	modernize-use-integer-sign-comparison	84b47d22b7e97a187e44	comparison between 'signed' and 'unsigned' integers
 src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	0ad80642abc0b54bce39	function 'valid_utf8_instruction' has cognitive complexity of 28 (threshold 20)
-src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	a6aef2f4519215c8efd6	function 'discover' has cognitive complexity of 110 (threshold 20)
 src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	c5a0f0faa0f86a50e9a4	function 'create' has cognitive complexity of 30 (threshold 20)
 src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	d321e7aed1727bb22a26	function 'observe_plain_once' has cognitive complexity of 30 (threshold 20)
 src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	e908ca6803d764919f24	function 'observe' has cognitive complexity of 30 (threshold 20)
@@ -142,7 +137,6 @@ src/adapters/process_image.cpp	cppcoreguidelines-pro-type-vararg	66fa5e306b6f18c
 src/adapters/process_image.cpp	readability-function-cognitive-complexity	2218539b52118fae2370	function 'render_terminal_viewer' has cognitive complexity of 31 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	17175cd81b663ee15bc7	function 'show_plan' has cognitive complexity of 29 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	39b0e565bfcd66520988	function 'request_close' has cognitive complexity of 50 (threshold 20)
-src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	7c3209940c7bc6a277b6	function 'on_render' has cognitive complexity of 27 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	c8e01de8f7f20ca090b4	function 'ensure_plan_review' has cognitive complexity of 64 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	d2b512e48c1c32a25b60	lambda has cognitive complexity of 21 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	ee61c5ba8d710095f66b	lambda has cognitive complexity of 21 (threshold 20)
@@ -205,7 +199,6 @@ src/lib/cli11_parser.cpp	readability-function-cognitive-complexity	d8ef788becd5a
 src/lib/command_registry.cpp	misc-no-recursion	9d34b19b3837738663cd	function 'validate_command' is within a recursive call chain
 src/lib/command_registry.cpp	misc-no-recursion	f3370e651e7c4d4673a4	function 'parser_command' is within a recursive call chain
 src/lib/command_registry.cpp	performance-move-const-arg	d258feb7a06deccc2cae	std::move of the expression of the trivially-copyable type 'aiforge::domain::SessionSpendCeiling' has no effect; remove std::move()
-src/lib/command_registry.cpp	readability-function-cognitive-complexity	36fba92a6cc692469490	function 'dispatch' has cognitive complexity of 21 (threshold 20)
 src/lib/command_registry.cpp	readability-function-cognitive-complexity	d690ef18c4696d750038	function 'render_help' has cognitive complexity of 22 (threshold 20)
 src/lib/config.cpp	concurrency-mt-unsafe	6d18d706b10e599beb3c	function is not thread safe
 src/lib/config.cpp	readability-function-cognitive-complexity	241d8821a6e026eb8108	function 'resolve_config' has cognitive complexity of 61 (threshold 20)
@@ -338,7 +331,6 @@ src/lib/review_receipt.cpp	readability-implicit-bool-conversion	931f541ab28b5159
 src/lib/run_kernel.cpp	bugprone-empty-catch	117003ae82267c76a50e	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-empty-catch	4845d7502acb85565c5e	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-empty-catch	4de7fc5ab4243f6558b4	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
-src/lib/run_kernel.cpp	bugprone-empty-catch	55bb095f09cee5c1c8af	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-empty-catch	b7793445ee89c997204d	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-empty-catch	b84fc3739cee09bebc71	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	0b5338e47fbcca98791d	unchecked access to optional value
@@ -352,7 +344,6 @@ src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	476b058506525184a3ee	u
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	49df6ded2928a44210e2	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	4aa47b64507dbe92ff31	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	569a24a14226ea70c72d	unchecked access to optional value
-src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	6fcbf1404c69f900108f	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	75d754ebea4decf8f016	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8634384da1ead018866e	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8c1e43403bdfb3c78a3f	unchecked access to optional value
@@ -374,7 +365,6 @@ src/lib/run_kernel.cpp	readability-function-cognitive-complexity	3a7e9f2435eb44b
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	3d85f609b90077c24657	function 'cancel_run' has cognitive complexity of 49 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	87a60ae0ea874695253e	function 'valid_question_answers' has cognitive complexity of 27 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	8bcc548cf36e891cfb4b	function 'process_child_result' has cognitive complexity of 25 (threshold 20)
-src/lib/run_kernel.cpp	readability-function-cognitive-complexity	9783d0140f61cd2e8374	function 'decide_approval' has cognitive complexity of 35 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	9d500c9fef0ef4da1dfa	function 'decide_plan' has cognitive complexity of 36 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	bb99b5aae5f74e09593f	function 'continue_run' has cognitive complexity of 22 (threshold 20)
 src/lib/run_kernel.cpp	readability-implicit-bool-conversion	3fa0b8b0af4af3d82b9b	implicit conversion 'const aiforge::domain::ReviewReceiptDrafted *' -> 'bool'

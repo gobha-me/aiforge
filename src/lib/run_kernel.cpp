@@ -901,7 +901,136 @@ using WorkerUpdate =
          digest.finish() == reference.content_digest.value;
 }
 
+class RepositoryAdmissionHistory final {
+ public:
+  auto consume(const domain::RunEvent& event) -> bool {
+    if (const auto* started = std::get_if<domain::RunStarted>(&event.payload)) {
+      if (m_started) return false;
+      m_started = true;
+      m_required = started->workspace_id.value() == "code";
+      return true;
+    }
+    if (!m_started) return false;
+    if (const auto* admitted =
+            std::get_if<domain::RepositoryContextAdmitted>(&event.payload)) {
+      return event.metadata.schema_version == 1 &&
+             !event.metadata.invocation_id && accept_admission(*admitted);
+    }
+    if (const auto* inference =
+            std::get_if<domain::InferenceStarted>(&event.payload)) {
+      return accept_inference(inference->inference_id);
+    }
+    if (const auto* unknown = std::get_if<domain::UnknownEvent>(&event.payload);
+        unknown != nullptr &&
+        unknown->type_name == "run.repository_context_admitted")
+      return false;
+    // Admission and inference start are one atomic, adjacent pair in a run.
+    return !m_pending;
+  }
+
+  [[nodiscard]] auto complete() const -> bool {
+    return m_started && !m_pending && (!m_required || m_latest.has_value());
+  }
+  [[nodiscard]] auto latest() const
+      -> const std::optional<domain::RepositoryContextAdmission>& {
+    return m_latest;
+  }
+
+ private:
+  auto accept_admission(const domain::RepositoryContextAdmitted& event)
+      -> bool {
+    if (m_pending || (m_observed_inference && !m_latest) ||
+        !domain::validate_repository_context_admission(event.admission) ||
+        (m_latest && !domain::repository_context_admission_successor(
+                         *m_latest, event.admission)))
+      return false;
+    m_pending = event;
+    return true;
+  }
+  auto accept_inference(const domain::InferenceId& inference) -> bool {
+    if (!m_inferences.insert(inference).second) return false;
+    m_observed_inference = true;
+    if (!m_pending) return !m_required && !m_latest;
+    if (m_pending->inference_id != inference) return false;
+    m_latest = std::move(m_pending->admission);
+    m_pending.reset();
+    return true;
+  }
+  bool m_started{};
+  bool m_required{};
+  bool m_observed_inference{};
+  std::set<domain::InferenceId> m_inferences;
+  std::optional<domain::RepositoryContextAdmitted> m_pending;
+  std::optional<domain::RepositoryContextAdmission> m_latest;
+};
+
+[[nodiscard]] auto approval_terminal_error(
+    const domain::ApprovalDecision decision) -> domain::DomainError {
+  return decision == domain::ApprovalDecision::cancelled
+             ? approval_cancelled_error()
+             : policy_denied_error();
+}
+
+[[nodiscard]] auto continuation_contains_tool_results(
+    const domain::ConstructedContext& context,
+    const std::vector<domain::InvocationId>& invocations) -> bool {
+  std::set<domain::InvocationId> supplied;
+  for (const auto& entry : context.entries) {
+    if (entry.kind == domain::ContextEntryKind::tool_result &&
+        entry.message.invocation_id) {
+      supplied.insert(*entry.message.invocation_id);
+    }
+  }
+  return std::ranges::all_of(invocations, [&](const auto& invocation_id) {
+    return supplied.contains(invocation_id);
+  });
+}
+
+auto repository_continuation_matches(
+    const domain::SessionEventLog& event_log, const domain::RunId& run_id,
+    const domain::ConstructedContext& context,
+    const std::optional<domain::RepositoryContextAdmission>& admission)
+    -> bool {
+  const auto previous =
+      recorded_repository_context_admission(event_log, run_id);
+  if (!previous) return false;
+  if (!*previous)
+    return !admission && domain::repository_context_admission_matches_context(
+                             admission, context);
+  if (!admission) return false;
+  return domain::repository_context_admission_successor(**previous,
+                                                        *admission) &&
+         domain::repository_context_admission_matches_context(admission,
+                                                              context);
+}
+
 } // namespace
+
+auto recorded_repository_context_admission(
+    const domain::SessionEventLog& event_log, const domain::RunId& run_id)
+    -> std::expected<std::optional<domain::RepositoryContextAdmission>,
+                     RunKernelError> {
+  try {
+    RepositoryAdmissionHistory history;
+    for (const auto& event : event_log.events()) {
+      if (event.metadata.run_id == run_id && !history.consume(event)) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::replay_rejected,
+            "repository context admission history is inconsistent"));
+      }
+    }
+    if (!history.complete()) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::replay_rejected,
+                       "repository context admission history is incomplete"));
+    }
+    return history.latest();
+  } catch (...) {
+    return std::unexpected(kernel_error(
+        RunKernelErrorCode::internal_failure,
+        "repository context admission history could not be inspected"));
+  }
+}
 
 // clang-format off
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Recovery classification validates complete primary/child provenance and exact pending authority.
@@ -2698,6 +2827,51 @@ struct RunKernel::Impl {
     return fail_live_run(transaction, protocol_domain_error());
   }
 
+  [[nodiscard]] auto apply_requested_tool_approval(
+      const domain::RunId& run_id, PendingInvocation& invocation,
+      const ToolApprovalResolution& resolution, Transaction& transaction)
+      -> std::expected<void, RunKernelError> {
+    if (resolution.decision != domain::ApprovalDecision::approved) return {};
+    if (!invocation.policy_request) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "approval has no policy request"));
+    }
+    std::expected<ToolPolicyResolution, ToolPolicyError> approved =
+        std::unexpected(
+            ToolPolicyError{ToolPolicyErrorCode::internal_failure,
+                            "tool policy approval failed internally", false});
+    try {
+      approved = policy->approve(
+          *invocation.policy_request,
+          ToolPolicyApproval{resolution.granted_scopes, resolution.lifetime});
+    } catch (...) {
+      approved = std::unexpected(
+          ToolPolicyError{ToolPolicyErrorCode::internal_failure,
+                          "tool policy approval failed internally", false});
+    }
+    if (!approved) {
+      const auto domain_error = policy_failure_error(approved.error());
+      if (auto failed = record(
+              run_id,
+              domain::ToolPolicyFailed{invocation.invocation_id, domain_error},
+              transaction, invocation.invocation_id);
+          !failed) {
+        return failed;
+      }
+      if (auto committed = commit(std::move(transaction)); !committed) {
+        return committed;
+      }
+      return std::unexpected(kernel_error(
+          approved.error().code == ToolPolicyErrorCode::scope_widening
+              ? RunKernelErrorCode::policy_scope_widening
+              : RunKernelErrorCode::policy_failure,
+          domain_error.message, approved.error().retryable));
+    }
+    invocation.granted_scopes = std::move(approved->scopes);
+    return {};
+  }
+
   [[nodiscard]] auto process_policy_resolution(Transaction& transaction,
                                                ActiveRun& active,
                                                PendingInvocation& invocation,
@@ -4277,6 +4451,14 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
         }
       }
     }
+    if ((start.attributes.workspace_id.value() == "code" &&
+         !start.repository_admission) ||
+        !domain::repository_context_admission_matches_context(
+            start.repository_admission, start.request.context)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "repository context admission does not match constructed context"));
+    }
     domain::MemorySelection empty_memory;
     if (!domain::seal_memory_selection(empty_memory)) {
       return std::unexpected(
@@ -4387,6 +4569,16 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
             start.run_id, domain::RunCompletionRequested{}, transaction);
         !result) {
       return result;
+    }
+    if (start.repository_admission) {
+      if (auto result =
+              m_impl->record(start.run_id,
+                             domain::RepositoryContextAdmitted{
+                                 start.request.inference_id,
+                                 std::move(*start.repository_admission)},
+                             transaction);
+          !result)
+        return result;
     }
     if (auto result =
             m_impl->record(start.run_id,
@@ -5406,6 +5598,11 @@ auto RunKernel::decide_approval(const domain::RunId& run_id,
                                       : RunKernelErrorCode::no_active_run,
                        "approval decision targets no active run"));
     }
+    if (!recorded_repository_context_admission(m_impl->event_log, run_id)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_tool_state,
+          "approval requires intact repository context admission history"));
+    }
     const auto found = m_impl->active->invocations.find(invocation_id);
     if (found == m_impl->active->invocations.end()) {
       return std::unexpected(
@@ -5429,43 +5626,15 @@ auto RunKernel::decide_approval(const domain::RunId& run_id,
     }
 
     auto transaction = m_impl->transaction();
-    auto& invocation = transaction.active->invocations.at(invocation_id);
-    if (resolution.decision == domain::ApprovalDecision::approved) {
-      if (!invocation.policy_request) {
-        return std::unexpected(
-            kernel_error(RunKernelErrorCode::invalid_tool_state,
-                         "approval has no policy request"));
-      }
-      std::expected<ToolPolicyResolution, ToolPolicyError> approved =
-          std::unexpected(
-              ToolPolicyError{ToolPolicyErrorCode::internal_failure,
-                              "tool policy approval failed internally", false});
-      try {
-        approved = m_impl->policy->approve(
-            *invocation.policy_request,
-            ToolPolicyApproval{resolution.granted_scopes, resolution.lifetime});
-      } catch (...) {
-      }
-      if (!approved) {
-        const auto domain_error = policy_failure_error(approved.error());
-        if (auto failed = m_impl->record(
-                run_id, domain::ToolPolicyFailed{invocation_id, domain_error},
-                transaction, invocation_id);
-            !failed) {
-          return failed;
-        }
-        if (auto committed = m_impl->commit(std::move(transaction));
-            !committed) {
-          return committed;
-        }
-        return std::unexpected(kernel_error(
-            approved.error().code == ToolPolicyErrorCode::scope_widening
-                ? RunKernelErrorCode::policy_scope_widening
-                : RunKernelErrorCode::policy_failure,
-            domain_error.message, approved.error().retryable));
-      }
-      invocation.granted_scopes = std::move(approved->scopes);
+    if (!transaction.active) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::internal_failure,
+                       "approval transaction has no active run"));
     }
+    auto& invocation = transaction.active->invocations.at(invocation_id);
+    auto approved = m_impl->apply_requested_tool_approval(
+        run_id, invocation, resolution, transaction);
+    if (!approved) return approved;
     if (auto result =
             m_impl->record(run_id,
                            domain::ToolApprovalDecided{
@@ -5478,9 +5647,7 @@ auto RunKernel::decide_approval(const domain::RunId& run_id,
     if (resolution.decision == domain::ApprovalDecision::approved) {
       invocation.state = Impl::InvocationState::allowed;
     } else {
-      auto error = resolution.decision == domain::ApprovalDecision::cancelled
-                       ? approval_cancelled_error()
-                       : policy_denied_error();
+      auto error = approval_terminal_error(resolution.decision);
       if (auto result = m_impl->record_tool_error(transaction, invocation,
                                                   std::move(error));
           !result) {
@@ -5513,6 +5680,11 @@ auto RunKernel::answer_questions(const domain::RunId& run_id,
           kernel_error(m_impl->active ? RunKernelErrorCode::wrong_run
                                       : RunKernelErrorCode::no_active_run,
                        "question answer targets no active run"));
+    }
+    if (!recorded_repository_context_admission(m_impl->event_log, run_id)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_tool_state,
+          "answers require intact repository context admission history"));
     }
     const auto found = m_impl->active->invocations.find(invocation_id);
     if (found == m_impl->active->invocations.end()) {
@@ -5585,6 +5757,12 @@ auto RunKernel::cancel_questions(const domain::RunId& run_id,
                                       : RunKernelErrorCode::no_active_run,
                        "question cancellation targets no active run"));
     }
+    if (!recorded_repository_context_admission(m_impl->event_log, run_id)) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "question cancellation requires intact repository "
+                       "context admission history"));
+    }
     const auto found = m_impl->active->invocations.find(invocation_id);
     if (found == m_impl->active->invocations.end()) {
       return std::unexpected(
@@ -5638,7 +5816,8 @@ auto RunKernel::cancel_questions(const domain::RunId& run_id,
 
 auto RunKernel::continue_run(
     const domain::RunId& run_id, backend::BackendRequest request,
-    std::optional<domain::PricingObservation> pricing_observation)
+    std::optional<domain::PricingObservation> pricing_observation,
+    std::optional<domain::RepositoryContextAdmission> repository_admission)
     -> std::expected<void, RunKernelError> {
   try {
     if (!m_impl->active || m_impl->active->run_id != run_id) {
@@ -5646,6 +5825,12 @@ auto RunKernel::continue_run(
           kernel_error(m_impl->active ? RunKernelErrorCode::wrong_run
                                       : RunKernelErrorCode::no_active_run,
                        "continuation targets no active run"));
+    }
+    if (!repository_continuation_matches(
+            m_impl->event_log, run_id, request.context, repository_admission)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::continuation_not_ready,
+          "continuation repository context admission changed or is invalid"));
     }
     const auto& active = *m_impl->active;
     if (active.inference_id || active.active_tool_id ||
@@ -5670,17 +5855,8 @@ auto RunKernel::continue_run(
           kernel_error(RunKernelErrorCode::continuation_not_ready,
                        "run is not ready for another inference"));
     }
-    std::set<domain::InvocationId> supplied;
-    for (const auto& entry : request.context.entries) {
-      if (entry.kind == domain::ContextEntryKind::tool_result &&
-          entry.message.invocation_id) {
-        supplied.insert(*entry.message.invocation_id);
-      }
-    }
-    if (std::ranges::any_of(active.invocation_order,
-                            [&](const auto& invocation_id) {
-                              return !supplied.contains(invocation_id);
-                            })) {
+    if (!continuation_contains_tool_results(request.context,
+                                            active.invocation_order)) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::continuation_not_ready,
                        "continuation omits a terminal tool result"));
@@ -5698,6 +5874,15 @@ auto RunKernel::continue_run(
     transaction_active.cancel_requested = false;
     transaction_active.cancel_reason.reset();
     transaction_active.reasoning_text_bytes = 0;
+    if (repository_admission) {
+      if (auto result = m_impl->record(
+              run_id,
+              domain::RepositoryContextAdmitted{
+                  request.inference_id, std::move(*repository_admission)},
+              transaction);
+          !result)
+        return result;
+    }
     if (auto result = m_impl->record(
             run_id,
             domain::InferenceStarted{request.inference_id, request.model_id},
@@ -5748,6 +5933,13 @@ auto RunKernel::drain()
     }
     std::vector<domain::RunEvent> committed;
     if (m_impl->active && m_impl->active->recovered_tool_launch_pending) {
+      if (!recorded_repository_context_admission(m_impl->event_log,
+                                                 m_impl->active->run_id)) {
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::invalid_tool_state,
+                         "recovered tool dispatch requires intact repository "
+                         "context admission history"));
+      }
       m_impl->active->recovered_tool_launch_pending = false;
       const auto before_launch = m_impl->event_log.events().size();
       if (auto launched = m_impl->launch_next_tool(); !launched) {

@@ -5,9 +5,11 @@
 #include <memory>
 
 #include <aiforge/runtime/automatic_approval_matcher.hpp>
+#include <aiforge/runtime/repository_context_controller.hpp>
 
 namespace aiforge::adapters {
 class GitExactSourceEditor;
+class GitProjectInstructionSource;
 class GitRepositorySnapshotSource;
 } // namespace aiforge::adapters
 
@@ -24,5 +26,11 @@ namespace aiforge::adapters {
     -> std::expected<
         std::shared_ptr<const runtime::PinnedRepositoryReadAuthority>,
         runtime::AutomaticApprovalMatcherError>;
+
+[[nodiscard]] auto make_pinned_repository_context_source(
+    std::shared_ptr<const runtime::PinnedRepositoryReadAuthority> authority,
+    GitProjectInstructionSource& instructions)
+    -> std::expected<std::shared_ptr<runtime::RepositoryContextSource>,
+                     runtime::AutomaticApprovalMatcherError>;
 
 } // namespace aiforge::adapters

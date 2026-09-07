@@ -80,6 +80,8 @@ struct InteractiveChatAppOptions {
   std::function<void()> wake_observer;
   bool live_wake_enabled{true};
   bool poll_worker_updates{true};
+  std::string repository_root_display;
+  runtime::RepositoryContextSource* repository_context_source{};
   model::CatalogService* model_catalog{};
   backend::ProviderCharacterCatalogSource* provider_character_catalog{};
   VeniceConfiguredRequestSettings configured_request_settings;
@@ -134,6 +136,9 @@ class InteractiveChatApp : public termforge::App {
       -> std::span<const domain::RunEvent> = 0;
   [[nodiscard]] virtual auto status_text() const noexcept
       -> std::string_view = 0;
+  // Observation only: a worker result is queued for the next UI consumption.
+  [[nodiscard]] virtual auto repository_preparation_ready() const noexcept
+      -> bool = 0;
   [[nodiscard]] virtual auto configure_terminal_for_scenario(
       termforge::TerminalIo io, const termforge::Capabilities& capabilities)
       -> std::expected<void, std::string> = 0;

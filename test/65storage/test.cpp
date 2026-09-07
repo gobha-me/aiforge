@@ -365,6 +365,46 @@ auto create(storage::SessionStore& store, const std::string& id,
   return session;
 }
 
+auto repository_admission() -> domain::RepositoryContextAdmission {
+  domain::RepositoryContextAdmission result{
+      1,
+      "root:123:456",
+      {make_id<domain::RepositoryId>("repository"),
+       {"sha256", std::string(64, 'a'), 0}},
+      "",
+      1,
+      {4096, 512, 0},
+      {},
+      {},
+      {}};
+  result.instructions.push_back(
+      {make_id<domain::ProjectInstructionId>("project:root"),
+       {result.source_snapshot,
+        "AGENTS.md",
+        {"git-sha1", std::string(40, 'b'), 3},
+        {}},
+       "",
+       0,
+       1,
+       3,
+       {"sha256", std::string(64, 'c'), 3}});
+  result.evidence.push_back(
+      {make_id<domain::EvidenceId>("file"),
+       make_id<domain::ContextEntryId>("repository-context-entry-file"),
+       make_id<domain::MessageId>("repository-context-message-file"),
+       make_id<domain::ContextSourceId>("repository-context-source-file"),
+       {result.source_snapshot,
+        "file.txt",
+        {"git-sha1", std::string(40, 'd'), 5},
+        {}},
+       1,
+       5,
+       domain::RepositoryContextDecision::admitted,
+       {"sha256", std::string(64, 'e'), 5}});
+  REQUIRE(domain::seal_repository_context_admission(result));
+  return result;
+}
+
 auto all_payloads() -> std::vector<domain::RunEventPayload> {
   const auto inference = make_id<domain::InferenceId>("inference");
   const auto invocation = make_id<domain::InvocationId>("invocation");
@@ -455,6 +495,7 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
                                          domain::TextBlock{"delta"}},
       domain::AssistantContentFinished{message, inference},
       domain::InferenceStarted{inference, make_id<domain::ModelId>("model")},
+      domain::RepositoryContextAdmitted{inference, repository_admission()},
       domain::InferencePricingObserved{inference, pricing_observation()},
       domain::ReasoningMetadataAdded{
           inference, std::string{"summary"}, {{"visibility", "summary"}}},
@@ -2601,4 +2642,148 @@ TEST_CASE(
   REQUIRE_FALSE(replayed);
   CHECK(replayed.error().code == storage::SessionStoreErrorCode::corrupt);
   CHECK(replayed.error().message.find("must-not-be-used") == std::string::npos);
+}
+
+TEST_CASE("repository admission corruption is rejected without source or "
+          "opaque fallback",
+          "[storage][sqlite][codec][repository][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "repository-admission", 100);
+  const auto persisted = event(
+      1,
+      domain::RepositoryContextAdmitted{
+          make_id<domain::InferenceId>("inference"), repository_admission()},
+      "admission");
+  REQUIRE(store->append_events(session, std::array{persisted}));
+  store.reset();
+  std::string expression;
+  SECTION("missing admission") {
+    expression = "json_remove(payload_json,'$.admission')";
+  }
+  SECTION("missing seal") {
+    expression = "json_remove(payload_json,'$.admission.admission_digest')";
+  }
+  SECTION("null admission") {
+    expression = "json_set(payload_json,'$.admission',NULL)";
+  }
+  SECTION("unsupported version") {
+    expression = "json_set(payload_json,'$.admission.version',2)";
+  }
+  SECTION("unsigned conversion overflow") {
+    expression = "json_set(payload_json,'$.admission.version',4294967297)";
+  }
+  SECTION("floating numeric field") {
+    expression = "json_set(payload_json,'$.admission.selection_revision',1.0)";
+  }
+  SECTION("negative budget") {
+    expression = "json_set(payload_json,'$.admission.capacity.reserved_input_"
+                 "tokens',-1)";
+  }
+  SECTION("valid shape changed budget") {
+    expression = "json_set(payload_json,'$.admission.capacity.context_window_"
+                 "tokens',8192)";
+  }
+  SECTION("changed target") {
+    expression = "json_set(payload_json,'$.admission.target_subtree','src')";
+  }
+  SECTION("changed root") {
+    expression =
+        "json_set(payload_json,'$.admission.root_binding','root:other')";
+  }
+  SECTION("changed snapshot") {
+    expression = "json_set(payload_json,'$.admission.source_snapshot."
+                 "repository_id','other')";
+  }
+  SECTION("changed instruction order") {
+    expression = "json_set(payload_json,'$.admission.instructions[0].order',2)";
+  }
+  SECTION("changed instruction membership") {
+    expression = "json_set(payload_json,'$.admission.instructions',json('[]'))";
+  }
+  SECTION("changed source identity") {
+    expression = "json_set(payload_json,'$.admission.evidence[0].source."
+                 "relative_path','other.txt')";
+  }
+  SECTION("changed evidence decision") {
+    expression = "json_set(payload_json,'$.admission.evidence[0].decision','"
+                 "omitted_budget')";
+  }
+  SECTION("unknown evidence decision") {
+    expression = "json_set(payload_json,'$.admission.evidence[0].decision','"
+                 "include_anything')";
+  }
+  SECTION("duplicate selected evidence") {
+    expression = "json_insert(payload_json,'$.admission.evidence[#]',json_"
+                 "extract(payload_json,'$.admission.evidence[0]'))";
+  }
+  SECTION("missing independent text digest") {
+    expression =
+        "json_remove(payload_json,'$.admission.instructions[0].text_digest')";
+  }
+  SECTION("additional envelope field") {
+    expression = "json_set(payload_json,'$.secret','must-not-be-used')";
+  }
+  SECTION("additional admission field") {
+    expression =
+        "json_set(payload_json,'$.admission.raw_text','must-not-be-used')";
+  }
+  SECTION("additional nested source field") {
+    expression = "json_set(payload_json,'$.admission.evidence[0].source.raw_"
+                 "text','must-not-be-used')";
+  }
+  REQUIRE_FALSE(expression.empty());
+  execute_sql(path, "UPDATE events SET payload_json=" + expression +
+                        " WHERE event_id='admission'");
+  store = open_store(path);
+  const auto replay = store->replay_events(session);
+  REQUIRE_FALSE(replay);
+  CHECK(replay.error().code == storage::SessionStoreErrorCode::corrupt);
+  CHECK(replay.error().message.find("must-not-be-used") == std::string::npos);
+}
+
+TEST_CASE(
+    "repository admission codec preserves empty populated and future schemas",
+    "[storage][sqlite][codec][repository]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "repository-admission", 100);
+  auto admission = repository_admission();
+  SECTION("empty") {
+    admission.instructions.clear();
+    admission.evidence.clear();
+  }
+  SECTION("populated") {
+  }
+  SECTION("explicit omitted evidence") {
+    admission.evidence.front().decision =
+        domain::RepositoryContextDecision::omitted_class_budget;
+  }
+  REQUIRE(domain::seal_repository_context_admission(admission));
+  const auto persisted =
+      event(1, domain::RepositoryContextAdmitted{
+                   make_id<domain::InferenceId>("inference"), admission});
+  REQUIRE(store->append_events(session, std::array{persisted}));
+  const auto replay = store->replay_events(session);
+  REQUIRE(replay);
+  CHECK(*replay == std::vector<domain::RunEvent>{persisted});
+  auto future = event(
+      2, domain::UnknownEvent{"run.repository_context_admitted",
+                              {"application/json", R"({"future":true})"}});
+  future.metadata.schema_version = 2;
+  REQUIRE(store->append_events(session, std::array{future}));
+  const auto future_replay = store->replay_events(session);
+  REQUIRE(future_replay);
+  CHECK(future_replay->back() == future);
+  auto invalid = persisted;
+  invalid.metadata.sequence = 3;
+  invalid.metadata.event_id = make_id<domain::EventId>("invalid");
+  std::get<domain::RepositoryContextAdmitted>(invalid.payload)
+      .admission.selection_revision++;
+  CHECK_FALSE(store->append_events(session, std::array{invalid}));
+  const auto unchanged = store->replay_events(session);
+  REQUIRE(unchanged);
+  CHECK(*unchanged == *future_replay);
 }
