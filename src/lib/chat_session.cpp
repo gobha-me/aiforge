@@ -567,6 +567,18 @@ template <typename Id>
   return result;
 }
 
+[[nodiscard]] auto invalid_resumed_persona(
+    const persona::PersonaDirective& directive, const bool allow_attention)
+    -> std::expected<PersonaSetup, ChatSessionError> {
+  if (allow_attention &&
+      directive.kind == persona::PersonaDirectiveKind::inherit) {
+    return PersonaSetup{std::nullopt, std::nullopt,
+                        "Persona is invalid; select a persona or turn it off"};
+  }
+  return error(ChatSessionErrorCode::context_failed,
+               "persona document is invalid");
+}
+
 [[nodiscard]] auto resolve_persona(persona::PersonaSource* source,
                                    const persona::PersonaLimits limits,
                                    const persona::PersonaDirective& directive,
@@ -630,8 +642,7 @@ template <typename Id>
     return std::unexpected(persona_error(loaded.error()));
   }
   if (!domain::validate_persona_document(*loaded)) {
-    return error(ChatSessionErrorCode::context_failed,
-                 "persona document is invalid");
+    return invalid_resumed_persona(directive, allow_attention);
   }
   if (directive.kind == persona::PersonaDirectiveKind::inherit &&
       loaded->reference != *previous) {
@@ -700,6 +711,8 @@ struct ChatSession::Impl {
   std::vector<domain::RunEvent> pending_surface_events;
   std::unique_ptr<runtime::RunKernel> kernel;
   std::uint64_t tool_profile_revision{};
+  std::optional<ChatRecoveryBlock> recovery_block;
+  std::optional<runtime::RecoverableRun> recovered_run;
 
   [[nodiscard]] auto tool_selection() const -> runtime::ToolProfileSelection {
     return {tool_profile_id, desired_tool_names,
@@ -743,6 +756,23 @@ namespace {
 
 auto ChatSession::validate_recovered_pending_run()
     -> std::expected<void, ChatSessionError> {
+  const auto run_id = m_impl->kernel->active_run_id();
+  if (!run_id && m_impl->recovery_block) {
+    return std::unexpected(m_impl->recovery_block->reason);
+  }
+  auto validated = load_recovered_pending_sources();
+  if (!validated && run_id &&
+      validated.error().code != ChatSessionErrorCode::cancelled) {
+    m_impl->recovery_block =
+        ChatRecoveryBlock{session_id(), *run_id, validated.error()};
+  } else {
+    m_impl->recovery_block.reset();
+  }
+  return validated;
+}
+
+auto ChatSession::load_recovered_pending_sources()
+    -> std::expected<void, ChatSessionError> {
   if (!m_impl->recovered_pending_run_validation_required) return {};
   const auto run_id = m_impl->kernel->active_run_id();
   if (!run_id) {
@@ -750,6 +780,18 @@ auto ChatSession::validate_recovered_pending_run()
     m_impl->recovered_persona_document.reset();
     m_impl->recovered_user_global_instruction.reset();
     return {};
+  }
+  if (!m_impl->recovered_persona_document) {
+    if (!m_impl->recovered_run || m_impl->recovered_run->run_id != *run_id) {
+      return error(ChatSessionErrorCode::context_failed,
+                   "recoverable run identity is unavailable");
+    }
+    auto loaded = recovered_persona_document(
+        m_impl->persona_source, m_impl->persona_limits,
+        m_impl->kernel->event_log(), *m_impl->recovered_run,
+        m_impl->stop_token);
+    if (!loaded) return std::unexpected(std::move(loaded.error()));
+    m_impl->recovered_persona_document = std::move(*loaded);
   }
   if (m_impl->recovered_persona_document) {
     auto validated = validate_recovered_persona_document(
@@ -938,8 +980,11 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
       auto loaded = recovered_persona_document(
           dependencies.persona_source, dependencies.persona_limits,
           recovery_history, **recoverable, stop_token);
-      if (!loaded) return std::unexpected(std::move(loaded.error()));
-      recovered_persona = std::move(*loaded);
+      if (loaded)
+        recovered_persona = std::move(*loaded);
+      else if (loaded.error().code == ChatSessionErrorCode::cancelled) {
+        return std::unexpected(std::move(loaded.error()));
+      }
     }
     const bool allow_persona_attention =
         request.mode == ChatSessionOpen::Mode::resume ||
@@ -1088,7 +1133,9 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              std::nullopt,
              {},
              std::move(kernel),
-             0});
+             0,
+             std::nullopt,
+             std::move(*recoverable)});
     return std::unique_ptr<ChatSession>{new ChatSession{std::move(impl)}};
   } catch (...) {
     return error(ChatSessionErrorCode::internal_failure,
@@ -1602,6 +1649,7 @@ auto ChatSession::continue_if_ready()
 auto ChatSession::drain()
     -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
   if (auto validated = validate_recovered_pending_run(); !validated) {
+    if (m_impl->recovery_block) return std::vector<domain::RunEvent>{};
     return std::unexpected(std::move(validated.error()));
   }
   auto drained = m_impl->kernel->drain();
@@ -1643,19 +1691,39 @@ auto ChatSession::drain()
 auto ChatSession::cancel_active(std::optional<std::string> reason)
     -> std::expected<void, ChatSessionError> {
   const auto run = m_impl->kernel->active_run_id();
-  if (!run) return {};
+  if (!run) {
+    if (m_impl->recovery_block) {
+      return error(ChatSessionErrorCode::session_failed,
+                   "reopen the session before retrying blocked cancellation");
+    }
+    return {};
+  }
   const auto before = m_impl->kernel->event_log().events().size();
   auto cancelled = m_impl->kernel->cancel_run(*run, std::move(reason));
-  if (!cancelled) return std::unexpected(kernel_error(cancelled.error()));
+  if (!cancelled) {
+    auto failure = kernel_error(cancelled.error());
+    if (m_impl->recovery_block && !m_impl->kernel->active_run_id()) {
+      m_impl->recovery_block->reason = failure;
+      m_impl->recovery_block->reason.message =
+          "cancellation persistence failed; reopen the session before retrying";
+    }
+    return std::unexpected(std::move(failure));
+  }
   m_impl->active_context.reset();
   m_impl->recovered_pending_run_validation_required = false;
   m_impl->recovered_persona_document.reset();
   m_impl->recovered_user_global_instruction.reset();
+  m_impl->recovery_block.reset();
   const auto events = m_impl->kernel->event_log().events();
   for (std::size_t index = before; index < events.size(); ++index) {
     m_impl->pending_surface_events.push_back(events[index]);
   }
   return {};
+}
+
+auto ChatSession::blocked_recovery() const
+    -> const std::optional<ChatRecoveryBlock>& {
+  return m_impl->recovery_block;
 }
 
 auto ChatSession::pending_question_input() const

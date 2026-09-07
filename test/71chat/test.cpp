@@ -387,6 +387,11 @@ class MemoryStore final : public storage::SessionStore {
   auto append_events(const domain::SessionId& session_id,
                      std::span<const domain::RunEvent> events, std::stop_token)
       -> std::expected<void, storage::SessionStoreError> override {
+    if (fail_appends) {
+      return std::unexpected(
+          storage::SessionStoreError{storage::SessionStoreErrorCode::io_failure,
+                                     "injected append failure", true});
+    }
     const auto found = sessions.find(session_id);
     if (found == sessions.end()) {
       return std::unexpected(storage::SessionStoreError{
@@ -437,6 +442,7 @@ class MemoryStore final : public storage::SessionStore {
     return sessions.at(request.candidate_session_id);
   }
 
+  bool fail_appends{};
   std::map<domain::SessionId, storage::SessionInfo> sessions;
   std::map<domain::SessionId, std::vector<domain::RunEvent>> histories;
   std::vector<std::pair<domain::MemoryOwner, domain::SessionId>>
@@ -1354,9 +1360,9 @@ TEST_CASE("recovered approvals revalidate their originating persona",
     REQUIRE(backend.requests.size() == backend_requests_before);
     REQUIRE(executor->recorded_invocations().empty());
     const auto drained = (*resumed)->drain();
-    REQUIRE_FALSE(drained);
-    REQUIRE(drained.error().code ==
-            surfaces::ChatSessionErrorCode::context_failed);
+    REQUIRE(drained);
+    REQUIRE(drained->empty());
+    REQUIRE((*resumed)->blocked_recovery());
     REQUIRE(store.histories.at(session_id) == history_before);
     REQUIRE(backend.requests.size() == backend_requests_before);
     REQUIRE(executor->recorded_invocations().empty());
@@ -2158,10 +2164,13 @@ TEST_CASE("recovered chat finishes with its exact persona before switching",
   REQUIRE(std::ranges::find(next_system, alpha.text) == next_system.end());
 }
 
-TEST_CASE("recovered chat rejects missing or changed originating persona",
+TEST_CASE("recovered chat exposes blocked persona history and cancellation",
           "[chat][recovery][persona][storage][failure]") {
-  const auto missing = GENERATE(true, false);
-  CAPTURE(missing);
+  const auto failure = GENERATE(0, 1, 2, 3);
+  const auto directive = GENERATE(persona::PersonaDirectiveKind::inherit,
+                                  persona::PersonaDirectiveKind::disable,
+                                  persona::PersonaDirectiveKind::select);
+  CAPTURE(failure, directive);
   QuestionBackend backend;
   MemoryStore store;
   const auto alpha = named_persona_document("persona:alpha-immutable", "alpha",
@@ -2197,23 +2206,120 @@ TEST_CASE("recovered chat rejects missing or changed originating persona",
   const auto history_before = store.histories.at(session_id);
 
   MutablePersonaSource resume_source;
-  if (!missing) {
+  if (failure != 0) {
     resume_source.documents.emplace(
         "alpha", named_persona_document("persona:alpha-immutable", "alpha",
                                         "Changed alpha instructions."));
   }
+  if (failure == 2) resume_source.documents.at("alpha").text = "bad\x1btext";
+  if (failure == 3) {
+    resume_source.documents.clear();
+    resume_source.documents.emplace("renamed", alpha);
+  }
+  const auto beta = named_persona_document("persona:beta-immutable", "beta",
+                                           "New beta instructions.");
+  resume_source.documents.emplace("beta", beta);
   surfaces::ChatSessionDependencies resume_dependencies;
   resume_dependencies.tools = *tools;
   resume_dependencies.persona_source = &resume_source;
-  const auto resumed = surfaces::ChatSession::open(
+  auto resumed = surfaces::ChatSession::open(
       {make_id<domain::ModelId>("model"),
-       surfaces::ChatSessionOpen::Mode::resume, session_id},
+       surfaces::ChatSessionOpen::Mode::resume,
+       session_id,
+       domain::RunProvenance{"test",
+                             "test",
+                             std::nullopt,
+                             make_id<domain::ModelId>("model"),
+                             std::nullopt,
+                             {},
+                             {},
+                             {}},
+       {directive,
+        directive == persona::PersonaDirectiveKind::select
+            ? std::optional<std::string>{"beta"}
+            : std::nullopt,
+        domain::PersonaSelectionSource::command_line}},
       backend, backend, &store, nullptr, {}, {}, resume_dependencies);
-  REQUIRE_FALSE(resumed);
-  REQUIRE(resumed.error().code ==
-          surfaces::ChatSessionErrorCode::context_failed);
+  REQUIRE(resumed);
+  REQUIRE((*resumed)->drain());
+  REQUIRE((*resumed)->blocked_recovery());
+  REQUIRE((*resumed)->blocked_recovery()->session_id == session_id);
+  const auto pending = (*resumed)->pending_question_input();
+  REQUIRE(pending);
+  REQUIRE((*resumed)->blocked_recovery()->run_id == pending->run_id);
+  REQUIRE_FALSE((*resumed)->answer_questions(
+      pending->run_id, pending->invocation_id,
+      {{make_id<domain::QuestionId>("format"), {"short"}, std::nullopt}}));
   REQUIRE(backend.requests.size() == 1);
   REQUIRE(store.histories.at(session_id) == history_before);
+  SECTION("restoring exact source bytes permits continuation") {
+    resume_source.documents.insert_or_assign("alpha", alpha);
+    REQUIRE((*resumed)->drain());
+    REQUIRE_FALSE((*resumed)->blocked_recovery());
+    REQUIRE((*resumed)->answer_questions(
+        pending->run_id, pending->invocation_id,
+        {{make_id<domain::QuestionId>("format"), {"short"}, std::nullopt}}));
+    drain_to_end(**resumed);
+    REQUIRE(backend.requests.size() == 2);
+    const auto system =
+        text_messages(backend.requests.back(), domain::Role::system);
+    REQUIRE(std::ranges::find(system, alpha.text) != system.end());
+  }
+  SECTION("cancellation can be retried after reopening a failed store") {
+    store.fail_appends = true;
+    REQUIRE_FALSE((*resumed)->cancel_active("cancel blocked run"));
+    REQUIRE_FALSE((*resumed)->active());
+    REQUIRE((*resumed)->blocked_recovery());
+    REQUIRE((*resumed)->drain());
+    REQUIRE((*resumed)->blocked_recovery());
+    REQUIRE((*resumed)->blocked_recovery()->reason.message.find("reopen") !=
+            std::string::npos);
+    REQUIRE_FALSE((*resumed)->cancel_active("retry before reopening"));
+    REQUIRE(store.histories.at(session_id) == history_before);
+    store.fail_appends = false;
+    resumed->reset();
+    resumed = surfaces::ChatSession::open(
+        {make_id<domain::ModelId>("model"),
+         surfaces::ChatSessionOpen::Mode::resume,
+         session_id,
+         domain::RunProvenance{"test",
+                               "test",
+                               std::nullopt,
+                               make_id<domain::ModelId>("model"),
+                               std::nullopt,
+                               {},
+                               {},
+                               {}},
+         {directive,
+          directive == persona::PersonaDirectiveKind::select
+              ? std::optional<std::string>{"beta"}
+              : std::nullopt,
+          domain::PersonaSelectionSource::command_line}},
+        backend, backend, &store, nullptr, {}, {}, resume_dependencies);
+    REQUIRE(resumed);
+    REQUIRE((*resumed)->drain());
+    REQUIRE((*resumed)->blocked_recovery());
+    REQUIRE((*resumed)->cancel_active("cancel blocked run"));
+    REQUIRE_FALSE((*resumed)->active());
+    REQUIRE_FALSE((*resumed)->blocked_recovery());
+    const auto cancelled_history = store.histories.at(session_id);
+    REQUIRE((*resumed)->cancel_active("duplicate cancellation"));
+    REQUIRE(store.histories.at(session_id) == cancelled_history);
+    REQUIRE(backend.requests.size() == 1);
+    if (directive != persona::PersonaDirectiveKind::select) {
+      REQUIRE((*resumed)->disable_persona());
+    }
+    const auto next = (*resumed)->submit("new run under current selection");
+    INFO((next ? std::string{} : next.error().message));
+    REQUIRE(next);
+    drain_to_end(**resumed);
+    REQUIRE(backend.requests.size() == 2);
+    const auto system =
+        text_messages(backend.requests.back(), domain::Role::system);
+    REQUIRE(std::ranges::find(system, alpha.text) == system.end());
+    REQUIRE((std::ranges::find(system, beta.text) != system.end()) ==
+            (directive == persona::PersonaDirectiveKind::select));
+  }
 }
 
 TEST_CASE(
