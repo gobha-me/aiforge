@@ -3463,7 +3463,8 @@ auto parse_v2_tool_policy_fields(const Json& value,
 
 [[nodiscard]] auto memory_selection_json(
     const domain::MemorySelection& selection) -> Json {
-  if (!domain::validate_memory_selection(selection))
+  if (!selection.admission_digest ||
+      !domain::validate_memory_selection(selection))
     throw CodecFailure{"invalid memory selection"};
   auto entries = Json::array();
   for (const auto& entry : selection.entries) {
