@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include <aiforge/domain/context.hpp>
+#include <aiforge/domain/digest.hpp>
 #include <aiforge/domain/ids.hpp>
 
 namespace aiforge::domain {
@@ -85,6 +87,30 @@ struct MemoryRecord {
   auto operator==(const MemoryRecord&) const -> bool = default;
 };
 
+// References only: saved text remains in its append-only journal.
+struct MemorySelectionEntry {
+  SessionId journal_session_id;
+  MemoryRecordId record_id;
+  EventId record_event_id;
+  MemoryOwner owner;
+  MemorySource source;
+  ContentDigest record_digest;
+  ContentDigest evidence_digest;
+  std::uint64_t order{};
+  std::uint64_t estimated_tokens{};
+  auto operator==(const MemorySelectionEntry&) const -> bool = default;
+};
+
+struct MemorySelection {
+  std::uint32_t version{1};
+  std::optional<RepositoryId> repository_id;
+  std::optional<PersonaId> persona_id;
+  std::uint64_t maximum_tokens{};
+  std::uint64_t available_tokens{};
+  std::vector<MemorySelectionEntry> entries;
+  auto operator==(const MemorySelection&) const -> bool = default;
+};
+
 struct MemoryAcceptance {
   MemoryRecord record;
   MemoryDecisionSource source{MemoryDecisionSource::user};
@@ -155,6 +181,17 @@ struct MemoryError {
   std::optional<MemoryRecordId> record_id;
   auto operator==(const MemoryError&) const -> bool = default;
 };
+
+[[nodiscard]] auto memory_record_digest(const MemoryRecord& record)
+    -> std::expected<ContentDigest, MemoryError>;
+[[nodiscard]] auto memory_evidence_input(const MemoryRecord& record,
+                                         std::uint64_t order)
+    -> std::expected<ContextContentInput, MemoryError>;
+[[nodiscard]] auto validate_memory_selection(const MemorySelection& selection)
+    -> std::expected<void, MemoryError>;
+[[nodiscard]] auto memory_selection_matches_context(
+    const MemorySelection& selection, const ConstructedContext& context)
+    -> bool;
 
 [[nodiscard]] auto validate_memory_proposal(const MemoryProposal& proposal,
                                             const MemoryLimits& limits = {})

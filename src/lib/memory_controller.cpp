@@ -1,5 +1,6 @@
 #include <aiforge/runtime/memory_controller.hpp>
 
+#include <aiforge/detail/sha256.hpp>
 #include <aiforge/runtime/context_builder.hpp>
 
 #include <algorithm>
@@ -109,18 +110,6 @@ template <typename Id>
   return "unknown";
 }
 
-[[nodiscard]] auto kind_name(const domain::MemoryKind kind)
-    -> std::string_view {
-  switch (kind) {
-    case domain::MemoryKind::user_preference: return "user preference";
-    case domain::MemoryKind::project_convention: return "project convention";
-    case domain::MemoryKind::workflow: return "workflow";
-    case domain::MemoryKind::reusable_fact: return "reusable fact";
-    case domain::MemoryKind::unknown: return "unknown";
-  }
-  return "unknown";
-}
-
 } // namespace
 
 struct MemoryController::Journal {
@@ -149,11 +138,18 @@ auto resolve_memory_settings(const config::ResolvedConfig& config)
   return MemorySettings{*global, *project, *persona, *value};
 }
 
-auto select_memory_context(MemoryController& controller,
-                           MemoryContextRequest request)
-    -> std::expected<std::vector<domain::ContextContentInput>,
-                     MemoryControllerError> {
-  if (request.maximum_tokens == 0 || request.available_tokens == 0) return {};
+auto select_memory_context_with_provenance(MemoryController& controller,
+                                           MemoryContextRequest request)
+    -> std::expected<SelectedMemoryContext, MemoryControllerError> {
+  SelectedMemoryContext result{{1,
+                                request.repository_id,
+                                request.persona_id,
+                                request.maximum_tokens,
+                                request.available_tokens,
+                                {}},
+                               {}};
+  if (request.maximum_tokens == 0 || request.available_tokens == 0)
+    return result;
   auto records =
       controller.current_for_context(request.repository_id, request.persona_id);
   if (!records) return std::unexpected(std::move(records.error()));
@@ -182,33 +178,12 @@ auto select_memory_context(MemoryController& controller,
   std::uint64_t order{};
   for (const auto& view : *records) {
     const auto& record = view.projected.record;
-    auto entry_id = domain::ContextEntryId::from(
-        "memory-entry-" + std::string{record.record_id.value()});
-    auto message_id = domain::MessageId::from(
-        "memory-message-" + std::string{record.record_id.value()});
-    auto source_id = domain::ContextSourceId::from(
-        "memory-source-" + std::string{record.record_id.value()});
-    if (!entry_id || !message_id || !source_id) {
+    auto content = domain::memory_evidence_input(record, ++order);
+    if (!content)
       return failure(MemoryControllerErrorCode::internal_failure,
-                     "saved memory identity cannot enter context");
-    }
-    auto text = "Saved " + std::string{owner_name(record.owner.kind)} + " " +
-                std::string{kind_name(record.kind)} + ": " + record.content;
-    domain::ContextContentInput content{
-        std::move(*entry_id),
-        domain::ContextContentKind::evidence,
-        {std::move(*message_id),
-         domain::Role::evidence,
-         {domain::TextBlock{text}},
-         std::nullopt},
-        {std::move(*source_id),
-         "memory:" + std::string{record.record_id.value()} +
-             ";session:" + std::string{record.source.session_id.value()},
-         std::nullopt},
-        ++order,
-        text.size()};
+                     content.error().message);
     selection.candidates.push_back(
-        {std::move(content), runtime::ContextBudgetClass::memory,
+        {std::move(*content), runtime::ContextBudgetClass::memory,
          runtime::ContextRepresentation::derived,
          domain::EvidenceFreshness::current, false, order, std::nullopt});
   }
@@ -219,16 +194,53 @@ auto select_memory_context(MemoryController& controller,
                    "saved memory context selection failed: " +
                        selected.error().message);
   }
-  std::vector<domain::ContextContentInput> result;
-  result.reserve(selected->context.entries.size());
+  result.content.reserve(selected->context.entries.size());
   for (auto& entry : selected->context.entries) {
     if (entry.kind == domain::ContextEntryKind::instruction) continue;
-    result.push_back({std::move(entry.entry_id),
-                      domain::ContextContentKind::evidence,
-                      std::move(entry.message), std::move(entry.provenance),
-                      entry.order, entry.estimated_tokens});
+    const auto found = std::ranges::find_if(*records, [&](const auto& view) {
+      return entry.entry_id.value() ==
+             "memory-entry-" +
+                 std::string{view.projected.record.record_id.value()};
+    });
+    if (found == records->end() || !found->journal_session_id)
+      return failure(MemoryControllerErrorCode::internal_failure,
+                     "selected memory journal identity is unavailable");
+    auto digest = domain::memory_record_digest(found->projected.record);
+    if (!digest)
+      return failure(MemoryControllerErrorCode::invalid_source,
+                     digest.error().message);
+    const auto& text =
+        std::get<domain::TextBlock>(entry.message.content.front()).text;
+    detail::Sha256 hash;
+    hash.update(std::as_bytes(std::span{text.data(), text.size()}));
+    result.selection.entries.push_back({*found->journal_session_id,
+                                        found->projected.record.record_id,
+                                        found->projected.record_event_id,
+                                        found->projected.record.owner,
+                                        found->projected.record.source,
+                                        std::move(*digest),
+                                        {"sha256", hash.finish(), text.size()},
+                                        entry.order,
+                                        entry.estimated_tokens});
+    result.content.push_back(
+        {std::move(entry.entry_id), domain::ContextContentKind::evidence,
+         std::move(entry.message), std::move(entry.provenance), entry.order,
+         entry.estimated_tokens});
   }
+  if (auto valid = domain::validate_memory_selection(result.selection); !valid)
+    return failure(MemoryControllerErrorCode::invalid_configuration,
+                   valid.error().message);
   return result;
+}
+
+auto select_memory_context(MemoryController& controller,
+                           MemoryContextRequest request)
+    -> std::expected<std::vector<domain::ContextContentInput>,
+                     MemoryControllerError> {
+  auto selected =
+      select_memory_context_with_provenance(controller, std::move(request));
+  if (!selected) return std::unexpected(std::move(selected.error()));
+  return std::move(selected->content);
 }
 
 MemoryController::MemoryController(
@@ -569,7 +581,7 @@ auto MemoryController::inspect(MemoryMutationTarget target)
   for (const auto& projected : journal->projection.records()) {
     auto available = source_available(projected.record.source);
     if (!available) return std::unexpected(std::move(available.error()));
-    state.records.push_back({projected, *available});
+    state.records.push_back({projected, *available, journal->info.session_id});
   }
   return state;
 }
@@ -608,6 +620,91 @@ auto MemoryController::current_for_context(
   auto appended = append_current(domain::MemoryOwner::global());
   if (!appended) return std::unexpected(std::move(appended.error()));
   return result;
+}
+
+auto MemoryController::restore_context(const domain::MemorySelection& selection)
+    -> std::expected<std::vector<domain::ContextContentInput>,
+                     MemoryControllerError> {
+  try {
+    if (auto valid = domain::validate_memory_selection(selection); !valid)
+      return failure(MemoryControllerErrorCode::invalid_source,
+                     valid.error().message);
+    std::map<domain::SessionId, domain::MemoryProjection> journals;
+    std::map<domain::SessionId, std::vector<domain::RunEvent>> sources;
+    std::vector<domain::ContextContentInput> result;
+    for (const auto& reference : selection.entries) {
+      auto journal = journals.find(reference.journal_session_id);
+      if (journal == journals.end()) {
+        auto events =
+            m_store.replay_events(reference.journal_session_id, m_stop_token);
+        if (!events) return storage_failure(events.error());
+        auto projected = domain::MemoryProjection::rebuild(*events, m_limits);
+        if (!projected)
+          return failure(MemoryControllerErrorCode::invalid_source,
+                         projected.error().message);
+        journal =
+            journals
+                .emplace(reference.journal_session_id, std::move(*projected))
+                .first;
+      }
+      const auto* record = journal->second.find_record(reference.record_id);
+      if (record == nullptr ||
+          record->record_event_id != reference.record_event_id ||
+          record->state != domain::ProjectedMemoryRecordState::current ||
+          record->record.owner != reference.owner ||
+          record->record.source != reference.source ||
+          std::ranges::any_of(journal->second.records(),
+                              [&](const auto& value) {
+                                return value.record.owner != reference.owner;
+                              }))
+        return failure(
+            MemoryControllerErrorCode::stale_state,
+            "original selected memory version is no longer available");
+      auto digest = domain::memory_record_digest(record->record);
+      if (!digest || *digest != reference.record_digest)
+        return failure(
+            MemoryControllerErrorCode::stale_state,
+            "original selected memory content or provenance changed");
+      auto source = sources.find(reference.source.session_id);
+      if (source == sources.end()) {
+        auto events =
+            m_store.replay_events(reference.source.session_id, m_stop_token);
+        if (!events) return storage_failure(events.error());
+        source =
+            sources.emplace(reference.source.session_id, std::move(*events))
+                .first;
+      }
+      if (!std::ranges::all_of(reference.source.event_ids, [&](const auto& id) {
+            return std::ranges::any_of(source->second, [&](const auto& event) {
+              return event.metadata.event_id == id &&
+                     event.metadata.run_id == reference.source.run_id;
+            });
+          }))
+        return failure(
+            MemoryControllerErrorCode::invalid_source,
+            "original selected memory source events are unavailable");
+      auto content =
+          domain::memory_evidence_input(record->record, reference.order);
+      if (!content)
+        return failure(MemoryControllerErrorCode::invalid_source,
+                       content.error().message);
+      result.push_back(std::move(*content));
+    }
+    domain::ConstructedContext context;
+    for (const auto& entry : result)
+      context.entries.push_back({entry.entry_id,
+                                 domain::ContextEntryKind::evidence,
+                                 std::nullopt, entry.message, entry.provenance,
+                                 0, entry.order, entry.estimated_tokens});
+    if (!domain::memory_selection_matches_context(selection, context))
+      return failure(
+          MemoryControllerErrorCode::invalid_source,
+          "original selected memory evidence does not match its admission");
+    return result;
+  } catch (...) {
+    return failure(MemoryControllerErrorCode::internal_failure,
+                   "original selected memory could not be restored");
+  }
 }
 
 auto MemoryController::accept(MemoryAcceptRequest request)

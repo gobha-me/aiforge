@@ -1619,10 +1619,12 @@ struct RunKernel::Impl {
     const auto* proposed_tool = std::get_if<domain::ToolProposed>(&payload);
     const auto policy_decided =
         std::holds_alternative<domain::ToolPolicyDecided>(payload);
+    const auto* started = std::get_if<domain::RunStarted>(&payload);
     const std::uint32_t schema_version =
         enriched_child
             ? (child_payload->descriptor->review_receipt_id ? 4U : 3U)
-            : (policy_decided
+            : (policy_decided ||
+                       (started != nullptr && started->memory_selection)
                    ? 2U
                    : (proposed_tool != nullptr &&
                               proposed_tool->validated_arguments
@@ -4274,6 +4276,15 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
               "run persona selection does not match constructed context"));
         }
       }
+    }
+    if (start.attributes.memory_selection &&
+        (start.attributes.memory_selection->persona_id !=
+             start.attributes.persona_id ||
+         !domain::memory_selection_matches_context(
+             *start.attributes.memory_selection, start.request.context))) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "run memory selection does not match constructed context"));
     }
     if (start.provenance) {
       if (!start.provenance->tools.empty()) {

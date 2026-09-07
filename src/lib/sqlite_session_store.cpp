@@ -3461,13 +3461,68 @@ auto parse_v2_tool_policy_fields(const Json& value,
   return types.contains(type);
 }
 
+[[nodiscard]] auto memory_selection_json(
+    const domain::MemorySelection& selection) -> Json {
+  if (!domain::validate_memory_selection(selection))
+    throw CodecFailure{"invalid memory selection"};
+  auto entries = Json::array();
+  for (const auto& entry : selection.entries) {
+    entries.push_back(
+        {{"journal_session_id", id_text(entry.journal_session_id)},
+         {"record_id", id_text(entry.record_id)},
+         {"record_event_id", id_text(entry.record_event_id)},
+         {"owner", memory_owner_json(entry.owner)},
+         {"source", memory_source_json(entry.source)},
+         {"record_digest", digest_json(entry.record_digest)},
+         {"evidence_digest", digest_json(entry.evidence_digest)},
+         {"order", entry.order},
+         {"estimated_tokens", entry.estimated_tokens}});
+  }
+  return {{"version", selection.version},
+          {"repository_id", optional_id_json(selection.repository_id)},
+          {"persona_id", optional_id_json(selection.persona_id)},
+          {"maximum_tokens", selection.maximum_tokens},
+          {"available_tokens", selection.available_tokens},
+          {"entries", std::move(entries)}};
+}
+
+[[nodiscard]] auto parse_memory_selection(const Json& value)
+    -> domain::MemorySelection {
+  domain::MemorySelection selection{
+      value.at("version").get<std::uint32_t>(),
+      parse_optional_id<domain::RepositoryId>(value.at("repository_id")),
+      parse_optional_id<domain::PersonaId>(value.at("persona_id")),
+      value.at("maximum_tokens").get<std::uint64_t>(),
+      value.at("available_tokens").get<std::uint64_t>(),
+      {}};
+  const auto& entries = value.at("entries");
+  if (!entries.is_array() || entries.size() > 4096)
+    throw CodecFailure{"memory selection exceeds reference limit"};
+  for (const auto& entry : entries) {
+    selection.entries.push_back(
+        {parse_id<domain::SessionId>(entry.at("journal_session_id")),
+         parse_id<domain::MemoryRecordId>(entry.at("record_id")),
+         parse_id<domain::EventId>(entry.at("record_event_id")),
+         parse_memory_owner(entry.at("owner")),
+         parse_memory_source(entry.at("source")),
+         parse_digest(entry.at("record_digest")),
+         parse_digest(entry.at("evidence_digest")),
+         entry.at("order").get<std::uint64_t>(),
+         entry.at("estimated_tokens").get<std::uint64_t>()});
+  }
+  if (!domain::validate_memory_selection(selection))
+    throw CodecFailure{"invalid memory selection"};
+  return selection;
+}
+
 [[nodiscard]] auto known_payload_schema(const std::string_view type,
                                         const std::uint32_t schema_version)
     -> bool {
   return (schema_version == 1 && known_payload_type(type)) ||
          (schema_version == 2 &&
-          (type == "plan.revision_proposed" || type == "run.child_created" ||
-           type == "tool.proposed" || type == "tool.policy_decided" ||
+          (type == "run.started" || type == "plan.revision_proposed" ||
+           type == "run.child_created" || type == "tool.proposed" ||
+           type == "tool.policy_decided" ||
            (type.starts_with("memory.") && known_payload_type(type)))) ||
          ((schema_version == 3 || schema_version == 4) &&
           type == "run.child_created");
@@ -3479,12 +3534,19 @@ auto parse_v2_tool_policy_fields(const Json& value,
     -> Json {
   return std::visit(
       Overloaded{
-          [](const domain::RunStarted& value) -> Json {
-            return {
+          [schema_version](const domain::RunStarted& value) -> Json {
+            Json result{
                 {"surface_id", id_text(value.surface_id)},
                 {"workspace_id", id_text(value.workspace_id)},
                 {"permission_profile_id", id_text(value.permission_profile_id)},
                 {"persona_id", optional_id_json(value.persona_id)}};
+            if ((schema_version == 2) != value.memory_selection.has_value())
+              throw CodecFailure{
+                  "run memory selection requires start schema version 2"};
+            if (value.memory_selection)
+              result["memory_selection"] =
+                  memory_selection_json(*value.memory_selection);
+            return result;
           },
           [](const domain::RunProvenanceRecorded& value) -> Json {
             return {{"provenance", run_provenance_json(value.provenance)}};
@@ -3926,7 +3988,11 @@ auto parse_v2_tool_policy_fields(const Json& value,
         parse_id<domain::WorkspaceId>(value.at("workspace_id")),
         parse_id<domain::PermissionProfileId>(
             value.at("permission_profile_id")),
-        parse_optional_id<domain::PersonaId>(value.at("persona_id"))};
+        parse_optional_id<domain::PersonaId>(value.at("persona_id")),
+        schema_version == 2
+            ? std::optional<domain::MemorySelection>{parse_memory_selection(
+                  value.at("memory_selection"))}
+            : std::nullopt};
   }
   if (type == "run.provenance_recorded") {
     return domain::RunProvenanceRecorded{
