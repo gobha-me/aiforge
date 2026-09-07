@@ -406,7 +406,11 @@ TEST_CASE("builtin commands expose honest offline behavior", "[commands]") {
   const auto& registry = builtin_command_registry();
   const auto schema = make_parser_schema(registry);
   REQUIRE(schema);
-  REQUIRE(schema->root.subcommands.size() == 9);
+  REQUIRE(schema->root.subcommands.size() == 10);
+  const auto agent =
+      std::ranges::find(schema->root.subcommands, "agent", &CommandSchema::id);
+  REQUIRE(agent != schema->root.subcommands.end());
+  REQUIRE(agent->subcommands.empty());
   const auto config =
       std::ranges::find(schema->root.subcommands, "config", &CommandSchema::id);
   REQUIRE(config != schema->root.subcommands.end());

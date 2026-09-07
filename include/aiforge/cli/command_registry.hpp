@@ -86,6 +86,21 @@ class InteractiveCommand {
       -> std::expected<void, CommandFailure> = 0;
 };
 
+class AgentCommand {
+ public:
+  virtual ~AgentCommand() = default;
+  struct Request {
+    std::optional<std::string> repository;
+    std::optional<std::string> tool_restriction;
+    std::optional<std::string> tool_approval;
+  };
+  [[nodiscard]] virtual auto execute(Request request,
+                                     CommandEnvironment& environment,
+                                     std::ostream& output,
+                                     std::ostream& diagnostics)
+      -> std::expected<void, CommandFailure> = 0;
+};
+
 class ModelsCommand {
  public:
   virtual ~ModelsCommand() = default;
@@ -252,6 +267,7 @@ struct CommandEnvironment {
   int output_descriptor{-1};
   AudioCommand* audio{};
   VideoCommand* video{};
+  AgentCommand* agent{};
 };
 
 struct CommandContext {

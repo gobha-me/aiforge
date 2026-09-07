@@ -17,6 +17,7 @@
 #include <variant>
 #include <vector>
 
+#include <aiforge/detail/sha256.hpp>
 #include <aiforge/instructions/editor.hpp>
 #include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
@@ -137,6 +138,96 @@ auto add_user_global(backend::BackendRequest& value,
        domain::ContextDecision::admitted, std::nullopt});
   value.context.estimated_input_tokens += document.text.size();
 }
+
+auto memory_start() -> runtime::RunStart {
+  const domain::MemoryRecord record{
+      make_id<domain::MemoryRecordId>("record"),
+      make_id<domain::MemoryProposalId>("proposal"),
+      domain::MemoryOwner::global(),
+      domain::MemoryKind::workflow,
+      "Run focused tests first.",
+      "Keep failures local.",
+      {make_id<domain::SessionId>("source-session"),
+       make_id<domain::RunId>("source-run"),
+       make_id<domain::InvocationId>("source-call"),
+       {make_id<domain::EventId>("source-event")}},
+      {make_id<domain::ModelId>("model"), "test", "1"}};
+  const auto evidence = domain::memory_evidence_input(record, 2);
+  REQUIRE(evidence);
+  const auto digest = domain::memory_record_digest(record);
+  REQUIRE(digest);
+  const auto& text =
+      std::get<domain::TextBlock>(evidence->message.content.front()).text;
+  detail::Sha256 hash;
+  hash.update(std::as_bytes(std::span{text.data(), text.size()}));
+  auto start = run_start();
+  start.attributes.memory_selection =
+      domain::MemorySelection{1,
+                              {},
+                              {},
+                              1000,
+                              1000,
+                              {{make_id<domain::SessionId>("journal"),
+                                record.record_id,
+                                make_id<domain::EventId>("accepted-event"),
+                                record.owner,
+                                record.source,
+                                *digest,
+                                {"sha256", hash.finish(), text.size()},
+                                evidence->order,
+                                evidence->estimated_tokens}}};
+  start.request.context.entries.push_back({evidence->entry_id,
+                                           domain::ContextEntryKind::evidence,
+                                           {},
+                                           evidence->message,
+                                           evidence->provenance,
+                                           0,
+                                           evidence->order,
+                                           evidence->estimated_tokens});
+  start.request.context.decisions.push_back(
+      {evidence->entry_id, domain::ContextDecision::admitted, {}});
+  start.request.context.estimated_input_tokens += evidence->estimated_tokens;
+  REQUIRE(domain::seal_memory_selection(*start.attributes.memory_selection));
+  return start;
+}
+
+class RejectStartupStore final : public storage::SessionStore {
+ public:
+  auto create_session(storage::SessionCreate, std::stop_token)
+      -> std::expected<void, storage::SessionStoreError> override {
+    return {};
+  }
+  auto open_session(const domain::SessionId&, std::stop_token)
+      -> std::expected<storage::SessionInfo,
+                       storage::SessionStoreError> override {
+    return std::unexpected(unexpected_call());
+  }
+  auto list_sessions(std::size_t, std::stop_token)
+      -> std::expected<std::vector<storage::SessionInfo>,
+                       storage::SessionStoreError> override {
+    return std::unexpected(unexpected_call());
+  }
+  auto replay_events(const domain::SessionId&, std::stop_token)
+      -> std::expected<std::vector<domain::RunEvent>,
+                       storage::SessionStoreError> override {
+    return std::unexpected(unexpected_call());
+  }
+  auto append_events(const domain::SessionId&,
+                     std::span<const domain::RunEvent> events, std::stop_token)
+      -> std::expected<void, storage::SessionStoreError> override {
+    attempts.emplace_back(events.begin(), events.end());
+    return std::unexpected(
+        storage::SessionStoreError{storage::SessionStoreErrorCode::contention,
+                                   "startup append unavailable", true});
+  }
+  std::vector<std::vector<domain::RunEvent>> attempts;
+
+ private:
+  static auto unexpected_call() -> storage::SessionStoreError {
+    return {storage::SessionStoreErrorCode::not_found, "unexpected read",
+            false};
+  }
+};
 
 template <typename Payload>
 auto durable_event(const domain::RunId& run, const std::uint64_t sequence,
@@ -1476,4 +1567,114 @@ TEST_CASE("resume restores recorded provenance and rejects a duplicate record",
   REQUIRE_FALSE(rejected);
   REQUIRE(rejected.error().code ==
           runtime::RunKernelErrorCode::replay_rejected);
+}
+
+TEST_CASE(
+    "memory selection and context match in both directions before startup",
+    "[runtime][memory][provenance][failure]") {
+  auto start = memory_start();
+  SECTION("absent snapshot cannot hide supplied memory") {
+    start.attributes.memory_selection.reset();
+  }
+  SECTION("empty snapshot cannot hide supplied memory") {
+    start.attributes.memory_selection->entries.clear();
+    REQUIRE(domain::seal_memory_selection(*start.attributes.memory_selection));
+  }
+  SECTION("selected memory must be supplied") {
+    start.request.context.entries.pop_back();
+  }
+  SECTION("selected bytes are immutable") {
+    std::get<domain::TextBlock>(
+        start.request.context.entries.back().message.content.front())
+        .text[0] = 'X';
+  }
+  SECTION("memory remains evidence") {
+    start.request.context.entries.back().message.role = domain::Role::system;
+  }
+  SECTION("source provenance must match") {
+    start.request.context.entries.back().provenance.source_location =
+        "memory:forged";
+  }
+  SECTION("record order must match") {
+    ++start.request.context.entries.back().order;
+  }
+  SECTION("duplicate context cannot stand in for selection") {
+    start.request.context.entries.push_back(
+        start.request.context.entries.back());
+  }
+  SECTION("selection cannot exceed admitted budget") {
+    start.attributes.memory_selection->available_tokens = 0;
+  }
+  testing::ScriptedBackend backend{{}};
+  RejectStartupStore store;
+  auto kernel =
+      runtime::RunKernel::open_durable({make_id<domain::SessionId>("session"),
+                                        runtime::DurableSessionMode::create,
+                                        {}},
+                                       store, backend);
+  REQUIRE(kernel);
+  const auto result = (*kernel)->start(std::move(start));
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == runtime::RunKernelErrorCode::invalid_start);
+  CHECK((*kernel)->event_log().events().empty());
+  CHECK(store.attempts.empty());
+  CHECK(backend.recorded_requests().empty());
+}
+
+TEST_CASE("memory startup append failure cannot start a backend or publish "
+          "partial events",
+          "[runtime][memory][storage][failure]") {
+  auto start = memory_start();
+  testing::ScriptedBackend backend{{}};
+  RejectStartupStore store;
+  auto kernel =
+      runtime::RunKernel::open_durable({make_id<domain::SessionId>("session"),
+                                        runtime::DurableSessionMode::create,
+                                        {}},
+                                       store, backend);
+  REQUIRE(kernel);
+  const auto result = (*kernel)->start(start);
+  REQUIRE_FALSE(result);
+  CHECK((*kernel)->event_log().events().empty());
+  CHECK_FALSE((*kernel)->active_run_id());
+  CHECK(backend.recorded_requests().empty());
+  REQUIRE(store.attempts.size() == 1);
+  REQUIRE_FALSE(store.attempts.front().empty());
+  const auto& started_event = store.attempts.front().front();
+  REQUIRE(std::holds_alternative<domain::RunStarted>(started_event.payload));
+  CHECK(started_event.metadata.schema_version == 2);
+  CHECK(std::get<domain::RunStarted>(started_event.payload).memory_selection ==
+        start.attributes.memory_selection);
+}
+
+TEST_CASE("run startup preserves populated and explicit empty memory snapshots",
+          "[runtime][memory][provenance]") {
+  auto start = memory_start();
+  SECTION("explicit empty selection") {
+    start = run_start();
+    start.attributes.memory_selection = domain::MemorySelection{};
+    REQUIRE(domain::seal_memory_selection(*start.attributes.memory_selection));
+  }
+  SECTION("selected memory") {
+  }
+  const auto expected = start.attributes.memory_selection;
+  testing::ScriptedBackend backend{
+      {{start.request,
+        testing::StreamScript{
+            {step(backend::ResponseStarted{"response"}),
+             step(backend::ResponseFinished{domain::FinishReason::stop}),
+             testing::EndOfStream{}}}}}};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), backend,
+                            &wake};
+  REQUIRE(kernel.start(std::move(start)));
+  static_cast<void>(drain_to_end(kernel, wake));
+  REQUIRE_FALSE(kernel.event_log().events().empty());
+  const auto& started_event = kernel.event_log().events().front();
+  CHECK(started_event.metadata.schema_version == 2);
+  CHECK(std::get<domain::RunStarted>(started_event.payload).memory_selection ==
+        expected);
+  CHECK(backend.recorded_requests().size() == 1);
+  CHECK(kernel.projection(make_id<domain::RunId>("run"))->status() ==
+        domain::RunStatus::completed);
 }

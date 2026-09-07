@@ -63,3 +63,36 @@ broaden capabilities.
 - Semantic contradiction detection is not guessed. Proposals declare overlap
   and replacement relationships; auto rejects them and review requires an
   explicit replacement decision.
+
+## Exact pending-run recovery (2026-09-07)
+
+New Chat and one-shot run starts record their bounded memory admission in
+`run.started` schema version 2, atomically with the user turn and first
+inference facts before provider dispatch. An explicit empty selection remains
+empty on recovery. Version-1 run starts remain readable; a pending legacy Chat
+run without an admission record cannot prove its original selection and stays
+inspectable and cancellable with continuation blocked.
+
+Admission records contain the originating repository and immutable persona,
+original memory and available-input budgets, ordered journal/record/acceptance
+identities, source provenance, and record/evidence digests. They contain no
+copy of saved memory text. The reference envelope is limited to 4096 records
+and 4096 total source-event references. A versioned length-prefixed SHA-256
+integrity digest covers the complete admission metadata, including order and
+budgets. This detects accidental metadata corruption; it does not authenticate
+arbitrary edits to the database.
+
+Recovery reads only the recorded journals and accepted versions. It requires
+unchanged content and provenance, currently valid lifecycle state, and available
+source events. Expired, superseded, missing, corrupted, or unavailable records
+block continuation instead of being omitted or replaced. New records and
+current persona, repository, or memory-budget selections affect later runs;
+they cannot change the old run's admitted evidence. Evidence keeps its original
+classification, order, and token estimates. A current model that cannot fit the
+reconstructed base context also blocks recovery. Inspection and cancellation
+remain available through the ordinary recovery-block state.
+
+Successful pending-input resolution pins the fully loaded source snapshot for
+that active run, matching uninterrupted continuation. Later source lifecycle
+changes do not prevent draining an approved tool, provider output, or usage.
+Inspection before resolution continues to validate the exact original sources.

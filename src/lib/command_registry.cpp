@@ -758,6 +758,28 @@ auto video_export_handler(CommandContext& context) -> int {
       context);
 }
 
+auto agent_handler(CommandContext& context) -> int {
+  if (parsed_argument(context.invocation, "agent.jsonl") == nullptr ||
+      context.environment.input_is_terminal) {
+    context.error << "aiforge: agent requires --jsonl and noninteractive "
+                     "standard input\n";
+    return usage_exit_code;
+  }
+  if (context.environment.agent == nullptr) return unavailable_handler(context);
+  const auto option =
+      [&](const std::string_view key) -> std::optional<std::string> {
+    const auto values = parsed_text_values(context.invocation, key);
+    if (!values || values->empty()) return std::nullopt;
+    return std::string{values->front()};
+  };
+  return command_result(
+      context.environment.agent->execute(
+          {option("agent.repository"), option("agent.tool_restriction"),
+           option("agent.tool_approval")},
+          context.environment, context.output, context.error),
+      context);
+}
+
 auto plan_handler(CommandContext& context) -> int {
   const auto resume =
       parsed_text_values(context.invocation, "plan.session.resume");
@@ -1502,6 +1524,37 @@ auto builtin_command_registry() -> const CommandRegistry& {
          {},
          {},
          login_handler},
+        {"agent",
+         "agent",
+         "Run bounded tools noninteractively through JSON Lines.",
+         false,
+         {{{"agent.jsonl", {"--jsonl"}, ArgumentValueKind::flag, 0, 1},
+           {},
+           "Use the versioned single-request JSON Lines protocol."},
+          {{"agent.repository",
+            {"--repository"},
+            ArgumentValueKind::text,
+            0,
+            1},
+           "path",
+           "Select the repository root for bounded reads."},
+          {{"agent.tool_restriction",
+            {"--tool-restriction"},
+            ArgumentValueKind::text,
+            0,
+            1},
+           "level",
+           "Select high, medium, low, or none process restriction."},
+          {{"agent.tool_approval",
+            {"--tool-approval"},
+            ArgumentValueKind::text,
+            0,
+            1},
+           "mode",
+           "Select prompt, automatic, or allow-all approval."}},
+         {},
+         {},
+         agent_handler},
         {"plan",
          "plan",
          "Inspect and control durable plans and tasks through JSON Lines.",

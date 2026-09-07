@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include <aiforge/adapters/sqlite_session_store.hpp>
+#include <aiforge/detail/sha256.hpp>
 #include <aiforge/testing/scripted_session_store.hpp>
 #include <algorithm>
 #include <array>
@@ -198,6 +199,36 @@ auto memory_record(const domain::MemoryProposal& proposal)
   return {proposal.record_id, proposal.proposal_id, proposal.owner,
           proposal.kind,      proposal.content,     proposal.rationale,
           proposal.source,    proposal.producer};
+}
+
+auto memory_selection() -> domain::MemorySelection {
+  const auto record =
+      memory_record(memory_proposal(domain::MemoryOwner::global()));
+  const auto digest = domain::memory_record_digest(record);
+  REQUIRE(digest);
+  const auto evidence = domain::memory_evidence_input(record, 1);
+  REQUIRE(evidence);
+  const auto& text =
+      std::get<domain::TextBlock>(evidence->message.content.front()).text;
+  detail::Sha256 hash;
+  hash.update(std::as_bytes(std::span{text.data(), text.size()}));
+  domain::MemorySelection selected{
+      1,
+      {},
+      {},
+      1000,
+      1000,
+      {{make_id<domain::SessionId>("memory-journal"),
+        record.record_id,
+        make_id<domain::EventId>("accepted-memory"),
+        record.owner,
+        record.source,
+        *digest,
+        {"sha256", hash.finish(), text.size()},
+        evidence->order,
+        evidence->estimated_tokens}}};
+  REQUIRE(domain::seal_memory_selection(selected));
+  return selected;
 }
 
 auto child_run_descriptor() -> domain::ChildRunDescriptor {
@@ -1120,8 +1151,12 @@ TEST_CASE("all typed payloads and opaque future payloads round trip",
             domain::UnknownEvent{
                 "run.started", {"application/json", "{\"future_field\":true}"}},
             "future-event");
-  future.metadata.schema_version = 2;
-  REQUIRE(store->append_events(future_session, std::array{future}));
+  future.metadata.schema_version = 3;
+  const auto future_append =
+      store->append_events(future_session, std::array{future});
+  INFO((future_append ? "future schema appended"
+                      : future_append.error().message));
+  REQUIRE(future_append);
   const auto future_replay = store->replay_events(future_session);
   REQUIRE(future_replay);
   REQUIRE(*future_replay == std::vector<domain::RunEvent>{future});
@@ -2398,4 +2433,172 @@ TEST_CASE(
   REQUIRE(replay.error().code == storage::SessionStoreErrorCode::io_failure);
   REQUIRE(fake.recorded_calls().size() == 2);
   REQUIRE(fake.remaining_exchanges() == 0);
+}
+
+TEST_CASE("run started preserves absent empty and populated memory snapshots",
+          "[storage][sqlite][codec][memory][compatibility]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "memory-snapshots", 100);
+  auto empty = started();
+  empty.memory_selection = domain::MemorySelection{};
+  REQUIRE(domain::seal_memory_selection(*empty.memory_selection));
+  auto selected = started();
+  selected.memory_selection = memory_selection();
+  std::vector<domain::RunEvent> events{event(1, started(), "legacy-start"),
+                                       event(2, empty, "empty-start"),
+                                       event(3, selected, "selected-start")};
+  events[1].metadata.schema_version = 2;
+  events[2].metadata.schema_version = 2;
+  REQUIRE(store->append_events(session, events));
+  store.reset();
+  store = open_store(path);
+  const auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  CHECK(*replayed == events);
+  CHECK_FALSE(
+      std::get<domain::RunStarted>((*replayed)[0].payload).memory_selection);
+  REQUIRE(
+      std::get<domain::RunStarted>((*replayed)[1].payload).memory_selection);
+  CHECK(std::get<domain::RunStarted>((*replayed)[1].payload)
+            .memory_selection->entries.empty());
+  CHECK(std::get<domain::RunStarted>((*replayed)[2].payload).memory_selection ==
+        selected.memory_selection);
+}
+
+TEST_CASE("memory snapshot presence must match the run started schema",
+          "[storage][sqlite][codec][memory][failure]") {
+  TemporaryDirectory temporary;
+  auto store = open_store(temporary.path() / "aiforge" / "sessions.sqlite3");
+  const auto session = create(*store, "invalid-memory-schema", 100);
+  auto run = started();
+  std::uint32_t schema = 1;
+  SECTION("legacy schema cannot carry selection") {
+    run.memory_selection = memory_selection();
+  }
+  SECTION("schema two requires explicit snapshot") {
+    schema = 2;
+  }
+  auto invalid = event(1, run);
+  invalid.metadata.schema_version = schema;
+  const auto appended = store->append_events(session, std::array{invalid});
+  REQUIRE_FALSE(appended);
+  CHECK(appended.error().code ==
+        storage::SessionStoreErrorCode::invalid_argument);
+  REQUIRE(store->replay_events(session));
+  CHECK(store->replay_events(session)->empty());
+}
+
+TEST_CASE(
+    "corrupt memory selection snapshots never decode as a fresh selection",
+    "[storage][sqlite][codec][memory][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "corrupt-memory-selection", 100);
+  auto run = started();
+  run.memory_selection = memory_selection();
+  auto persisted = event(1, run, "memory-start");
+  persisted.metadata.schema_version = 2;
+  REQUIRE(store->append_events(session, std::array{persisted}));
+  store.reset();
+  std::string expression;
+  SECTION("missing snapshot") {
+    expression = "json_remove(payload_json,'$.memory_selection')";
+  }
+  SECTION("null snapshot") {
+    expression = "json_set(payload_json,'$.memory_selection',NULL)";
+  }
+  SECTION("missing entries") {
+    expression = "json_remove(payload_json,'$.memory_selection.entries')";
+  }
+  SECTION("unsupported selection version") {
+    expression = "json_set(payload_json,'$.memory_selection.version',2)";
+  }
+  SECTION("missing maximum budget") {
+    expression =
+        "json_remove(payload_json,'$.memory_selection.maximum_tokens')";
+  }
+  SECTION("admitted memory exceeds available budget") {
+    expression =
+        "json_set(payload_json,'$.memory_selection.available_tokens',0)";
+  }
+  SECTION("structurally valid changed budget") {
+    expression =
+        "json_set(payload_json,'$.memory_selection.maximum_tokens',999)";
+  }
+  SECTION("structurally valid changed order") {
+    expression =
+        "json_set(payload_json,'$.memory_selection.entries[0].order',2)";
+  }
+  SECTION("duplicate entry") {
+    expression = "json_insert(payload_json,'$.memory_selection.entries[#]',"
+                 "json_extract(payload_json,'$.memory_selection.entries[0]'))";
+  }
+  SECTION("wrong owner shape") {
+    expression = "json_set(payload_json,'$.memory_selection.entries[0].owner."
+                 "repository_id','foreign-repository')";
+  }
+  SECTION("unknown owner") {
+    expression = "json_set(payload_json,'$.memory_selection.entries[0].owner."
+                 "kind','unknown')";
+  }
+  SECTION("empty journal identity") {
+    expression = "json_set(payload_json,'$.memory_selection.entries[0].journal_"
+                 "session_id','')";
+  }
+  SECTION("missing accepted event identity") {
+    expression = "json_remove(payload_json,'$.memory_selection.entries[0]."
+                 "record_event_id')";
+  }
+  SECTION("missing source identity") {
+    expression = "json_remove(payload_json,'$.memory_selection.entries[0]."
+                 "source.session_id')";
+  }
+  SECTION("empty source references") {
+    expression = "json_set(payload_json,'$.memory_selection.entries[0].source."
+                 "event_ids',json('[]'))";
+  }
+  SECTION("too many source references") {
+    std::string source_ids{"["};
+    for (int index = 0; index < 257; ++index) {
+      if (index != 0) source_ids += ',';
+      source_ids += "\"source-" + std::to_string(index) + "\"";
+    }
+    source_ids += ']';
+    expression = "json_set(payload_json,'$.memory_selection.entries[0].source."
+                 "event_ids',json('" +
+                 source_ids + "'))";
+  }
+  SECTION("duplicate source references") {
+    expression = "json_insert(payload_json,'$.memory_selection.entries[0]."
+                 "source.event_ids[#]',json_extract(payload_json,'$.memory_"
+                 "selection.entries[0].source.event_ids[0]'))";
+  }
+  SECTION("malformed record digest") {
+    expression = "json_set(payload_json,'$.memory_selection.entries[0].record_"
+                 "digest.value','not-a-digest')";
+  }
+  SECTION("missing admission digest") {
+    expression =
+        "json_remove(payload_json,'$.memory_selection.admission_digest')";
+  }
+  SECTION("unknown extra field") {
+    expression = "json_set(payload_json,'$.memory_selection.raw_text','must-"
+                 "not-be-used')";
+  }
+  SECTION("downgraded schema cannot discard the snapshot") {
+    execute_sql(
+        path,
+        "UPDATE events SET schema_version=1 WHERE event_id='memory-start'");
+  }
+  if (!expression.empty())
+    execute_sql(path, "UPDATE events SET payload_json=" + expression +
+                          " WHERE event_id='memory-start'");
+  store = open_store(path);
+  const auto replayed = store->replay_events(session);
+  REQUIRE_FALSE(replayed);
+  CHECK(replayed.error().code == storage::SessionStoreErrorCode::corrupt);
+  CHECK(replayed.error().message.find("must-not-be-used") == std::string::npos);
 }

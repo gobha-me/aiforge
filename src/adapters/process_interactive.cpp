@@ -9,6 +9,7 @@
 #include <aiforge/adapters/persona_editor_dialog.hpp>
 #include <aiforge/adapters/pinned_repository_root_authority.hpp>
 #include <aiforge/adapters/process_chat_assembly.hpp>
+#include <aiforge/adapters/process_chat_launch.hpp>
 #include <aiforge/adapters/process_credentials.hpp>
 #include <aiforge/adapters/process_draft_editor.hpp>
 #include <aiforge/adapters/process_interactive.hpp>
@@ -4678,17 +4679,58 @@ auto make_interactive_chat_app(
                                        std::move(options));
 }
 
+namespace {
+auto finish_agent_execution(
+    surfaces::ChatSession& session, ProcessAgentExecution& agent,
+    const std::expected<surfaces::AgentOutcome, surfaces::AgentError>& result)
+    -> std::expected<void, cli::CommandFailure> {
+  agent.terminal_attempted = true;
+  if (result) {
+    if (result->status == surfaces::AgentStatus::completed) return {};
+    return failure(result->status == surfaces::AgentStatus::cancelled
+                       ? cli::CommandFailureKind::cancelled
+                       : cli::CommandFailureKind::runtime,
+                   result->reason.empty() ? "agent run did not complete"
+                                          : result->reason);
+  }
+  const auto kind = result.error().code == surfaces::AgentErrorCode::cancelled
+                        ? cli::CommandFailureKind::cancelled
+                        : cli::CommandFailureKind::runtime;
+  const auto failed = failure(kind, result.error().message);
+  const auto record = surfaces::agent_error_record(result.error());
+  if (!record) return failed;
+  const auto reported = agent.sink.write_record(*record);
+  if (!reported) return failed;
+  const surfaces::AgentOutcome outcome{
+      kind == cli::CommandFailureKind::cancelled
+          ? surfaces::AgentStatus::cancelled
+          : surfaces::AgentStatus::failed,
+      false,
+      session.session_id(),
+      {},
+      result.error().message};
+  const auto terminal = surfaces::agent_terminal_record(outcome);
+  if (!terminal) return failed;
+  const auto written = agent.sink.write_record(*terminal);
+  if (!written) return failed;
+  return failed;
+}
+} // namespace
+
 // clang-format off
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit startup boundaries.
-auto ProcessInteractiveCommand::execute(Request request,
+auto execute_process_chat(cli::InteractiveCommand::Request request,
                                         cli::CommandEnvironment& environment,
                                         std::ostream& output,
-                                        std::ostream& diagnostics)
+                                        std::ostream& diagnostics,
+                                        ProcessAgentExecution* agent)
     -> std::expected<void, cli::CommandFailure> {
   // clang-format on
+  using SessionMode = cli::InteractiveCommand::SessionMode;
   try {
     static_cast<void>(output);
-    if (!environment.input_is_terminal || !environment.output_is_terminal) {
+    if (agent == nullptr &&
+        (!environment.input_is_terminal || !environment.output_is_terminal)) {
       return failure(cli::CommandFailureKind::usage,
                      "interactive chat requires terminal input and output");
     }
@@ -4735,9 +4777,18 @@ auto ProcessInteractiveCommand::execute(Request request,
     auto catalog = ProcessModelCatalog::create();
     if (!catalog)
       return failure(cli::CommandFailureKind::runtime, catalog.error().message);
-    auto model =
-        resolve_interactive_model(*resolved, (*catalog)->service(),
-                                  *generation_options, environment.stop_token);
+    auto model = [&]() -> std::expected<domain::ModelId, cli::CommandFailure> {
+      if (agent == nullptr)
+        return resolve_interactive_model(*resolved, (*catalog)->service(),
+                                         *generation_options,
+                                         environment.stop_token);
+      auto configured = configured_model(*resolved);
+      if (!configured) return std::unexpected(std::move(configured.error()));
+      if (!*configured)
+        return failure(cli::CommandFailureKind::usage,
+                       "agent requires an explicit or configured text model");
+      return std::move(**configured);
+    }();
     if (!model) return std::unexpected(std::move(model.error()));
     if (request.model) {
       auto snapshot = (*catalog)->service().snapshot(environment.stop_token);
@@ -4773,7 +4824,8 @@ auto ProcessInteractiveCommand::execute(Request request,
           maximum_image_artifact_bytes;
       auto venice_backend = std::make_unique<VeniceBackend>(
           std::move(resolved_credential.secret), std::move(backend_options));
-      if (*image_tool_model) image_generator = venice_backend.get();
+      if (agent == nullptr && *image_tool_model)
+        image_generator = venice_backend.get();
       provider_character_catalog = venice_backend.get();
       backend = std::move(venice_backend);
     } else {
@@ -4885,7 +4937,21 @@ auto ProcessInteractiveCommand::execute(Request request,
     }
     std::optional<domain::RepositoryId> repository_id;
     std::optional<domain::RepositorySnapshot> repository_snapshot;
-    if (auto snapshot = observe_process_repository(environment.stop_token)) {
+    auto observed_repository =
+        [&]() -> std::expected<domain::RepositorySnapshot, std::string> {
+      if (agent == nullptr || !agent->repository)
+        return observe_process_repository(environment.stop_token);
+      auto source = open_process_repository_source();
+      if (!source) return std::unexpected(std::move(source.error()));
+      auto snapshot =
+          source->observe({*agent->repository, {}}, environment.stop_token);
+      if (!snapshot) return std::unexpected(snapshot.error().message);
+      return std::move(*snapshot);
+    }();
+    if (agent != nullptr && agent->repository && !observed_repository)
+      return failure(cli::CommandFailureKind::runtime,
+                     observed_repository.error());
+    if (auto& snapshot = observed_repository; snapshot) {
       repository_id = snapshot->root.repository_id;
       repository_snapshot = std::move(*snapshot);
     }
@@ -4914,9 +4980,9 @@ auto ProcessInteractiveCommand::execute(Request request,
           memory_settings->persona_capture != domain::MemoryCaptureMode::off,
           std::nullopt,
           {}};
-      if (tool_configuration.global_enabled ||
-          tool_configuration.project_enabled ||
-          tool_configuration.persona_capable) {
+      if (agent == nullptr && (tool_configuration.global_enabled ||
+                               tool_configuration.project_enabled ||
+                               tool_configuration.persona_capable)) {
         auto registered =
             runtime::register_memory_tool(tool_registry, tool_configuration);
         if (!registered) {
@@ -4925,10 +4991,12 @@ auto ProcessInteractiveCommand::execute(Request request,
         }
       }
     }
-    if (auto registered = runtime::register_ask_user_tool(tool_registry, true);
-        !registered) {
-      return failure(cli::CommandFailureKind::runtime,
-                     registered.error().message);
+    if (agent == nullptr) {
+      if (auto registered =
+              runtime::register_ask_user_tool(tool_registry, true);
+          !registered)
+        return failure(cli::CommandFailureKind::runtime,
+                       registered.error().message);
     }
     if (repository_snapshot && repository_snapshot->vcs &&
         repository_snapshot->vcs->system == "git") {
@@ -5050,6 +5118,33 @@ auto ProcessInteractiveCommand::execute(Request request,
     if (!tool_policy) {
       return failure(cli::CommandFailureKind::runtime,
                      tool_policy.error().message);
+    }
+
+    if (agent != nullptr) {
+      surfaces::ChatSessionDependencies dependencies;
+      dependencies.persona_source = personas ? &*personas : nullptr;
+      dependencies.user_global_instruction_source =
+          user_global_instructions ? &*user_global_instructions : nullptr;
+      dependencies.user_global_instructions_enabled =
+          *user_global_instructions_enabled;
+      dependencies.tools = std::move(tools);
+      dependencies.tool_policy = std::move(*tool_policy);
+      dependencies.model_tool_profile_maximums = tool_profile_maximums->models;
+      dependencies.persona_tool_profile_maximums =
+          tool_profile_maximums->personas;
+      dependencies.permission_profile_id = permission_profile_id;
+      dependencies.memory_controller = memory_controller.get();
+      dependencies.memory_settings = *memory_settings;
+      dependencies.repository_id = repository_id;
+      dependencies.runtime_version = runtime_version();
+      dependencies.surface_kind = surfaces::ChatSurfaceKind::agent;
+      auto session = surfaces::ChatSession::open(
+          std::move(open), *backend, (*catalog)->service(), store.get(),
+          nullptr, environment.stop_token, {}, std::move(dependencies));
+      if (!session) return std::unexpected(session_error(session.error()));
+      auto result = surfaces::run_agent_session(
+          **session, agent->request, agent->sink, environment.stop_token);
+      return finish_agent_execution(**session, *agent, result);
     }
 
     InteractiveChatAppOptions app_options;
@@ -5204,6 +5299,15 @@ auto ProcessInteractiveCommand::execute(Request request,
     return failure(cli::CommandFailureKind::runtime,
                    "interactive chat failed internally");
   }
+}
+
+auto ProcessInteractiveCommand::execute(Request request,
+                                        cli::CommandEnvironment& environment,
+                                        std::ostream& output,
+                                        std::ostream& diagnostics)
+    -> std::expected<void, cli::CommandFailure> {
+  return execute_process_chat(std::move(request), environment, output,
+                              diagnostics);
 }
 
 } // namespace aiforge::adapters
