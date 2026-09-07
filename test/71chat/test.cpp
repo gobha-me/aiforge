@@ -2950,7 +2950,7 @@ TEST_CASE(
         executor, limits,
         runtime::ToolExecutorContract{"test.dev." + name, "1"}, category);
     CAPTURE(name);
-    INFO(registered ? "tool registered" : registered.error().message);
+    INFO((registered ? "tool registered" : registered.error().message));
     REQUIRE(registered);
     return executor;
   };

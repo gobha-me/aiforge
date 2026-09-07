@@ -90,7 +90,7 @@ auto launch_policy(
   auto policy = runtime::make_tool_launch_policy(
       tools,
       {std::move(permission_profile), std::move(*context), std::move(matcher)});
-  INFO(policy ? "launch policy created" : policy.error().message);
+  INFO((policy ? "launch policy created" : policy.error().message));
   REQUIRE(policy);
   return std::move(*policy);
 }
