@@ -689,9 +689,13 @@ TEST_CASE(
     reference.journal_session_id = id<domain::SessionId>("missing-journal");
   }
   SECTION("deleted source session") {
+    // Simulate deletion directly in the test database, preserving foreign keys;
+    // this is fault injection, not a production deletion or GC operation.
     execute_sql(fixture.store->path(),
-                "PRAGMA foreign_keys=ON; DELETE FROM sessions WHERE "
-                "session_id='source-session'");
+                "PRAGMA foreign_keys=ON; BEGIN IMMEDIATE; "
+                "DELETE FROM events WHERE session_id='source-session'; "
+                "DELETE FROM sessions WHERE session_id='source-session'; "
+                "COMMIT;");
   }
   SECTION("source belongs to another run") {
     reference.source.run_id = id<domain::RunId>("other-run");

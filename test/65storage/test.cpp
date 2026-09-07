@@ -1151,8 +1151,12 @@ TEST_CASE("all typed payloads and opaque future payloads round trip",
             domain::UnknownEvent{
                 "run.started", {"application/json", "{\"future_field\":true}"}},
             "future-event");
-  future.metadata.schema_version = 2;
-  REQUIRE(store->append_events(future_session, std::array{future}));
+  future.metadata.schema_version = 3;
+  const auto future_append =
+      store->append_events(future_session, std::array{future});
+  INFO((future_append ? "future schema appended"
+                      : future_append.error().message));
+  REQUIRE(future_append);
   const auto future_replay = store->replay_events(future_session);
   REQUIRE(future_replay);
   REQUIRE(*future_replay == std::vector<domain::RunEvent>{future});
