@@ -2918,7 +2918,7 @@ TEST_CASE(
   const std::vector<domain::CapabilityScope> read_scopes{
       {domain::Effect::read, "filesystem.root", "/repo"}};
   const std::vector<domain::CapabilityScope> process_scopes{
-      {domain::Effect::execute, "process.executable", "/usr/bin/ctest"},
+      {domain::Effect::execute, "process.command", "/usr/bin/ctest"},
       {domain::Effect::read, "filesystem.root", "/repo"},
       {domain::Effect::write, "filesystem.root", "/repo/build"},
       {domain::Effect::network, "network.unrestricted", "new-sockets"}};
@@ -2941,14 +2941,17 @@ TEST_CASE(
                            {runtime::ToolExecutionEvent{runtime::ToolResult{
                                 {domain::TextBlock{result}}}},
                             testing::ToolEndOfStream{}}}}});
-    REQUIRE(registry.register_tool(
+    const auto registered = registry.register_tool(
         {name,
          "Deterministic Dev workflow tool",
          {"application/schema+json", R"({"type":"object"})"},
          effects,
          scopes},
         executor, limits,
-        runtime::ToolExecutorContract{"test.dev." + name, "1"}, category));
+        runtime::ToolExecutorContract{"test.dev." + name, "1"}, category);
+    CAPTURE(name);
+    INFO(registered ? "tool registered" : registered.error().message);
+    REQUIRE(registered);
     return executor;
   };
   auto reader = add("read_repository_file", "dev-read", dev_read_arguments,

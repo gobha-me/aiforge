@@ -90,6 +90,7 @@ auto launch_policy(
   auto policy = runtime::make_tool_launch_policy(
       tools,
       {std::move(permission_profile), std::move(*context), std::move(matcher)});
+  INFO(policy ? "launch policy created" : policy.error().message);
   REQUIRE(policy);
   return std::move(*policy);
 }
@@ -720,7 +721,7 @@ TEST_CASE("Dev reports unavailable members without removing independent tools",
       }
     }
     const auto tools = registry.snapshot().value();
-    const auto policy = launch_policy(tools, runtime::RestrictionLevel::none);
+    const auto policy = launch_policy(tools, runtime::RestrictionLevel::medium);
     const auto resolution = runtime::resolve_tool_profile(
         tools,
         runtime::ToolProfileSelection{profile_id("dev"), {}, {}, {}, true},
@@ -749,7 +750,7 @@ TEST_CASE("Dev preserves model persona session and policy narrowing",
                 runtime::ToolCategory::repository);
   register_tool(registry, "run_process", true, runtime::ToolCategory::process);
   const auto tools = registry.snapshot().value();
-  const auto policy = launch_policy(tools, runtime::RestrictionLevel::none);
+  const auto policy = launch_policy(tools, runtime::RestrictionLevel::medium);
   runtime::ToolProfileSelection selection{profile_id("dev"), {}, {}, {}, true};
   std::size_t expected = 4;
   SECTION("unknown model support") {
