@@ -271,6 +271,9 @@ const std::array kBuiltinProfiles{
                 "Media",
                 {"ask_user", "propose_memory", "generate_image"}},
     ToolProfile{make_id("off"), "Off", {}},
+    ToolProfile{make_id("dev"),
+                "Dev",
+                {"ask_user", "propose_memory", "read_repository_file", "run_process"}},
 };
 // clang-format on
 
