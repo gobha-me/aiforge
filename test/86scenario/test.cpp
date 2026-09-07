@@ -3,6 +3,7 @@
 #include <aiforge/adapters/interactive_chat_app.hpp>
 #include <aiforge/adapters/provider_character_picker_dialog.hpp>
 #include <aiforge/backend/provider_character_catalog.hpp>
+#include <aiforge/detail/sha256.hpp>
 #include <aiforge/model/catalog.hpp>
 #include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/runtime/tool_launch_policy.hpp>
@@ -2806,6 +2807,172 @@ auto question_factory() -> testing::TuiScenarioTargetFactory {
   };
 }
 
+class RecoveryQuestionStream final : public backend::BackendStream {
+ public:
+  auto next(std::stop_token)
+      -> std::expected<std::optional<backend::BackendEvent>,
+                       backend::BackendError> override {
+    switch (m_step++) {
+      case 0:
+        return backend::BackendEvent{backend::ResponseStarted{"recovery"}};
+      case 1:
+        return backend::BackendEvent{backend::ToolCallDelta{
+            make_id<domain::InvocationId>("recovery-question"), "ask_user",
+            R"({"questions":[{"id":"format","prompt":"Choose output","kind":"one","required":true,"minimum_selections":1,"maximum_selections":1,"options":[{"id":"short","label":"Short"}]}]})"}};
+      case 2:
+        return backend::BackendEvent{
+            backend::ResponseFinished{domain::FinishReason::tool_call}};
+      default: return std::optional<backend::BackendEvent>{};
+    }
+  }
+
+ private:
+  int m_step{};
+};
+
+class RecoveryQuestionBackend final : public backend::Backend,
+                                      public backend::ModelContextProvider {
+ public:
+  auto lookup(const domain::ModelId& model_id, std::stop_token)
+      -> std::expected<backend::ModelContextInfo,
+                       backend::BackendError> override {
+    return backend::ModelContextInfo{
+        model_id, 8192, 1024, pricing_observation(),
+        backend::ModelCapabilityMap{{"tools", true}}};
+  }
+
+  auto start(backend::BackendRequest, std::stop_token)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    ++requests;
+    return std::make_unique<RecoveryQuestionStream>();
+  }
+  std::size_t requests{};
+};
+
+auto blocked_recovery_factory() -> testing::TuiScenarioTargetFactory {
+  return [](testing::TuiScenarioPass, termforge::ByteSink* output)
+             -> std::expected<testing::TuiScenarioTarget,
+                              testing::TuiScenarioError> {
+    auto pipe = std::make_shared<Pipe>();
+    REQUIRE(pipe->ok());
+    auto store = std::make_shared<SessionScenarioStore>();
+    auto backend = std::make_shared<RecoveryQuestionBackend>();
+    auto editor = std::make_shared<NoEditor>();
+    const std::string text{"Original persona instructions."};
+    detail::Sha256 digest;
+    digest.update(std::as_bytes(std::span{text.data(), text.size()}));
+    const domain::PersonaDocument document{
+        {make_id<domain::PersonaId>("persona:recovery"),
+         "recovery",
+         "personas/recovery.md",
+         {"sha256", digest.finish(), text.size()}},
+        text};
+    testing::ScriptedPersonaSource source{
+        {},
+        std::vector<testing::PersonaLoadExchange>(16, {"recovery", document})};
+    runtime::ToolRegistry registry;
+    REQUIRE(runtime::register_ask_user_tool(registry, true));
+    auto tools = registry.snapshot();
+    REQUIRE(tools);
+    auto suffix = std::make_shared<std::uint64_t>();
+    surfaces::ChatSessionDependencies dependencies;
+    dependencies.persona_source = &source;
+    dependencies.tools = *tools;
+    dependencies.identity_suffix_source = [suffix] { return ++*suffix; };
+    dependencies.timestamp_source = [] {
+      return domain::EventTimestamp{123ms};
+    };
+    surfaces::ChatSessionOpen seed{make_id<domain::ModelId>("model"),
+                                   surfaces::ChatSessionOpen::Mode::create};
+    seed.provenance = domain::RunProvenance{"test-revision",
+                                            "scenario",
+                                            std::nullopt,
+                                            seed.model_id,
+                                            std::nullopt,
+                                            {},
+                                            {{"aiforge", "test-revision"}},
+                                            {},
+                                            {}};
+    seed.persona = {persona::PersonaDirectiveKind::select, "recovery",
+                    domain::PersonaSelectionSource::command_line};
+    auto session = surfaces::ChatSession::open(
+        seed, *backend, *backend, store.get(), nullptr, {}, {}, dependencies);
+    REQUIRE(session);
+    const auto submitted =
+        (*session)->submit("Durable question before restart");
+    INFO((submitted ? "seed run submitted" : submitted.error().message));
+    REQUIRE(submitted);
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (!(*session)->pending_question_input() &&
+           std::chrono::steady_clock::now() < deadline) {
+      const auto drained = (*session)->drain();
+      INFO((drained ? "seed run drained" : drained.error().message));
+      REQUIRE(drained);
+      std::this_thread::sleep_for(1ms);
+    }
+    REQUIRE((*session)->pending_question_input());
+    const auto session_id = (*session)->session_id();
+    const auto run_id = (*session)->pending_question_input()->run_id;
+    session->reset();
+    const auto append_baseline = store->append_calls();
+
+    // Simulate the original persona disappearing while the app was closed.
+    dependencies.persona_source = nullptr;
+    auto frame = std::make_shared<std::string>();
+    adapters::InteractiveChatAppOptions options;
+    options.live_wake_enabled = false;
+    options.session_dependencies = dependencies;
+    options.rendered_output = output;
+    options.rendered_frame = [frame](const termforge::Screen& screen) {
+      *frame = normalized_screen(screen);
+    };
+    surfaces::ChatSessionOpen resume{make_id<domain::ModelId>("model"),
+                                     surfaces::ChatSessionOpen::Mode::resume,
+                                     session_id};
+    resume.persona = {persona::PersonaDirectiveKind::disable, std::nullopt,
+                      domain::PersonaSelectionSource::command_line};
+    auto app = adapters::make_interactive_chat_app(*backend, *backend,
+                                                   store.get(), resume, *editor,
+                                                   {}, std::move(options));
+    REQUIRE(app->ready());
+    auto* raw = app.get();
+    return testing::TuiScenarioTarget{
+        std::move(app),
+        [raw, pipe](const termforge::Capabilities& capabilities) {
+          return raw->configure_terminal_for_scenario(
+              termforge::TerminalIo{pipe->read_fd(), -1}, capabilities);
+        },
+        [raw, backend, store, editor] {
+          static_cast<void>(backend);
+          static_cast<void>(store);
+          static_cast<void>(editor);
+          return raw->run();
+        },
+        [](std::string_view) -> std::expected<void, std::string> {
+          return std::unexpected("blocked recovery has no backend steps");
+        },
+        [](std::string_view) -> std::expected<void, std::string> {
+          return std::unexpected("blocked recovery has no tool steps");
+        },
+        [frame] { return *frame; },
+        [raw, backend, store, append_baseline, run_id] {
+          std::size_t cancellations{};
+          bool exact = true;
+          for (const auto& event : raw->events()) {
+            if (std::holds_alternative<domain::RunCancelled>(event.payload)) {
+              ++cancellations;
+              exact = exact && event.metadata.run_id == run_id;
+            }
+          }
+          return "requests=" + std::to_string(backend->requests) +
+                 "|cancellations=" + std::to_string(cancellations) +
+                 "|exact=" + (exact ? "yes" : "no") + "|appends=" +
+                 std::to_string(store->append_calls() - append_baseline);
+        }};
+  };
+}
+
 auto approval_factory() -> testing::TuiScenarioTargetFactory {
   return [](const testing::TuiScenarioPass pass, termforge::ByteSink* output)
              -> std::expected<testing::TuiScenarioTarget,
@@ -4588,4 +4755,41 @@ TEST_CASE("TUI scenarios fail on replay divergence and frame exhaustion",
           testing::TuiScenarioErrorCode::target_failure);
   REQUIRE(replay_failure.error().message ==
           "backend script release failed: replay descriptor mismatch");
+}
+
+TEST_CASE("blocked recovery stays visible and Ctrl+C cancels the exact run",
+          "[scenario][chat][recovery][cancellation]") {
+  testing::TuiScenario scenario;
+  scenario.scenario_id = "interactive-blocked-persona-recovery";
+  scenario.corpus_version = "1";
+  scenario.application_revision = "test-revision";
+  scenario.initial_size = {160, 18, 1600, 360};
+  const auto control = [](char32_t character) {
+    return testing::TuiScenarioPost{
+        termforge::KeyEvent{termforge::Key::Char, character, true, false, false,
+                            termforge::KeyAction::Press}};
+  };
+  scenario.steps = {
+      {1, testing::TuiScenarioResize{{100, 18, 1000, 360}}},
+      {3, control(U'c')},
+      {5, control(U'c')},
+      {7, control(U'd')},
+  };
+  scenario.limits.maximum_frames = 20;
+  const auto result =
+      testing::run_tui_scenario(scenario, blocked_recovery_factory());
+  INFO((result ? "" : result.error().message));
+  REQUIRE(result);
+  CHECK(result->recorded == result->replayed);
+  CHECK(result->recorded.semantic_state ==
+        "requests=1|cancellations=1|exact=yes|appends=1");
+  CHECK(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const auto& frame) {
+        return frame.find("Recovery blocked: session") != std::string::npos;
+      }));
+  CHECK(std::ranges::any_of(
+      result->recorded.normalized_frames, [](const auto& frame) {
+        return frame.find("Durable question before restart") !=
+               std::string::npos;
+      }));
 }

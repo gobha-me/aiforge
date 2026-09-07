@@ -660,3 +660,173 @@ TEST_CASE("unknown future memory kinds replay but do not enter context",
   REQUIRE(selected);
   REQUIRE(selected->empty());
 }
+
+TEST_CASE(
+    "exact saved memory recovery rejects changed lifecycle and references",
+    "[memory][recovery][failure]") {
+  Fixture fixture;
+  const auto events = source_events(id<domain::InvocationId>("selected-call"));
+  REQUIRE(fixture.store->append_events(fixture.source_session, events));
+  const runtime::MemorySettings settings{domain::MemoryCaptureMode::automatic,
+                                         domain::MemoryCaptureMode::automatic,
+                                         domain::MemoryCaptureMode::automatic,
+                                         2048};
+  REQUIRE(fixture.controller->capture_committed(fixture.source_session, events,
+                                                settings, fixture.repository,
+                                                "test") == 1);
+  auto selected = runtime::select_memory_context_with_provenance(
+      *fixture.controller, {fixture.repository, std::nullopt, 2048, 4096});
+  REQUIRE(selected);
+  REQUIRE(selected->selection.entries.size() == 1);
+  auto& reference = selected->selection.entries.front();
+  SECTION("expired record") {
+    REQUIRE(fixture.controller->expire({{reference.owner},
+                                        reference.record_id,
+                                        reference.record_event_id,
+                                        "no longer current"}));
+  }
+  SECTION("missing journal") {
+    reference.journal_session_id = id<domain::SessionId>("missing-journal");
+  }
+  SECTION("deleted source session") {
+    execute_sql(fixture.store->path(),
+                "PRAGMA foreign_keys=ON; DELETE FROM sessions WHERE "
+                "session_id='source-session'");
+  }
+  SECTION("source belongs to another run") {
+    reference.source.run_id = id<domain::RunId>("other-run");
+  }
+  SECTION("missing source event") {
+    reference.source.event_ids.front() = id<domain::EventId>("missing-source");
+  }
+  SECTION("different acceptance version") {
+    reference.record_event_id = id<domain::EventId>("other-acceptance");
+  }
+  SECTION("changed record fingerprint") {
+    reference.record_digest.value[0] =
+        reference.record_digest.value[0] == '0' ? '1' : '0';
+  }
+  SECTION("changed admitted evidence") {
+    reference.evidence_digest.value[0] =
+        reference.evidence_digest.value[0] == '0' ? '1' : '0';
+  }
+  SECTION("wrong owner") {
+    reference.owner = domain::MemoryOwner::global();
+  }
+  SECTION("wrong admission order") {
+    reference.order = 0;
+  }
+  SECTION("stale budget") {
+    selected->selection.maximum_tokens = reference.estimated_tokens - 1;
+  }
+  SECTION("forged estimate") {
+    ++reference.estimated_tokens;
+  }
+  SECTION("unknown selection version") {
+    ++selected->selection.version;
+  }
+  SECTION("duplicate selection") {
+    selected->selection.entries.push_back(reference);
+  }
+  SECTION("superseded record") {
+    const auto replacement_session =
+        id<domain::SessionId>("replacement-session");
+    REQUIRE(fixture.store->create_session({replacement_session, {}}));
+    auto replacement =
+        source_events(id<domain::InvocationId>("replacement-call"),
+                      proposal_arguments("project", "workflow", "Prefer spaces",
+                                         "Prefer spaces"),
+                      "Prefer spaces");
+    REQUIRE(fixture.store->append_events(replacement_session, replacement));
+    auto review = settings;
+    review.project_capture = domain::MemoryCaptureMode::review;
+    REQUIRE(fixture.controller->capture_committed(
+                replacement_session, replacement, review, fixture.repository,
+                "test") == 1);
+    auto state = fixture.controller->inspect({reference.owner});
+    REQUIRE(state);
+    const auto& proposal = state->proposals.back().projected;
+    REQUIRE(fixture.controller->accept({{reference.owner},
+                                        proposal.proposal.proposal_id,
+                                        proposal.proposal_event_id,
+                                        std::nullopt,
+                                        std::nullopt,
+                                        std::nullopt}));
+    const auto history =
+        fixture.store->replay_events(reference.journal_session_id);
+    REQUIRE(history);
+    const auto transition = event(
+        history->back().metadata.sequence + 1, "superseded-selection",
+        domain::MemorySuperseded{
+            {reference.record_id, proposal.proposal.record_id,
+             domain::MemoryDecisionSource::user, reference.record_event_id}});
+    REQUIRE(fixture.store->append_events(reference.journal_session_id,
+                                         std::span{&transition, 1}));
+  }
+  const auto restored =
+      fixture.controller->restore_context(selected->selection);
+  REQUIRE_FALSE(restored);
+}
+
+TEST_CASE("exact saved memory recovery retains admitted ordering budget and "
+          "emptiness",
+          "[memory][recovery]") {
+  Fixture fixture;
+  const auto persona = id<domain::PersonaId>("persona:origin");
+  const runtime::MemorySettings settings{domain::MemoryCaptureMode::automatic,
+                                         domain::MemoryCaptureMode::automatic,
+                                         domain::MemoryCaptureMode::automatic,
+                                         2048};
+  const auto save = [&](const std::string& suffix, const std::string& scope,
+                        const std::string& text,
+                        std::optional<domain::PersonaId> owner) {
+    const auto source = id<domain::SessionId>("admitted-source-" + suffix);
+    REQUIRE(fixture.store->create_session({source, {}}));
+    const auto events = source_events(
+        id<domain::InvocationId>("admitted-call-" + suffix),
+        proposal_arguments(scope, "user_preference", text, text), text, owner);
+    REQUIRE(fixture.store->append_events(source, events));
+    REQUIRE(fixture.controller->capture_committed(
+                source, events, settings, fixture.repository, "test") == 1);
+  };
+  save("global", "global", "Prefer concise global output", {});
+  save("repo", "project", "Prefer repository formatting", {});
+  save("persona", "persona", "Prefer this persona memory", persona);
+  auto all = runtime::select_memory_context_with_provenance(
+      *fixture.controller, {fixture.repository, persona, 2048, 4096});
+  REQUIRE(all);
+  REQUIRE(all->content.size() == 3);
+  auto selected = *all;
+  SECTION("mixed owners") {
+  }
+  SECTION("budget admitted only first record") {
+    auto limited = runtime::select_memory_context_with_provenance(
+        *fixture.controller, {fixture.repository, persona,
+                              all->content.front().estimated_tokens, 4096});
+    REQUIRE(limited);
+    selected = std::move(*limited);
+    REQUIRE(selected.content.size() == 1);
+  }
+  SECTION("originally empty") {
+    auto empty = runtime::select_memory_context_with_provenance(
+        *fixture.controller, {fixture.repository, persona, 0, 4096});
+    REQUIRE(empty);
+    selected = std::move(*empty);
+    REQUIRE(selected.content.empty());
+  }
+  save("later", "persona", "Prefer newly accepted content", persona);
+  const auto before = fixture.store->replay_events(
+      selected.selection.entries.empty()
+          ? all->selection.entries.front().journal_session_id
+          : selected.selection.entries.front().journal_session_id);
+  REQUIRE(before);
+  const auto restored = fixture.controller->restore_context(selected.selection);
+  REQUIRE(restored);
+  CHECK(*restored == selected.content);
+  const auto after = fixture.store->replay_events(
+      selected.selection.entries.empty()
+          ? all->selection.entries.front().journal_session_id
+          : selected.selection.entries.front().journal_session_id);
+  REQUIRE(after);
+  CHECK(*after == *before);
+}

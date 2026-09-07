@@ -30,6 +30,9 @@ struct RunStarted {
   WorkspaceId workspace_id;
   PermissionProfileId permission_profile_id;
   std::optional<PersonaId> persona_id;
+  // Absent in legacy events; an explicit empty selection proves no memory was
+  // admitted.
+  std::optional<MemorySelection> memory_selection{};
   auto operator==(const RunStarted&) const -> bool = default;
 };
 

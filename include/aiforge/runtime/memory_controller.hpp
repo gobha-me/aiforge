@@ -46,6 +46,7 @@ struct MemoryControllerError {
 struct MemoryRecordView {
   domain::ProjectedMemoryRecord projected;
   bool source_available{};
+  std::optional<domain::SessionId> journal_session_id{};
   auto operator==(const MemoryRecordView&) const -> bool = default;
 };
 
@@ -95,6 +96,11 @@ struct MemoryContextRequest {
   std::uint64_t available_tokens{};
 };
 
+struct SelectedMemoryContext {
+  domain::MemorySelection selection;
+  std::vector<domain::ContextContentInput> content;
+};
+
 using MemoryIdentitySuffixSource = std::function<std::uint64_t()>;
 using MemoryTimestampSource = std::function<domain::EventTimestamp()>;
 
@@ -102,6 +108,9 @@ class MemoryController;
 
 [[nodiscard]] auto resolve_memory_settings(const config::ResolvedConfig& config)
     -> std::expected<MemorySettings, MemoryControllerError>;
+[[nodiscard]] auto select_memory_context_with_provenance(
+    MemoryController& controller, MemoryContextRequest request)
+    -> std::expected<SelectedMemoryContext, MemoryControllerError>;
 [[nodiscard]] auto select_memory_context(MemoryController& controller,
                                          MemoryContextRequest request)
     -> std::expected<std::vector<domain::ContextContentInput>,
@@ -128,6 +137,11 @@ class MemoryController final {
       std::optional<domain::RepositoryId> repository_id,
       std::optional<domain::PersonaId> persona_id)
       -> std::expected<std::vector<MemoryRecordView>, MemoryControllerError>;
+  // Recovery reads only exact recorded journals and versions; it never creates
+  // a journal.
+  [[nodiscard]] auto restore_context(const domain::MemorySelection& selection)
+      -> std::expected<std::vector<domain::ContextContentInput>,
+                       MemoryControllerError>;
   [[nodiscard]] auto accept(MemoryAcceptRequest request)
       -> std::expected<void, MemoryControllerError>;
   [[nodiscard]] auto reject(MemoryRejectRequest request)

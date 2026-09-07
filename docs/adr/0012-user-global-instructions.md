@@ -83,7 +83,11 @@ source file to remain available. Recovering a pending run after process restart
 may reload the canonical file only when its identity and digest match the
 recorded run reference. Changed, removed, malformed, or unavailable content
 blocks continuation rather than substituting a new instruction into the old
-run. After the pending run is cancelled or completed, a new run may load and
+run. The recovered session remains available for read-only inspection and exact
+run cancellation. Its blocked state identifies the session, run, and source
+failure. Answers, approvals, and automatic continuation remain unavailable
+until source validation succeeds; a failed cancellation append leaves the run
+pending and retryable. After the pending run is cancelled or completed, a new run may load and
 record the current document.
 
 Resume never restores user-global content as session state. It preserves old

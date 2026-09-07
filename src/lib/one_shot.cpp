@@ -844,6 +844,15 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                             std::move(history.error()));
     }
     auto content = std::move(*history);
+    domain::MemorySelection memory_selection{
+        1,
+        m_dependencies.repository_id,
+        resolved_persona->document
+            ? std::optional{resolved_persona->document->reference.persona_id}
+            : std::nullopt,
+        0,
+        0,
+        {}};
     if (m_dependencies.memory_controller != nullptr) {
       std::uint64_t mandatory = detail::runtime_contract.size() +
                                 request.prompt.size() + evidence_size;
@@ -859,7 +868,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
       const auto available = mandatory < maximum_input
                                  ? maximum_input - mandatory
                                  : std::uint64_t{};
-      auto memory = runtime::select_memory_context(
+      auto memory = runtime::select_memory_context_with_provenance(
           *m_dependencies.memory_controller,
           {m_dependencies.repository_id,
            resolved_persona->document
@@ -871,8 +880,11 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
         return one_shot_error(OneShotErrorCode::context_failed,
                               memory.error().message);
       }
-      for (auto& item : *memory) {
+      memory_selection = std::move(memory->selection);
+      for (std::size_t index{}; index < memory->content.size(); ++index) {
+        auto& item = memory->content[index];
         item.order = static_cast<std::uint64_t>(content.size()) + 1;
+        memory_selection.entries[index].order = item.order;
         content.push_back(std::move(item));
       }
     }
@@ -971,13 +983,19 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                             "unavailable");
     }
     const auto run_event_offset = kernel->event_log().events().size();
+    if (auto sealed = domain::seal_memory_selection(memory_selection);
+        !sealed) {
+      return one_shot_error(OneShotErrorCode::context_failed,
+                            sealed.error().message);
+    }
     auto started = kernel->start(
         {*run_id,
          {*surface_id, *workspace_id, *permission_id,
           resolved_persona->document
               ? std::optional<domain::PersonaId>{resolved_persona->document
                                                      ->reference.persona_id}
-              : std::nullopt},
+              : std::nullopt,
+          std::move(memory_selection)},
          std::move(user_message),
          std::move(backend_request),
          std::move(request.provenance),
