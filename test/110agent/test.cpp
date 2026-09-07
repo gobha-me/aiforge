@@ -195,9 +195,10 @@ struct Gate {
 class Stream final : public backend::BackendStream {
  public:
   Stream(domain::MessageId message, bool calls_tool, std::shared_ptr<Gate> gate,
-         std::size_t request_number)
+         std::size_t request_number, std::string tool_name)
       : m_message(std::move(message)), m_calls_tool(calls_tool),
-        m_gate(std::move(gate)), m_request_number(request_number) {}
+        m_gate(std::move(gate)), m_request_number(request_number),
+        m_tool_name(std::move(tool_name)) {}
   auto next(std::stop_token token)
       -> std::expected<std::optional<backend::BackendEvent>,
                        backend::BackendError> override {
@@ -227,7 +228,7 @@ class Stream final : public backend::BackendStream {
           return backend::BackendEvent{backend::ToolCallDelta{
               id<domain::InvocationId>("agent-read-" +
                                        std::to_string(m_request_number)),
-              "read_repository_file", "{}"}};
+              m_tool_name, "{}"}};
         return backend::BackendEvent{
             backend::ContentDelta{m_message, domain::TextBlock{"answer"}}};
       case 3:
@@ -244,12 +245,14 @@ class Stream final : public backend::BackendStream {
   std::shared_ptr<Gate> m_gate;
   int m_step{};
   std::size_t m_request_number{};
+  std::string m_tool_name;
 };
 class Backend final : public backend::Backend,
                       public backend::ModelContextProvider {
  public:
   bool capabilities{true};
   bool calls_tool{};
+  std::string tool_name{"read_repository_file"};
   std::shared_ptr<Gate> gate;
   std::vector<backend::BackendRequest> requests;
   auto lookup(const domain::ModelId& model, std::stop_token)
@@ -264,7 +267,7 @@ class Backend final : public backend::Backend,
     requests.push_back(request);
     return std::make_unique<Stream>(request.assistant_message_id,
                                     calls_tool && requests.size() % 2 == 1,
-                                    gate, requests.size());
+                                    gate, requests.size(), tool_name);
   }
 };
 class ToolStream final : public runtime::ToolExecutionStream {
@@ -336,18 +339,25 @@ struct Fixture {
   std::shared_ptr<testing::ScriptedToolExecutor> executor;
   explicit Fixture(std::shared_ptr<Executor> executing = {}) {
     runtime::ToolRegistry registry;
+    const std::string tool_name =
+        executing ? "run_process" : "read_repository_file";
+    backend.tool_name = tool_name;
+    const auto effect =
+        executing ? domain::Effect::execute : domain::Effect::read;
     executor = std::make_shared<testing::ScriptedToolExecutor>(
         std::vector<testing::ScriptedToolExchange>{});
     REQUIRE(registry.register_tool(
-        {"read_repository_file",
-         "Read file",
+        {tool_name,
+         "Hermetic test tool",
          {"application/schema+json", R"({"type":"object"})"},
-         {domain::Effect::read},
-         {{domain::Effect::read, "filesystem.root", "/repo"}}},
+         {effect},
+         {{effect, executing ? "process.command" : "filesystem.root",
+           executing ? "/usr/bin/test-agent" : "/repo"}}},
         executing ? std::static_pointer_cast<runtime::ToolExecutor>(executing)
                   : executor,
-        {}, runtime::ToolExecutorContract{"test.agent.read", "1"},
-        runtime::ToolCategory::repository));
+        {}, runtime::ToolExecutorContract{"test.agent.tool", "1"},
+        executing ? runtime::ToolCategory::process
+                  : runtime::ToolCategory::repository));
     dependencies.tools = registry.snapshot().value();
     const auto permission =
         id<domain::PermissionProfileId>("agent-prompt-policy");
@@ -355,7 +365,7 @@ struct Fixture {
     if (executing) {
       auto compiled = runtime::compile_automatic_approval_matcher(
           {runtime::ExactToolArgumentsApprovalRule{
-              "read_repository_file",
+              tool_name,
               runtime::canonicalize_validated_tool_arguments(
                   {"application/json", "{}"})
                   .value(),
@@ -395,12 +405,13 @@ struct Fixture {
     return std::move(*opened);
   }
 };
-auto request() -> surfaces::AgentRequest {
+auto request(std::string tool = "read_repository_file")
+    -> surfaces::AgentRequest {
   return {surfaces::AgentOperation::submit,
           {},
           {},
           id<domain::ToolProfileId>("dev"),
-          {"read_repository_file"},
+          {std::move(tool)},
           "Read source"};
 }
 template <class Payload>
@@ -725,8 +736,8 @@ TEST_CASE("agent cancellation and output failure drain a real gated tool",
     return reject_output;
   };
   auto release = release_after_cancel(executor->gate);
-  const auto outcome =
-      surfaces::run_agent_session(*session, request(), sink, stop.get_token());
+  const auto outcome = surfaces::run_agent_session(
+      *session, request("run_process"), sink, stop.get_token());
   if (reject_output) {
     REQUIRE_FALSE(outcome);
     CHECK(outcome.error().code == surfaces::AgentErrorCode::output_failed);
@@ -764,7 +775,7 @@ TEST_CASE("agent cleanup deadline cannot claim a still-running tool is drained",
   };
   auto release = release_after_cancel(executor->gate, 100ms);
   const auto outcome = surfaces::run_agent_session(
-      *session, request(), sink, stop.get_token(), {1s, 10ms});
+      *session, request("run_process"), sink, stop.get_token(), {1s, 10ms});
   INFO((outcome ? outcome->reason : outcome.error().message));
   REQUIRE(outcome);
   CHECK(outcome->status == surfaces::AgentStatus::failed);
@@ -789,7 +800,7 @@ TEST_CASE("agent exact automatic rule executes once then refuses exhaustion",
   Fixture fixture{executor};
   fixture.backend.calls_tool = true;
   auto session = fixture.open();
-  auto bound = request();
+  auto bound = request("run_process");
   bound.session_id = session->session_id();
   bound.model = session->model_id();
   Sink first;
@@ -829,7 +840,8 @@ TEST_CASE("agent tool result persistence failure cannot report durable cleanup",
     });
   };
   Sink sink;
-  const auto outcome = surfaces::run_agent_session(*session, request(), sink);
+  const auto outcome =
+      surfaces::run_agent_session(*session, request("run_process"), sink);
   INFO((outcome ? outcome->reason : outcome.error().message));
   REQUIRE(outcome);
   CHECK(outcome->status == surfaces::AgentStatus::failed);
