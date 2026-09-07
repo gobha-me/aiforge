@@ -567,6 +567,18 @@ template <typename Id>
   return result;
 }
 
+[[nodiscard]] auto invalid_resumed_persona(
+    const persona::PersonaDirective& directive, const bool allow_attention)
+    -> std::expected<PersonaSetup, ChatSessionError> {
+  if (allow_attention &&
+      directive.kind == persona::PersonaDirectiveKind::inherit) {
+    return PersonaSetup{std::nullopt, std::nullopt,
+                        "Persona is invalid; select a persona or turn it off"};
+  }
+  return error(ChatSessionErrorCode::context_failed,
+               "persona document is invalid");
+}
+
 [[nodiscard]] auto resolve_persona(persona::PersonaSource* source,
                                    const persona::PersonaLimits limits,
                                    const persona::PersonaDirective& directive,
@@ -630,14 +642,7 @@ template <typename Id>
     return std::unexpected(persona_error(loaded.error()));
   }
   if (!domain::validate_persona_document(*loaded)) {
-    if (allow_attention &&
-        directive.kind == persona::PersonaDirectiveKind::inherit) {
-      return PersonaSetup{
-          std::nullopt, std::nullopt,
-          "Persona is invalid; select a persona or turn it off"};
-    }
-    return error(ChatSessionErrorCode::context_failed,
-                 "persona document is invalid");
+    return invalid_resumed_persona(directive, allow_attention);
   }
   if (directive.kind == persona::PersonaDirectiveKind::inherit &&
       loaded->reference != *previous) {
