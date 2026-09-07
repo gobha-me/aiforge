@@ -2205,6 +2205,10 @@ TEST_CASE("recovered chat exposes blocked persona history and cancellation",
     REQUIRE_FALSE((*resumed)->cancel_active("cancel blocked run"));
     REQUIRE_FALSE((*resumed)->active());
     REQUIRE((*resumed)->blocked_recovery());
+    REQUIRE((*resumed)->drain());
+    REQUIRE((*resumed)->blocked_recovery());
+    REQUIRE((*resumed)->blocked_recovery()->reason.message.find("reopen") !=
+            std::string::npos);
     REQUIRE_FALSE((*resumed)->cancel_active("retry before reopening"));
     REQUIRE(store.histories.at(session_id) == history_before);
     store.fail_appends = false;

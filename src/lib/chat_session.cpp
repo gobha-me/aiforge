@@ -758,10 +758,13 @@ namespace {
 
 auto ChatSession::validate_recovered_pending_run()
     -> std::expected<void, ChatSessionError> {
+  const auto run_id = m_impl->kernel->active_run_id();
+  if (!run_id && m_impl->recovery_block) {
+    return std::unexpected(m_impl->recovery_block->reason);
+  }
   if (m_impl->recovered_sources_pinned) return {};
   auto validated = load_recovered_pending_sources();
   if (validated) validated = validate_recovered_memory_capacity();
-  const auto run_id = m_impl->kernel->active_run_id();
   if (!validated && run_id &&
       validated.error().code != ChatSessionErrorCode::cancelled) {
     m_impl->recovery_block =
@@ -1820,7 +1823,15 @@ auto ChatSession::cancel_active(std::optional<std::string> reason)
   }
   const auto before = m_impl->kernel->event_log().events().size();
   auto cancelled = m_impl->kernel->cancel_run(*run, std::move(reason));
-  if (!cancelled) return std::unexpected(kernel_error(cancelled.error()));
+  if (!cancelled) {
+    auto failure = kernel_error(cancelled.error());
+    if (m_impl->recovery_block && !m_impl->kernel->active_run_id()) {
+      m_impl->recovery_block->reason = failure;
+      m_impl->recovery_block->reason.message =
+          "cancellation persistence failed; reopen the session before retrying";
+    }
+    return std::unexpected(std::move(failure));
+  }
   m_impl->active_context.reset();
   m_impl->recovered_memory_context.clear();
   m_impl->recovered_sources_pinned = false;
