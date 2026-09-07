@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import pathlib
+import select
 import signal
 import subprocess
 import sys
@@ -81,12 +82,24 @@ def run(production, fixture, root):
             process.stdin.close()
             start = time.monotonic()
             if interrupt:
+                readable, _, _ = select.select([process.stdout], [], [], 3)
+                assert readable, "replay never produced output before cancellation"
+                # Observe readiness without consuming bytes, so the consumer
+                # still applies backpressure. Cancellation may nevertheless
+                # land between records; a partial final line is optional.
                 time.sleep(0.15)
                 process.send_signal(signal.SIGINT)
             assert process.wait(timeout=4) == (130 if interrupt else 1)
             assert time.monotonic() - start < 4
             output = process.stdout.read()
-            assert output and not output.endswith(b"\n"), "partial record was not retained"
+            assert output, "replay produced no bytes before stopping"
+            complete, _, unfinished = output.rpartition(b"\n")
+            prefix = records(complete) if complete else []
+            assert prefix == emitted[:len(prefix)], "output is not an exact replay prefix"
+            assert len(prefix) < len(emitted), "blocked replay unexpectedly completed"
+            if unfinished:
+                expected = result.stdout.splitlines()[len(prefix)]
+                assert expected.startswith(unfinished), "unfinished record differs from replay"
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, env=environment) as process:
         process.stdout.close()
