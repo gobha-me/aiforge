@@ -235,6 +235,46 @@ See
 [`ADR 0008`](docs/adr/0008-plan-task-control-and-project-backlog.md) for the
 durable contract.
 
+## Noninteractive agent runs
+
+`aiforge agent --jsonl` reads one version-1 JSON request through EOF and writes
+versioned `accepted`, `event`, `error`, and `terminal` records to stdout. An
+explicit or configured text model is required; no terminal picker is opened.
+
+```bash
+printf '%s\n' '{"version":1,"operation":"submit","profile":"dev","tools":["read_repository_file"],"prompt":"Read the relevant tracked source","model":"model-id"}' \
+  | aiforge agent --jsonl --repository /path/to/repository
+printf '%s\n' '{"version":1,"operation":"replay","session_id":"session-id"}' \
+  | aiforge agent --jsonl
+```
+
+The selected profile and explicit tool list narrow the same production policy
+used by Chat. Only `read_repository_file` and configured `run_process` are
+supported. `--tool-restriction` and `--tool-approval` use the existing launch
+controls; executable, root, environment, network and automatic-approval grants
+remain configuration-owned. Prompt approval ends with `interaction_required`
+and durable cancellation; automation needs explicit positive automatic rules or
+an explicitly selected `allow-all` launch. There is no shell, question response,
+media generation, or implicit grant in the protocol.
+
+Optional `session_id` submits a new run to completed history. Unresolved runs
+return `recovery_required` before opening live runtime services; replay is
+read-only and needs no credentials. Persisted session/run/event identities
+support inspection before retrying; requests are not idempotent.
+
+Input is capped at 1 MiB and each output record at 2 MiB. SIGINT and broken or
+stalled output cancel active work and drain accounting. A run/delivery deadline
+is five minutes, output has a two-second per-record deadline, and cancellation
+accounting has a separate two-second surface deadline. `durable_terminal` is
+true only when the run has a recorded terminal and accounting has drained;
+replay's `completed` describes the replay operation and leaves that flag false.
+Pipe/socket backpressure is bounded; synchronous regular-file/device writes
+and arbitrary custom C++ sinks cannot be forcibly preempted. Ignore a final
+partial line without LF. Exit codes are 0 for success, 2 for
+invalid input, 130 for cancellation, and 1 for runtime, recovery, interaction or
+output failure. The exact contract is in
+[`ADR 0020`](docs/adr/0020-headless-agent-jsonl.md).
+
 ## Bounded task dispatch and reconciliation
 
 `RunKernel::dispatch_child` starts accepted materialized tasks as child runs

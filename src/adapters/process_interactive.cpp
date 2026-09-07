@@ -4679,6 +4679,44 @@ auto make_interactive_chat_app(
                                        std::move(options));
 }
 
+namespace {
+auto finish_agent_execution(
+    surfaces::ChatSession& session, ProcessAgentExecution& agent,
+    const std::expected<surfaces::AgentOutcome, surfaces::AgentError>& result)
+    -> std::expected<void, cli::CommandFailure> {
+  agent.terminal_attempted = true;
+  if (result) {
+    if (result->status == surfaces::AgentStatus::completed) return {};
+    return failure(result->status == surfaces::AgentStatus::cancelled
+                       ? cli::CommandFailureKind::cancelled
+                       : cli::CommandFailureKind::runtime,
+                   result->reason.empty() ? "agent run did not complete"
+                                          : result->reason);
+  }
+  const auto kind = result.error().code == surfaces::AgentErrorCode::cancelled
+                        ? cli::CommandFailureKind::cancelled
+                        : cli::CommandFailureKind::runtime;
+  const auto failed = failure(kind, result.error().message);
+  const auto record = surfaces::agent_error_record(result.error());
+  if (!record) return failed;
+  const auto reported = agent.sink.write_record(*record);
+  if (!reported) return failed;
+  const surfaces::AgentOutcome outcome{
+      kind == cli::CommandFailureKind::cancelled
+          ? surfaces::AgentStatus::cancelled
+          : surfaces::AgentStatus::failed,
+      false,
+      session.session_id(),
+      {},
+      result.error().message};
+  const auto terminal = surfaces::agent_terminal_record(outcome);
+  if (!terminal) return failed;
+  const auto written = agent.sink.write_record(*terminal);
+  if (!written) return failed;
+  return failed;
+}
+} // namespace
+
 // clang-format off
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicit startup boundaries.
 auto execute_process_chat(cli::InteractiveCommand::Request request,
@@ -5106,33 +5144,7 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
       if (!session) return std::unexpected(session_error(session.error()));
       auto result = surfaces::run_agent_session(
           **session, agent->request, agent->sink, environment.stop_token);
-      if (!result) {
-        const auto record = surfaces::agent_error_record(result.error());
-        if (record) static_cast<void>(agent->sink.write_record(*record));
-        const surfaces::AgentOutcome outcome{
-            result.error().code == surfaces::AgentErrorCode::cancelled
-                ? surfaces::AgentStatus::cancelled
-                : surfaces::AgentStatus::failed,
-            false,
-            (*session)->session_id(),
-            {},
-            result.error().message};
-        const auto terminal = surfaces::agent_terminal_record(outcome);
-        agent->terminal_attempted = true;
-        if (terminal) static_cast<void>(agent->sink.write_record(*terminal));
-        return failure(result.error().code ==
-                               surfaces::AgentErrorCode::cancelled
-                           ? cli::CommandFailureKind::cancelled
-                           : cli::CommandFailureKind::runtime,
-                       result.error().message);
-      }
-      agent->terminal_attempted = true;
-      if (result->status == surfaces::AgentStatus::completed) return {};
-      return failure(result->status == surfaces::AgentStatus::cancelled
-                         ? cli::CommandFailureKind::cancelled
-                         : cli::CommandFailureKind::runtime,
-                     result->reason.empty() ? "agent run did not complete"
-                                            : result->reason);
+      return finish_agent_execution(**session, *agent, result);
     }
 
     InteractiveChatAppOptions app_options;

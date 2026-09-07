@@ -1,7 +1,9 @@
 #include <aiforge/adapters/agent_transport.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cstdint>
 #include <utility>
 
 #ifndef _WIN32
@@ -71,25 +73,34 @@ auto write_all(const int output, std::string_view record,
     -> std::expected<void, surfaces::AgentError> {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (!record.empty()) {
+    if (std::chrono::steady_clock::now() >= deadline)
+      return failure(surfaces::AgentErrorCode::output_failed,
+                     "agent output deadline exceeded");
     // Attempt an immediately writable cancellation/terminal record even after
     // stop. A blocked descriptor must never postpone cancellation accounting.
     const auto written = ::write(output, record.data(), record.size());
     if (written > 0) {
       record.remove_prefix(static_cast<std::size_t>(written));
-      if (record.empty()) return {};
     } else if (written < 0 && errno != EINTR && errno != EAGAIN &&
                errno != EWOULDBLOCK) {
       return failure(surfaces::AgentErrorCode::output_failed,
                      "agent output closed or failed");
     }
-    if (stop.stop_requested())
-      return failure(surfaces::AgentErrorCode::cancelled,
-                     "agent output cancelled");
     if (std::chrono::steady_clock::now() >= deadline)
       return failure(surfaces::AgentErrorCode::output_failed,
                      "agent output deadline exceeded");
+    if (record.empty()) return {};
+    if (stop.stop_requested())
+      return failure(surfaces::AgentErrorCode::cancelled,
+                     "agent output cancelled");
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now())
+            .count();
+    const auto wait_ms =
+        static_cast<int>(std::clamp<std::int64_t>(remaining, 1, 10));
     pollfd descriptor{output, POLLOUT, 0};
-    const auto ready = ::poll(&descriptor, 1, 10);
+    const auto ready = ::poll(&descriptor, 1, wait_ms);
     if ((ready < 0 && errno != EINTR) ||
         (descriptor.revents & (POLLERR | POLLNVAL | POLLHUP)) != 0)
       return failure(surfaces::AgentErrorCode::output_failed,
@@ -106,7 +117,7 @@ struct AgentTransport::Impl {
   NonblockingDescriptor output;
   Impl(int input_fd, int output_fd, std::stop_token token,
        std::chrono::milliseconds timeout)
-      : input(input_fd, true), output(output_fd, false), stop(token),
+      : input(input_fd, true), output(output_fd, false), stop(std::move(token)),
         output_timeout(timeout) {}
 #endif
   std::stop_token stop;

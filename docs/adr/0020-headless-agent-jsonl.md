@@ -66,7 +66,7 @@ Expiry stops event delivery and cancels work, followed by separately bounded
 cleanup and one terminal-report phase. It is failure rather than user
 cancellation. If the run already completed durably, a delivery deadline can
 report `failed` with `durable_terminal: true` without rewriting that outcome.
-The transport deadline bounds synchronous write overrun; arbitrary custom C++
+The pipe/socket transport deadline bounds write waiting; arbitrary custom C++
 sinks cannot be preempted. Cancellation has a separate two-second accounting-drain deadline;
 exhaustion returns `cleanup_incomplete` and requires reopening rather than
 claiming durable completion. Tests inject shorter positive deadlines. This
@@ -81,6 +81,12 @@ indefinitely for a consumer. A partial final record lacks its LF and must be
 ignored by consumers. The executable ignores SIGPIPE and propagates SIGINT
 through its existing stop source. Descriptor flags are restored on teardown.
 One bounded record is buffered at a time; no unbounded JSONL output queue exists.
+
+These output waiting bounds cover pipe/socket backpressure. `O_NONBLOCK` cannot
+preempt an in-progress synchronous regular-file or device write; cancellation
+and deadline checks resume when that system call returns. Ordinary redirected
+file output remains supported. Likewise, arbitrary custom C++ sinks cannot be
+forcibly interrupted by the surface.
 
 ## Implementation boundaries
 

@@ -46,7 +46,7 @@ def run(production, fixture, root):
     assert not (root / "state").exists(), "input errors opened persistent storage"
 
     database = root / "state" / "aiforge" / "sessions.sqlite3"
-    database.parent.mkdir(parents=True)
+    database.parent.mkdir(parents=True, mode=0o700)
     subprocess.run([fixture, str(database)], check=True, env=environment, timeout=3)
     before = hashlib.sha256(database.read_bytes()).hexdigest()
     # A broken configuration would prevent normal startup. Replay and pending

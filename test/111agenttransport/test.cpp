@@ -4,6 +4,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -176,5 +178,81 @@ TEST_CASE(
   std::array<char, 3> bytes{};
   REQUIRE(::read(output.descriptors[0], bytes.data(), bytes.size()) == 3);
   CHECK(std::string(bytes.data(), bytes.size()) == "{}\n");
+}
+
+TEST_CASE("agent transport validates record framing and timeout bounds",
+          "[agent][transport][failure]") {
+  Pipe input;
+  Pipe output;
+  CHECK_FALSE(adapters::AgentTransport::open(input.descriptors[0],
+                                             output.descriptors[1], {}, 0ms));
+  CHECK_FALSE(adapters::AgentTransport::open(input.descriptors[0],
+                                             output.descriptors[1], {},
+                                             std::chrono::milliseconds::max()));
+  for (const auto& record : std::vector<std::string>{
+           "", "{}", "{}\n{}\n",
+           std::string(surfaces::agent_maximum_record_bytes + 1, '\n')}) {
+    auto transport = adapters::AgentTransport::open(input.descriptors[0],
+                                                    output.descriptors[1], {});
+    REQUIRE(transport);
+    CHECK_FALSE((*transport)->write_record(record));
+    CHECK_FALSE((*transport)->write_record("{}\n"));
+  }
+}
+
+TEST_CASE("agent transport accepts regular file input at EOF",
+          "[agent][transport]") {
+  const auto close_file = [](std::FILE* file) { std::fclose(file); };
+  std::unique_ptr<std::FILE, decltype(close_file)> file(std::tmpfile(),
+                                                        close_file);
+  REQUIRE(file);
+  REQUIRE(std::fwrite("{}", 1, 2, file.get()) == 2);
+  std::rewind(file.get());
+  Pipe output;
+  auto transport = adapters::AgentTransport::open(::fileno(file.get()),
+                                                  output.descriptors[1], {});
+  REQUIRE(transport);
+  const auto read = (*transport)->read_request();
+  REQUIRE(read);
+  CHECK(*read == "{}");
+}
+
+TEST_CASE("agent transport stop wins while output is blocked",
+          "[agent][transport][cancel]") {
+  Pipe input;
+  Pipe output;
+  std::stop_source stop;
+  auto transport = adapters::AgentTransport::open(
+      input.descriptors[0], output.descriptors[1], stop.get_token());
+  REQUIRE(transport);
+  std::string record(1024U * 1024U, 'x');
+  record.back() = '\n';
+  std::jthread cancel([&] {
+    std::this_thread::sleep_for(20ms);
+    stop.request_stop();
+  });
+  const auto start = std::chrono::steady_clock::now();
+  const auto written = (*transport)->write_record(record);
+  REQUIRE_FALSE(written);
+  CHECK(written.error().code == surfaces::AgentErrorCode::cancelled);
+  CHECK(std::chrono::steady_clock::now() - start < 1s);
+}
+
+TEST_CASE("agent transport does not write after a blocked record deadline",
+          "[agent][transport][failure]") {
+  Pipe input;
+  Pipe output;
+  auto transport = adapters::AgentTransport::open(
+      input.descriptors[0], output.descriptors[1], {}, 1ms);
+  REQUIRE(transport);
+  std::array<char, 4096> buffer{};
+  while (::write(output.descriptors[1], buffer.data(), buffer.size()) > 0) {
+  }
+  std::jthread reader([&] {
+    std::this_thread::sleep_for(5ms);
+    static_cast<void>(
+        ::read(output.descriptors[0], buffer.data(), buffer.size()));
+  });
+  CHECK_FALSE((*transport)->write_record("{}\n"));
 }
 #endif

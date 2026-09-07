@@ -15,22 +15,22 @@ auto invalid() -> std::unexpected<AgentError> {
                                     "invalid version 1 agent request"});
 }
 
-auto valid_framing(std::string_view input) -> bool {
-  if (input.empty() || input.size() > agent_maximum_input_bytes) return false;
-  if (input.back() == '\n') input.remove_suffix(1);
-  if (!input.empty() && input.back() == '\r') input.remove_suffix(1);
-  if (input.find_first_of("\r\n") != std::string_view::npos) return false;
+void consume_quoted(const char byte, bool& quoted, bool& escape) {
+  if (escape)
+    escape = false;
+  else if (byte == '\\')
+    escape = true;
+  else if (byte == '"')
+    quoted = false;
+}
+
+auto valid_depth(const std::string_view input) -> bool {
   bool quoted{};
   bool escape{};
   unsigned depth{};
   for (const char byte : input) {
     if (quoted) {
-      if (escape)
-        escape = false;
-      else if (byte == '\\')
-        escape = true;
-      else if (byte == '"')
-        quoted = false;
+      consume_quoted(byte, quoted, escape);
     } else if (byte == '"') {
       quoted = true;
     } else if (byte == '{' || byte == '[') {
@@ -41,6 +41,16 @@ auto valid_framing(std::string_view input) -> bool {
     }
   }
   return !quoted && depth == 0;
+}
+
+auto valid_framing(std::string_view input) -> bool {
+  if (input.empty() || input.size() > agent_maximum_input_bytes) return false;
+  if (input.back() == '\n') {
+    input.remove_suffix(1);
+    if (!input.empty() && input.back() == '\r') input.remove_suffix(1);
+  }
+  if (input.find_first_of("\r\n") != std::string_view::npos) return false;
+  return valid_depth(input);
 }
 
 auto exact_keys(const Json& value, const std::set<std::string>& allowed)
@@ -67,31 +77,63 @@ auto optional_id(const Json& root, const char* key, std::optional<Id>& result)
   result = std::move(*parsed);
   return true;
 }
+auto decode_request(const std::string_view input)
+    -> std::expected<Json, AgentError> {
+  std::vector<std::set<std::string>> keys;
+  bool duplicate{};
+  const auto callback = [&](int, const Json::parse_event_t event, Json& value) {
+    if (event == Json::parse_event_t::object_start)
+      keys.emplace_back();
+    else if (event == Json::parse_event_t::key) {
+      if (keys.empty() || !keys.back().insert(value.get<std::string>()).second)
+        duplicate = true;
+    } else if (event == Json::parse_event_t::object_end && !keys.empty())
+      keys.pop_back();
+    return true;
+  };
+  auto root = Json::parse(input, callback, true, false);
+  if (duplicate || !root.is_object() || !root.contains("version") ||
+      !root.at("version").is_number_unsigned() || root.at("version") != 1 ||
+      !root.contains("operation") || !root.at("operation").is_string())
+    return invalid();
+  return root;
+}
+
+auto parse_submit(const Json& root, AgentRequest result)
+    -> std::expected<AgentRequest, AgentError> {
+  if (root.at("operation") != "submit" ||
+      !exact_keys(root, {"version", "operation", "session_id", "model",
+                         "profile", "tools", "prompt"}) ||
+      !optional_id(root, "model", result.model) ||
+      !optional_id(root, "profile", result.profile) || !result.profile ||
+      !root.contains("prompt") || !root.at("prompt").is_string() ||
+      !root.contains("tools") || !root.at("tools").is_array())
+    return invalid();
+  result.prompt = root.at("prompt").get<std::string>();
+  if (result.prompt.empty() || !detail::is_safe_utf8_text(result.prompt))
+    return invalid();
+  const auto& tools = root.at("tools");
+  if (tools.empty() || tools.size() > 2) return invalid();
+  for (const auto& tool : tools) {
+    if (!tool.is_string() ||
+        (tool != "read_repository_file" && tool != "run_process"))
+      return invalid();
+    auto name = tool.get<std::string>();
+    if (std::ranges::find(result.tools, name) != result.tools.end())
+      return invalid();
+    result.tools.push_back(std::move(name));
+  }
+  return result;
+}
 } // namespace
 
 auto parse_agent_request(const std::string_view input)
     -> std::expected<AgentRequest, AgentError> {
   try {
     if (!valid_framing(input)) return invalid();
-    std::vector<std::set<std::string>> keys;
-    bool duplicate{};
-    const auto callback = [&](int, const Json::parse_event_t event,
-                              Json& value) {
-      if (event == Json::parse_event_t::object_start)
-        keys.emplace_back();
-      else if (event == Json::parse_event_t::key) {
-        if (keys.empty() ||
-            !keys.back().insert(value.get<std::string>()).second)
-          duplicate = true;
-      } else if (event == Json::parse_event_t::object_end && !keys.empty())
-        keys.pop_back();
-      return true;
-    };
-    const auto root = Json::parse(input, callback, true, false);
-    if (duplicate || !root.is_object() || !root.contains("version") ||
-        !root.at("version").is_number_unsigned() || root.at("version") != 1 ||
-        !root.contains("operation") || !root.at("operation").is_string())
-      return invalid();
+    auto decoded = decode_request(input);
+    if (!decoded) return std::unexpected(std::move(decoded.error()));
+    const auto& root = *decoded;
     AgentRequest result;
     if (!optional_id(root, "session_id", result.session_id)) return invalid();
     if (root.at("operation") == "replay") {
@@ -101,29 +143,7 @@ auto parse_agent_request(const std::string_view input)
       result.operation = AgentOperation::replay;
       return result;
     }
-    if (root.at("operation") != "submit" ||
-        !exact_keys(root, {"version", "operation", "session_id", "model",
-                           "profile", "tools", "prompt"}) ||
-        !optional_id(root, "model", result.model) ||
-        !optional_id(root, "profile", result.profile) || !result.profile ||
-        !root.contains("prompt") || !root.at("prompt").is_string() ||
-        !root.contains("tools") || !root.at("tools").is_array())
-      return invalid();
-    result.prompt = root.at("prompt").get<std::string>();
-    if (result.prompt.empty() || !detail::is_safe_utf8_text(result.prompt))
-      return invalid();
-    const auto& tools = root.at("tools");
-    if (tools.empty() || tools.size() > 2) return invalid();
-    for (const auto& tool : tools) {
-      if (!tool.is_string() ||
-          (tool != "read_repository_file" && tool != "run_process"))
-        return invalid();
-      auto name = tool.get<std::string>();
-      if (std::ranges::find(result.tools, name) != result.tools.end())
-        return invalid();
-      result.tools.push_back(std::move(name));
-    }
-    return result;
+    return parse_submit(root, std::move(result));
   } catch (...) {
     return invalid();
   }

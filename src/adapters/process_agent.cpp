@@ -24,7 +24,9 @@ auto report_failure(surfaces::AgentRecordSink& sink,
                     std::optional<domain::SessionId> session = {})
     -> std::unexpected<cli::CommandFailure> {
   const auto record = surfaces::agent_error_record(error);
-  if (record) static_cast<void>(sink.write_record(*record));
+  if (!record) return std::unexpected(command_failure(record.error()));
+  auto written = sink.write_record(*record);
+  if (!written) return std::unexpected(command_failure(error));
   const surfaces::AgentOutcome outcome{
       error.code == surfaces::AgentErrorCode::cancelled
           ? surfaces::AgentStatus::cancelled
@@ -34,7 +36,9 @@ auto report_failure(surfaces::AgentRecordSink& sink,
       {},
       error.message};
   const auto terminal = surfaces::agent_terminal_record(outcome);
-  if (terminal) static_cast<void>(sink.write_record(*terminal));
+  if (!terminal) return std::unexpected(command_failure(terminal.error()));
+  written = sink.write_record(*terminal);
+  if (!written) return std::unexpected(command_failure(error));
   return std::unexpected(command_failure(error));
 }
 
@@ -79,22 +83,21 @@ auto unresolved_run(const std::vector<domain::RunEvent>& events)
   return std::nullopt;
 }
 
-auto execute_request(const surfaces::AgentRequest& request,
-                     cli::AgentCommand::Request options,
-                     cli::CommandEnvironment& environment,
-                     surfaces::AgentRecordSink& sink, std::ostream& output,
-                     std::ostream& diagnostics)
-    -> std::expected<void, cli::CommandFailure> {
-  if (request.session_id) {
-    auto events = history(*request.session_id, environment.stop_token);
+auto inspect_saved_session(const surfaces::AgentRequest& request,
+                           const std::stop_token stop,
+                           surfaces::AgentRecordSink& sink)
+    -> std::expected<bool, cli::CommandFailure> {
+  if (!request.session_id) return false;
+  {
+    auto events = history(*request.session_id, stop);
     if (!events)
       return report_failure(sink, events.error(), request.session_id);
     if (request.operation == surfaces::AgentOperation::replay) {
-      auto replayed = surfaces::replay_agent_session(
-          *request.session_id, *events, sink, environment.stop_token);
+      auto replayed = surfaces::replay_agent_session(*request.session_id,
+                                                     *events, sink, stop);
       if (!replayed)
         return report_failure(sink, replayed.error(), request.session_id);
-      return {};
+      return true;
     }
     auto unresolved = unresolved_run(*events);
     if (!unresolved)
@@ -102,7 +105,7 @@ auto execute_request(const surfaces::AgentRequest& request,
     if (*unresolved) {
       auto terminal = surfaces::agent_terminal_record(
           {surfaces::AgentStatus::recovery_required, false, request.session_id,
-           **unresolved,
+           *unresolved,
            "unresolved recovered run requires interactive recovery"});
       if (!terminal)
         return report_failure(sink, terminal.error(), request.session_id);
@@ -113,6 +116,18 @@ auto execute_request(const surfaces::AgentRequest& request,
           "unresolved recovered run requires interactive recovery"});
     }
   }
+  return false;
+}
+
+auto execute_request(const surfaces::AgentRequest& request,
+                     cli::AgentCommand::Request options,
+                     cli::CommandEnvironment& environment,
+                     surfaces::AgentRecordSink& sink, std::ostream& output,
+                     std::ostream& diagnostics)
+    -> std::expected<void, cli::CommandFailure> {
+  auto inspected = inspect_saved_session(request, environment.stop_token, sink);
+  if (!inspected) return std::unexpected(std::move(inspected.error()));
+  if (*inspected) return {};
   cli::InteractiveCommand::Request launch;
   launch.session_mode = request.session_id
                             ? cli::InteractiveCommand::SessionMode::resume

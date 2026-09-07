@@ -38,8 +38,10 @@ struct AgentRequest {
   std::vector<std::string> tools;
   std::string prompt;
 };
-inline constexpr std::size_t agent_maximum_input_bytes = 1024U * 1024U;
-inline constexpr std::size_t agent_maximum_record_bytes = 2U * 1024U * 1024U;
+inline constexpr std::size_t agent_maximum_input_bytes =
+    std::size_t{1024} * 1024U;
+inline constexpr std::size_t agent_maximum_record_bytes =
+    std::size_t{2} * 1024U * 1024U;
 
 class AgentRecordSink {
  public:

@@ -5,7 +5,7 @@
 namespace aiforge::adapters {
 class ProcessAgentCommand final : public cli::AgentCommand {
  public:
-  [[nodiscard]] auto execute(Request request,
+  [[nodiscard]] auto execute(Request options,
                              cli::CommandEnvironment& environment,
                              std::ostream& output, std::ostream& diagnostics)
       -> std::expected<void, cli::CommandFailure> override;
