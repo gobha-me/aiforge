@@ -85,16 +85,11 @@ src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-bounds-poi
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-const-cast	f339047fc9b91f6da5f6	do not use const_cast to remove const qualifier
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-const-cast	fe3941382bf327a68181	do not use const_cast to remove const qualifier
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	077de43c2f64f087ce2e	do not call c-style vararg functions
-src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	0be3f4e87b76fa44dfa0	do not call c-style vararg functions
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	0d54941187af3f869f8f	do not call c-style vararg functions
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	3402b2b65ec808ca8d4f	do not call c-style vararg functions
-src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	4a94538fb7d7dacd2ca7	do not call c-style vararg functions
 src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	559847b11a3c8df9d9bd	do not call c-style vararg functions
-src/adapters/git_repository_snapshot_source.cpp	cppcoreguidelines-pro-type-vararg	ad1351ed1d0ecfaf0cc3	do not call c-style vararg functions
 src/adapters/git_repository_snapshot_source.cpp	modernize-use-integer-sign-comparison	26b24ff743c699515bd0	comparison between 'signed' and 'unsigned' integers
-src/adapters/git_repository_snapshot_source.cpp	modernize-use-integer-sign-comparison	84b47d22b7e97a187e44	comparison between 'signed' and 'unsigned' integers
 src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	0ad80642abc0b54bce39	function 'valid_utf8_instruction' has cognitive complexity of 28 (threshold 20)
-src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	a6aef2f4519215c8efd6	function 'discover' has cognitive complexity of 110 (threshold 20)
 src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	c5a0f0faa0f86a50e9a4	function 'create' has cognitive complexity of 30 (threshold 20)
 src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	d321e7aed1727bb22a26	function 'observe_plain_once' has cognitive complexity of 30 (threshold 20)
 src/adapters/git_repository_snapshot_source.cpp	readability-function-cognitive-complexity	e908ca6803d764919f24	function 'observe' has cognitive complexity of 30 (threshold 20)
@@ -142,7 +137,6 @@ src/adapters/process_image.cpp	cppcoreguidelines-pro-type-vararg	66fa5e306b6f18c
 src/adapters/process_image.cpp	readability-function-cognitive-complexity	2218539b52118fae2370	function 'render_terminal_viewer' has cognitive complexity of 31 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	17175cd81b663ee15bc7	function 'show_plan' has cognitive complexity of 29 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	39b0e565bfcd66520988	function 'request_close' has cognitive complexity of 50 (threshold 20)
-src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	7c3209940c7bc6a277b6	function 'on_render' has cognitive complexity of 27 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	c8e01de8f7f20ca090b4	function 'ensure_plan_review' has cognitive complexity of 64 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	d2b512e48c1c32a25b60	lambda has cognitive complexity of 21 (threshold 20)
 src/adapters/process_interactive.cpp	readability-function-cognitive-complexity	ee61c5ba8d710095f66b	lambda has cognitive complexity of 21 (threshold 20)
@@ -205,7 +199,6 @@ src/lib/cli11_parser.cpp	readability-function-cognitive-complexity	d8ef788becd5a
 src/lib/command_registry.cpp	misc-no-recursion	9d34b19b3837738663cd	function 'validate_command' is within a recursive call chain
 src/lib/command_registry.cpp	misc-no-recursion	f3370e651e7c4d4673a4	function 'parser_command' is within a recursive call chain
 src/lib/command_registry.cpp	performance-move-const-arg	d258feb7a06deccc2cae	std::move of the expression of the trivially-copyable type 'aiforge::domain::SessionSpendCeiling' has no effect; remove std::move()
-src/lib/command_registry.cpp	readability-function-cognitive-complexity	36fba92a6cc692469490	function 'dispatch' has cognitive complexity of 21 (threshold 20)
 src/lib/command_registry.cpp	readability-function-cognitive-complexity	d690ef18c4696d750038	function 'render_help' has cognitive complexity of 22 (threshold 20)
 src/lib/config.cpp	concurrency-mt-unsafe	6d18d706b10e599beb3c	function is not thread safe
 src/lib/config.cpp	readability-function-cognitive-complexity	241d8821a6e026eb8108	function 'resolve_config' has cognitive complexity of 61 (threshold 20)
