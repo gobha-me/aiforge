@@ -186,11 +186,14 @@ class NonblockingInput final {
  public:
   explicit NonblockingInput(const int descriptor) : m_descriptor(descriptor) {
     if (descriptor < 0) return;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX flags query.
     m_flags = ::fcntl(descriptor, F_GETFL);
-    m_ready =
-        m_flags >= 0 && ::fcntl(descriptor, F_SETFL, m_flags | O_NONBLOCK) == 0;
+    if (m_flags < 0) return;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX integer flags.
+    m_ready = ::fcntl(descriptor, F_SETFL, m_flags | O_NONBLOCK) == 0;
   }
   ~NonblockingInput() {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Restore POSIX flags.
     if (m_ready) static_cast<void>(::fcntl(m_descriptor, F_SETFL, m_flags));
   }
   NonblockingInput(const NonblockingInput&) = delete;
@@ -205,6 +208,29 @@ class NonblockingInput final {
   int m_flags{-1};
   bool m_ready{};
 };
+
+[[nodiscard]] auto read_descriptor_chunk(cli::CommandEnvironment& environment,
+                                         std::span<char> buffer)
+    -> std::expected<std::size_t, cli::CommandFailure> {
+  for (;;) {
+    if (environment.stop_token.stop_requested()) {
+      return failure(cli::CommandFailureKind::cancelled, "request cancelled");
+    }
+    pollfd descriptor{environment.input_descriptor, POLLIN, 0};
+    // The signal watcher requests the token; bound idle waits independently
+    // of signal delivery and SA_RESTART. Nonblocking reads also cover stale
+    // readiness without changing signal-handler ownership.
+    const auto ready = ::poll(&descriptor, 1, 20);
+    if (ready == 0 || (ready < 0 && errno == EINTR)) continue;
+    if (ready < 0 || (descriptor.revents & POLLNVAL) != 0) break;
+    const auto count =
+        ::read(environment.input_descriptor, buffer.data(), buffer.size());
+    if (count >= 0) return static_cast<std::size_t>(count);
+    if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) break;
+  }
+  return failure(cli::CommandFailureKind::runtime,
+                 "standard input could not be read");
+}
 #endif
 
 [[nodiscard]] auto read_input_chunk(cli::CommandEnvironment& environment,
@@ -212,24 +238,7 @@ class NonblockingInput final {
     -> std::expected<std::size_t, cli::CommandFailure> {
 #ifndef _WIN32
   if (environment.input_descriptor >= 0) {
-    for (;;) {
-      if (environment.stop_token.stop_requested()) {
-        return failure(cli::CommandFailureKind::cancelled, "request cancelled");
-      }
-      pollfd descriptor{environment.input_descriptor, POLLIN, 0};
-      // The signal watcher requests the token; bound idle waits independently
-      // of signal delivery and SA_RESTART. Nonblocking reads also cover stale
-      // readiness without changing signal-handler ownership.
-      const auto ready = ::poll(&descriptor, 1, 20);
-      if (ready == 0 || (ready < 0 && errno == EINTR)) continue;
-      if (ready < 0 || (descriptor.revents & POLLNVAL) != 0) break;
-      const auto count =
-          ::read(environment.input_descriptor, buffer.data(), buffer.size());
-      if (count >= 0) return static_cast<std::size_t>(count);
-      if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) break;
-    }
-    return failure(cli::CommandFailureKind::runtime,
-                   "standard input could not be read");
+    return read_descriptor_chunk(environment, buffer);
   }
 #endif
   // Portable, bounded stream input remains available for deterministic callers.
