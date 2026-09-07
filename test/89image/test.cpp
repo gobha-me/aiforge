@@ -5,11 +5,14 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
@@ -27,6 +30,7 @@
 #include <aiforge/adapters/filesystem_artifact_store.hpp>
 #include <aiforge/adapters/image_backend.hpp>
 #include <aiforge/adapters/image_tool.hpp>
+#include <aiforge/adapters/process_image.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/adapters/termforge_image_renderer.hpp>
 #include <aiforge/adapters/venice_backend.hpp>
@@ -569,6 +573,329 @@ TEST_CASE("image tool owns artifact and catalog-estimate spend lifecycle",
   REQUIRE(artifacts.calls.size() == 1);
   CHECK(artifacts.calls.front().write.producing_invocation_id == invocation);
 }
+
+#ifndef _WIN32
+class EnvironmentGuard final {
+ public:
+  EnvironmentGuard(std::string name, const std::string& value)
+      : m_name{std::move(name)} {
+    if (const auto* existing = std::getenv(m_name.c_str())) m_prior = existing;
+    REQUIRE(::setenv(m_name.c_str(), value.c_str(), 1) == 0);
+  }
+  ~EnvironmentGuard() {
+    if (m_prior)
+      static_cast<void>(::setenv(m_name.c_str(), m_prior->c_str(), 1));
+    else
+      static_cast<void>(::unsetenv(m_name.c_str()));
+  }
+
+ private:
+  std::string m_name;
+  std::optional<std::string> m_prior;
+};
+
+auto file_bytes(const std::filesystem::path& path) -> std::vector<std::byte> {
+  std::ifstream stream{path, std::ios::binary};
+  REQUIRE(stream);
+  std::vector<std::byte> result;
+  for (char byte; stream.get(byte);)
+    result.push_back(static_cast<std::byte>(static_cast<unsigned char>(byte)));
+  REQUIRE(stream.eof());
+  return result;
+}
+
+auto file_snapshot(const std::filesystem::path& root)
+    -> std::map<std::filesystem::path, std::vector<std::byte>> {
+  std::map<std::filesystem::path, std::vector<std::byte>> result;
+  for (const auto& entry :
+       std::filesystem::recursive_directory_iterator{root}) {
+    if (entry.is_regular_file())
+      result.emplace(entry.path(), file_bytes(entry.path()));
+  }
+  return result;
+}
+
+class StoredToolImage final {
+ public:
+  StoredToolImage()
+      : state_environment{"XDG_STATE_HOME", temporary.path().string()},
+        cache_environment{"XDG_CACHE_HOME",
+                          (temporary.path() / "cache").string()},
+        config_environment{"XDG_CONFIG_HOME",
+                           (temporary.path() / "config").string()},
+        generator{{{{make_id<domain::ModelId>("configured-image"), "blue",
+                     "image/png"},
+                    backend::GeneratedImage{bytes(png_bytes), "image/png"}}}} {
+    auto opened_sessions =
+        adapters::SqliteSessionStore::open(state_root() / "sessions.sqlite3");
+    REQUIRE(opened_sessions);
+    sessions = std::move(*opened_sessions);
+    REQUIRE(sessions->create_session({session, {}}));
+    auto opened_artifacts =
+        adapters::FilesystemArtifactStore::open(state_root() / "artifacts");
+    REQUIRE(opened_artifacts);
+    artifacts = std::move(*opened_artifacts);
+    const auto tool = registered_image_tool(generator, *artifacts);
+    const auto validated = tool.executor->validate(
+        {"application/json", R"({"prompt":"blue","format":"png"})"});
+    REQUIRE(validated);
+    auto stream = tool.executor->start(
+        {invocation, std::nullopt, "generate_image", *validated,
+         validated->required_scopes, tool.limits},
+        {});
+    REQUIRE(stream);
+    auto event = (*stream)->next({});
+    REQUIRE(event);
+    REQUIRE(*event);
+    const auto* result = std::get_if<runtime::ToolResult>(&**event);
+    REQUIRE(result);
+    REQUIRE(result->created_artifacts.size() == 1);
+    artifact = result->created_artifacts.front();
+    REQUIRE(artifact->producing_invocation_id == invocation);
+    REQUIRE_FALSE(artifact->producing_inference_id);
+    append(domain::ToolStarted{invocation}, invocation);
+  }
+
+  auto state_root() const -> std::filesystem::path {
+    return temporary.path() / "aiforge";
+  }
+  auto blob_path() const -> std::filesystem::path {
+    const auto digest = artifact->digest.substr(7);
+    return state_root() / "artifacts" / "sha256" / digest.substr(0, 2) / digest;
+  }
+  auto append(domain::RunEventPayload payload,
+              std::optional<domain::InvocationId> producer = {},
+              const std::string& run = "image-run") -> void {
+    ++sequence;
+    const domain::RunEvent event{
+        {make_id<domain::EventId>("show-event-" + std::to_string(sequence)),
+         make_id<domain::RunId>(run),
+         sequence,
+         1,
+         {},
+         {},
+         {},
+         std::move(producer)},
+        std::move(payload)};
+    REQUIRE(sessions->append_events(session, std::span{&event, 1}));
+  }
+  auto persist() -> void {
+    append(domain::ArtifactCreated{*artifact}, invocation);
+  }
+  auto close() -> void {
+    artifacts.reset();
+    sessions.reset();
+  }
+
+  TemporaryDirectory temporary;
+  EnvironmentGuard state_environment;
+  EnvironmentGuard cache_environment;
+  EnvironmentGuard config_environment;
+  testing::ScriptedImageGenerator generator;
+  const domain::SessionId session = make_id<domain::SessionId>("image-session");
+  const domain::InvocationId invocation =
+      make_id<domain::InvocationId>("image-call");
+  std::unique_ptr<adapters::SqliteSessionStore> sessions;
+  std::unique_ptr<adapters::FilesystemArtifactStore> artifacts;
+  std::optional<domain::ArtifactMetadata> artifact;
+  std::uint64_t sequence{};
+};
+
+TEST_CASE("image show rejects foreign media and forged producer metadata",
+          "[image][show]") {
+  StoredToolImage fixture;
+  auto selected_session = fixture.session;
+  auto event_invocation = std::optional{fixture.invocation};
+  std::string run = "image-run";
+  SECTION("artifact belongs to another session") {
+    selected_session = make_id<domain::SessionId>("other-session");
+    REQUIRE(fixture.sessions->create_session({selected_session, {}}));
+  }
+  SECTION("nonimage media") {
+    fixture.artifact->media_type = "audio/wav";
+  }
+  SECTION("missing producer") {
+    fixture.artifact->producing_invocation_id.reset();
+  }
+  SECTION("both producer kinds") {
+    fixture.artifact->producing_inference_id =
+        make_id<domain::InferenceId>("forged-inference");
+  }
+  SECTION("unrecorded inference") {
+    fixture.artifact->producing_invocation_id.reset();
+    fixture.artifact->producing_inference_id =
+        make_id<domain::InferenceId>("forged-inference");
+    event_invocation.reset();
+  }
+  SECTION("unrecorded invocation") {
+    fixture.artifact->producing_invocation_id =
+        make_id<domain::InvocationId>("forged-call");
+    event_invocation = fixture.artifact->producing_invocation_id;
+  }
+  SECTION("mismatched invocation envelope") {
+    event_invocation = make_id<domain::InvocationId>("forged-call");
+  }
+  SECTION("missing invocation envelope") {
+    event_invocation.reset();
+  }
+  SECTION("producer belongs to another run") {
+    run = "other-run";
+  }
+  fixture.append(domain::ArtifactCreated{*fixture.artifact}, event_invocation,
+                 run);
+  fixture.close();
+  const auto before = file_snapshot(fixture.state_root());
+  std::istringstream input;
+  cli::CommandEnvironment environment{input, false, false, false, {}};
+  std::ostringstream output;
+  std::ostringstream error;
+  adapters::ProcessImageCommand command;
+  const auto export_path = fixture.temporary.path() / "rejected.png";
+  auto shown = command.show(
+      {selected_session, fixture.artifact->artifact_id, export_path.string()},
+      environment, output, error);
+  REQUIRE_FALSE(shown);
+  CHECK(shown.error().message ==
+        "image artifact is not present in that session");
+  CHECK(output.str().empty());
+  CHECK_FALSE(std::filesystem::exists(export_path));
+  CHECK(file_snapshot(fixture.state_root()) == before);
+}
+
+TEST_CASE("image show rejects unsafe blobs exports and cancellation",
+          "[image][show]") {
+  StoredToolImage fixture;
+  fixture.persist();
+  fixture.close();
+  const auto export_path = fixture.temporary.path() / "rejected.png";
+  const auto target = fixture.temporary.path() / "target.png";
+  std::stop_source cancellation;
+  auto expected_kind = cli::CommandFailureKind::runtime;
+  SECTION("missing blob") {
+    REQUIRE(std::filesystem::remove(fixture.blob_path()));
+  }
+  SECTION("corrupt blob") {
+    std::fstream blob{fixture.blob_path(),
+                      std::ios::in | std::ios::out | std::ios::binary};
+    REQUIRE(blob);
+    blob.put('x');
+  }
+  SECTION("insecure blob") {
+    REQUIRE(::chmod(fixture.blob_path().c_str(), 0644) == 0);
+  }
+  SECTION("symlink blob") {
+    std::filesystem::rename(fixture.blob_path(), target);
+    std::filesystem::create_symlink(target, fixture.blob_path());
+  }
+  SECTION("existing output") {
+    std::ofstream{export_path} << "keep";
+    expected_kind = cli::CommandFailureKind::usage;
+  }
+  SECTION("symlink output") {
+    std::ofstream{target} << "keep";
+    std::filesystem::create_symlink(target, export_path);
+    expected_kind = cli::CommandFailureKind::usage;
+  }
+  SECTION("cancelled") {
+    cancellation.request_stop();
+    expected_kind = cli::CommandFailureKind::cancelled;
+  }
+  std::istringstream input;
+  cli::CommandEnvironment environment{input, false, false, false,
+                                      cancellation.get_token()};
+  std::ostringstream output;
+  std::ostringstream error;
+  adapters::ProcessImageCommand command;
+  auto shown = command.show(
+      {fixture.session, fixture.artifact->artifact_id, export_path.string()},
+      environment, output, error);
+  REQUIRE_FALSE(shown);
+  CHECK(shown.error().kind == expected_kind);
+  CHECK(output.str().empty());
+  if (expected_kind == cli::CommandFailureKind::usage) {
+    CHECK(file_bytes(export_path) ==
+          bytes(std::array<std::uint8_t, 4>{'k', 'e', 'e', 'p'}));
+  } else {
+    CHECK_FALSE(std::filesystem::exists(export_path));
+  }
+}
+
+TEST_CASE("image show replays and exports tool and standalone images locally",
+          "[image][show]") {
+  StoredToolImage fixture;
+  auto expected = *fixture.artifact;
+  std::optional<domain::ArtifactId> selected;
+  const auto standalone = [&] {
+    const auto inference = make_id<domain::InferenceId>("standalone-inference");
+    auto stored =
+        fixture.artifacts->put({make_id<domain::ArtifactId>("standalone-image"),
+                                "image/png",
+                                {},
+                                inference,
+                                2,
+                                1},
+                               bytes(png_bytes));
+    REQUIRE(stored);
+    fixture.append(domain::InferenceStarted{
+        inference, make_id<domain::ModelId>("image-model")});
+    fixture.append(domain::ArtifactCreated{*stored});
+    return *stored;
+  };
+  SECTION("tool only default") {
+    fixture.persist();
+  }
+  SECTION("tool only explicit") {
+    fixture.persist();
+    selected = expected.artifact_id;
+  }
+  SECTION("tool after standalone is latest") {
+    static_cast<void>(standalone());
+    fixture.persist();
+  }
+  SECTION("standalone after tool is latest") {
+    fixture.persist();
+    expected = standalone();
+  }
+  SECTION("explicit tool before latest standalone") {
+    fixture.persist();
+    static_cast<void>(standalone());
+    selected = expected.artifact_id;
+  }
+  SECTION("explicit standalone before latest tool") {
+    expected = standalone();
+    fixture.persist();
+    selected = expected.artifact_id;
+  }
+  fixture.close();
+  const auto before = file_snapshot(fixture.state_root());
+  std::istringstream input;
+  cli::CommandEnvironment environment{input, false, false, false, {}};
+  std::ostringstream output;
+  std::ostringstream error;
+  adapters::ProcessImageCommand command;
+  const auto export_path = fixture.temporary.path() / "exported.png";
+  REQUIRE(command.show({fixture.session, selected, {}}, environment, output,
+                       error));
+  const auto metadata_line = output.str();
+  output.str("");
+  REQUIRE(command.show({fixture.session, selected, export_path.string()},
+                       environment, output, error));
+  CHECK(output.str() == metadata_line);
+  CHECK(metadata_line.find("session=" + std::string{fixture.session.value()}) !=
+        std::string::npos);
+  CHECK(metadata_line.find("artifact=" +
+                           std::string{expected.artifact_id.value()}) !=
+        std::string::npos);
+  CHECK(metadata_line.find("digest=" + expected.digest) != std::string::npos);
+  CHECK(file_bytes(export_path) == bytes(png_bytes));
+  CHECK(error.str().empty());
+  CHECK(fixture.generator.recorded_requests().size() == 1);
+  CHECK(fixture.generator.remaining_exchanges() == 0);
+  CHECK(file_snapshot(fixture.state_root()) == before);
+  CHECK_FALSE(std::filesystem::exists(fixture.temporary.path() / "cache"));
+  CHECK_FALSE(std::filesystem::exists(fixture.temporary.path() / "config"));
+}
+#endif
 
 TEST_CASE("image tool distinguishes pre-transport and uncertain failures",
           "[image][tool][spend][failure][cancel]") {

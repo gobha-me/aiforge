@@ -90,6 +90,7 @@ auto launch_policy(
   auto policy = runtime::make_tool_launch_policy(
       tools,
       {std::move(permission_profile), std::move(*context), std::move(matcher)});
+  INFO((policy ? "launch policy created" : policy.error().message));
   REQUIRE(policy);
   return std::move(*policy);
 }
@@ -100,7 +101,7 @@ TEST_CASE("built-in tool profiles have explicit bounded membership",
           "[tool-profile]") {
   const auto profiles = runtime::builtin_tool_profiles();
   REQUIRE(runtime::validate_tool_profiles(profiles));
-  REQUIRE(profiles.size() == 5);
+  REQUIRE(profiles.size() == 6);
   REQUIRE(profiles[0].profile_id == profile_id("essentials"));
   REQUIRE(profiles[0].name == "Essentials");
   REQUIRE(profiles[0].tool_names ==
@@ -121,6 +122,11 @@ TEST_CASE("built-in tool profiles have explicit bounded membership",
   REQUIRE(profiles[3].tool_names == std::vector<std::string>{"ask_user",
                                                              "propose_memory",
                                                              "generate_image"});
+  REQUIRE(profiles[5].profile_id == profile_id("dev"));
+  REQUIRE(profiles[5].name == "Dev");
+  REQUIRE(profiles[5].tool_names ==
+          std::vector<std::string>{"ask_user", "propose_memory",
+                                   "read_repository_file", "run_process"});
   REQUIRE(profiles[4].profile_id == profile_id("off"));
   REQUIRE(profiles[4].name == "Off");
   REQUIRE(profiles[4].tool_names.empty());
@@ -678,4 +684,140 @@ TEST_CASE("paid image tool requires media selection and authority ceilings",
   CHECK(resolved->effective_tools.find("generate_image") == nullptr);
   CHECK(resolved->tool_availability.back().reason ==
         runtime::ToolProfileAvailabilityReason::model_profile_limit);
+}
+
+TEST_CASE("Dev reports unavailable members without removing independent tools",
+          "[tool-profile][dev][failure]") {
+  using Reason = runtime::ToolUnavailableReason;
+  const std::array cases{
+      std::pair{std::string{"run_process"},
+                runtime::ToolUnavailability{Reason::not_configured}},
+      std::pair{
+          std::string{"run_process"},
+          runtime::ToolUnavailability{
+              Reason::restriction_unavailable,
+              runtime::ToolRestrictionUnavailability{
+                  runtime::RestrictionLevel::high,
+                  runtime::RestrictionUnavailableReason::mechanism_absent}}},
+      std::pair{
+          std::string{"run_process"},
+          runtime::ToolUnavailability{Reason::unrestricted_network_required}},
+      std::pair{std::string{"read_repository_file"},
+                runtime::ToolUnavailability{
+                    Reason::runtime_dependency_or_path_unavailable}}};
+  for (const auto& [missing, reason] : cases) {
+    CAPTURE(missing, reason.reason);
+    runtime::ToolRegistry registry;
+    register_tool(registry, "ask_user");
+    register_tool(registry, "propose_memory");
+    for (const auto& name : {"read_repository_file", "run_process"}) {
+      const auto category = std::string_view{name} == "run_process"
+                                ? runtime::ToolCategory::process
+                                : runtime::ToolCategory::repository;
+      if (name == missing) {
+        REQUIRE(registry.declare_unavailable_tool(name, reason, category));
+      } else {
+        register_tool(registry, name, true, category);
+      }
+    }
+    const auto tools = registry.snapshot().value();
+    const auto policy = launch_policy(tools, runtime::RestrictionLevel::medium);
+    const auto resolution = runtime::resolve_tool_profile(
+        tools,
+        runtime::ToolProfileSelection{profile_id("dev"), {}, {}, {}, true},
+        *policy);
+    REQUIRE(resolution);
+    CHECK(resolution->effective_tools.size() == 3);
+    CHECK(resolution->effective_tools.find(missing) == nullptr);
+    const auto unavailable =
+        std::ranges::find(resolution->tool_availability, missing,
+                          &runtime::ToolProfileToolAvailability::tool_name);
+    REQUIRE(unavailable != resolution->tool_availability.end());
+    CHECK(unavailable->reason ==
+          runtime::ToolProfileAvailabilityReason::declared_unavailable);
+    CHECK(unavailable->unavailability == reason);
+  }
+}
+
+TEST_CASE("Dev preserves model persona session and policy narrowing",
+          "[tool-profile][dev][narrowing][failure]") {
+  runtime::ToolRegistry registry;
+  register_tool(registry, "ask_user", false,
+                runtime::ToolCategory::interaction);
+  register_tool(registry, "propose_memory", false,
+                runtime::ToolCategory::memory);
+  register_tool(registry, "read_repository_file", true,
+                runtime::ToolCategory::repository);
+  register_tool(registry, "run_process", true, runtime::ToolCategory::process);
+  const auto tools = registry.snapshot().value();
+  const auto policy = launch_policy(tools, runtime::RestrictionLevel::medium);
+  runtime::ToolProfileSelection selection{profile_id("dev"), {}, {}, {}, true};
+  std::size_t expected = 4;
+  SECTION("unknown model support") {
+    selection.model_tool_calling_support.reset();
+    expected = 0;
+  }
+  SECTION("unsupported model") {
+    selection.model_tool_calling_support = false;
+    expected = 0;
+  }
+  SECTION("model repository ceiling") {
+    selection.model_maximum_profile_id = profile_id("repository-read");
+    expected = 3;
+  }
+  SECTION("persona process ceiling") {
+    selection.persona_maximum_profile_id = profile_id("process");
+    expected = 3;
+  }
+  SECTION("independent ceilings intersect") {
+    selection.model_maximum_profile_id = profile_id("repository-read");
+    selection.persona_maximum_profile_id = profile_id("process");
+    expected = 2;
+  }
+  SECTION("explicit model off") {
+    selection.model_maximum_profile_id = profile_id("off");
+    expected = 0;
+  }
+  SECTION("explicit persona off") {
+    selection.persona_maximum_profile_id = profile_id("off");
+    expected = 0;
+  }
+  SECTION("individual disable") {
+    selection.desired_tool_names = std::vector<std::string>{
+        "ask_user", "propose_memory", "read_repository_file"};
+    expected = 3;
+  }
+  SECTION("explicit empty subset") {
+    selection.desired_tool_names = std::vector<std::string>{};
+    expected = 0;
+  }
+  SECTION("profile off") {
+    selection.selected_profile_id = profile_id("off");
+    expected = 0;
+  }
+  const auto resolution =
+      runtime::resolve_tool_profile(tools, selection, *policy);
+  REQUIRE(resolution);
+  CHECK(resolution->effective_tools.size() == expected);
+  CHECK(resolution->effective_tools.find("run_shell") == nullptr);
+  CHECK(resolution->effective_tools.find("generate_image") == nullptr);
+  for (const auto& member : resolution->tool_availability) {
+    CHECK(
+        (member.reason == runtime::ToolProfileAvailabilityReason::available) ==
+        (resolution->effective_tools.find(member.tool_name) != nullptr));
+    CHECK_FALSE(
+        runtime::tool_profile_availability_reason_text(member.reason).empty());
+  }
+  const auto fallback = runtime::default_tool_policy();
+  const auto unprivileged = runtime::resolve_tool_profile(
+      tools, runtime::ToolProfileSelection{profile_id("dev"), {}, {}, {}, true},
+      *fallback);
+  REQUIRE(unprivileged);
+  CHECK(unprivileged->effective_tools.size() == 2);
+  CHECK(runtime::tool_profile_category_members(
+            tools, profile_id("dev"), runtime::ToolCategory::repository) ==
+        std::vector<std::string>{"read_repository_file"});
+  CHECK(runtime::tool_profile_category_members(
+            tools, profile_id("dev"), runtime::ToolCategory::process) ==
+        std::vector<std::string>{"run_process"});
 }

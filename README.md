@@ -560,6 +560,14 @@ regular UTF-8 file from the repository root selected at launch. Repository metad
 ignored and untracked files, traversal, symbolic links, stale snapshots, and
 changing files fail closed.
 
+For a read/test workflow, opt into `/tools profile dev`. This combines
+`read_repository_file` and `run_process` with interaction and memory. `/tools`
+shows the exact effective declarations and each unavailable tool's reason
+before a run. Missing process configuration or unavailable restriction leaves
+repository reads independently available; the preset grants no executable,
+root, network, approval, or budget authority. Model/persona ceilings and
+category/individual narrowing still apply, and `essentials` remains the default.
+
 Interactive Chat can separately opt into the `media` profile with
 `/tools profile media`. Its `generate_image` tool is registered only when
 `tools.image.model` names one exact online image model in a fresh catalog and

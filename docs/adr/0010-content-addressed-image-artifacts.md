@@ -54,7 +54,12 @@ aiforge image generate --model ID [--format auto|png|jpeg|webp]
 aiforge image show --session ID [--artifact ID] [--output PATH]
 ```
 
-`show` selects the latest generated image by default. It replays local events
+`show` selects the latest generated image by durable event order by default,
+including both standalone inference output and Chat tool output. Selection
+requires a preceding producer start in the same run: an inference ID without
+an invocation for standalone output, or a matching producing invocation and
+event-envelope invocation for tool output. Tool artifacts retain their original
+provenance; replay never synthesizes an inference ID. It replays local events
 and content only; it performs no provider request, generation, or network
 fetch.
 

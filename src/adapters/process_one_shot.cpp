@@ -2,11 +2,13 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <istream>
 #include <optional>
 #include <ostream>
+#include <span>
 #include <string>
 #include <utility>
 #include <variant>
@@ -28,6 +30,12 @@
 #include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/surfaces/one_shot.hpp>
 #include <version.hpp>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <poll.h>
+#include <unistd.h>
+#endif
 
 namespace aiforge::adapters {
 namespace {
@@ -171,32 +179,119 @@ auto warning(std::ostream& error, const std::string_view message) -> bool {
   return failure(cli::CommandFailureKind::usage, std::move(message));
 }
 
+#ifndef _WIN32
+// Process input has one reader. Restore inherited descriptor flags on every
+// exit.
+class NonblockingInput final {
+ public:
+  explicit NonblockingInput(const int descriptor) : m_descriptor(descriptor) {
+    if (descriptor < 0) return;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX flags query.
+    m_flags = ::fcntl(descriptor, F_GETFL);
+    if (m_flags < 0) return;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- POSIX integer flags.
+    m_ready = ::fcntl(descriptor, F_SETFL, m_flags | O_NONBLOCK) == 0;
+  }
+  ~NonblockingInput() {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Restore POSIX flags.
+    if (m_ready) static_cast<void>(::fcntl(m_descriptor, F_SETFL, m_flags));
+  }
+  NonblockingInput(const NonblockingInput&) = delete;
+  auto operator=(const NonblockingInput&) -> NonblockingInput& = delete;
+
+  [[nodiscard]] auto ready() const -> bool {
+    return m_descriptor < 0 || m_ready;
+  }
+
+ private:
+  int m_descriptor;
+  int m_flags{-1};
+  bool m_ready{};
+};
+
+[[nodiscard]] auto read_descriptor_chunk(cli::CommandEnvironment& environment,
+                                         std::span<char> buffer)
+    -> std::expected<std::size_t, cli::CommandFailure> {
+  for (;;) {
+    if (environment.stop_token.stop_requested()) {
+      return failure(cli::CommandFailureKind::cancelled, "request cancelled");
+    }
+    pollfd descriptor{environment.input_descriptor, POLLIN, 0};
+    // The signal watcher requests the token; bound idle waits independently
+    // of signal delivery and SA_RESTART. Nonblocking reads also cover stale
+    // readiness without changing signal-handler ownership.
+    const auto ready = ::poll(&descriptor, 1, 20);
+    if (ready == 0 || (ready < 0 && errno == EINTR)) continue;
+    if (ready < 0 || (descriptor.revents & POLLNVAL) != 0) break;
+    const auto count =
+        ::read(environment.input_descriptor, buffer.data(), buffer.size());
+    if (count >= 0) return static_cast<std::size_t>(count);
+    if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) break;
+  }
+  return failure(cli::CommandFailureKind::runtime,
+                 "standard input could not be read");
+}
+#endif
+
+[[nodiscard]] auto read_input_chunk(cli::CommandEnvironment& environment,
+                                    std::span<char> buffer)
+    -> std::expected<std::size_t, cli::CommandFailure> {
+#ifndef _WIN32
+  if (environment.input_descriptor >= 0) {
+    return read_descriptor_chunk(environment, buffer);
+  }
+#endif
+  // Portable, bounded stream input remains available for deterministic callers.
+  // Arbitrary streambuf implementations do not provide an interruptible wait.
+  try {
+    environment.input.read(buffer.data(),
+                           static_cast<std::streamsize>(buffer.size()));
+  } catch (...) {
+    if (!environment.input.eof() || environment.input.bad()) {
+      return failure(cli::CommandFailureKind::runtime,
+                     "standard input could not be read");
+    }
+  }
+  if (environment.input.bad() ||
+      (!environment.input && !environment.input.eof())) {
+    return failure(cli::CommandFailureKind::runtime,
+                   "standard input could not be read");
+  }
+  return static_cast<std::size_t>(environment.input.gcount());
+}
+
 [[nodiscard]] auto read_stdin(cli::CommandEnvironment& environment,
                               const std::size_t maximum_bytes)
     -> std::expected<std::optional<std::string>, cli::CommandFailure> {
+  if (environment.stop_token.stop_requested()) {
+    return failure(cli::CommandFailureKind::cancelled, "request cancelled");
+  }
   if (environment.input_is_terminal) return std::nullopt;
+#ifndef _WIN32
+  const NonblockingInput descriptor{environment.input_descriptor};
+  if (!descriptor.ready()) {
+    return failure(cli::CommandFailureKind::runtime,
+                   "standard input could not be read");
+  }
+#endif
   std::string value;
   std::array<char, 4096> buffer{};
   for (;;) {
     if (environment.stop_token.stop_requested()) {
       return failure(cli::CommandFailureKind::cancelled, "request cancelled");
     }
-    environment.input.read(buffer.data(),
-                           static_cast<std::streamsize>(buffer.size()));
-    const auto count = environment.input.gcount();
-    if (count > 0) {
-      const auto size = static_cast<std::size_t>(count);
-      if (size > maximum_bytes - std::min(maximum_bytes, value.size())) {
-        return failure(cli::CommandFailureKind::usage,
-                       "standard input exceeds 1 MiB");
-      }
-      value.append(buffer.data(), size);
+    const auto count = read_input_chunk(environment, buffer);
+    // Cancellation wins over bytes, EOF and errors observed in the same read.
+    if (environment.stop_token.stop_requested()) {
+      return failure(cli::CommandFailureKind::cancelled, "request cancelled");
     }
-    if (environment.input.eof()) break;
-    if (!environment.input) {
-      return failure(cli::CommandFailureKind::runtime,
-                     "standard input could not be read");
+    if (!count) return std::unexpected(count.error());
+    if (*count == 0) break;
+    if (*count > maximum_bytes - std::min(maximum_bytes, value.size())) {
+      return failure(cli::CommandFailureKind::usage,
+                     "standard input exceeds 1 MiB");
     }
+    value.append(buffer.data(), *count);
   }
   if (value.empty()) return std::nullopt;
   return std::optional<std::string>{std::move(value)};
@@ -246,6 +341,9 @@ auto ProcessOneShotCommand::execute(cli::OneShotCommand::Request request,
                      "one-shot input exceeds 1 MiB");
     }
 
+    if (environment.stop_token.stop_requested()) {
+      return failure(cli::CommandFailureKind::cancelled, "request cancelled");
+    }
     auto resolved =
         load_process_config(error, request.model, request.web_search);
     if (!resolved) return std::unexpected(std::move(resolved.error()));
