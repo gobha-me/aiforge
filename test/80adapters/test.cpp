@@ -3997,7 +3997,7 @@ TEST_CASE("process credential resolution uses environment then XDG storage",
 TEST_CASE(
     "Chat artifact tool results complete a subsequent Venice assistant turn",
     "[adapter][venice][chat][tools][artifact][continuation]") {
-  for (const auto* tool_name : {"generate_image", "execute_process"}) {
+  for (const auto* tool_name : {"generate_image", "run_process"}) {
     for (const bool artifact_only : {false, true}) {
       CAPTURE(tool_name, artifact_only);
       LocalServer server{std::nullopt, false, "0",          false,
@@ -4054,6 +4054,13 @@ TEST_CASE(
            surfaces::ChatSessionOpen::Mode::ephemeral, std::nullopt},
           backend, models, nullptr, nullptr, {}, {}, std::move(dependencies));
       REQUIRE(session);
+      REQUIRE((*session)->select_tool_profile(
+          make_id<domain::ToolProfileId>(image ? "media" : "process")));
+      const auto profile = (*session)->tool_profile_state();
+      REQUIRE(profile);
+      const auto declarations = profile->effective_tools.declarations();
+      REQUIRE(declarations.size() == 1);
+      REQUIRE(declarations.front().name == tool_name);
       const auto submitted =
           (*session)->submit("produce output then explain it");
       REQUIRE(submitted);
@@ -4061,6 +4068,7 @@ TEST_CASE(
       while ((*session)->active() &&
              std::chrono::steady_clock::now() < deadline) {
         const auto drained = (*session)->drain();
+        INFO((drained ? "" : drained.error().message));
         REQUIRE(drained);
         if (drained->empty()) std::this_thread::sleep_for(2ms);
       }
