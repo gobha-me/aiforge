@@ -4757,7 +4757,7 @@ TEST_CASE("blocked recovery stays visible and Ctrl+C cancels the exact run",
   scenario.limits.maximum_frames = 20;
   const auto result =
       testing::run_tui_scenario(scenario, blocked_recovery_factory());
-  INFO(result ? "" : result.error().message);
+  INFO((result ? "" : result.error().message));
   REQUIRE(result);
   CHECK(result->recorded == result->replayed);
   CHECK(result->recorded.semantic_state ==
