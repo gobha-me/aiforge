@@ -13,10 +13,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <expected>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stop_token>
@@ -3015,7 +3017,9 @@ class MemoryRecoveryBackend final : public backend::Backend,
 };
 
 struct MemoryRecoveryFixture {
-  explicit MemoryRecoveryFixture(const bool approval, const int owners = 7)
+  explicit MemoryRecoveryFixture(
+      const bool approval, const int owners = 7,
+      std::shared_ptr<runtime::ToolExecutor> approved_executor = {})
       : backend(approval), memories(
                                store, [this] { return ++suffix; },
                                [] { return domain::EventTimestamp{}; }),
@@ -3030,7 +3034,7 @@ struct MemoryRecoveryFixture {
            {"application/schema+json", R"({"type":"object"})"},
            {domain::Effect::read},
            {{domain::Effect::read, "filesystem.root", "/repo"}}},
-          executor, {},
+          approved_executor ? std::move(approved_executor) : executor, {},
           runtime::ToolExecutorContract{"test.read_repository_file", "1"},
           runtime::ToolCategory::repository));
     } else {
@@ -3109,6 +3113,63 @@ auto admitted_memory(const backend::BackendRequest& request)
       result.push_back(entry);
   return result;
 }
+
+struct RecoveryToolGate {
+  std::mutex mutex;
+  std::condition_variable_any changed;
+  std::vector<runtime::ToolInvocation> invocations;
+  bool entered{};
+  bool released{};
+};
+
+class GatedRecoveryStream final : public runtime::ToolExecutionStream {
+ public:
+  explicit GatedRecoveryStream(std::shared_ptr<RecoveryToolGate> gate)
+      : m_gate(std::move(gate)) {}
+  auto next(const std::stop_token stop_token)
+      -> std::expected<std::optional<runtime::ToolExecutionEvent>,
+                       runtime::ToolExecutionError> override {
+    if (m_finished) return std::optional<runtime::ToolExecutionEvent>{};
+    std::unique_lock lock(m_gate->mutex);
+    m_gate->entered = true;
+    m_gate->changed.notify_all();
+    if (!m_gate->changed.wait(lock, stop_token,
+                              [&] { return m_gate->released; }))
+      return std::unexpected(runtime::ToolExecutionError{
+          runtime::ToolExecutionErrorCode::cancelled, "gated tool cancelled",
+          false});
+    m_finished = true;
+    return runtime::ToolExecutionEvent{
+        runtime::ToolResult{{domain::TextBlock{"gated result"}}}};
+  }
+
+ private:
+  std::shared_ptr<RecoveryToolGate> m_gate;
+  bool m_finished{};
+};
+
+class GatedRecoveryExecutor final : public runtime::ToolExecutor {
+ public:
+  explicit GatedRecoveryExecutor(std::shared_ptr<RecoveryToolGate> gate)
+      : m_gate(std::move(gate)) {}
+  auto validate(const domain::StructuredDataBlock& arguments) const
+      -> std::expected<runtime::ValidatedToolArguments,
+                       runtime::ToolExecutionError> override {
+    return runtime::ValidatedToolArguments{arguments};
+  }
+  auto start(runtime::ToolInvocation invocation, std::stop_token)
+      -> std::expected<std::unique_ptr<runtime::ToolExecutionStream>,
+                       runtime::ToolExecutionError> override {
+    {
+      std::lock_guard lock(m_gate->mutex);
+      m_gate->invocations.push_back(std::move(invocation));
+    }
+    return std::make_unique<GatedRecoveryStream>(m_gate);
+  }
+
+ private:
+  std::shared_ptr<RecoveryToolGate> m_gate;
+};
 
 } // namespace
 
@@ -3296,4 +3357,90 @@ TEST_CASE("restarted and uninterrupted requests retain exact admitted memory",
       return text.contains("Prefer late-alpha");
     }));
   }
+}
+
+TEST_CASE("approved recovered tool drains after selected memory expires",
+          "[chat][memory][recovery][approval][race]") {
+  auto gate = std::make_shared<RecoveryToolGate>();
+  MemoryRecoveryFixture fixture{true, 7,
+                                std::make_shared<GatedRecoveryExecutor>(gate)};
+  auto created = fixture.open();
+  REQUIRE(created);
+  REQUIRE((*created)->select_tool_profile(
+      make_id<domain::ToolProfileId>("repository-read")));
+  REQUIRE((*created)->submit("request approved work"));
+  static_cast<void>(drain_to_approval(**created));
+  REQUIRE(fixture.backend.requests.size() == 1);
+  const auto original = admitted_memory(fixture.backend.requests.front());
+  REQUIRE(original.size() == 3);
+  const auto session_id = (*created)->session_id();
+  created->reset();
+  auto resumed = fixture.open(session_id);
+  REQUIRE(resumed);
+  const auto pending = (*resumed)->pending_tool_approval();
+  REQUIRE(pending);
+  REQUIRE((*resumed)->decide_tool_approval(
+      pending->run_id, pending->invocation_id,
+      {domain::ApprovalDecision::approved, pending->scopes}));
+  for (int attempt{}; attempt < 200; ++attempt) {
+    REQUIRE((*resumed)->drain());
+    {
+      std::lock_guard lock(gate->mutex);
+      if (gate->entered) break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+  }
+  {
+    std::lock_guard lock(gate->mutex);
+    REQUIRE(gate->entered);
+    REQUIRE_FALSE(gate->released);
+    REQUIRE(gate->invocations.size() == 1);
+    CHECK(gate->invocations.front().invocation_id == pending->invocation_id);
+  }
+  const auto started = std::ranges::find_if(
+      (*resumed)->event_log().events(), [](const auto& event) {
+        return std::holds_alternative<domain::RunStarted>(event.payload);
+      });
+  REQUIRE(started != (*resumed)->event_log().events().end());
+  const auto& selection =
+      std::get<domain::RunStarted>(started->payload).memory_selection;
+  REQUIRE(selection);
+  const auto& reference = selection->entries.front();
+  REQUIRE(
+      fixture.memories.expire({{reference.owner},
+                               reference.record_id,
+                               reference.record_event_id,
+                               "expired while approved executor is blocked"}));
+  REQUIRE_FALSE(fixture.memories.restore_context(*selection));
+  REQUIRE((*resumed)->drain());
+  CHECK_FALSE((*resumed)->blocked_recovery());
+  CHECK(fixture.backend.requests.size() == 1);
+  {
+    std::lock_guard lock(gate->mutex);
+    gate->released = true;
+  }
+  gate->changed.notify_all();
+  drain_to_end(**resumed);
+  CHECK_FALSE((*resumed)->active());
+  CHECK_FALSE((*resumed)->blocked_recovery());
+  REQUIRE(fixture.backend.requests.size() == 2);
+  CHECK(admitted_memory(fixture.backend.requests.back()) == original);
+  {
+    std::lock_guard lock(gate->mutex);
+    CHECK(gate->invocations.size() == 1);
+  }
+  const auto& events = (*resumed)->event_log().events();
+  CHECK(std::ranges::count_if(events, [](const auto& event) {
+          return std::holds_alternative<domain::ToolResultRecorded>(
+              event.payload);
+        }) == 1);
+  const auto usage = std::ranges::find_if(events, [](const auto& event) {
+    return std::holds_alternative<domain::UsageRecorded>(event.payload);
+  });
+  REQUIRE(usage != events.end());
+  CHECK(std::get<domain::UsageRecorded>(usage->payload).usage ==
+        domain::Usage{2, 1, 0, 0});
+  CHECK(std::ranges::count_if(events, [](const auto& event) {
+          return std::holds_alternative<domain::RunCompleted>(event.payload);
+        }) == 1);
 }
