@@ -91,6 +91,8 @@ struct ChatSubmission {
 
 using ChatIdentitySuffixSource = std::function<std::uint64_t()>;
 
+enum class ChatSurfaceKind { interactive, agent };
+
 struct ChatSessionDependencies {
   ChatIdentitySuffixSource identity_suffix_source;
   runtime::TimestampSource timestamp_source;
@@ -114,6 +116,7 @@ struct ChatSessionDependencies {
   runtime::MemorySettings memory_settings{};
   std::optional<domain::RepositoryId> repository_id;
   std::string runtime_version{"unknown"};
+  ChatSurfaceKind surface_kind{ChatSurfaceKind::interactive};
 };
 
 class PreparedChatGenerationOptions final {

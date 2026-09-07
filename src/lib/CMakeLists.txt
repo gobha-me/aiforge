@@ -1,4 +1,7 @@
 add_library(${PROJECT_NAME}_lib STATIC
+  agent.cpp
+  agent_protocol.cpp
+  agent_records.cpp
   application_launch_context.cpp
   automatic_approval.cpp
   automatic_approval_matcher.cpp

@@ -715,6 +715,7 @@ struct ChatSession::Impl {
   std::optional<runtime::RecoverableRun> recovered_run;
   std::vector<domain::ContextContentInput> recovered_memory_context{};
   bool recovered_sources_pinned{};
+  ChatSurfaceKind surface_kind{ChatSurfaceKind::interactive};
 
   [[nodiscard]] auto tool_selection() const -> runtime::ToolProfileSelection {
     return {tool_profile_id, desired_tool_names,
@@ -1223,6 +1224,7 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              0,
              std::nullopt,
              std::move(*recoverable)});
+    impl->surface_kind = dependencies.surface_kind;
     return std::unique_ptr<ChatSession>{new ChatSession{std::move(impl)}};
   } catch (...) {
     return error(ChatSessionErrorCode::internal_failure,
@@ -1355,7 +1357,10 @@ auto ChatSession::submit(std::string prompt)
         make_id<domain::ContextSourceId>("runtime-source", suffix);
     auto user_source_id =
         make_id<domain::ContextSourceId>("user-source", suffix);
-    auto surface_id = make_id<domain::SurfaceId>("interactive", suffix);
+    auto surface_id = make_id<domain::SurfaceId>(
+        m_impl->surface_kind == ChatSurfaceKind::agent ? "agent"
+                                                       : "interactive",
+        suffix);
     auto workspace_id = make_id<domain::WorkspaceId>("chat", suffix);
     auto permission_id = m_impl->permission_profile_id;
     if (!permission_id) {
@@ -1451,7 +1456,11 @@ auto ChatSession::submit(std::string prompt)
         {*user_entry_id,
          domain::ContextContentKind::conversation,
          user_message,
-         {*user_source_id, std::string{"interactive-composer"}, std::nullopt},
+         {*user_source_id,
+          std::string{m_impl->surface_kind == ChatSurfaceKind::agent
+                          ? "agent-protocol"
+                          : "interactive-composer"},
+          std::nullopt},
          static_cast<std::uint64_t>(content.size()) + 1,
          prompt.size()});
 
