@@ -104,6 +104,66 @@ class Backend final : public backend::Backend,
   std::map<std::string, backend::ModelCapabilityMap> capabilities_by_model;
 };
 
+class DevWorkflowStream final : public backend::BackendStream {
+ public:
+  DevWorkflowStream(std::string tool, std::string arguments,
+                    std::string invocation)
+      : m_tool(std::move(tool)), m_arguments(std::move(arguments)),
+        m_invocation(make_id<domain::InvocationId>(invocation)) {}
+  auto next(std::stop_token)
+      -> std::expected<std::optional<backend::BackendEvent>,
+                       backend::BackendError> override {
+    switch (m_step++) {
+      case 0:
+        return backend::BackendEvent{backend::ResponseStarted{"dev-response"}};
+      case 1:
+        return backend::BackendEvent{
+            backend::ToolCallDelta{m_invocation, m_tool, m_arguments}};
+      case 2:
+        return backend::BackendEvent{
+            backend::ResponseFinished{domain::FinishReason::tool_call}};
+      default: return std::optional<backend::BackendEvent>{};
+    }
+  }
+
+ private:
+  std::string m_tool;
+  std::string m_arguments;
+  domain::InvocationId m_invocation;
+  int m_step{};
+};
+
+const std::string dev_read_arguments{R"({"relative_path":"src/example.cpp"})"};
+const std::string dev_process_arguments{
+    R"({"executable":"/usr/bin/ctest","arguments":["--test-dir","build","--output-on-failure"],"working_directory":"/repo","readable_roots":["/repo"],"writable_roots":["/repo/build"],"environment":{},"stdin":"closed","timeout_ms":1000,"output_bytes":4096})"};
+
+class DevWorkflowBackend final : public backend::Backend,
+                                 public backend::ModelContextProvider {
+ public:
+  auto lookup(const domain::ModelId& model_id, std::stop_token)
+      -> std::expected<backend::ModelContextInfo,
+                       backend::BackendError> override {
+    return backend::ModelContextInfo{
+        model_id, 100000, 4096, std::nullopt,
+        backend::ModelCapabilityMap{{"tools", true}}};
+  }
+  auto start(backend::BackendRequest request, std::stop_token)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    requests.push_back(request);
+    if (requests.size() == 1)
+      return std::make_unique<DevWorkflowStream>(
+          "read_repository_file", dev_read_arguments, "dev-read");
+    if (requests.size() == 2)
+      return std::make_unique<DevWorkflowStream>(
+          "run_process", dev_process_arguments, "dev-process");
+    return std::make_unique<Stream>(request.assistant_message_id,
+                                    "Read source and verified tests.",
+                                    std::nullopt);
+  }
+  std::vector<backend::BackendRequest> requests;
+};
+
 class QuestionStream final : public backend::BackendStream {
  public:
   QuestionStream(domain::MessageId message_id, const bool asks)
@@ -2847,4 +2907,173 @@ TEST_CASE("durable interactive resume rebuilds history without inference",
   REQUIRE((*resumed)->submitted_prompts() ==
           std::vector<std::string>{"persisted"});
   REQUIRE(backend.requests.size() == requests_before);
+}
+
+TEST_CASE(
+    "Dev Chat reads and runs tests with separate exact approvals in one run",
+    "[chat][tools][profiles][dev][storage]") {
+  DevWorkflowBackend backend;
+  MemoryStore store;
+  runtime::ToolRegistry registry;
+  const std::vector<domain::CapabilityScope> read_scopes{
+      {domain::Effect::read, "filesystem.root", "/repo"}};
+  const std::vector<domain::CapabilityScope> process_scopes{
+      {domain::Effect::execute, "process.executable", "/usr/bin/ctest"},
+      {domain::Effect::read, "filesystem.root", "/repo"},
+      {domain::Effect::write, "filesystem.root", "/repo/build"},
+      {domain::Effect::network, "network.unrestricted", "new-sockets"}};
+  const runtime::ToolExecutionLimits limits{4096, 8, 1s};
+  const auto add = [&](std::string name, std::string invocation,
+                       std::string arguments,
+                       std::vector<domain::Effect> effects,
+                       const std::vector<domain::CapabilityScope>& scopes,
+                       runtime::ToolCategory category, std::string result) {
+    const runtime::ToolInvocation expected{
+        make_id<domain::InvocationId>(invocation),
+        {},
+        name,
+        runtime::ValidatedToolArguments{{"application/json", arguments}},
+        scopes,
+        limits};
+    auto executor = std::make_shared<testing::ScriptedToolExecutor>(
+        std::vector<testing::ScriptedToolExchange>{
+            {expected, testing::ToolStreamScript{
+                           {runtime::ToolExecutionEvent{runtime::ToolResult{
+                                {domain::TextBlock{result}}}},
+                            testing::ToolEndOfStream{}}}}});
+    REQUIRE(registry.register_tool(
+        {name,
+         "Deterministic Dev workflow tool",
+         {"application/schema+json", R"({"type":"object"})"},
+         effects,
+         scopes},
+        executor, limits,
+        runtime::ToolExecutorContract{"test.dev." + name, "1"}, category));
+    return executor;
+  };
+  auto reader = add("read_repository_file", "dev-read", dev_read_arguments,
+                    {domain::Effect::read}, read_scopes,
+                    runtime::ToolCategory::repository,
+                    "src/example.cpp: int answer() { return 42; }");
+  auto process = add("run_process", "dev-process", dev_process_arguments,
+                     {domain::Effect::execute, domain::Effect::read,
+                      domain::Effect::write, domain::Effect::network},
+                     process_scopes, runtime::ToolCategory::process,
+                     "exit=0; all tests passed");
+  const auto tools = registry.snapshot().value();
+  const auto permission =
+      make_id<domain::PermissionProfileId>("dev-explicit-prompt");
+  const auto policy = runtime::make_tool_launch_policy(
+      tools, {permission,
+              testing::available_application_launch_context(
+                  runtime::RestrictionLevel::none),
+              {}});
+  REQUIRE(policy);
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.tools = tools;
+  dependencies.tool_policy = *policy;
+  dependencies.permission_profile_id = permission;
+  auto opened = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::create, std::nullopt,
+       domain::RunProvenance{"test",
+                             "fake",
+                             std::nullopt,
+                             make_id<domain::ModelId>("model"),
+                             std::nullopt,
+                             {},
+                             {},
+                             {}}},
+      backend, backend, &store, nullptr, {}, {}, dependencies);
+  REQUIRE(opened);
+  auto& session = **opened;
+  REQUIRE(session.select_tool_profile(make_id<domain::ToolProfileId>("dev")));
+  REQUIRE(
+      session.set_tool_category_enabled(runtime::ToolCategory::process, false));
+  CHECK(session.tool_profile_state()->effective_tools.size() == 1);
+  REQUIRE(session.set_tool_enabled("run_process", true));
+  CHECK(session.tool_profile_state()->effective_tools.size() == 2);
+  const auto submitted =
+      session.submit("Read src/example.cpp and run the configured tests.");
+  REQUIRE(submitted);
+  REQUIRE_FALSE(
+      session.select_tool_profile(make_id<domain::ToolProfileId>("off")));
+  REQUIRE_FALSE(session.set_tool_enabled("run_process", false));
+  auto approval = drain_to_approval(session);
+  REQUIRE(approval.invocation_id == make_id<domain::InvocationId>("dev-read"));
+  CHECK(reader->recorded_invocations().empty());
+  CHECK(process->recorded_invocations().empty());
+  REQUIRE(session.decide_tool_approval(
+      submitted->run_id, approval.invocation_id,
+      {domain::ApprovalDecision::approved, read_scopes}));
+  const auto next = drain_to_approval(session);
+  REQUIRE(next.invocation_id == make_id<domain::InvocationId>("dev-process"));
+  CHECK(reader->recorded_invocations().size() == 1);
+  CHECK(process->recorded_invocations().empty());
+  CHECK_FALSE(session.decide_tool_approval(
+      submitted->run_id, approval.invocation_id,
+      {domain::ApprovalDecision::approved, read_scopes}));
+  REQUIRE(session.decide_tool_approval(
+      submitted->run_id, next.invocation_id,
+      {domain::ApprovalDecision::approved, process_scopes}));
+  drain_to_end(session);
+  REQUIRE(backend.requests.size() == 3);
+  CHECK(process->recorded_invocations().size() == 1);
+  CHECK(
+      text_messages(backend.requests[1], domain::Role::tool) ==
+      std::vector<std::string>{"src/example.cpp: int answer() { return 42; }"});
+  CHECK(text_messages(backend.requests[2], domain::Role::tool) ==
+        std::vector<std::string>{"src/example.cpp: int answer() { return 42; }",
+                                 "exit=0; all tests passed"});
+  CHECK(reader->remaining_exchanges() == 0);
+  CHECK(process->remaining_exchanges() == 0);
+  for (const auto& request : backend.requests)
+    CHECK(request.tools == tools.declarations());
+  const auto session_id = session.session_id();
+  const auto history = store.histories.at(session_id);
+  std::vector<domain::InvocationId> policy_decisions;
+  std::vector<domain::InvocationId> results;
+  bool pinned_profile{};
+  for (const auto& event : history) {
+    CHECK(event.metadata.run_id == submitted->run_id);
+    if (const auto* provenance =
+            std::get_if<domain::RunProvenanceRecorded>(&event.payload)) {
+      REQUIRE(provenance->provenance.tool_profile);
+      CHECK(provenance->provenance.tool_profile->selected_profile_id.value() ==
+            "dev");
+      CHECK(provenance->provenance.tools.size() == 2);
+      pinned_profile = true;
+    }
+    if (const auto* decision =
+            std::get_if<domain::ToolPolicyDecided>(&event.payload)) {
+      policy_decisions.push_back(decision->invocation_id);
+      CHECK(
+          decision->scopes ==
+          (decision->invocation_id == make_id<domain::InvocationId>("dev-read")
+               ? read_scopes
+               : process_scopes));
+    }
+    if (const auto* result =
+            std::get_if<domain::ToolResultRecorded>(&event.payload))
+      results.push_back(result->invocation_id);
+  }
+  CHECK(std::ranges::contains(policy_decisions,
+                              make_id<domain::InvocationId>("dev-read")));
+  CHECK(std::ranges::contains(policy_decisions,
+                              make_id<domain::InvocationId>("dev-process")));
+  CHECK(results == std::vector<domain::InvocationId>{
+                       make_id<domain::InvocationId>("dev-read"),
+                       make_id<domain::InvocationId>("dev-process")});
+  CHECK(pinned_profile);
+  opened->reset();
+  auto resumed = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::resume, session_id},
+      backend, backend, &store, nullptr, {}, {}, dependencies);
+  REQUIRE(resumed);
+  CHECK((*resumed)->drain());
+  CHECK(store.histories.at(session_id) == history);
+  CHECK(backend.requests.size() == 3);
+  CHECK(reader->recorded_invocations().size() == 1);
+  CHECK(process->recorded_invocations().size() == 1);
 }

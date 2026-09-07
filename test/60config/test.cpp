@@ -1045,9 +1045,10 @@ TEST_CASE("tool profile maximum mappings are typed bounded JSON objects",
   const auto path = temporary.path() / "aiforge" / "config.json";
   JsonConfigFileStore store{path};
 
-  const ConfigTextMap models{{"z-model", "repository-read"},
-                             {"a-model", "off"}};
-  const ConfigTextMap personas{{"reviewer", "essentials"}};
+  const ConfigTextMap models{
+      {"z-model", "repository-read"}, {"a-model", "off"}, {"dev-model", "dev"}};
+  const ConfigTextMap personas{{"reviewer", "essentials"},
+                               {"developer", "dev"}};
   REQUIRE(store.set(builtin_config_registry(), model_maximum_tool_profiles_key,
                     ConfigValue{models}));
   REQUIRE(store.set(builtin_config_registry(),
@@ -1060,7 +1061,11 @@ TEST_CASE("tool profile maximum mappings are typed bounded JSON objects",
   REQUIRE(resolved);
   const auto mappings = resolve_tool_profile_maximum_mappings(*resolved);
   REQUIRE(mappings);
-  REQUIRE(mappings->models.size() == 2);
+  REQUIRE(mappings->models.size() == 3);
+  REQUIRE(mappings->models.at(id<aiforge::domain::ModelId>("dev-model")) ==
+          id<aiforge::domain::ToolProfileId>("dev"));
+  REQUIRE(mappings->personas.at(id<aiforge::domain::PersonaId>("developer")) ==
+          id<aiforge::domain::ToolProfileId>("dev"));
   REQUIRE(mappings->models.at(id<aiforge::domain::ModelId>("a-model")) ==
           id<aiforge::domain::ToolProfileId>("off"));
   REQUIRE(mappings->models.at(id<aiforge::domain::ModelId>("z-model")) ==
