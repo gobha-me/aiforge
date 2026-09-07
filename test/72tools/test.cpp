@@ -687,6 +687,38 @@ class OrderedPolicy final : public runtime::ToolPolicy {
   }
 };
 
+auto artifact_continuation_events() -> std::vector<domain::RunEvent> {
+  const auto invocation = make_id<domain::InvocationId>("artifact-call");
+  const auto assistant = make_id<domain::MessageId>("artifact-assistant");
+  const auto inference = make_id<domain::InferenceId>("artifact-inference");
+  const auto artifact = make_id<domain::ArtifactId>("artifact-output");
+  std::vector<domain::RunEvent> events;
+  const auto append = [&](domain::RunEventPayload payload) {
+    const auto sequence = events.size() + 1;
+    events.push_back(
+        {{make_id<domain::EventId>("artifact-event-" +
+                                   std::to_string(sequence)),
+          make_id<domain::RunId>("artifact-run"), sequence, 1,
+          domain::EventTimestamp{1ms}, std::nullopt, std::nullopt, invocation},
+         std::move(payload)});
+  };
+  append(domain::AssistantContentStarted{assistant, inference});
+  append(domain::ToolProposed{
+      invocation, "generate_image", {"application/json", "{}"}, {}});
+  append(domain::AssistantContentFinished{assistant, inference});
+  append(domain::ArtifactCreated{domain::ArtifactMetadata{
+      artifact, "image/png", 4, "sha256:" + std::string(64, 'a'), invocation, 1,
+      1}});
+  append(domain::ArtifactReferenced{artifact, std::nullopt});
+  append(domain::ToolResultRecorded{
+      invocation,
+      {domain::StructuredDataBlock{"application/json",
+                                   R"({"status":"generated"})"},
+       domain::ArtifactReferenceBlock{artifact, "untrusted label"}},
+      make_id<domain::MessageId>("artifact-result")});
+  return events;
+}
+
 } // namespace
 
 TEST_CASE(
@@ -3518,4 +3550,254 @@ TEST_CASE("invalid tool artifact metadata fails the run without a reference",
       std::ranges::any_of(kernel.event_log().events(), [](const auto& event) {
         return std::holds_alternative<domain::RunFailed>(event.payload);
       }));
+}
+
+TEST_CASE("artifact continuation fails closed on missing or corrupt provenance",
+          "[tools][artifact][continuation][failure]") {
+  auto events = artifact_continuation_events();
+  auto& created = std::get<domain::ArtifactCreated>(events[3].payload).artifact;
+  auto& result = std::get<domain::ToolResultRecorded>(events[5].payload);
+  SECTION("missing metadata") {
+    events.erase(events.begin() + 3);
+  }
+  SECTION("metadata arrives after result") {
+    std::swap(events[3], events[5]);
+  }
+  SECTION("duplicate metadata") {
+    events.insert(events.begin() + 4, events[3]);
+  }
+  SECTION("different invocation") {
+    created.producing_invocation_id = make_id<domain::InvocationId>("other");
+  }
+  SECTION("missing invocation") {
+    created.producing_invocation_id.reset();
+  }
+  SECTION("conflicting inference producer") {
+    created.producing_inference_id = make_id<domain::InferenceId>("other");
+  }
+  SECTION("different run") {
+    events[3].metadata.run_id = make_id<domain::RunId>("other");
+  }
+  SECTION("different envelope invocation") {
+    events[3].metadata.invocation_id = make_id<domain::InvocationId>("other");
+  }
+  SECTION("different result envelope invocation") {
+    events[5].metadata.invocation_id = make_id<domain::InvocationId>("other");
+  }
+  SECTION("missing result envelope invocation") {
+    events[5].metadata.invocation_id.reset();
+  }
+  SECTION("empty artifact") {
+    created.byte_size = 0;
+  }
+  SECTION("out of order sequence") {
+    events[3].metadata.sequence = 100;
+  }
+  SECTION("malformed digest") {
+    created.digest = "sha256:short";
+  }
+  SECTION("uppercase digest") {
+    created.digest = "sha256:" + std::string(64, 'A');
+  }
+  SECTION("URL media type") {
+    created.media_type = "https://invalid.example/secret";
+  }
+  SECTION("media controls") {
+    created.media_type = "image/png\x1b[31m";
+  }
+  SECTION("oversized media") {
+    created.media_type = "image/" + std::string(129, 'x');
+  }
+  SECTION("missing height") {
+    created.height.reset();
+  }
+  SECTION("zero dimensions") {
+    created.width = 0;
+  }
+  SECTION("unsafe artifact identity") {
+    created.artifact_id = make_id<domain::ArtifactId>("artifact-\xc2\x80");
+    result.content[1] = domain::ArtifactReferenceBlock{created.artifact_id, {}};
+  }
+  SECTION("too many references including duplicates") {
+    const auto reference = result.content.back();
+    result.content.assign(33, reference);
+  }
+  const auto original = events;
+  const auto projected = runtime::tool_continuation_messages(events);
+  REQUIRE_FALSE(projected);
+  CHECK(projected.error().code ==
+        runtime::ToolExecutionErrorCode::protocol_failure);
+  CHECK(projected.error().message.find("secret") == std::string::npos);
+  CHECK(projected.error().message.find('\x1b') == std::string::npos);
+  CHECK(events == original);
+}
+
+TEST_CASE(
+    "artifact continuation bounds metadata and preserves durable references",
+    "[tools][artifact][continuation]") {
+  auto events = artifact_continuation_events();
+  auto& result = std::get<domain::ToolResultRecorded>(events[5].payload);
+  const auto reference = result.content.back();
+  SECTION("artifact only") {
+    result.content = {reference};
+  }
+  SECTION("duplicate references") {
+    result.content = {reference, reference};
+  }
+  SECTION("maximum duplicate references") {
+    result.content.assign(32, reference);
+  }
+  SECTION("unsupported media remains opaque") {
+    auto& artifact =
+        std::get<domain::ArtifactCreated>(events[3].payload).artifact;
+    artifact.media_type = "application/x-unknown";
+    artifact.width.reset();
+    artifact.height.reset();
+  }
+  SECTION("untrusted labels are omitted") {
+    result.content.back() = domain::ArtifactReferenceBlock{
+        std::get<domain::ArtifactCreated>(events[3].payload)
+            .artifact.artifact_id,
+        "secret https://invalid.example/bytes \x1b[31m"};
+  }
+  SECTION("bounded process excerpts remain intact") {
+    result.content.front() = domain::StructuredDataBlock{
+        "application/vnd.aiforge.process-result+json",
+        R"({"stdout":{"excerpt_encoding":"base64","excerpt":"YWJj"}})"};
+    std::get<domain::ToolProposed>(events[1].payload).tool_name =
+        "execute_process";
+  }
+  const auto original = events;
+  const auto durable = runtime::tool_result_messages(events);
+  REQUIRE(durable);
+  const auto projected = runtime::tool_continuation_messages(events);
+  REQUIRE(projected);
+  REQUIRE(projected->size() == 2);
+  CHECK(projected->back().role == domain::Role::tool);
+  CHECK(projected->back().invocation_id == result.invocation_id);
+  REQUIRE(projected->front().tool_calls.size() == 1);
+  const auto& metadata_block =
+      std::get<domain::StructuredDataBlock>(projected->back().content.back());
+  CHECK(metadata_block.media_type ==
+        "application/vnd.aiforge.artifact-context+json");
+  CHECK(metadata_block.data.size() < 1024);
+  CHECK(metadata_block.data.find(R"("artifact_id":"artifact-output")") !=
+        std::string::npos);
+  CHECK(metadata_block.data.find(
+            R"("producing_invocation_id":"artifact-call")") !=
+        std::string::npos);
+  CHECK(metadata_block.data.find(
+            projected->front().tool_calls.front().tool_name) !=
+        std::string::npos);
+  CHECK(metadata_block.data.find(
+            "omitted; metadata only; bytes and image pixels not inspected") !=
+        std::string::npos);
+  CHECK(metadata_block.data.find("secret") == std::string::npos);
+  CHECK(metadata_block.data.find("https://") == std::string::npos);
+  CHECK(metadata_block.data.find('\x1b') == std::string::npos);
+  if (std::holds_alternative<domain::StructuredDataBlock>(
+          result.content.front())) {
+    CHECK(projected->back().content.front() == result.content.front());
+    CHECK(projected->back().content.size() == 2);
+  } else {
+    CHECK(projected->back().content.size() == 1);
+  }
+  CHECK(events == original);
+  CHECK(runtime::tool_result_messages(events) == durable);
+  CHECK(runtime::tool_continuation_messages(events) == projected);
+}
+
+TEST_CASE("paid artifact result survives cancellation and restart without "
+          "another charge",
+          "[tools][artifact][continuation][storage][spend][replay]") {
+  const bool cancel_after_result = GENERATE(false, true);
+  const auto invocation = make_id<domain::InvocationId>("paid-call");
+  const auto artifact = make_id<domain::ArtifactId>("paid-image");
+  const domain::ArtifactMetadata metadata{
+      artifact,   "image/png", 4, "sha256:" + std::string(64, 'b'),
+      invocation, 1,           1};
+  const auto quote = domain::ToolSpendQuote{
+      usd("0.3"), domain::ToolSpendEstimateBasis::catalog_estimate,
+      spend_digest(), spend_expiry()};
+  auto executor = std::make_shared<PaidExecutor>(
+      quote, runtime::ToolResult{
+                 {domain::StructuredDataBlock{"application/json",
+                                              R"({"status":"generated"})"},
+                  domain::ArtifactReferenceBlock{artifact, "generated image"}},
+                 {metadata},
+                 domain::ToolSpendFinalized{domain::ToolSpendFinalization{
+                     invocation, usd("0.2"),
+                     domain::ToolSpendFinalizationBasis::catalog_estimate,
+                     std::nullopt}}});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      paid_declaration(), executor, {},
+      runtime::ToolExecutorContract{"test.generate-image", "1"}));
+  const auto tools = snapshot_of(registry);
+  auto initial = request("inference-1", "assistant-1", tools.declarations());
+  testing::ScriptedBackend backend{
+      {{initial,
+        testing::StreamScript{
+            {step(backend::ResponseStarted{"response"}),
+             step(backend::UsageObserved{{0, 0, 0, 0}}),
+             step(backend::ToolCallDelta{invocation, "generate_image", "{}"}),
+             step(backend::ResponseFinished{domain::FinishReason::tool_call}),
+             testing::EndOfStream{}}}}}};
+  MemoryStore store;
+  WakeCounter wake;
+  auto kernel = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::create, store.created},
+      store, backend, &wake, {}, {}, tools, paid_policy());
+  REQUIRE(kernel);
+  set_spend_ceiling(**kernel, "1");
+  auto start = run_start(initial);
+  start.pricing_observation = pricing_observation();
+  start.provenance = provenance();
+  REQUIRE((*kernel)->start(std::move(start)));
+  drain_to_inference_boundary(**kernel, wake);
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    REQUIRE((*kernel)->drain());
+    if (std::ranges::any_of(store.events, [](const auto& event) {
+          return std::holds_alternative<domain::ToolResultRecorded>(
+              event.payload);
+        }))
+      break;
+    std::this_thread::sleep_for(2ms);
+  }
+  const auto projected = runtime::tool_continuation_messages(store.events);
+  REQUIRE(projected);
+  REQUIRE(projected->size() == 2);
+  if (cancel_after_result) {
+    REQUIRE(
+        (*kernel)->cancel_run(make_id<domain::RunId>("run"), "after result"));
+  }
+  const auto persisted = store.events;
+  const auto validations = executor->validations;
+  kernel->reset();
+  testing::ScriptedBackend replay_backend{{}};
+  auto replayed = runtime::RunKernel::open_durable(
+      {store.session_id, runtime::DurableSessionMode::resume, store.created},
+      store, replay_backend, nullptr, {}, {}, tools, paid_policy());
+  REQUIRE(replayed);
+  CHECK(replay_backend.recorded_requests().empty());
+  CHECK(executor->starts == 1);
+  CHECK(executor->validations == validations);
+  CHECK(store.events == persisted);
+  CHECK(runtime::tool_continuation_messages(
+            (*replayed)->event_log().events()) == projected);
+  CHECK(std::ranges::count_if(store.events, [](const auto& event) {
+          return std::holds_alternative<domain::ToolSpendReserved>(
+              event.payload);
+        }) == 1);
+  CHECK(std::ranges::count_if(store.events, [](const auto& event) {
+          const auto* finalized =
+              std::get_if<domain::ToolSpendFinalized>(&event.payload);
+          return finalized != nullptr &&
+                 finalized->finalization.amount == usd("0.2");
+        }) == 1);
+  CHECK(std::ranges::count_if(store.events, [&](const auto& event) {
+          const auto* created =
+              std::get_if<domain::ArtifactCreated>(&event.payload);
+          return created != nullptr && created->artifact == metadata;
+        }) == 1);
 }
