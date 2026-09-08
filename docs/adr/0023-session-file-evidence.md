@@ -41,6 +41,18 @@ its recorded physical root, membership and bytes. Current tray choices cannot
 replace that evidence. Revocation prevents new reads and inference admission;
 already-dispatched usage and results still drain.
 
+The initial Linux adapter binds the boot identity, current mount namespace,
+statx mount identity and pinned root-component identities. Reboot, namespace
+change or mount replacement cannot silently recreate an older grant. Changing
+flags on the same mount is not necessarily a new identity; current filesystem
+access checks still apply. Missing required identity primitives fail closed.
+The final file is pinned with O_PATH and verified regular before reopening its
+owned descriptor for bytes, avoiding a pathname type race at read-open.
+
+Folder grant creation itself performs synchronous filesystem observation. The
+browser must schedule that explicit user action on bounded owning background
+work; calling the grant factory on the UI thread is not an integration path.
+
 ## Listing, preview and tray
 
 Listing and preview are separate cancellable operations with
