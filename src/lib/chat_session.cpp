@@ -1,7 +1,7 @@
 #include <aiforge/detail/sha256.hpp>
-#include <aiforge/domain/tool_spend.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/runtime/context_builder.hpp>
+#include <aiforge/runtime/inference_spend.hpp>
 #include <aiforge/runtime/memory_tool.hpp>
 #include <aiforge/runtime/persona.hpp>
 #include <aiforge/runtime/session_context.hpp>
@@ -101,12 +101,6 @@ template <typename IdType>
   return {ChatSessionErrorCode::run_failed, value.message, value.retryable};
 }
 
-struct SpendState {
-  domain::UsageLedgerProjection ledger;
-  domain::ToolSpendLedgerProjection tools;
-  domain::SessionSpendCeilingProjection ceiling;
-};
-
 [[nodiscard]] auto rebuild_spend_ceiling(const domain::SessionEventLog& log)
     -> std::expected<domain::SessionSpendCeilingProjection, ChatSessionError> {
   domain::SessionSpendCeilingProjection ceiling;
@@ -119,17 +113,28 @@ struct SpendState {
   return ceiling;
 }
 
-[[nodiscard]] auto rebuild_spend_state(const domain::SessionEventLog& log)
-    -> std::expected<SpendState, ChatSessionError> {
-  SpendState state;
-  for (const auto& event : log.events()) {
-    if (!state.ledger.apply(event) || !state.tools.apply(event) ||
-        !state.ceiling.apply(event)) {
-      return error(ChatSessionErrorCode::session_failed,
-                   "session spend history is invalid");
-    }
+[[nodiscard]] auto inference_spend_error(
+    const runtime::InferenceSpendError& value) -> ChatSessionError {
+  using Code = runtime::InferenceSpendErrorCode;
+  switch (value.code) {
+    case Code::invalid_history:
+      return {ChatSessionErrorCode::session_failed, value.message, false};
+    case Code::accounting_unavailable:
+      return {ChatSessionErrorCode::spend_accounting_unavailable, value.message,
+              false};
+    case Code::ceiling_reached:
+      if (value.summary && value.summary->accounted)
+        return {ChatSessionErrorCode::spend_ceiling_reached,
+                "session spend ceiling reached (USD " +
+                    value.summary->accounted->amount().to_string() + " of " +
+                    value.summary->ceiling.amount().to_string() + ")",
+                false};
+      return {ChatSessionErrorCode::spend_ceiling_reached, value.message,
+              false};
+    case Code::internal_failure: break;
   }
-  return state;
+  return {ChatSessionErrorCode::internal_failure,
+          "interactive submission failed internally", false};
 }
 
 [[nodiscard]] auto apply_requested_spend_ceiling(
@@ -1968,28 +1973,10 @@ auto ChatSession::submit_prepared(std::string prompt,
       if (!loaded) return std::unexpected(std::move(loaded.error()));
       user_global_instruction = std::move(*loaded);
     }
-    auto ceiling = rebuild_spend_ceiling(m_impl->kernel->event_log());
-    if (!ceiling) return std::unexpected(std::move(ceiling.error()));
-    const auto session_ceiling = ceiling->ceiling();
-    if (session_ceiling) {
-      auto spend_state = rebuild_spend_state(m_impl->kernel->event_log());
-      if (!spend_state) {
-        return std::unexpected(std::move(spend_state.error()));
-      }
-      const auto spend = domain::summarize_combined_session_spend(
-          spend_state->ledger.records(), spend_state->tools, *session_ceiling);
-      if (!spend || !spend->accounted) {
-        return error(ChatSessionErrorCode::spend_accounting_unavailable,
-                     "session spend accounting is unavailable; refusing "
-                     "another inference");
-      }
-      if (spend->reached) {
-        return error(ChatSessionErrorCode::spend_ceiling_reached,
-                     "session spend ceiling reached (USD " +
-                         spend->accounted->amount().to_string() + " of " +
-                         spend->ceiling.amount().to_string() + ")");
-      }
-    }
+    if (auto spend =
+            runtime::preflight_inference_spend(m_impl->kernel->event_log());
+        !spend)
+      return std::unexpected(inference_spend_error(spend.error()));
     if (m_impl->persona_document) {
       if (m_impl->persona_source == nullptr) {
         m_impl->persona_attention = "Persona source is unavailable";
