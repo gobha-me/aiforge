@@ -66,6 +66,14 @@ struct SessionContextError {
                                            std::stop_token stop = {})
     -> std::expected<PreparedSessionContext, SessionContextError>;
 
+// Specialized read-only preview of the exact three-event activation suffix.
+// Sources are resolved from the unchanged real log; only bounded projections
+// receive the validated transition. No arbitrary projected state is accepted.
+[[nodiscard]] auto preview_session_context_after_summary_activation(
+    const SessionContextRequest& request,
+    std::span<const domain::RunEvent> suffix, std::stop_token stop = {})
+    -> std::expected<PreparedSessionContext, SessionContextError>;
+
 // Version 1 counts every byte of name, description, schema media type and
 // schema data, plus a 32-token declaration envelope. This conservative neutral
 // estimate is not a provider tokenizer. Authority metadata is not provider

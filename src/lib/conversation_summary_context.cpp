@@ -1,3 +1,4 @@
+#include "conversation_context_internal.hpp"
 #include <aiforge/detail/sha256.hpp>
 #include <aiforge/runtime/conversation_summary_context.hpp>
 #include <algorithm>
@@ -234,6 +235,27 @@ auto recover(const SessionEventLog& log,
 }
 } // namespace
 
+auto context_detail::prepare_summary_context_from_snapshot(
+    const ConversationSummarySnapshot& snapshot, std::uint64_t first_order,
+    const ConversationHistoryLimits& limits, std::stop_token stop) -> Result {
+  if (stop.stop_requested())
+    return failure(Code::cancelled, "summary context cancelled");
+  if (first_order == 0)
+    return failure(Code::invalid_order,
+                   "summary evidence order must be positive");
+  if (!snapshot.active.empty() &&
+      snapshot.active.size() - 1 >
+          std::numeric_limits<std::uint64_t>::max() - first_order)
+    return failure(Code::invalid_order, "summary evidence order overflows");
+  Builder builder{limits, stop, {}, 0, {}};
+  for (const auto& active : snapshot.active) {
+    auto added = builder.append(snapshot, active,
+                                first_order + builder.result.content.size());
+    if (!added) return std::unexpected(added.error());
+  }
+  return std::move(builder.result);
+}
+
 auto prepare_conversation_summary_context(
     const SessionEventLog& log, std::uint64_t first_order,
     const ConversationHistoryLimits& limits, std::stop_token stop) -> Result {
@@ -247,17 +269,8 @@ auto prepare_conversation_summary_context(
     if (!bounded) return std::unexpected(bounded.error());
     auto state = recorded_conversation_summaries(log);
     if (!state) return projection_failure(state.error());
-    if (!state->active.empty() &&
-        state->active.size() - 1 >
-            std::numeric_limits<std::uint64_t>::max() - first_order)
-      return failure(Code::invalid_order, "summary evidence order overflows");
-    Builder builder{limits, stop, {}, 0, {}};
-    for (const auto& active : state->active) {
-      auto added = builder.append(*state, active,
-                                  first_order + builder.result.content.size());
-      if (!added) return std::unexpected(added.error());
-    }
-    return std::move(builder.result);
+    return context_detail::prepare_summary_context_from_snapshot(
+        *state, first_order, limits, stop);
   } catch (...) {
     return failure(Code::internal_failure,
                    "summary context preparation failed internally");

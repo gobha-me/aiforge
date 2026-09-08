@@ -1,3 +1,4 @@
+#include "conversation_context_internal.hpp"
 #include <aiforge/runtime/conversation_context.hpp>
 
 #include <aiforge/detail/sha256.hpp>
@@ -141,6 +142,7 @@ auto build_admission(const ConversationContextRequest& request,
                      const ConversationPolicySnapshot& policy,
                      const std::vector<ConversationHistoryGroup>& history,
                      const ConversationSelectionResult& selection,
+                     std::uint64_t snapshot_sequence,
                      std::span<const ConversationAdmittedSummary> summaries,
                      std::stop_token stop)
     -> std::expected<ConversationAdmission, ConversationContextError> {
@@ -148,7 +150,7 @@ auto build_admission(const ConversationContextRequest& request,
                                conversation_estimator_version,
                                request.log.session_id(),
                                request.model_id,
-                               request.log.last_sequence(),
+                               snapshot_sequence,
                                policy.event_id,
                                policy.policy.revision,
                                policy.policy.mode,
@@ -355,6 +357,35 @@ auto validate_recovered_summary_coverage(
   return {};
 }
 
+auto prepare_from_rendered(
+    const ConversationContextRequest& request,
+    const context_detail::ConversationContextSources& sources,
+    PreparedConversationSummaryContext summaries, std::stop_token stop)
+    -> std::expected<PreparedConversationContext, ConversationContextError> {
+  auto adjusted = request;
+  auto budget =
+      add_estimate(adjusted.mandatory_input_tokens, summaries.estimated_tokens);
+  if (!budget) return std::unexpected(budget.error());
+  if (summaries.content.size() >
+      std::numeric_limits<std::uint64_t>::max() - adjusted.first_history_order)
+    return failure(Code::invalid_order,
+                   "history order after summaries overflows");
+  adjusted.first_history_order += summaries.content.size();
+  auto selection = select_history(adjusted, sources.policy, sources.history,
+                                  summaries, stop);
+  if (!selection) return std::unexpected(selection.error());
+  auto ordered =
+      renumber(selection->selected_groups, adjusted.first_history_order);
+  if (!ordered) return std::unexpected(ordered.error());
+  auto admission =
+      build_admission(adjusted, sources.policy, sources.history, *selection,
+                      sources.snapshot_sequence, summaries.summaries, stop);
+  if (!admission) return std::unexpected(admission.error());
+  return PreparedConversationContext{std::move(*selection),
+                                     std::move(*admission),
+                                     std::move(summaries.content)};
+}
+
 } // namespace
 
 auto prepare_conversation_context(const ConversationContextRequest& request,
@@ -383,31 +414,61 @@ auto prepare_conversation_context(const ConversationContextRequest& request,
       if (!prepared) return summary_failure(prepared.error());
       summaries = std::move(*prepared);
     }
-    auto adjusted = request;
-    auto budget = add_estimate(adjusted.mandatory_input_tokens,
-                               summaries.estimated_tokens);
-    if (!budget) return std::unexpected(budget.error());
-    if (summaries.content.size() > std::numeric_limits<std::uint64_t>::max() -
-                                       adjusted.first_history_order)
-      return failure(Code::invalid_order,
-                     "history order after summaries overflows");
-    adjusted.first_history_order += summaries.content.size();
-    auto selection =
-        select_history(adjusted, *policy, *history, summaries, stop);
-    if (!selection) return std::unexpected(selection.error());
-    auto ordered =
-        renumber(selection->selected_groups, adjusted.first_history_order);
-    if (!ordered) return std::unexpected(ordered.error());
-    auto admission = build_admission(adjusted, *policy, *history, *selection,
-                                     summaries.summaries, stop);
-    if (!admission) return std::unexpected(admission.error());
-    return PreparedConversationContext{std::move(*selection),
-                                       std::move(*admission),
-                                       std::move(summaries.content)};
+    context_detail::ConversationContextSources sources{
+        request.log.last_sequence(),
+        std::move(*policy),
+        std::move(*history),
+        {}};
+    // Normal preparation has already rendered its validated active snapshot.
+    return prepare_from_rendered(request, sources, std::move(summaries), stop);
   } catch (...) {
     return failure(Code::internal_failure,
                    "conversation context preparation failed internally");
   }
+}
+
+auto context_detail::prepare_conversation_context_from_sources(
+    const ConversationContextRequest& request,
+    const ConversationContextSources& sources, std::stop_token stop)
+    -> std::expected<PreparedConversationContext, ConversationContextError> {
+  PreparedConversationSummaryContext summaries;
+  if (sources.policy.policy.mode == ConversationMode::rolling) {
+    auto prepared = prepare_summary_context_from_snapshot(
+        sources.summaries, request.first_history_order, request.history_limits,
+        stop);
+    if (!prepared) return summary_failure(prepared.error());
+    summaries = std::move(*prepared);
+  }
+  return prepare_from_rendered(request, sources, std::move(summaries), stop);
+}
+
+auto context_detail::resolve_summary_preview_sources(
+    const ConversationContextRequest& request, std::span<const RunEvent> suffix,
+    std::stop_token stop)
+    -> std::expected<ConversationContextSources, ConversationContextError> {
+  if (stop.stop_requested())
+    return failure(Code::cancelled, "summary context preview cancelled");
+  if (suffix.size() != 3 ||
+      suffix.size() > request.history_limits.maximum_events ||
+      request.log.events().size() >
+          request.history_limits.maximum_events - suffix.size())
+    return failure(Code::resource_exhausted,
+                   "summary preview event bound exceeded");
+  auto policy = recorded_conversation_policy(request.log);
+  if (!policy) return domain_failure(policy.error(), Code::invalid_policy);
+  auto summaries = preview_conversation_summary_transition(request.log, suffix);
+  if (!summaries)
+    return failure(Code::invalid_admission, summaries.error().message);
+  auto history = reconstruct_conversation_history(
+      {request.log, {}, conversation_estimator_version, request.history_limits},
+      stop);
+  if (!history) return history_failure(history.error());
+  policy->policy.revision = summaries->policy_revision;
+  policy->event_id = suffix[1].metadata.event_id;
+  policy->event_sequence = suffix[1].metadata.sequence;
+  return ConversationContextSources{suffix.back().metadata.sequence,
+                                    std::move(*policy), std::move(*history),
+                                    std::move(*summaries)};
 }
 
 auto recover_conversation_context(const SessionEventLog& log,
