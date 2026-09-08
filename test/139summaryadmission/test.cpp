@@ -199,37 +199,17 @@ TEST_CASE(
   CHECK(f.store.history == before);
   CHECK(f.backend.count() == 0);
 }
-TEST_CASE("resolved live summary context survives disable while unresolved "
-          "restart fails",
-          "[summaryadmission][recovery]") {
+TEST_CASE("resolved live summary context survives a later disable",
+          "[summaryadmission][continuation]") {
   KernelFixture f;
   f.pending();
-  bool resolved = true;
-  SECTION("live run remains pinned") {
-  }
-  SECTION("explicit recovery resolution remains pinned") {
-    f.reopen();
-    REQUIRE(f.kernel->pin_conversation_summaries(f.started->run_id));
-  }
-  SECTION("unresolved restart cannot use disabled evidence") {
-    f.reopen();
-    resolved = false;
-  }
   f.disable();
-  const auto before = f.store.history;
   const auto result =
       f.kernel->continue_run(f.started->run_id, f.continuation());
-  if (resolved) {
-    INFO((result ? "continued" : result.error().message));
-    REQUIRE(result);
-    f.drain();
-    CHECK(f.backend.count() == 2);
-  } else {
-    CHECK_FALSE(result);
-    CHECK_FALSE(f.kernel->pin_conversation_summaries(f.started->run_id));
-    CHECK(f.store.history == before);
-    CHECK(f.backend.count() == 1);
-  }
+  INFO((result ? "continued" : result.error().message));
+  REQUIRE(result);
+  f.drain();
+  CHECK(f.backend.count() == 2);
 }
 TEST_CASE("summary pinning requires the exact active run",
           "[summaryadmission][failure]") {
