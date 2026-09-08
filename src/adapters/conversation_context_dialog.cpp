@@ -257,6 +257,7 @@ auto ConversationContextDialog::candidate(
 auto ConversationContextDialog::set_mode(
     const surfaces::SetConversationMode& command)
     -> std::expected<void, Error> {
+  invalidate_review();
   auto policy = m_session.conversation_policy();
   if (!policy) return std::unexpected(policy.error());
   auto changed = m_session.set_conversation_policy(
@@ -267,6 +268,7 @@ auto ConversationContextDialog::set_mode(
 }
 auto ConversationContextDialog::set_pin(
     const surfaces::PinConversationRun& command) -> std::expected<void, Error> {
+  invalidate_review();
   auto policy = m_session.conversation_policy();
   if (!policy) return std::unexpected(policy.error());
   auto& pins = policy->policy.pinned_run_ids;
@@ -296,6 +298,7 @@ auto ConversationContextDialog::generate(
 auto ConversationContextDialog::review(const domain::ConversationSummaryId& id,
                                        bool edit)
     -> std::expected<void, Error> {
+  invalidate_review();
   auto value = candidate(id, !edit);
   if (!value) return std::unexpected(value.error());
   invalidate_review();
@@ -326,6 +329,7 @@ auto ConversationContextDialog::review(const domain::ConversationSummaryId& id,
 auto ConversationContextDialog::preview(
     const surfaces::PreviewConversationSummary& command)
     -> std::expected<void, Error> {
+  invalidate_review();
   auto value = candidate(command.summary_id, false);
   if (!value) return std::unexpected(value.error());
   auto catalog = m_session.summary_catalog();
@@ -373,6 +377,7 @@ auto ConversationContextDialog::apply() -> std::expected<void, Error> {
 }
 auto ConversationContextDialog::disable(const domain::ConversationSummaryId& id)
     -> std::expected<void, Error> {
+  invalidate_review();
   auto catalog = m_session.summary_catalog();
   if (!catalog) return std::unexpected(catalog.error());
   const auto found =

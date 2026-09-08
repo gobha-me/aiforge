@@ -193,3 +193,28 @@ TEST_CASE("Transcript summary exclusion preserves the default projection and "
   CHECK(text(filtered).find("Keep the open task and unresolved constraints.") !=
         std::string::npos);
 }
+
+TEST_CASE(
+    "Failed replacement preview cannot leave an older summary armed for Apply",
+    "[contextdialog][stale]") {
+  Fixture f;
+  const auto first = f.candidate();
+  const auto second = f.candidate();
+  REQUIRE(f.chat->edit_conversation_summary(f.chat->event_log().last_sequence(),
+                                            version(second),
+                                            std::string(60000, 'x')));
+  REQUIRE(f.chat->set_conversation_policy(0, domain::ConversationMode::rolling,
+                                          {}));
+  adapters::ConversationContextDialog dialog{
+      *f.chat, [] { return std::string{"draft"}; }};
+  REQUIRE(dialog.execute(
+      surfaces::PreviewConversationSummary{first.summary_id, {}}));
+  REQUIRE(dialog.review_available());
+  const auto before = f.chat->event_log().events();
+  CHECK_FALSE(dialog.execute(
+      surfaces::PreviewConversationSummary{second.summary_id, {}}));
+  CHECK_FALSE(dialog.review_available());
+  CHECK_FALSE(dialog.execute(surfaces::ApplyConversationSummary{}));
+  CHECK(f.chat->event_log().events() == before);
+  CHECK(f.backend.requests().size() == 2);
+}
