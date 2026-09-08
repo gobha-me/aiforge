@@ -1,5 +1,9 @@
+#include <aiforge/runtime/ask_user_tool.hpp>
+#include <aiforge/runtime/conversation_context.hpp>
 #include <aiforge/runtime/conversation_history.hpp>
+
 #include <aiforge/surfaces/chat_session.hpp>
+#include <algorithm>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -43,18 +47,48 @@ class Stream final : public backend::BackendStream {
   unsigned m_step{};
 };
 
+class QuestionStream final : public backend::BackendStream {
+ public:
+  auto next(std::stop_token)
+      -> std::expected<std::optional<backend::BackendEvent>,
+                       backend::BackendError> override {
+    switch (m_step++) {
+      case 0:
+        return backend::BackendEvent{backend::ResponseStarted{"question"}};
+      case 1:
+        return backend::BackendEvent{backend::ToolCallDelta{
+            id<domain::InvocationId>("ask-call"), "ask_user",
+            R"({"questions":[{"id":"format","prompt":"Choose output","kind":"one","required":true,"minimum_selections":1,"maximum_selections":1,"options":[{"id":"short","label":"Short","recommended":true},{"id":"long","label":"Long"}]}]})"}};
+      case 2:
+        return backend::BackendEvent{
+            backend::ResponseFinished{domain::FinishReason::tool_call}};
+      default: return std::optional<backend::BackendEvent>{};
+    }
+  }
+
+ private:
+  unsigned m_step{};
+};
+
 class Backend final : public backend::Backend,
                       public backend::ModelContextProvider {
  public:
   auto lookup(const domain::ModelId& model, std::stop_token)
       -> std::expected<backend::ModelContextInfo,
                        backend::BackendError> override {
-    return backend::ModelContextInfo{model, window, 16};
+    return backend::ModelContextInfo{
+        model, window, 16, {}, backend::ModelCapabilityMap{{"tools", true}}};
   }
   auto start(backend::BackendRequest request, std::stop_token)
       -> std::expected<std::unique_ptr<backend::BackendStream>,
                        backend::BackendError> override {
-    auto stream = std::make_unique<Stream>(request.assistant_message_id);
+    std::unique_ptr<backend::BackendStream> stream;
+    if (ask_next) {
+      ask_next = false;
+      stream = std::make_unique<QuestionStream>();
+    } else {
+      stream = std::make_unique<Stream>(request.assistant_message_id);
+    }
     std::lock_guard lock{m_mutex};
     m_requests.push_back(std::move(request));
     return stream;
@@ -64,6 +98,7 @@ class Backend final : public backend::Backend,
     return m_requests;
   }
   std::uint64_t window{8192};
+  bool ask_next{};
 
  private:
   std::mutex m_mutex;
@@ -312,4 +347,111 @@ TEST_CASE("Chat policy changes affect subsequent turns while active admission "
   CHECK(admission(*next).policy_revision == 1);
   finish(*session);
   CHECK(backend.requests().size() == 2);
+}
+
+TEST_CASE(
+    "Chat resume preserves gapped admitted history and its original policy") {
+  Backend backend;
+  Store store;
+  runtime::ToolRegistry registry;
+  REQUIRE(runtime::register_ask_user_tool(registry, true));
+  const auto tools = registry.snapshot();
+  REQUIRE(tools);
+  auto next_identity = std::make_shared<std::uint64_t>();
+  const auto reopen = [&](std::optional<domain::SessionId> session_id = {}) {
+    surfaces::ChatSessionDependencies dependencies;
+    dependencies.tools = *tools;
+    dependencies.identity_suffix_source = [next_identity] {
+      return ++*next_identity;
+    };
+    return surfaces::ChatSession::open(
+        {id<domain::ModelId>("model"),
+         session_id ? surfaces::ChatSessionOpen::Mode::resume
+                    : surfaces::ChatSessionOpen::Mode::create,
+         session_id},
+        backend, backend, &store, nullptr, {}, {1024 * 1024, 16},
+        std::move(dependencies));
+  };
+  auto created = reopen();
+  REQUIRE(created);
+  REQUIRE((*created)->submit("first"));
+  finish(**created);
+  backend.ask_next = true;
+  const auto submitted = (*created)->submit("ask next");
+  REQUIRE(submitted);
+  for (unsigned attempt = 0;
+       attempt < 1000 && !(*created)->pending_question_input(); ++attempt) {
+    REQUIRE((*created)->drain());
+    std::this_thread::sleep_for(1ms);
+  }
+  REQUIRE((*created)->pending_question_input());
+  REQUIRE(backend.requests().size() == 2);
+  REQUIRE((*created)->set_conversation_policy(
+      0, domain::ConversationMode::rolling));
+  const auto session_id = (*created)->session_id();
+  created->reset();
+
+  // Construct a valid persisted fixture from a caller that assigned history
+  // starting at order 17. Production recovery must retain those sealed orders.
+  auto started = std::ranges::find_if(store.history, [&](const auto& event) {
+    return event.metadata.run_id == submitted->run_id &&
+           std::holds_alternative<domain::RunStarted>(event.payload);
+  });
+  REQUIRE(started != store.history.end());
+  auto& saved =
+      std::get<domain::RunStarted>(started->payload).conversation_admission;
+  REQUIRE(saved);
+  REQUIRE(saved->policy_revision == 0);
+  REQUIRE(saved->groups.size() == 1);
+  REQUIRE(saved->groups.front().entries.size() == 2);
+  saved->groups.front().entries[0].order = 17;
+  saved->groups.front().entries[1].order = 18;
+  REQUIRE(domain::seal_conversation_admission(*saved));
+  REQUIRE(domain::validate_conversation_admission(*saved));
+  const auto original_admission = *saved;
+  const auto history_before_resume = store.history;
+
+  auto resumed = reopen(session_id);
+  REQUIRE(resumed);
+  REQUIRE_FALSE((*resumed)->blocked_recovery());
+  REQUIRE((*resumed)->conversation_policy());
+  CHECK((*resumed)->conversation_policy()->policy.revision == 1);
+  CHECK((*resumed)->conversation_policy()->policy.mode ==
+        domain::ConversationMode::rolling);
+  REQUIRE(store.history == history_before_resume);
+  const auto original_history = runtime::recover_conversation_context(
+      (*resumed)->event_log(), original_admission);
+  REQUIRE(original_history);
+  const auto pending = (*resumed)->pending_question_input();
+  REQUIRE(pending);
+  REQUIRE((*resumed)->answer_questions(
+      pending->run_id, pending->invocation_id,
+      {{id<domain::QuestionId>("format"), {"short"}, {}}}));
+  finish(**resumed);
+  REQUIRE_FALSE((*resumed)->blocked_recovery());
+  const auto requests = backend.requests();
+  REQUIRE(requests.size() == 3);
+  const auto& entries = requests.back().context.entries;
+  for (const auto& expected : original_history->front().entries) {
+    const auto actual = std::ranges::find(entries, expected.content.entry_id,
+                                          &domain::ContextEntry::entry_id);
+    REQUIRE(actual != entries.end());
+    CHECK(actual->order == expected.content.order);
+    CHECK(actual->message == expected.content.message);
+    CHECK(actual->estimated_tokens == expected.content.estimated_tokens);
+  }
+  const auto current = std::ranges::find(
+      entries, requests[1].context.entries.back().message.message_id,
+      [](const auto& entry) { return entry.message.message_id; });
+  REQUIRE(current != entries.end());
+  CHECK(current->order == 19);
+  const auto recorded = std::ranges::find_if(
+      (*resumed)->event_log().events(), [&](const auto& event) {
+        return event.metadata.run_id == submitted->run_id &&
+               std::holds_alternative<domain::RunStarted>(event.payload);
+      });
+  REQUIRE(recorded != (*resumed)->event_log().events().end());
+  CHECK(
+      std::get<domain::RunStarted>(recorded->payload).conversation_admission ==
+      original_admission);
 }
