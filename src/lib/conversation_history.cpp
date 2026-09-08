@@ -293,6 +293,25 @@ struct MessageSource {
   std::size_t exchange_order{};
 };
 
+auto has_payload(const ContentBlock& block) -> bool {
+  return std::visit(
+      [](const auto& value) {
+        using T = std::remove_cvref_t<decltype(value)>;
+        if constexpr (std::same_as<T, TextBlock>) {
+          return !value.text.empty();
+        } else if constexpr (std::same_as<T, StructuredDataBlock>) {
+          return !value.media_type.empty() || !value.data.empty();
+        } else if constexpr (std::same_as<T, CitationBlock>) {
+          return !value.uri.empty() || (value.title && !value.title->empty());
+        } else {
+          // Unsupported representations must reach explicit validation, never
+          // be silently discarded as an empty answer.
+          return true;
+        }
+      },
+      block);
+}
+
 struct PlainMessages {
   std::optional<Message> active;
   std::optional<InferenceId> inference;
@@ -301,6 +320,7 @@ struct PlainMessages {
   std::map<MessageId, std::uint64_t> starts;
   std::map<MessageId, const RunEvent*> sources;
   std::vector<MessageSource> messages;
+  std::size_t empty_messages{};
 
   auto finish(const AssistantContentFinished& finished, const RunEvent& event)
       -> Status {
@@ -308,9 +328,16 @@ struct PlainMessages {
         *inference != finished.inference_id ||
         !sources.emplace(finished.message_id, &event).second)
       return failure(Code::invalid_history, "ambiguous assistant completion");
-    if (!has_tools)
-      messages.push_back(
-          {std::move(*active), &event, active_start_sequence, 0});
+    if (!has_tools) {
+      if (std::ranges::any_of(active->content, has_payload)) {
+        messages.push_back(
+            {std::move(*active), &event, active_start_sequence, 0});
+      } else {
+        // Legacy replay preserved the user input when the provider completed
+        // without an answer. Keep validating this completion's source identity.
+        ++empty_messages;
+      }
+    }
     active.reset();
     inference.reset();
     return {};
@@ -407,7 +434,7 @@ auto merge_tool_messages(PlainMessages& plain, std::vector<Message> tools,
     plain.messages.push_back(
         {std::move(message), found->second, assistant_start, exchange_order++});
   }
-  if (plain.messages.size() != plain.sources.size())
+  if (plain.messages.size() + plain.empty_messages != plain.sources.size())
     return failure(Code::invalid_history,
                    "completed run contains an incomplete tool group", run_id);
   std::ranges::sort(plain.messages, {}, [](const auto& message) {

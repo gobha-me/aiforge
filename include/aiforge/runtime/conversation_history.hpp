@@ -68,6 +68,7 @@ struct ConversationHistoryError {
 // Scans bounded event references before copying/projecting relevant content.
 // Completed source runs retain all complete tool exchanges; failed/cancelled
 // runs retain only their original user input. No external work or mutation.
+// Empty successful answers preserve user input, matching legacy replay.
 // Tool artifacts use the existing metadata projector. Unresolved direct
 // user/assistant artifact references return unsupported_content.
 [[nodiscard]] auto reconstruct_conversation_history(

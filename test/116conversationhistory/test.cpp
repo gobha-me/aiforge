@@ -629,3 +629,38 @@ TEST_CASE("source-less control runs and explicitly excluded payloads do not "
   request.excluded_run_ids.clear();
   CHECK(error(request) == Code::unsupported_content);
 }
+
+TEST_CASE("successful empty answers preserve user input without weakening "
+          "source validation",
+          "[conversationhistory]") {
+  HistoryLog history;
+  history.start("empty");
+  history.user("empty");
+  history.assistant_start("empty", "empty-answer");
+  SECTION("no content deltas") {
+  }
+  SECTION("empty text delta") {
+    history.add("empty", domain::AssistantContentDeltaAdded{
+                             id<domain::MessageId>("empty-answer"),
+                             id<domain::InferenceId>("empty-answer-inference"),
+                             domain::TextBlock{""}});
+  }
+  SECTION("mismatched completion remains invalid") {
+    history.assistant_finish("empty", "wrong-answer");
+    history.add("empty", domain::RunCompleted{});
+    CHECK(error({history.log}) == Code::invalid_history);
+    return;
+  }
+  history.assistant_finish("empty", "empty-answer");
+  history.add("empty", domain::RunCompleted{});
+  history.complete("later");
+  const auto result = runtime::reconstruct_conversation_history({history.log});
+  REQUIRE(result);
+  REQUIRE(result->size() == 2);
+  REQUIRE(result->front().entries.size() == 1);
+  CHECK(result->front().entries.front().content.message.role ==
+        domain::Role::user);
+  CHECK(result->front().entries.front().completed_event_id ==
+        history.log.events()[1].metadata.event_id);
+  CHECK(result->back().entries.size() == 2);
+}
