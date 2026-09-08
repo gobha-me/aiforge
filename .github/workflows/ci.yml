@@ -58,9 +58,9 @@ jobs:
   build-and-test:
     name: ${{ matrix.compiler }}
     runs-on: ubuntu-24.04
-    # Full dependency-consumption rebuilds can finish near 45 minutes; retain
-    # time for the exact-SHA evidence uploads and runner cleanup.
-    timeout-minutes: 60
+    # The expanded suite and full dependency-consumption rebuilds can exceed
+    # one hour with GCC; retain time for exact-SHA evidence and runner cleanup.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
