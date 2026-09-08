@@ -71,6 +71,7 @@ enum class ConversationSelectionDecision {
   admitted_recent,
   omitted_capacity,
   omitted_older,
+  omitted_summary,
 };
 
 struct ConversationSelectionDecisionRecord {

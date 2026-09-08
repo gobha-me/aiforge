@@ -16,9 +16,10 @@ struct ConversationContextRequest {
   const domain::SessionEventLog& log;
   domain::ModelId model_id;
   domain::ContextCapacity capacity;
+  // Required input and memory only; active summary estimates are added here.
   std::uint64_t mandatory_input_tokens{};
-  // Selected entries follow already admitted memory/evidence in the content
-  // order. Only selected entries are renumbered; durable source IDs stay fixed.
+  // Summary evidence then selected history follow already admitted memory.
+  // The legacy field name denotes the first order available to this binder.
   std::uint64_t first_history_order{1};
   ConversationHistoryLimits history_limits;
   ConversationSelectionLimits selection_limits;
@@ -27,6 +28,7 @@ struct ConversationContextRequest {
 struct PreparedConversationContext {
   ConversationSelectionResult selection;
   domain::ConversationAdmission admission;
+  std::vector<domain::ContextContentInput> summary_content{};
   auto operator==(const PreparedConversationContext&) const -> bool = default;
 };
 

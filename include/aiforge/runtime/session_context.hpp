@@ -57,10 +57,11 @@ struct SessionContextError {
 };
 
 // Reserves pins in rolling mode, or all history in full mode, before selecting
-// scoped memory. Remaining capacity admits a contiguous newest history suffix.
-// The final content order is memory, history, then required content. Both
-// manifests are sealed against those orders, and ContextBuilder validates the
-// merged input. No history/policy events or provider requests are produced.
+// scoped memory. Active rolling summaries are mandatory before that budget.
+// Remaining capacity admits a contiguous newest history suffix.
+// The final content order is memory, summaries, history, then required content.
+// Both manifests are sealed against those orders, and ContextBuilder validates
+// the merged input. No history/policy events or provider requests are produced.
 [[nodiscard]] auto prepare_session_context(const SessionContextRequest& request,
                                            std::stop_token stop = {})
     -> std::expected<PreparedSessionContext, SessionContextError>;

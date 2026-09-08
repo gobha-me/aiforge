@@ -208,6 +208,7 @@ auto merge(const SessionContextRequest& request, SelectedMemoryContext memory,
   auto count = std::uint64_t{request.mandatory.instructions.size()};
   for (const auto amount :
        {request.mandatory.content.size(), memory.content.size(),
+        conversation.summary_content.size(),
         conversation.selection.selected_entry_count}) {
     auto valid = add(count, amount);
     if (!valid) return std::unexpected(valid.error());
@@ -219,6 +220,8 @@ auto merge(const SessionContextRequest& request, SelectedMemoryContext memory,
   std::ranges::sort(input.content, {}, &ContextContentInput::order);
   auto required = std::move(input.content);
   input.content = std::move(memory.content);
+  for (auto& summary : conversation.summary_content)
+    input.content.push_back(std::move(summary));
   for (auto& group : conversation.selection.selected_groups)
     for (auto& entry : group.entries)
       input.content.push_back(std::move(entry.content));

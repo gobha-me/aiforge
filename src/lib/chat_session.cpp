@@ -1,6 +1,7 @@
 #include <aiforge/detail/sha256.hpp>
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/runtime/context_builder.hpp>
+#include <aiforge/runtime/conversation_summary_context.hpp>
 #include <aiforge/runtime/inference_spend.hpp>
 #include <aiforge/runtime/memory_tool.hpp>
 #include <aiforge/runtime/persona.hpp>
@@ -580,30 +581,14 @@ auto finalize_conversation_admission(domain::ConversationAdmission& admission,
   return {};
 }
 
-auto recovered_conversation_input(const domain::SessionEventLog& log,
-                                  const std::optional<domain::RunId>& run_id,
-                                  std::uint64_t suffix)
+auto append_recovered_user_input(
+    const domain::SessionEventLog& log, const domain::RunId& run_id,
+    std::vector<domain::ContextContentInput> result, std::uint64_t order)
     -> std::expected<std::vector<domain::ContextContentInput>, std::string> {
-  const auto* attributes = context_run_attributes(log, run_id);
-  if (!run_id || attributes == nullptr || !attributes->conversation_admission)
-    return detail::replayed_conversation(log, suffix);
-  auto history = runtime::recover_conversation_context(
-      log, *attributes->conversation_admission);
-  if (!history) return std::unexpected(history.error().message);
-  std::vector<domain::ContextContentInput> result;
-  std::uint64_t order{};
-  if (attributes->memory_selection)
-    for (const auto& memory : attributes->memory_selection->entries)
-      order = std::max(order, memory.order);
-  for (auto& group : *history)
-    for (auto& entry : group.entries) {
-      order = std::max(order, entry.content.order);
-      result.push_back(std::move(entry.content));
-    }
   const domain::UserContentAdded* current{};
   const domain::RunEvent* source{};
   for (const auto& event : log.events()) {
-    if (event.metadata.run_id != *run_id) continue;
+    if (event.metadata.run_id != run_id) continue;
     if (const auto* user =
             std::get_if<domain::UserContentAdded>(&event.payload)) {
       if (current != nullptr)
@@ -638,6 +623,48 @@ auto recovered_conversation_input(const domain::SessionEventLog& log,
        order + 1,
        *estimate});
   return result;
+}
+
+auto frozen_summary_content(
+    const std::optional<std::vector<domain::ContextContentInput>>& content)
+    -> const std::vector<domain::ContextContentInput>* {
+  return content ? &*content : nullptr;
+}
+
+auto recovered_conversation_input(
+    const domain::SessionEventLog& log,
+    const std::optional<domain::RunId>& run_id, std::uint64_t suffix,
+    const std::vector<domain::ContextContentInput>* frozen_summaries = nullptr)
+    -> std::expected<std::vector<domain::ContextContentInput>, std::string> {
+  const auto* attributes = context_run_attributes(log, run_id);
+  if (!run_id || attributes == nullptr || !attributes->conversation_admission)
+    return detail::replayed_conversation(log, suffix);
+  auto history = runtime::recover_conversation_context(
+      log, *attributes->conversation_admission);
+  if (!history) return std::unexpected(history.error().message);
+  std::vector<domain::ContextContentInput> result;
+  const auto& admission = *attributes->conversation_admission;
+  if (frozen_summaries != nullptr) {
+    result = *frozen_summaries;
+  } else if (admission.version == 2 &&
+             admission.mode == domain::ConversationMode::rolling) {
+    auto restored = runtime::recover_conversation_summary_context(
+        log, admission.summaries, admission.source_snapshot_sequence);
+    if (!restored) return std::unexpected(restored.error().message);
+    result = std::move(restored->content);
+  }
+  std::uint64_t order{};
+  for (const auto& summary : result)
+    order = std::max(order, summary.order);
+  if (attributes->memory_selection)
+    for (const auto& memory : attributes->memory_selection->entries)
+      order = std::max(order, memory.order);
+  for (auto& group : *history)
+    for (auto& entry : group.entries) {
+      order = std::max(order, entry.content.order);
+      result.push_back(std::move(entry.content));
+    }
+  return append_recovered_user_input(log, *run_id, std::move(result), order);
 }
 
 [[nodiscard]] auto assistant_continuation_state(
@@ -853,6 +880,8 @@ struct ChatSession::Impl {
   bool async_repository_preparation{};
   bool repository_proof_ready{};
   bool repository_recovery_pinned{};
+  std::optional<std::vector<domain::ContextContentInput>>
+      recovered_summary_context{};
 
   [[nodiscard]] auto tool_selection() const -> runtime::ToolProfileSelection {
     return {tool_profile_id, desired_tool_names,
@@ -1330,6 +1359,7 @@ auto ChatSession::validate_recovered_pending_run()
   if (m_impl->recovered_sources_pinned) return {};
   auto validated = load_recovered_pending_sources();
   if (validated) validated = validate_recovered_memory_capacity();
+  if (validated) validated = pin_recovered_summary_sources();
   if (!validated && run_id &&
       validated.error().code != ChatSessionErrorCode::cancelled) {
     m_impl->recovery_block =
@@ -1395,11 +1425,39 @@ struct RecoveryCapacityBudget {
 }
 } // namespace
 
+auto ChatSession::pin_recovered_summary_sources()
+    -> std::expected<void, ChatSessionError> {
+  if (!m_impl->recovered_pending_run_validation_required ||
+      m_impl->recovered_summary_context ||
+      (m_impl->repository_admission && !m_impl->repository_recovery_pinned))
+    return {};
+  const auto run = m_impl->kernel->active_run_id();
+  const auto* attributes =
+      context_run_attributes(m_impl->kernel->event_log(), run);
+  if (!run || attributes == nullptr || !attributes->conversation_admission)
+    return {};
+  const auto& admission = *attributes->conversation_admission;
+  if (admission.version != 2 ||
+      admission.mode != domain::ConversationMode::rolling)
+    return {};
+  auto restored = runtime::recover_conversation_summary_context(
+      m_impl->kernel->event_log(), admission.summaries,
+      admission.source_snapshot_sequence, {}, m_impl->stop_token);
+  if (!restored)
+    return error(ChatSessionErrorCode::context_failed,
+                 restored.error().message);
+  auto pinned = m_impl->kernel->pin_conversation_summaries(*run);
+  if (!pinned) return std::unexpected(kernel_error(pinned.error()));
+  m_impl->recovered_summary_context = std::move(restored->content);
+  return {};
+}
+
 auto ChatSession::validate_recovered_memory_capacity()
     -> std::expected<void, ChatSessionError> {
   if (!m_impl->recovered_pending_run_validation_required) return {};
   auto history = recovered_conversation_input(
-      m_impl->kernel->event_log(), m_impl->kernel->active_run_id(), 0);
+      m_impl->kernel->event_log(), m_impl->kernel->active_run_id(), 0,
+      frozen_summary_content(m_impl->recovered_summary_context));
   if (!history)
     return error(ChatSessionErrorCode::context_failed,
                  "original saved memory conversation cannot be reconstructed");
@@ -2297,7 +2355,8 @@ auto ChatSession::continue_if_ready()
     base = *m_impl->active_context;
   } else {
     auto history = recovered_conversation_input(
-        m_impl->kernel->event_log(), m_impl->kernel->active_run_id(), suffix);
+        m_impl->kernel->event_log(), m_impl->kernel->active_run_id(), suffix,
+        frozen_summary_content(m_impl->recovered_summary_context));
     if (!history) {
       return error(ChatSessionErrorCode::session_failed,
                    std::move(history.error()));
@@ -2529,6 +2588,8 @@ auto ChatSession::prepare_recovered_repository()
     return false;
   }
   m_impl->repository_recovery_pinned = true;
+  auto pinned = pin_recovered_summary_sources();
+  if (!pinned) return std::unexpected(pinned.error());
   return true;
 }
 
@@ -2578,6 +2639,7 @@ auto ChatSession::drain()
   if (!m_impl->kernel->active_run_id()) {
     m_impl->active_context.reset();
     m_impl->recovered_memory_context.clear();
+    m_impl->recovered_summary_context.reset();
     m_impl->recovered_sources_pinned = false;
     m_impl->recovered_pending_run_validation_required = false;
     m_impl->recovered_persona_document.reset();
@@ -2615,6 +2677,7 @@ auto ChatSession::cancel_active(std::optional<std::string> reason)
   }
   m_impl->active_context.reset();
   m_impl->recovered_memory_context.clear();
+  m_impl->recovered_summary_context.reset();
   m_impl->recovered_sources_pinned = false;
   m_impl->recovered_pending_run_validation_required = false;
   m_impl->recovered_persona_document.reset();

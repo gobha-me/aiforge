@@ -357,6 +357,8 @@ class ChatSession final {
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto load_recovered_memory()
       -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto pin_recovered_summary_sources()
+      -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto validate_recovered_memory_capacity()
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto load_recovered_pending_sources()
