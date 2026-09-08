@@ -40,6 +40,9 @@ add_library(${PROJECT_NAME}_lib STATIC
   inference_spend.cpp
   json_config_file_store.cpp
   language_analysis.cpp
+  local_context.cpp
+  local_context_controller.cpp
+  local_context_history.cpp
   local_source.cpp
   local_source_worker.cpp
   model_catalog.cpp

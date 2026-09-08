@@ -2,6 +2,7 @@
 
 #include <aiforge/backend/backend.hpp>
 #include <aiforge/domain/event_log.hpp>
+#include <aiforge/domain/local_context.hpp>
 #include <aiforge/domain/plan_projection.hpp>
 #include <aiforge/domain/project_backlog_projection.hpp>
 #include <aiforge/domain/run_projection.hpp>
@@ -89,6 +90,11 @@ struct RecoverableRun {
     -> std::expected<std::optional<domain::RepositoryContextAdmission>,
                      RunKernelError>;
 
+[[nodiscard]] auto recorded_local_context_admission(
+    const domain::SessionEventLog& event_log, const domain::RunId& run_id)
+    -> std::expected<std::optional<domain::LocalContextAdmission>,
+                     RunKernelError>;
+
 struct ToolApprovalPresentationLimits {
   std::size_t maximum_tool_name_bytes{256};
   std::size_t maximum_effects{16};
@@ -140,6 +146,7 @@ struct RunStart {
   std::optional<domain::RepositoryContextAdmission> repository_admission{};
   // Required for a tool-free summary producer; committed before dispatch.
   std::optional<domain::ConversationSummaryIntent> summary_intent{};
+  std::optional<domain::LocalContextAdmission> local_admission{};
   auto operator==(const RunStart&) const -> bool = default;
 };
 
@@ -435,6 +442,8 @@ class RunKernel final {
       std::optional<domain::PricingObservation> pricing_observation =
           std::nullopt,
       std::optional<domain::RepositoryContextAdmission> repository_admission =
+          std::nullopt,
+      std::optional<domain::LocalContextAdmission> local_admission =
           std::nullopt) -> std::expected<void, RunKernelError>;
 
   // Drain worker observations and apply their run events on the calling

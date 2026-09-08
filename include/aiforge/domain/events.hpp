@@ -6,6 +6,7 @@
 #include <aiforge/domain/conversation_admission.hpp>
 #include <aiforge/domain/conversation_summary.hpp>
 #include <aiforge/domain/events_fwd.hpp>
+#include <aiforge/domain/local_context.hpp>
 #include <aiforge/domain/memory.hpp>
 #include <aiforge/domain/money.hpp>
 #include <aiforge/domain/persona.hpp>
@@ -40,6 +41,9 @@ struct RunStarted {
   std::optional<MemorySelection> memory_selection{};
   RunPurpose purpose{RunPurpose::conversation};
   std::optional<ConversationAdmission> conversation_admission{};
+  // Schema 5 records true explicitly, so losing the separate initial local
+  // proof cannot masquerade as a legacy run without local evidence.
+  bool local_context_admission_required{false};
   auto operator==(const RunStarted&) const -> bool = default;
 };
 
@@ -169,6 +173,14 @@ struct RepositoryContextAdmitted {
   InferenceId inference_id;
   RepositoryContextAdmission admission;
   auto operator==(const RepositoryContextAdmitted&) const -> bool = default;
+};
+
+// Ordinary-file proof for the following inference, before an optional adjacent
+// repository proof. It never grants filesystem authority by itself.
+struct LocalContextAdmitted {
+  InferenceId inference_id;
+  LocalContextAdmission admission;
+  auto operator==(const LocalContextAdmitted&) const -> bool = default;
 };
 
 struct InferencePricingObserved {
@@ -628,22 +640,22 @@ using RunEventPayload = std::variant<
     RunCompletionRequested, RunCompleted, RunFailed, RunCancelRequested,
     RunCancelled, UserContentAdded, AssistantContentStarted,
     AssistantContentDeltaAdded, AssistantContentFinished, InferenceStarted,
-    RepositoryContextAdmitted, InferencePricingObserved, ReasoningMetadataAdded,
-    UsageRecorded, InferenceCostRecorded, InferenceFinished, InferenceFailed,
-    InferenceCancelled, ToolProposed, ToolPolicyDecided, ToolApprovalRequested,
-    ToolApprovalDecided, ToolPolicyFailed, ToolSpendReserved, ToolStarted,
-    ToolProgressed, ToolSpendReleased, ToolSpendFinalized,
-    ToolSpendReconciliationRequired, ToolResultRecorded, ToolErrored,
-    QuestionRequested, QuestionAnswered, QuestionCancelled, ArtifactCreated,
-    ArtifactReferenced, ArtifactDisplayed, ArtifactRemovedFromView,
-    VideoGenerationRequested, VideoQuoteObserved, VideoJobQueued,
-    VideoJobStatusObserved, VideoArtifactPublished, VideoCleanupPending,
-    VideoCleanupCompleted, VideoCleanupFailed, VideoTranscriptionRequested,
-    VideoTranscriptionObserved, VerificationEvidenceRecorded,
-    ReviewReceiptDrafted, ReviewRequested, ReviewFindingOpened,
-    ReviewFindingResolved, ReviewVerdictRecorded, ReviewVerdictRevoked,
-    ReviewOverrideRecorded, ReviewOverrideRevoked, PlanRevisionProposed,
-    PlanRevisionDecisionRecorded, PlanRevisionInvalidated,
+    RepositoryContextAdmitted, LocalContextAdmitted, InferencePricingObserved,
+    ReasoningMetadataAdded, UsageRecorded, InferenceCostRecorded,
+    InferenceFinished, InferenceFailed, InferenceCancelled, ToolProposed,
+    ToolPolicyDecided, ToolApprovalRequested, ToolApprovalDecided,
+    ToolPolicyFailed, ToolSpendReserved, ToolStarted, ToolProgressed,
+    ToolSpendReleased, ToolSpendFinalized, ToolSpendReconciliationRequired,
+    ToolResultRecorded, ToolErrored, QuestionRequested, QuestionAnswered,
+    QuestionCancelled, ArtifactCreated, ArtifactReferenced, ArtifactDisplayed,
+    ArtifactRemovedFromView, VideoGenerationRequested, VideoQuoteObserved,
+    VideoJobQueued, VideoJobStatusObserved, VideoArtifactPublished,
+    VideoCleanupPending, VideoCleanupCompleted, VideoCleanupFailed,
+    VideoTranscriptionRequested, VideoTranscriptionObserved,
+    VerificationEvidenceRecorded, ReviewReceiptDrafted, ReviewRequested,
+    ReviewFindingOpened, ReviewFindingResolved, ReviewVerdictRecorded,
+    ReviewVerdictRevoked, ReviewOverrideRecorded, ReviewOverrideRevoked,
+    PlanRevisionProposed, PlanRevisionDecisionRecorded, PlanRevisionInvalidated,
     SessionTasksMaterialized, ChildRunCreated, SessionTaskResultRecorded,
     ProjectBacklogItemPromoted, ProjectBacklogItemStatusChanged, MemoryProposed,
     MemoryPolicyDecided, MemoryAccepted, MemoryEditedAndAccepted,
