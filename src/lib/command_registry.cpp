@@ -799,6 +799,32 @@ auto agent_handler(CommandContext& context) -> int {
       context);
 }
 
+auto context_handler(CommandContext& context) -> int {
+  const auto session =
+      parsed_text_values(context.invocation, "context.session");
+  const auto model = parsed_text_values(context.invocation, "context.model");
+  if (parsed_argument(context.invocation, "context.jsonl") == nullptr ||
+      context.environment.input_is_terminal || !session || !model ||
+      session->size() != 1 || model->size() != 1) {
+    context.error
+        << "aiforge: context requires --jsonl, --session, --model and "
+           "noninteractive standard input\n";
+    return usage_exit_code;
+  }
+  auto session_id = domain::SessionId::from(std::string{session->front()});
+  auto model_id = domain::ModelId::from(std::string{model->front()});
+  if (!session_id || !model_id) {
+    context.error << "aiforge: invalid context session or model identity\n";
+    return usage_exit_code;
+  }
+  if (context.environment.context == nullptr)
+    return unavailable_handler(context);
+  return command_result(context.environment.context->execute(
+                            {std::move(*session_id), std::move(*model_id)},
+                            context.environment, context.output, context.error),
+                        context);
+}
+
 auto plan_handler(CommandContext& context) -> int {
   const auto resume =
       parsed_text_values(context.invocation, "plan.session.resume");
@@ -1581,6 +1607,23 @@ auto builtin_command_registry() -> const CommandRegistry& {
          {},
          {},
          login_handler},
+        {"context",
+         "context",
+         "Inspect and explicitly manage conversation context through JSON "
+         "Lines.",
+         false,
+         {{{"context.jsonl", {"--jsonl"}, ArgumentValueKind::flag, 0, 1},
+           {},
+           "Use the persistent context control protocol."},
+          {{"context.session", {"--session"}, ArgumentValueKind::text, 0, 1},
+           "session-id",
+           "Open an exact durable session."},
+          {{"context.model", {"--model"}, ArgumentValueKind::text, 0, 1},
+           "model-id",
+           "Select the model used to calculate context capacity."}},
+         {},
+         {},
+         context_handler},
         {"agent",
          "agent",
          "Run bounded tools noninteractively through JSON Lines.",

@@ -1,0 +1,5 @@
+if (NOT TARGET ${PROJECT_NAME}::adapters)
+  return()
+endif ()
+add_executable(147contextprotocol-test ../main.cpp test.cpp transport.cpp)
+target_link_libraries(147contextprotocol-test PRIVATE Catch2::Catch2 aiforge::adapters nlohmann_json::nlohmann_json)

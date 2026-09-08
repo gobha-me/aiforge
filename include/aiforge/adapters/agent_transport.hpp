@@ -9,6 +9,11 @@
 #include <aiforge/surfaces/agent.hpp>
 
 namespace aiforge::adapters {
+enum class TransportLineState { idle, line, end };
+struct TransportLine {
+  TransportLineState state{TransportLineState::idle};
+  std::string text;
+};
 
 // Borrows descriptors. The caller owns SIGPIPE handling and must keep the
 // descriptors open, with no concurrent flag mutations, until destruction.
@@ -24,6 +29,10 @@ class AgentTransport final : public surfaces::AgentRecordSink {
 
   [[nodiscard]] auto read_request()
       -> std::expected<std::string, surfaces::AgentError>;
+  // Additive JSONL mode: consumes at most one bounded chunk and waits at most
+  // 20ms. Idle is distinct from EOF. Cannot be mixed with read_request().
+  [[nodiscard]] auto poll_line()
+      -> std::expected<TransportLine, surfaces::AgentError>;
   [[nodiscard]] auto write_record(std::string_view record)
       -> std::expected<void, surfaces::AgentError> override;
 

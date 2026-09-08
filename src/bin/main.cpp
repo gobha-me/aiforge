@@ -11,6 +11,7 @@
 #ifdef AIFORGE_HAS_ADAPTERS
 #include <aiforge/adapters/process_agent.hpp>
 #include <aiforge/adapters/process_audio.hpp>
+#include <aiforge/adapters/process_context.hpp>
 #include <aiforge/adapters/process_image.hpp>
 #include <aiforge/adapters/process_interactive.hpp>
 #include <aiforge/adapters/process_login.hpp>
@@ -78,12 +79,14 @@ auto main(const int argc, char* argv[]) -> int {
   aiforge::adapters::ProcessModelsCommand models;
   aiforge::adapters::ProcessPlanCommand plan;
   aiforge::adapters::ProcessAgentCommand agent;
+  aiforge::adapters::ProcessContextCommand context;
   aiforge::cli::OneShotCommand* one_shot_service = &one_shot;
   aiforge::cli::InteractiveCommand* interactive_service = &interactive;
   aiforge::cli::ModelsCommand* models_service = &models;
   aiforge::cli::LoginCommand* login_service = &login;
   aiforge::cli::PlanCommand* plan_service = &plan;
   aiforge::cli::AgentCommand* agent_service = &agent;
+  aiforge::cli::ContextCommand* context_service = &context;
   aiforge::cli::ImageCommand* image_service = &image;
   aiforge::cli::AudioCommand* audio_service = &audio;
   aiforge::cli::VideoCommand* video_service = &video;
@@ -94,6 +97,7 @@ auto main(const int argc, char* argv[]) -> int {
   aiforge::cli::LoginCommand* login_service = nullptr;
   aiforge::cli::PlanCommand* plan_service = nullptr;
   aiforge::cli::AgentCommand* agent_service = nullptr;
+  aiforge::cli::ContextCommand* context_service = nullptr;
   aiforge::cli::ImageCommand* image_service = nullptr;
   aiforge::cli::AudioCommand* audio_service = nullptr;
   aiforge::cli::VideoCommand* video_service = nullptr;
@@ -130,6 +134,7 @@ auto main(const int argc, char* argv[]) -> int {
                                                video_service,
                                                agent_service};
 #endif
+  environment.context = context_service;
   const auto result =
       aiforge::cli::run_cli(arguments, environment, std::cout, std::cerr);
   signal_watcher.request_stop();
