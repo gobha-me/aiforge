@@ -27,7 +27,12 @@ history projection uses one completed source run per group, including all
 eligible messages and complete tool exchanges. Failed/cancelled runs retain
 their complete user input as a user-only group; incomplete assistant/tool
 exchanges are excluded. Live runs and summary-producing or policy-control runs
-do not become ordinary historical groups. Groups follow their first source
+do not become ordinary historical groups, even when they contain user and
+assistant messages. Successful empty assistant answers retain the user input as
+legacy replay did. If an empty final answer follows complete tool exchanges,
+the group may end with the last matched tool result; preserving those exchanges
+does not require inventing assistant text. Unresolved calls still reject the
+group. Groups follow their first source
 sequence, while entries retain provider message order. A tool validation error
 can be recorded before the assistant's completion event; its tool message still
 follows that assistant's tool call. Source completion sequences are positive and

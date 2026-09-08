@@ -37,11 +37,13 @@ struct HistoryLog {
                     std::move(payload)}));
   }
 
-  auto start(const std::string& run) -> void {
+  auto start(const std::string& run,
+             domain::RunPurpose purpose = domain::RunPurpose::conversation)
+      -> void {
     add(run, domain::RunStarted{id<domain::SurfaceId>("chat"),
                                 id<domain::WorkspaceId>("workspace"),
                                 id<domain::PermissionProfileId>("observe"),
-                                std::nullopt});
+                                std::nullopt, std::nullopt, purpose});
   }
 
   auto user(const std::string& run, std::string text = "question") -> void {
@@ -82,8 +84,10 @@ struct HistoryLog {
     assistant_finish(run, suffix);
   }
 
-  auto complete(const std::string& run) -> void {
-    start(run);
+  auto complete(const std::string& run,
+                domain::RunPurpose purpose = domain::RunPurpose::conversation)
+      -> void {
+    start(run, purpose);
     user(run);
     answer(run, run + "-answer");
     add(run, domain::RunCompleted{});
@@ -468,6 +472,12 @@ TEST_CASE("empty histories require no projection or source budget",
 TEST_CASE("kernel validation errors keep provider order and actual completed "
           "event provenance",
           "[conversationhistory][kernel]") {
+  std::string final_text{"invalid arguments explained"};
+  SECTION("visible final answer") {
+  }
+  SECTION("empty final answer preserves complete tool evidence") {
+    final_text.clear();
+  }
   runtime::ToolRegistry registry;
   REQUIRE(registry.register_tool(
       {"read",
@@ -494,9 +504,9 @@ TEST_CASE("kernel validation errors keep provider order and actual completed "
        {final,
         testing::StreamScript{
             {backend::BackendEvent{backend::ResponseStarted{"response-two"}},
-             backend::BackendEvent{backend::ContentDelta{
-                 id<domain::MessageId>("final-assistant"),
-                 domain::TextBlock{"invalid arguments explained"}}},
+             backend::BackendEvent{
+                 backend::ContentDelta{id<domain::MessageId>("final-assistant"),
+                                       domain::TextBlock{final_text}}},
              backend::BackendEvent{
                  backend::ResponseFinished{domain::FinishReason::stop}},
              testing::EndOfStream{}}}}}};
@@ -523,7 +533,7 @@ TEST_CASE("kernel validation errors keep provider order and actual completed "
   REQUIRE(result);
   REQUIRE(result->size() == 1);
   const auto& entries = result->front().entries;
-  REQUIRE(entries.size() == 4);
+  REQUIRE(entries.size() == (final_text.empty() ? 3 : 4));
   CHECK(entries[1].content.message.role == domain::Role::assistant);
   CHECK(entries[2].content.message.role == domain::Role::tool);
   CHECK(entries[1].event_sequence > entries[2].event_sequence);
@@ -663,4 +673,20 @@ TEST_CASE("successful empty answers preserve user input without weakening "
   CHECK(result->front().entries.front().completed_event_id ==
         history.log.events()[1].metadata.event_id);
   CHECK(result->back().entries.size() == 2);
+}
+
+TEST_CASE("typed summary and control producers never become ordinary "
+          "conversation history",
+          "[conversationhistory]") {
+  HistoryLog history;
+  history.complete("keep");
+  history.complete("summary-producer", domain::RunPurpose::summary);
+  history.complete("control-producer", domain::RunPurpose::control);
+  history.complete("summary-word-in-conversation-name");
+  const auto result = runtime::reconstruct_conversation_history({history.log});
+  REQUIRE(result);
+  REQUIRE(result->size() == 2);
+  CHECK(result->front().run_id == id<domain::RunId>("keep"));
+  CHECK(result->back().run_id ==
+        id<domain::RunId>("summary-word-in-conversation-name"));
 }

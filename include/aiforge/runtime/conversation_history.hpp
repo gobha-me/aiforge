@@ -31,8 +31,9 @@ struct ConversationHistoryLimits {
 
 struct ConversationHistoryRequest {
   const domain::SessionEventLog& log;
-  // Caller supplies active, summary and control runs. Typed child runs and
-  // nonterminal runs are also excluded; prompts/surface names are never read.
+  // Additional caller exclusions, such as the active run. Typed child,
+  // control, summary and nonterminal runs are automatically excluded;
+  // prompts/surface names are never read.
   std::vector<domain::RunId> excluded_run_ids;
   std::uint32_t estimator_version{conversation_estimator_version};
   ConversationHistoryLimits limits;

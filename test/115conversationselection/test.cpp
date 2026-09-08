@@ -266,7 +266,8 @@ TEST_CASE("conversation selection rejects split or unmatched tool exchanges",
     REQUIRE(error(value) == Code::duplicate_identity);
     return;
   }
-  SECTION("missing final response") {
+  SECTION("missing final result and response") {
+    value.groups[0].entries.pop_back();
     value.groups[0].entries.pop_back();
   }
   SECTION("user tool call") {
@@ -278,6 +279,18 @@ TEST_CASE("conversation selection rejects split or unmatched tool exchanges",
         domain::ContextContentKind::conversation;
   }
   REQUIRE(error(value) == Code::invalid_group);
+}
+
+TEST_CASE("completed source groups may end with fully matched tool results",
+          "[conversationselection]") {
+  auto value = request(20);
+  value.groups = {tool_group()};
+  value.groups[0].entries.pop_back();
+  const auto selected = runtime::select_conversation(value);
+  REQUIRE(selected);
+  CHECK(selected->selected_groups == value.groups);
+  CHECK(selected->selected_entry_count == 4);
+  CHECK(selected->selected_history_tokens == 20);
 }
 
 TEST_CASE("conversation selection cancellation leaves immutable input intact",

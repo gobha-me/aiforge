@@ -126,7 +126,7 @@ enum class Terminal { none, completed, failed };
 struct RunIndex {
   RunId run_id;
   std::vector<const RunEvent*> events;
-  bool child{};
+  bool excluded{};
 };
 
 auto index_runs(const ConversationHistoryRequest& request, std::stop_token stop)
@@ -156,8 +156,11 @@ auto index_runs(const ConversationHistoryRequest& request, std::stop_token stop)
     }
     auto& run = result[found->second];
     run.events.push_back(&event);
-    run.child = run.child || event.metadata.parent_run_id.has_value() ||
-                std::holds_alternative<ChildRunCreated>(event.payload);
+    run.excluded = run.excluded || event.metadata.parent_run_id.has_value() ||
+                   std::holds_alternative<ChildRunCreated>(event.payload);
+    if (const auto* started = std::get_if<RunStarted>(&event.payload))
+      run.excluded =
+          run.excluded || started->purpose != RunPurpose::conversation;
   }
   return result;
 }
@@ -622,7 +625,7 @@ auto reconstruct_conversation_history(const ConversationHistoryRequest& request,
     for (const auto& run : *runs) {
       if (stop.stop_requested())
         return failure(Code::cancelled, "history cancelled");
-      if (run.child) continue;
+      if (run.excluded) continue;
       const auto sources = run_sources(run, stop);
       if (!sources) return std::unexpected(sources.error());
       if (sources->terminal == Terminal::none || sources->user == nullptr)

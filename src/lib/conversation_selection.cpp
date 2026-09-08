@@ -245,9 +245,7 @@ auto validate_group(const ConversationHistoryGroup& group,
       return failure(Code::token_overflow,
                      "conversation group estimate overflowed", group.run_id);
   }
-  if (!pending.empty() ||
-      (group.entries.size() > 1 &&
-       group.entries.back().content.message.role != Role::assistant))
+  if (!pending.empty())
     return failure(Code::invalid_group, "conversation group is incomplete",
                    group.run_id);
   if (!add_tokens(state.history_tokens, tokens))
