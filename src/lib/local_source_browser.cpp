@@ -60,6 +60,7 @@ struct LocalSourceBrowser::Impl {
   std::optional<GrantWork> granting;
   std::optional<ReadWork> reading;
   std::optional<ContextWork> preparing;
+  std::optional<runtime::RepositoryContextWorkToken> repository_work;
 
   auto next_request() -> std::expected<std::uint64_t, Error> {
     if (auto result = increment(request_id); !result)
@@ -89,6 +90,13 @@ struct LocalSourceBrowser::Impl {
     }
     preparing.reset();
     state.preparing = false;
+  }
+  auto cancel_repository() -> void {
+    if (repository_work) {
+      [[maybe_unused]] const auto cancelled = worker->cancel(*repository_work);
+    }
+    repository_work.reset();
+    state.preparing_repository = false;
   }
   auto cancel_browsing() -> void {
     if (granting) {
@@ -266,14 +274,30 @@ LocalSourceBrowser::LocalSourceBrowser(std::unique_ptr<Impl> impl)
     : m_impl(std::move(impl)) {
 }
 LocalSourceBrowser::~LocalSourceBrowser() {
-  // A context job may retain the resolver after the UI is gone. End logical
-  // authority now; the registry still owns eventual physical cleanup.
-  if (m_impl->state.session_id) {
-    [[maybe_unused]] const auto invalidated =
-        m_impl->grants->invalidate_session(*m_impl->state.session_id);
+  [[maybe_unused]] const auto ended = deactivate_session();
+}
+auto LocalSourceBrowser::deactivate_session() -> Status {
+  try {
+    if (m_impl->state.session_id) {
+      auto invalidated =
+          m_impl->grants->invalidate_session(*m_impl->state.session_id);
+      if (!invalidated) return invalidated;
+    }
+    m_impl->cancel_browsing();
+    m_impl->cancel_context();
+    m_impl->cancel_repository();
+    // Preserve the application-wide epoch and request/generation high-water
+    // marks so even reopening the same session cannot revive a late result.
+    m_impl->state.session_id.reset();
+    m_impl->state.folders.clear();
+    m_impl->state.selection.clear();
+    m_impl->state.listing.reset();
+    m_impl->state.preview.reset();
+    m_impl->state.message.clear();
+    return {};
+  } catch (...) {
+    return fail(Code::internal_failure, "Local browser deactivation failed");
   }
-  m_impl->cancel_browsing();
-  m_impl->cancel_context();
 }
 
 auto LocalSourceBrowser::create(
@@ -313,6 +337,7 @@ auto LocalSourceBrowser::activate_session(const domain::SessionId& session)
       return activated;
     m_impl->cancel_browsing();
     m_impl->cancel_context();
+    m_impl->cancel_repository();
     if (m_impl->state.session_id) {
       [[maybe_unused]] const auto invalidated =
           m_impl->worker->invalidate_session(*m_impl->state.session_id);
@@ -377,6 +402,7 @@ auto LocalSourceBrowser::remove_folder(const domain::LocalRootIdentity& root)
       return revoked;
     m_impl->cancel_browsing();
     m_impl->cancel_context();
+    m_impl->cancel_repository();
     state.folders.erase(found);
     if (state.listing && state.listing->token.root == root)
       state.listing.reset();
@@ -458,6 +484,10 @@ auto LocalSourceBrowser::poll() -> Status {
 auto LocalSourceBrowser::cancel_browsing() -> void {
   m_impl->cancel_browsing();
 }
+auto LocalSourceBrowser::pending_evidence_selection() const noexcept -> bool {
+  return m_impl->reading &&
+         m_impl->reading->purpose == Impl::ReadPurpose::selection;
+}
 auto LocalSourceBrowser::prepare_selection()
     -> std::expected<runtime::LocalContextWorkToken, Error> {
   try {
@@ -514,6 +544,75 @@ auto LocalSourceBrowser::poll_context(
 }
 auto LocalSourceBrowser::cancel_context() -> void {
   m_impl->cancel_context();
+}
+auto LocalSourceBrowser::prepare_repository(
+    const std::shared_ptr<runtime::RepositoryContextController>& controller,
+    const std::variant<runtime::RepositoryContextRequest,
+                       domain::RepositoryContextAdmission>& operation)
+    -> std::expected<runtime::RepositoryContextWorkToken, Error> {
+  try {
+    if (!m_impl->state.session_id || !controller || !controller->owns_source())
+      return fail(Code::unavailable, "Owned repository context is unavailable");
+    std::uint64_t revision{};
+    if (const auto* request =
+            std::get_if<runtime::RepositoryContextRequest>(&operation)) {
+      if (auto valid = runtime::validate_repository_context_request(*request);
+          !valid)
+        return fail(Code::invalid_request,
+                    "Repository context request is invalid");
+      revision = request->selection_revision;
+    } else {
+      const auto& admission =
+          std::get<domain::RepositoryContextAdmission>(operation);
+      if (auto valid = domain::validate_repository_context_admission(admission);
+          !valid)
+        return fail(Code::invalid_request,
+                    "Repository context admission is invalid");
+      revision = admission.selection_revision;
+    }
+    if (m_impl->repository_work)
+      return fail(Code::resource_exhausted,
+                  "Repository context is already preparing");
+    auto id = m_impl->next_request();
+    if (!id) return std::unexpected(id.error());
+    runtime::RepositoryContextWorkToken token{
+        *m_impl->state.session_id, m_impl->state.session_epoch, *id, revision};
+    auto submitted = m_impl->worker->submit(
+        controller, runtime::RepositoryContextWorkRequest{token, operation});
+    if (!submitted) return worker_error(submitted.error());
+    m_impl->repository_work = token;
+    m_impl->state.preparing_repository = true;
+    return token;
+  } catch (...) {
+    return fail(Code::internal_failure,
+                "Repository context preparation failed");
+  }
+}
+auto LocalSourceBrowser::poll_repository(
+    const runtime::RepositoryContextWorkToken& token)
+    -> std::expected<std::optional<runtime::RepositoryContextWorkCompletion>,
+                     Error> {
+  try {
+    if (!m_impl->repository_work || *m_impl->repository_work != token)
+      return fail(Code::stale_lease,
+                  "Repository context result is no longer current");
+    auto completion = m_impl->worker->poll(token);
+    if (!completion) return worker_error(completion.error());
+    if (*completion) {
+      m_impl->repository_work.reset();
+      m_impl->state.preparing_repository = false;
+    }
+    return std::move(*completion);
+  } catch (...) {
+    return fail(Code::internal_failure, "Repository context completion failed");
+  }
+}
+auto LocalSourceBrowser::cancel_repository() -> void {
+  m_impl->cancel_repository();
+}
+auto LocalSourceBrowser::repository_preparation_ready() const noexcept -> bool {
+  return m_impl->repository_work &&
+         m_impl->worker->ready_result(*m_impl->repository_work);
 }
 auto LocalSourceBrowser::state() const noexcept -> const LocalBrowserState& {
   return m_impl->state;

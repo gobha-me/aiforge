@@ -432,6 +432,15 @@ using ToolTargetValidator = auto (*)(std::string_view) -> bool;
       arguments.empty() ? std::nullopt : std::optional<std::string>{arguments}};
 }
 
+[[nodiscard]] auto local_files_handler(std::string_view arguments,
+                                       const SlashCommandContext&)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  arguments = trim_arguments(arguments);
+  return SlashCommandResult{
+      SlashCommandAction::manage_local_files,
+      arguments.empty() ? std::nullopt : std::optional<std::string>{arguments}};
+}
+
 [[nodiscard]] auto inspection_available(const SlashCommandContext&) -> bool {
   return true;
 }
@@ -444,7 +453,7 @@ using ToolTargetValidator = auto (*)(std::string_view) -> bool;
     return SlashCommandResult{dev ? SlashCommandAction::show_dev
                                   : SlashCommandAction::show_context,
                               std::nullopt};
-  if (dev && arguments == "retry")
+  if (arguments == "retry")
     return SlashCommandResult{SlashCommandAction::retry_dev_context,
                               std::nullopt};
   if (context.run_active)
@@ -556,12 +565,19 @@ using ToolTargetValidator = auto (*)(std::string_view) -> bool;
        "accept|edit|reject|expire|accept-all|reject-all ...]",
        "Inspect and manage proposed, saved, and historical memory.",
        idle_available, memory_handler},
+      {"files", "files",
+       "[folders | add-folder <absolute-path> | remove-folder <number> | open "
+       "<number> [directory] [filter] | preview/add/remove <number> <path> | "
+       "tray | clear | cancel]",
+       "Browse explicitly granted folders and select ordinary file evidence.",
+       inspection_available, local_files_handler},
       {"dev", "dev", "[target <subtree> | off | retry]",
        "Inspect Dev context or select its directory for future runs.",
        inspection_available, dev_handler},
       {"context", "context",
        "[history | mode full/rolling | pin/unpin <run-id> | summary <action> | "
-       "toolbar show/hide | add <path> | remove <selection-id> | clear]",
+       "toolbar show/hide | add <path> | remove <selection-id> | clear | "
+       "retry]",
        "Inspect conversation capacity, review summaries, or select repository "
        "evidence.",
        inspection_available, context_handler},

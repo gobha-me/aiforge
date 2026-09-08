@@ -60,6 +60,7 @@ struct ChatRepositoryWorkOutcome {
   std::vector<domain::RunEvent> events;
   bool submitted{};
   bool selection_changed{};
+  bool pending{};
 };
 struct ChatRepositoryContextState {
   bool available{};

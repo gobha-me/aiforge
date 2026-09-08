@@ -334,12 +334,13 @@ class NoDraftEditor final : public surfaces::DraftEditor {
 };
 class GatedRepositorySource final : public runtime::RepositoryContextSource {
  public:
-  explicit GatedRepositorySource(runtime::RepositoryContextSource& source)
-      : m_source(source) {}
+  explicit GatedRepositorySource(
+      std::shared_ptr<runtime::RepositoryContextSource> source)
+      : m_source(std::move(source)) {}
   std::atomic<bool> hold{};
   std::atomic<bool> entered{};
   auto identity() const noexcept -> std::string_view override {
-    return m_source.identity();
+    return m_source->identity();
   }
   auto guarantees_pinned_read_only_sources() const noexcept -> bool override {
     return true;
@@ -361,25 +362,51 @@ class GatedRepositorySource final : public runtime::RepositoryContextSource {
             repository::RepositorySnapshotErrorCode::timed_out,
             "fixture gate timed out"});
     }
-    return m_source.observe(limits, stop);
+    return m_source->observe(limits, stop);
   }
   auto discover(repository::ProjectInstructionRequest request,
                 std::stop_token stop)
       -> std::expected<domain::ProjectInstructionDiscovery,
                        repository::ProjectInstructionError> override {
-    return m_source.discover(std::move(request), stop);
+    return m_source->discover(std::move(request), stop);
   }
   auto read(repository::ExactSourceReadRequest request, std::stop_token stop)
       -> std::expected<repository::ExactSourceReadResult,
                        repository::ExactSourceEditError> override {
-    return m_source.read(std::move(request), stop);
+    return m_source->read(std::move(request), stop);
   }
 
  private:
-  runtime::RepositoryContextSource& m_source;
+  std::shared_ptr<runtime::RepositoryContextSource> m_source;
   std::mutex m_mutex;
   std::condition_variable_any m_condition;
 };
+
+auto owned_source(const RepositoryFixture& fixture)
+    -> std::shared_ptr<runtime::RepositoryContextSource> {
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  do {
+    auto opened = adapters::open_owned_pinned_repository_sources(
+        fixture.repository.path, open_test_source());
+    if (opened) return std::move(opened->context);
+    // Only the bounded reclaimer's temporary capacity refusal is retryable.
+    REQUIRE(opened.error().code ==
+            runtime::AutomaticApprovalMatcherErrorCode::path_unavailable);
+    REQUIRE(opened.error().message ==
+            "Repository source retirement capacity remains occupied");
+    std::this_thread::sleep_for(1ms);
+  } while (std::chrono::steady_clock::now() < deadline);
+  FAIL("Repository source retirement did not release capacity");
+  return {};
+}
+auto owned_controller(std::shared_ptr<runtime::RepositoryContextSource> source,
+                      const RepositoryFixture& fixture)
+    -> std::shared_ptr<runtime::RepositoryContextController> {
+  auto made = runtime::RepositoryContextController::create_owned(
+      std::move(source), fixture.authority->baseline().root);
+  REQUIRE(made);
+  return std::move(*made);
+}
 
 auto key_event(termforge::Key key, char32_t ch = 0, bool ctrl = false)
     -> termforge::KeyEvent {
@@ -410,12 +437,14 @@ auto rendered(adapters::InteractiveChatApp& app) -> std::string {
   }
   return text;
 }
-auto surface(SurfaceBackend& backend, NoDraftEditor& editor,
-             runtime::RepositoryContextController& controller, std::string root,
-             std::stop_token stop = {})
+auto surface(
+    SurfaceBackend& backend, NoDraftEditor& editor,
+    const std::shared_ptr<runtime::RepositoryContextController>& controller,
+    std::string root, std::stop_token stop = {})
     -> std::unique_ptr<adapters::InteractiveChatApp> {
   adapters::InteractiveChatAppOptions options;
-  options.session_dependencies.repository_context_controller = &controller;
+  options.session_dependencies.repository_context_controller = controller.get();
+  options.owned_repository_context_controller = controller;
   options.session_dependencies.async_repository_preparation = true;
   options.repository_root_display = std::move(root);
   options.live_wake_enabled = false;
@@ -434,16 +463,15 @@ TEST_CASE(
     "Dev surface cancels preparation and rejects late results without spending",
     "[dev][surface][failure]") {
   RepositoryFixture fixture;
-  GatedRepositorySource source{*fixture.source};
-  source.hold = true;
-  runtime::RepositoryContextController controller{
-      source, fixture.authority->baseline().root};
+  auto source = std::make_shared<GatedRepositorySource>(owned_source(fixture));
+  source->hold = true;
+  auto controller = owned_controller(source, fixture);
   SurfaceBackend backend;
   NoDraftEditor editor;
   auto app =
       surface(backend, editor, controller, fixture.repository.path.string());
   command(*app, "/dev target src");
-  REQUIRE(drive_until(*app, [&] { return source.entered.load(); }));
+  REQUIRE(drive_until(*app, [&] { return source->entered.load(); }));
   CHECK(backend.requests.empty());
   app->on_event(key_event(termforge::Key::F10));
   app->on_event(key_event(termforge::Key::Enter));
@@ -477,8 +505,7 @@ TEST_CASE(
     "Dev surface prepares target and exact evidence before ordinary submit",
     "[dev][surface]") {
   RepositoryFixture fixture;
-  runtime::RepositoryContextController controller{
-      *fixture.source, fixture.authority->baseline().root};
+  auto controller = owned_controller(owned_source(fixture), fixture);
   SurfaceBackend backend;
   NoDraftEditor editor;
   auto app =
@@ -537,20 +564,19 @@ TEST_CASE(
   CHECK_FALSE(app->failure_state());
 }
 
-TEST_CASE(
-    "Dev surface destruction cancels a blocked source and joins its worker",
-    "[dev][surface][failure]") {
+TEST_CASE("Dev surface destruction cancels a blocked source without joining "
+          "its worker",
+          "[dev][surface][failure]") {
   RepositoryFixture fixture;
-  GatedRepositorySource source{*fixture.source};
-  source.hold = true;
-  runtime::RepositoryContextController controller{
-      source, fixture.authority->baseline().root};
+  auto source = std::make_shared<GatedRepositorySource>(owned_source(fixture));
+  source->hold = true;
+  auto controller = owned_controller(source, fixture);
   SurfaceBackend backend;
   NoDraftEditor editor;
   auto app =
       surface(backend, editor, controller, fixture.repository.path.string());
   command(*app, "/dev target src");
-  REQUIRE(drive_until(*app, [&] { return source.entered.load(); }));
+  REQUIRE(drive_until(*app, [&] { return source->entered.load(); }));
   termforge::Screen tiny{1, 1};
   app->on_render(tiny);
   const auto before = std::chrono::steady_clock::now();
@@ -563,8 +589,7 @@ TEST_CASE(
     "Dev surface cancellation wins over a queued successful submit preparation",
     "[dev][surface][failure]") {
   RepositoryFixture fixture;
-  runtime::RepositoryContextController controller{
-      *fixture.source, fixture.authority->baseline().root};
+  auto controller = owned_controller(owned_source(fixture), fixture);
   SurfaceBackend backend;
   NoDraftEditor editor;
   std::stop_source stop;

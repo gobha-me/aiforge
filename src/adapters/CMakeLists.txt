@@ -15,6 +15,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   json_model_catalog_cache.cpp
   linux_process_launcher.cpp
   local_file_source.cpp
+  local_source_browser_dialog.cpp
   model_picker_dialog.cpp
   persona_editor_dialog.cpp
   pinned_repository_root_authority.cpp

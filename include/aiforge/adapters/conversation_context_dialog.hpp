@@ -15,11 +15,23 @@ namespace aiforge::adapters {
 class ConversationContextDialog final : public termforge::Dialog {
  public:
   explicit ConversationContextDialog(surfaces::ChatSession& session,
-                                     std::function<std::string()> draft);
+                                     std::function<std::string()> draft,
+                                     bool async_preparation = false);
   [[nodiscard]] auto execute(const surfaces::ConversationCommand& command)
       -> std::expected<void, surfaces::ChatSessionError>;
+  // Production uses asynchronous preparation. The default only preserves
+  // no-filesystem standalone callers; Chat still enforces source preparation.
+  [[nodiscard]] auto complete_evidence_work(
+      surfaces::ChatEvidenceOutcome outcome)
+      -> std::expected<bool, surfaces::ChatSessionError>;
+  [[nodiscard]] auto fail_evidence_work(
+      const surfaces::ChatEvidenceWorkToken& token,
+      const surfaces::ChatSessionError& error) -> bool;
+  [[nodiscard]] auto pending_evidence_work() const
+      -> std::optional<surfaces::ChatEvidenceWorkToken>;
   auto on_toolbar(std::function<void(bool)> callback) -> void;
   auto on_repository(std::function<void()> callback) -> void;
+  auto on_files(std::function<void()> callback) -> void;
   auto on_committed(std::function<void(std::vector<domain::RunEvent>)> callback)
       -> void;
   auto invalidate_review() -> void;
@@ -65,6 +77,29 @@ class ConversationContextDialog final : public termforge::Dialog {
   [[nodiscard]] auto disable(const domain::ConversationSummaryId& id)
       -> std::expected<void, surfaces::ChatSessionError>;
   auto choose_sources(bool pin) -> void;
+  auto choose_source_groups(
+      std::vector<surfaces::ChatConversationGroupInspection> groups, bool pin)
+      -> void;
+  auto show_inspection(
+      const surfaces::ChatConversationContextInspection& inspected) -> void;
+  auto show_preview(surfaces::ChatSummaryPreview prepared,
+                    const domain::ConversationSummaryCandidate& candidate,
+                    std::string draft) -> void;
+  [[nodiscard]] auto begin_evidence_work(std::string draft)
+      -> std::expected<void, surfaces::ChatSessionError>;
+  auto cancel_pending_evidence() -> void;
+  struct PendingEvidence {
+    surfaces::ChatEvidenceWorkToken token;
+    std::string draft;
+    std::optional<domain::ConversationSummaryCandidate> candidate;
+    std::optional<bool> choose_sources;
+  };
+  [[nodiscard]] auto finish_evidence_work(surfaces::ChatEvidenceOutcome outcome,
+                                          PendingEvidence pending)
+      -> std::expected<void, surfaces::ChatSessionError>;
+  bool m_async_preparation{};
+  std::optional<PendingEvidence> m_pending_evidence;
+
   auto choose_summary(unsigned action) -> void;
   auto choose_replacements(domain::ConversationSummaryId id) -> void;
   auto choose(termforge::ChoiceWizardPage page,
@@ -77,6 +112,7 @@ class ConversationContextDialog final : public termforge::Dialog {
   std::function<std::string()> m_draft;
   std::function<void(bool)> m_toolbar;
   std::function<void()> m_repository;
+  std::function<void()> m_files;
   std::function<void(std::vector<domain::RunEvent>)> m_committed;
   termforge::MenuBar m_menu;
   termforge::TextBox m_text;
