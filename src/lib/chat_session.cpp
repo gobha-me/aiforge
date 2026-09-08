@@ -586,12 +586,13 @@ auto recovered_conversation_input(const domain::SessionEventLog& log,
       log, *attributes->conversation_admission);
   if (!history) return std::unexpected(history.error().message);
   std::vector<domain::ContextContentInput> result;
-  std::uint64_t order = attributes->memory_selection
-                            ? attributes->memory_selection->entries.size()
-                            : 0;
+  std::uint64_t order{};
+  if (attributes->memory_selection)
+    for (const auto& memory : attributes->memory_selection->entries)
+      order = std::max(order, memory.order);
   for (auto& group : *history)
     for (auto& entry : group.entries) {
-      order = entry.content.order;
+      order = std::max(order, entry.content.order);
       result.push_back(std::move(entry.content));
     }
   const domain::UserContentAdded* current{};
@@ -1401,9 +1402,9 @@ auto ChatSession::validate_recovered_memory_capacity()
   if (tools == nullptr)
     return error(ChatSessionErrorCode::context_failed,
                  "original saved memory tool context is unavailable");
-  auto declarations = tool_declaration_tokens(
-      *tools, legacy_context(m_impl->kernel->event_log(),
-                             m_impl->kernel->active_run_id()));
+  const bool legacy = legacy_context(m_impl->kernel->event_log(),
+                                     m_impl->kernel->active_run_id());
+  auto declarations = tool_declaration_tokens(*tools, legacy);
   if (!declarations) return std::unexpected(declarations.error());
   const auto* attributes = context_run_attributes(
       m_impl->kernel->event_log(), m_impl->kernel->active_run_id());
@@ -1434,7 +1435,7 @@ auto ChatSession::validate_recovered_memory_capacity()
   if (!repository_fits) return repository_fits;
   auto count = history->size();
   for (const auto& memory : m_impl->recovered_memory_context) {
-    if (memory.order == 0 || memory.order > count + 1)
+    if (memory.order == 0 || (legacy && memory.order > count + 1))
       return error(
           ChatSessionErrorCode::context_failed,
           "original saved memory admission order cannot be reconstructed");
@@ -2282,6 +2283,12 @@ auto ChatSession::continue_if_ready()
       m_impl->kernel->pending_question_input()) {
     return std::vector<domain::RunEvent>{};
   }
+  const auto* projection = m_impl->kernel->projection(*run_id);
+  if (projection != nullptr &&
+      (projection->status() == domain::RunStatus::completed ||
+       projection->status() == domain::RunStatus::failed ||
+       projection->status() == domain::RunStatus::cancelled))
+    return std::vector<domain::RunEvent>{};
   if (auto validated = validate_recovered_pending_run(); !validated) {
     return std::unexpected(std::move(validated.error()));
   }
@@ -2375,16 +2382,24 @@ auto ChatSession::continue_if_ready()
       }
     }
     for (const auto& memory : m_impl->recovered_memory_context) {
-      if (memory.order == 0 || memory.order > base.content.size() + 1)
+      if (memory.order == 0 ||
+          (legacy && memory.order > base.content.size() + 1))
         return error(
             ChatSessionErrorCode::context_failed,
             "original saved memory admission order cannot be reconstructed");
-      base.content.insert(base.content.begin() +
-                              static_cast<std::ptrdiff_t>(memory.order - 1),
-                          memory);
+      if (legacy)
+        base.content.insert(base.content.begin() +
+                                static_cast<std::ptrdiff_t>(memory.order - 1),
+                            memory);
+      else
+        base.content.push_back(memory);
     }
-    for (std::size_t index{}; index < base.content.size(); ++index)
-      base.content[index].order = index + 1;
+    if (legacy) {
+      for (std::size_t index{}; index < base.content.size(); ++index)
+        base.content[index].order = index + 1;
+    } else {
+      std::ranges::sort(base.content, {}, &domain::ContextContentInput::order);
+    }
     m_impl->active_context = base;
   }
 
