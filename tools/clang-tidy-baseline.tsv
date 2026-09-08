@@ -280,10 +280,8 @@ src/lib/money.cpp	readability-function-cognitive-complexity	6956ca1599ecd39737fe
 src/lib/one_shot.cpp	bugprone-unchecked-optional-access	45d1bdb59f64117b2a3b	unchecked access to optional value
 src/lib/one_shot.cpp	bugprone-unused-return-value	14ced4fc6449bc6ff6bd	the value returned by this function should not be disregarded; neglecting it may lead to errors
 src/lib/one_shot.cpp	bugprone-unused-return-value	78ceceba786141d8e4a9	the value returned by this function should not be disregarded; neglecting it may lead to errors
-src/lib/one_shot.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	7df6b762d49aa80fb2fb	do not use pointer arithmetic
 src/lib/one_shot.cpp	cppcoreguidelines-pro-bounds-pointer-arithmetic	d58af3dc2ca21bc58e44	do not use pointer arithmetic
 src/lib/one_shot.cpp	readability-function-cognitive-complexity	496a1271f3251ab40f50	function 'render_events' has cognitive complexity of 34 (threshold 20)
-src/lib/one_shot.cpp	readability-function-cognitive-complexity	6985728956b7a7597d42	function 'estimated_message_tokens' has cognitive complexity of 21 (threshold 20)
 src/lib/one_shot.cpp	readability-function-cognitive-complexity	f5b43a857caa7cf1fd69	function 'resolve_persona' has cognitive complexity of 23 (threshold 20)
 src/lib/one_shot.cpp	readability-function-cognitive-complexity	fc6602dfc5c395c12b8a	function 'valid_utf8' has cognitive complexity of 25 (threshold 20)
 src/lib/persona.cpp	bugprone-implicit-widening-of-multiplication-result	3af33fbf819fdcf4f5b3	performing an implicit widening conversion to type 'std::uint64_t' (aka 'unsigned long') of a multiplication performed in type 'unsigned int'
@@ -366,7 +364,6 @@ src/lib/run_kernel.cpp	readability-function-cognitive-complexity	3d85f609b90077c
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	87a60ae0ea874695253e	function 'valid_question_answers' has cognitive complexity of 27 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	8bcc548cf36e891cfb4b	function 'process_child_result' has cognitive complexity of 25 (threshold 20)
 src/lib/run_kernel.cpp	readability-function-cognitive-complexity	9d500c9fef0ef4da1dfa	function 'decide_plan' has cognitive complexity of 36 (threshold 20)
-src/lib/run_kernel.cpp	readability-function-cognitive-complexity	bb99b5aae5f74e09593f	function 'continue_run' has cognitive complexity of 22 (threshold 20)
 src/lib/run_kernel.cpp	readability-implicit-bool-conversion	3fa0b8b0af4af3d82b9b	implicit conversion 'const aiforge::domain::ReviewReceiptDrafted *' -> 'bool'
 src/lib/run_kernel.cpp	readability-implicit-bool-conversion	cccf256ebaf939f4e427	implicit conversion 'const aiforge::domain::ReviewReceiptDrafted *' -> 'bool'
 src/lib/run_kernel.cpp	readability-implicit-bool-conversion	d1bc4e7c5e7723e59ffb	implicit conversion 'const aiforge::domain::ReviewRequested *' -> 'bool'
