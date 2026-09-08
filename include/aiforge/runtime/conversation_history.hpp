@@ -34,9 +34,9 @@ struct ConversationHistoryRequest {
   // Additional caller exclusions, such as the active run. Typed child,
   // control, summary and nonterminal runs are automatically excluded;
   // prompts/surface names are never read.
-  std::vector<domain::RunId> excluded_run_ids;
+  std::vector<domain::RunId> excluded_run_ids{};
   std::uint32_t estimator_version{conversation_estimator_version};
-  ConversationHistoryLimits limits;
+  ConversationHistoryLimits limits{};
   // Null selects the current log end. A positive cutoff must identify an
   // existing event; zero selects an empty prefix. Later events cannot change
   // completion, purpose or child classification in this snapshot.
@@ -81,5 +81,14 @@ struct ConversationHistoryError {
     const ConversationHistoryRequest& request, std::stop_token stop = {})
     -> std::expected<std::vector<ConversationHistoryGroup>,
                      ConversationHistoryError>;
+
+// Projects complete tool exchanges from one live run, including buffered
+// early tool errors. Pending exchanges remain absent until complete. Bounds
+// the entire event scan and all copied payloads before the existing metadata
+// renderer runs; no artifact bytes or provider work are fetched.
+[[nodiscard]] auto reconstruct_active_tool_continuation(
+    const domain::SessionEventLog& log, const domain::RunId& run_id,
+    const ConversationHistoryLimits& limits = {}, std::stop_token stop = {})
+    -> std::expected<std::vector<domain::Message>, ConversationHistoryError>;
 
 } // namespace aiforge::runtime

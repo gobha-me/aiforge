@@ -267,7 +267,8 @@ auto valid_tool(const backend::ToolDeclaration& value) -> bool {
                               [](const unsigned char character) {
                                 return character < 0x20U || character == 0x7fU;
                               }) &&
-         value.input_schema.media_type == "application/json" &&
+         (value.input_schema.media_type == "application/json" ||
+          value.input_schema.media_type == "application/schema+json") &&
          !value.input_schema.data.empty();
 }
 

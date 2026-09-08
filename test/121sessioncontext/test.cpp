@@ -272,6 +272,10 @@ TEST_CASE(
                         tools.front().input_schema.media_type.size() + 2;
   CHECK(runtime::estimate_session_tool_declarations(tools) == expected);
   CHECK(runtime::estimate_session_tool_declarations({}) == 0);
+  SECTION("registered schema media type") {
+    tools.front().input_schema.media_type = "application/schema+json";
+    CHECK(runtime::estimate_session_tool_declarations(tools) == expected + 7);
+  }
   SECTION("unsupported version") {
     REQUIRE_FALSE(runtime::estimate_session_tool_declarations(tools, 2));
   }

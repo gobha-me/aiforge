@@ -604,6 +604,85 @@ auto validate_groups(std::vector<ConversationHistoryGroup> groups,
   return std::move(result->selected_groups);
 }
 
+auto active_tool_run(const SessionEventLog& log, const RunId& run_id,
+                     const ConversationHistoryLimits& limits,
+                     std::stop_token stop)
+    -> std::expected<RunIndex, ConversationHistoryError> {
+  if (stop.stop_requested())
+    return failure(Code::cancelled, "history cancelled");
+  if (log.events().size() > limits.maximum_events || limits.maximum_runs == 0)
+    return failure(Code::resource_exhausted,
+                   "active tool history scan limit exceeded");
+  RunIndex run{run_id, {}, false};
+  for (const auto& event : log.events()) {
+    if (stop.stop_requested())
+      return failure(Code::cancelled, "history cancelled");
+    if (event.metadata.run_id == run_id) run.events.push_back(&event);
+  }
+  auto sources = run_sources(run, stop);
+  if (!sources) return std::unexpected(sources.error());
+  if (!sources->started || sources->user == nullptr ||
+      sources->terminal != Terminal::none)
+    return failure(Code::invalid_history,
+                   "tool continuation requires a live source run", run_id);
+  return run;
+}
+
+auto active_projection_events(const RunIndex& run, ContentBudget& input)
+    -> std::expected<std::vector<RunEvent>, ConversationHistoryError> {
+  auto relevant =
+      preflight_projection(run, input, input.limits.maximum_source_references);
+  if (!relevant) return std::unexpected(relevant.error());
+  const auto source_count = static_cast<std::size_t>(
+      std::ranges::count_if(*relevant, [](const RunEvent* event) {
+        return std::holds_alternative<AssistantContentFinished>(
+                   event->payload) ||
+               std::holds_alternative<ToolResultRecorded>(event->payload) ||
+               std::holds_alternative<ToolErrored>(event->payload);
+      }));
+  auto remaining_work = input.limits.maximum_projection_work;
+  auto work =
+      reserve_projection_work(relevant->size(), source_count, remaining_work);
+  if (!work) return std::unexpected(work.error());
+  std::vector<RunEvent> projected;
+  projected.reserve(relevant->size());
+  for (const auto* event : *relevant) {
+    if (input.stop.stop_requested())
+      return failure(Code::cancelled, "history cancelled");
+    projected.push_back(projection_event(*event));
+  }
+  return projected;
+}
+
+auto active_tool_messages(const RunIndex& run,
+                          const ConversationHistoryLimits& limits,
+                          std::stop_token stop)
+    -> std::expected<std::vector<Message>, ConversationHistoryError> {
+  ContentBudget input{limits, stop};
+  auto projected = active_projection_events(run, input);
+  if (!projected) return std::unexpected(projected.error());
+  if (stop.stop_requested())
+    return failure(Code::cancelled, "history cancelled");
+  auto messages = tool_continuation_messages(*projected);
+  if (!messages)
+    return failure(Code::invalid_history,
+                   "active tool history cannot be reconstructed", run.run_id);
+  if (messages->size() > limits.maximum_source_references)
+    return failure(Code::resource_exhausted,
+                   "active tool history source limit exceeded");
+  ContentBudget output{limits, stop};
+  for (const auto& message : *messages) {
+    if (std::ranges::any_of(message.content, [](const auto& block) {
+          return std::holds_alternative<ArtifactReferenceBlock>(block);
+        }))
+      return failure(Code::unsupported_content,
+                     "active tool artifact requires metadata projection");
+    auto valid = count_message(message, output);
+    if (!valid) return std::unexpected(valid.error());
+  }
+  return std::move(*messages);
+}
+
 } // namespace
 
 auto estimate_conversation_message(const Message& message,
@@ -662,6 +741,20 @@ auto reconstruct_conversation_history(const ConversationHistoryRequest& request,
   } catch (...) {
     return failure(Code::internal_failure,
                    "conversation history reconstruction failed");
+  }
+}
+
+auto reconstruct_active_tool_continuation(
+    const SessionEventLog& log, const RunId& run_id,
+    const ConversationHistoryLimits& limits, std::stop_token stop)
+    -> std::expected<std::vector<Message>, ConversationHistoryError> {
+  try {
+    auto run = active_tool_run(log, run_id, limits, stop);
+    if (!run) return std::unexpected(run.error());
+    return active_tool_messages(*run, limits, stop);
+  } catch (...) {
+    return failure(Code::internal_failure,
+                   "active tool history reconstruction failed");
   }
 }
 
