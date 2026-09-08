@@ -690,3 +690,67 @@ TEST_CASE("typed summary and control producers never become ordinary "
   CHECK(result->back().run_id ==
         id<domain::RunId>("summary-word-in-conversation-name"));
 }
+
+TEST_CASE("history snapshots reject missing and future cutoff events",
+          "[conversationhistory][failure]") {
+  HistoryLog history;
+  history.complete("run");
+  runtime::ConversationHistoryRequest request{history.log};
+  request.source_snapshot_sequence = history.log.last_sequence() + 1;
+  CHECK(error(request) == Code::invalid_snapshot);
+
+  domain::SessionEventLog gap{id<domain::SessionId>("gap")};
+  auto event = history.log.events().front();
+  event.metadata.sequence = 3;
+  REQUIRE(gap.append(std::move(event)));
+  runtime::ConversationHistoryRequest missing{gap};
+  missing.source_snapshot_sequence = 2;
+  CHECK(error(missing) == Code::invalid_snapshot);
+}
+
+TEST_CASE("snapshot recovery ignores later completion and bounds only the "
+          "selected prefix",
+          "[conversationhistory]") {
+  HistoryLog history;
+  history.complete("complete");
+  history.start("then-live");
+  history.user("then-live");
+  const auto cutoff = history.log.last_sequence();
+  const auto original =
+      runtime::reconstruct_conversation_history({history.log});
+  REQUIRE(original);
+  history.answer("then-live", "later-answer");
+  history.add("then-live", domain::RunCompleted{});
+  history.complete("later-summary", domain::RunPurpose::summary);
+  runtime::ConversationHistoryRequest request{history.log};
+  request.source_snapshot_sequence = cutoff;
+  request.limits.maximum_events = static_cast<std::size_t>(cutoff);
+  const auto restored = runtime::reconstruct_conversation_history(request);
+  REQUIRE(restored);
+  CHECK(restored == original);
+  request.source_snapshot_sequence.reset();
+  CHECK(error(request) == Code::resource_exhausted);
+  request.source_snapshot_sequence = 0;
+  request.limits.maximum_events = 0;
+  const auto empty = runtime::reconstruct_conversation_history(request);
+  REQUIRE(empty);
+  CHECK(empty->empty());
+}
+
+TEST_CASE(
+    "later child declarations cannot reclassify an earlier history snapshot",
+    "[conversationhistory]") {
+  HistoryLog history;
+  history.complete("run");
+  const auto cutoff = history.log.last_sequence();
+  history.add("run", domain::ChildRunCreated{id<domain::RunId>("run")});
+  const auto current = runtime::reconstruct_conversation_history({history.log});
+  REQUIRE(current);
+  CHECK(current->empty());
+  runtime::ConversationHistoryRequest request{history.log};
+  request.source_snapshot_sequence = cutoff;
+  const auto original = runtime::reconstruct_conversation_history(request);
+  REQUIRE(original);
+  REQUIRE(original->size() == 1);
+  CHECK(original->front().run_id == id<domain::RunId>("run"));
+}

@@ -129,9 +129,30 @@ struct RunIndex {
   bool excluded{};
 };
 
-auto index_runs(const ConversationHistoryRequest& request, std::stop_token stop)
+auto source_events(const ConversationHistoryRequest& request)
+    -> std::expected<std::span<const RunEvent>, ConversationHistoryError> {
+  const auto& events = request.log.events();
+  if (!request.source_snapshot_sequence) return std::span{events};
+  const auto snapshot = *request.source_snapshot_sequence;
+  if (snapshot == 0) return std::span<const RunEvent>{};
+  if (snapshot > request.log.last_sequence())
+    return failure(Code::invalid_snapshot,
+                   "conversation snapshot is beyond the log");
+  const auto found =
+      std::ranges::lower_bound(events, snapshot, {}, [](const auto& event) {
+        return event.metadata.sequence;
+      });
+  if (found == events.end() || found->metadata.sequence != snapshot)
+    return failure(Code::invalid_snapshot,
+                   "conversation snapshot event is missing");
+  const auto count = static_cast<std::size_t>(found - events.begin()) + 1;
+  return std::span{events.data(), count};
+}
+
+auto index_runs(const ConversationHistoryRequest& request,
+                std::span<const RunEvent> events, std::stop_token stop)
     -> std::expected<std::vector<RunIndex>, ConversationHistoryError> {
-  if (request.log.events().size() > request.limits.maximum_events ||
+  if (events.size() > request.limits.maximum_events ||
       request.excluded_run_ids.size() > request.limits.maximum_runs)
     return failure(Code::resource_exhausted,
                    "conversation event/exclusion limit exceeded");
@@ -142,7 +163,7 @@ auto index_runs(const ConversationHistoryRequest& request, std::stop_token stop)
                      "duplicate excluded run identity");
   std::map<RunId, std::size_t> lookup;
   std::vector<RunIndex> result;
-  for (const auto& event : request.log.events()) {
+  for (const auto& event : events) {
     if (stop.stop_requested())
       return failure(Code::cancelled, "history cancelled");
     if (excluded.contains(event.metadata.run_id)) continue;
@@ -248,7 +269,7 @@ auto count_result(const ToolResultRecorded& result, ContentBudget& budget)
   // The shared renderer permits at most 32 KiB metadata per tool result.
   // Reserve its worst-case expansion before entering that renderer. This is
   // a resource bound only; final token estimates use the actual rendered text.
-  if (artifacts) return budget.add_bytes(32 * 1024);
+  if (artifacts) return budget.add_bytes(std::size_t{32} * 1024U);
   return {};
 }
 
@@ -615,7 +636,9 @@ auto reconstruct_conversation_history(const ConversationHistoryRequest& request,
     if (request.estimator_version != conversation_estimator_version)
       return failure(Code::unsupported_estimator,
                      "unsupported conversation estimator version");
-    auto runs = index_runs(request, stop);
+    auto events = source_events(request);
+    if (!events) return std::unexpected(events.error());
+    auto runs = index_runs(request, *events, stop);
     if (!runs) return std::unexpected(runs.error());
     ContentBudget input{request.limits, stop};
     ContentBudget output{request.limits, stop};

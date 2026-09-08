@@ -37,11 +37,16 @@ struct ConversationHistoryRequest {
   std::vector<domain::RunId> excluded_run_ids;
   std::uint32_t estimator_version{conversation_estimator_version};
   ConversationHistoryLimits limits;
+  // Null selects the current log end. A positive cutoff must identify an
+  // existing event; zero selects an empty prefix. Later events cannot change
+  // completion, purpose or child classification in this snapshot.
+  std::optional<std::uint64_t> source_snapshot_sequence{};
 };
 
 enum class ConversationHistoryErrorCode {
   unsupported_estimator,
   invalid_history,
+  invalid_snapshot,
   invalid_exclusion,
   unsupported_content,
   resource_exhausted,
