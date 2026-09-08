@@ -5,6 +5,9 @@
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/repository/context_parcel.hpp>
 #include <aiforge/repository/review_receipt.hpp>
+#include <aiforge/runtime/conversation_context.hpp>
+#include <aiforge/runtime/conversation_history.hpp>
+#include <aiforge/runtime/conversation_policy.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 
 #include <algorithm>
@@ -1004,6 +1007,287 @@ auto repository_continuation_matches(
                                                               context);
 }
 
+class ConversationRequestMatch final {
+ public:
+  ConversationRequestMatch(const domain::Message& user,
+                           std::span<const domain::Message> active,
+                           std::uint64_t reserved_input)
+      : m_user(user), m_active(active), m_total_input(reserved_input) {}
+
+  auto initialize(const std::vector<ConversationHistoryGroup>& history,
+                  std::uint32_t estimator_version) -> bool {
+    for (const auto& group : history) {
+      for (const auto& entry : group.entries) {
+        if (!m_expected.emplace(entry.content.entry_id, &entry.content).second)
+          return false;
+        m_source_order.push_back(entry.content.entry_id);
+        m_last_history_order = entry.content.order;
+      }
+    }
+    m_active_estimates.reserve(m_active.size());
+    for (const auto& message : m_active) {
+      auto estimate = estimate_conversation_message(message, estimator_version);
+      if (!estimate) return false;
+      m_active_estimates.push_back(*estimate);
+    }
+    return true;
+  }
+
+  auto consume(const domain::ContextEntry& entry) -> bool {
+    if (!m_seen.insert(entry.entry_id).second ||
+        !m_message_ids.insert(entry.message.message_id).second ||
+        entry.estimated_tokens >
+            std::numeric_limits<std::uint64_t>::max() - m_total_input)
+      return false;
+    m_total_input += entry.estimated_tokens;
+    const auto source = m_expected.find(entry.entry_id);
+    if (source != m_expected.end()) return consume_history(entry, source);
+    if (m_matched != 0 && m_matched != m_source_order.size()) return false;
+    if (entry.kind == domain::ContextEntryKind::conversation &&
+        entry.message == m_user)
+      return consume_user(entry);
+    if (entry.kind == domain::ContextEntryKind::conversation ||
+        entry.kind == domain::ContextEntryKind::tool_result)
+      return consume_active(entry);
+    // Once appended exchanges start, nothing can interrupt their provider
+    // order.
+    if (m_active_index != 0) return false;
+    return consume_mandatory(entry);
+  }
+
+  [[nodiscard]] auto complete(const domain::ConversationAdmission& admission,
+                              const domain::ConstructedContext& context) const
+      -> bool {
+    return m_expected.empty() && m_users == 1 &&
+           m_active_index == m_active.size() &&
+           m_mandatory == admission.mandatory_input_tokens &&
+           m_total_input == context.estimated_input_tokens &&
+           m_total_input <= context.capacity.context_window_tokens -
+                                context.capacity.reserved_output_tokens;
+  }
+
+ private:
+  using HistoryLookup =
+      std::map<domain::ContextEntryId, const domain::ContextContentInput*>;
+
+  auto consume_history(const domain::ContextEntry& entry,
+                       HistoryLookup::iterator source) -> bool {
+    if (m_users != 0 || m_source_order[m_matched] != entry.entry_id)
+      return false;
+    const auto& value = *source->second;
+    const auto kind = value.kind == domain::ContextContentKind::tool_result
+                          ? domain::ContextEntryKind::tool_result
+                          : domain::ContextEntryKind::conversation;
+    if (entry.kind != kind || entry.instruction_layer ||
+        entry.specificity != 0 || entry.message != value.message ||
+        entry.provenance != value.provenance || entry.order != value.order ||
+        entry.estimated_tokens != value.estimated_tokens)
+      return false;
+    m_expected.erase(source);
+    ++m_matched;
+    m_previous_content_order = entry.order;
+    return true;
+  }
+
+  auto consume_user(const domain::ContextEntry& entry) -> bool {
+    if (++m_users != 1 || m_active_index != 0 || entry.instruction_layer ||
+        entry.specificity != 0 || entry.order <= m_last_history_order ||
+        entry.order <= m_previous_content_order)
+      return false;
+    return consume_mandatory(entry);
+  }
+
+  auto consume_active(const domain::ContextEntry& entry) -> bool {
+    if (m_users != 1 || m_active_index == m_active.size()) return false;
+    const auto& message = m_active[m_active_index];
+    const auto kind = message.role == domain::Role::tool
+                          ? domain::ContextEntryKind::tool_result
+                          : domain::ContextEntryKind::conversation;
+    if (entry.kind != kind || entry.message != message ||
+        entry.instruction_layer || entry.specificity != 0 ||
+        entry.order <= m_previous_content_order ||
+        entry.estimated_tokens != m_active_estimates[m_active_index])
+      return false;
+    ++m_active_index;
+    m_previous_content_order = entry.order;
+    return true;
+  }
+
+  auto consume_mandatory(const domain::ContextEntry& entry) -> bool {
+    if (entry.estimated_tokens >
+        std::numeric_limits<std::uint64_t>::max() - m_mandatory)
+      return false;
+    m_mandatory += entry.estimated_tokens;
+    if (entry.kind != domain::ContextEntryKind::instruction)
+      m_previous_content_order =
+          std::max(m_previous_content_order, entry.order);
+    return true;
+  }
+
+  const domain::Message& m_user;
+  std::span<const domain::Message> m_active;
+  HistoryLookup m_expected;
+  std::vector<domain::ContextEntryId> m_source_order;
+  std::vector<std::uint64_t> m_active_estimates;
+  std::set<domain::ContextEntryId> m_seen;
+  std::set<domain::MessageId> m_message_ids;
+  std::uint64_t m_total_input{};
+  std::uint64_t m_mandatory{};
+  std::uint64_t m_last_history_order{};
+  std::uint64_t m_previous_content_order{};
+  std::size_t m_users{};
+  std::size_t m_matched{};
+  std::size_t m_active_index{};
+};
+
+auto validate_conversation_request(
+    const domain::SessionEventLog& log,
+    const domain::ConversationAdmission& admission,
+    const domain::Message& user_message, const backend::BackendRequest& request,
+    std::span<const domain::Message> active_messages,
+    RunKernelErrorCode error_code) -> std::expected<void, RunKernelError> {
+  const auto reject = [error_code] {
+    return std::unexpected(kernel_error(
+        error_code,
+        "conversation admission does not match its source or request"));
+  };
+  const auto& context = request.context;
+  if (admission.model_id != request.model_id ||
+      admission.capacity != context.capacity || context.entries.size() > 65536)
+    return reject();
+  const auto resolved = recover_conversation_context(log, admission);
+  if (!resolved) return reject();
+  ConversationRequestMatch match{user_message, active_messages,
+                                 context.capacity.reserved_input_tokens};
+  if (!match.initialize(*resolved, admission.estimator_version))
+    return reject();
+  for (const auto& entry : context.entries)
+    if (!match.consume(entry)) return reject();
+  if (!match.complete(admission, context)) return reject();
+  return {};
+}
+
+auto event_schema_version(const domain::RunEventPayload& payload)
+    -> std::uint32_t {
+  if (const auto* started = std::get_if<domain::RunStarted>(&payload)) {
+    if (started->purpose != domain::RunPurpose::conversation ||
+        started->conversation_admission)
+      return 3;
+    return started->memory_selection ? 2 : 1;
+  }
+  if (const auto* child = std::get_if<domain::ChildRunCreated>(&payload);
+      child != nullptr && child->descriptor)
+    return child->descriptor->review_receipt_id ? 4 : 3;
+  if (const auto* tool = std::get_if<domain::ToolProposed>(&payload);
+      tool != nullptr && tool->validated_arguments)
+    return 2;
+  if (std::holds_alternative<domain::ToolPolicyDecided>(payload) ||
+      std::holds_alternative<domain::PlanRevisionProposed>(payload))
+    return 2;
+  return 1;
+}
+
+auto validate_conversation_start(const domain::SessionEventLog& log,
+                                 const RunStart& start)
+    -> std::expected<void, RunKernelError> {
+  const auto& admission = start.attributes.conversation_admission;
+  if (!admission) {
+    if (start.attributes.purpose != domain::RunPurpose::conversation) return {};
+    const auto policy = recorded_conversation_policy(log);
+    if (!policy || policy->policy.revision != 0)
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "conversation policy requires an exact admission"));
+    return {};
+  }
+  if (admission->source_snapshot_sequence != log.last_sequence())
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::invalid_start,
+                     "conversation admission snapshot is stale"));
+  return validate_conversation_request(log, *admission, start.user_message,
+                                       start.request, {},
+                                       RunKernelErrorCode::invalid_start);
+}
+
+auto original_conversation_user(const domain::SessionEventLog& log,
+                                const domain::RunId& run_id,
+                                const domain::RunStarted* expected_start)
+    -> const domain::Message* {
+  const domain::Message* user{};
+  bool started{};
+  for (const auto& event : log.events()) {
+    if (event.metadata.run_id != run_id) continue;
+    if (const auto* value = std::get_if<domain::RunStarted>(&event.payload)) {
+      if (started || value != expected_start) return nullptr;
+      started = true;
+    } else if (const auto* value =
+                   std::get_if<domain::UserContentAdded>(&event.payload)) {
+      if (user != nullptr || !started) return nullptr;
+      user = &value->message;
+    }
+  }
+  return user;
+}
+
+auto validate_conversation_continuation(const domain::SessionEventLog& log,
+                                        const domain::RunId& run_id,
+                                        const backend::BackendRequest& request)
+    -> std::expected<void, RunKernelError> {
+  const auto reject = [] {
+    return std::unexpected(kernel_error(
+        RunKernelErrorCode::continuation_not_ready,
+        "continuation requires its exact original conversation admission"));
+  };
+  const auto first_start =
+      std::ranges::find_if(log.events(), [&](const auto& event) {
+        return event.metadata.run_id == run_id &&
+               std::holds_alternative<domain::RunStarted>(event.payload);
+      });
+  if (first_start == log.events().end()) return reject();
+  const auto& attributes = std::get<domain::RunStarted>(first_start->payload);
+  const auto& admission = attributes.conversation_admission;
+  // Legacy continuations retain their existing reconstruction contract.
+  if (!admission) return {};
+  if (log.events().size() > ConversationHistoryLimits{}.maximum_events)
+    return reject();
+  const auto* user = original_conversation_user(log, run_id, &attributes);
+  if (user == nullptr) return reject();
+  domain::MemorySelection empty_memory;
+  if (!domain::seal_memory_selection(empty_memory) ||
+      !domain::memory_selection_matches_context(
+          attributes.memory_selection ? *attributes.memory_selection
+                                      : empty_memory,
+          request.context))
+    return reject();
+  auto active_messages = reconstruct_active_tool_continuation(log, run_id);
+  if (!active_messages || active_messages->empty()) return reject();
+  return validate_conversation_request(
+      log, *admission, *user, request, *active_messages,
+      RunKernelErrorCode::continuation_not_ready);
+}
+
+auto validate_continuation_context(
+    const domain::SessionEventLog& log, const domain::RunId& run_id,
+    const backend::BackendRequest& request,
+    const std::optional<domain::PricingObservation>& pricing,
+    const std::vector<domain::InvocationId>& invocations)
+    -> std::expected<void, RunKernelError> {
+  if (!persona_context_matches(request.context,
+                               recorded_persona_selection(log, run_id)) ||
+      !user_global_context_matches(
+          request.context, recorded_user_global_instruction(log, run_id)) ||
+      (pricing && (pricing->model_id != request.model_id ||
+                   !domain::validate_pricing_observation(*pricing))))
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::continuation_not_ready,
+                     "run is not ready for another inference"));
+  if (!continuation_contains_tool_results(request.context, invocations))
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::continuation_not_ready,
+                     "continuation omits a terminal tool result"));
+  return validate_conversation_continuation(log, run_id, request);
+}
+
 } // namespace
 
 auto recorded_repository_context_admission(
@@ -1741,27 +2025,7 @@ struct RunKernel::Impl {
       return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
                                           "could not create an event ID"));
     }
-    const auto enriched_child =
-        std::holds_alternative<domain::ChildRunCreated>(payload) &&
-        std::get<domain::ChildRunCreated>(payload).descriptor.has_value();
-    const auto* child_payload = std::get_if<domain::ChildRunCreated>(&payload);
-    const auto* proposed_tool = std::get_if<domain::ToolProposed>(&payload);
-    const auto policy_decided =
-        std::holds_alternative<domain::ToolPolicyDecided>(payload);
-    const auto* started = std::get_if<domain::RunStarted>(&payload);
-    const std::uint32_t schema_version =
-        enriched_child
-            ? (child_payload->descriptor->review_receipt_id ? 4U : 3U)
-            : (policy_decided ||
-                       (started != nullptr && started->memory_selection)
-                   ? 2U
-                   : (proposed_tool != nullptr &&
-                              proposed_tool->validated_arguments
-                          ? 2U
-                          : (std::holds_alternative<
-                                 domain::PlanRevisionProposed>(payload)
-                                 ? 2U
-                                 : 1U)));
+    const auto schema_version = event_schema_version(payload);
     std::optional<domain::RunId> parent_run_id;
     const auto child = transaction.active_children.find(run_id);
     if (child != transaction.active_children.end() && child->second.child_run) {
@@ -4342,7 +4606,11 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
     }
     auto effective_tools = m_impl->tools.subset(requested_tool_names);
     const auto* policy_provenance = m_impl->policy->provenance();
-    if (start.user_message.role != domain::Role::user ||
+    if ((start.attributes.purpose != domain::RunPurpose::conversation &&
+         start.attributes.purpose != domain::RunPurpose::summary) ||
+        (start.attributes.purpose == domain::RunPurpose::summary &&
+         !start.request.tools.empty()) ||
+        start.user_message.role != domain::Role::user ||
         !start.user_message.tool_calls.empty() ||
         start.request.assistant_message_id == start.user_message.message_id ||
         !effective_tools ||
@@ -4459,6 +4727,9 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
           RunKernelErrorCode::invalid_start,
           "repository context admission does not match constructed context"));
     }
+    if (auto admitted = validate_conversation_start(m_impl->event_log, start);
+        !admitted)
+      return admitted;
     domain::MemorySelection empty_memory;
     if (!domain::seal_memory_selection(empty_memory)) {
       return std::unexpected(
@@ -4682,6 +4953,69 @@ auto RunKernel::record_session_spend_ceiling(SessionSpendCeilingChange change)
     return std::unexpected(
         kernel_error(RunKernelErrorCode::internal_failure,
                      "session spend ceiling change failed internally"));
+  }
+}
+
+auto RunKernel::record_conversation_policy(ConversationPolicyChange change)
+    -> std::expected<void, RunKernelError> {
+  try {
+    if (m_impl->unusable)
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    if (m_impl->projections.contains(change.run_id) ||
+        change.attributes.purpose != domain::RunPurpose::control ||
+        change.attributes.memory_selection ||
+        change.attributes.conversation_admission)
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "conversation policy requires a new control run"));
+    auto current = recorded_conversation_policy(m_impl->event_log);
+    if (!current || current->policy.revision != change.expected_revision ||
+        change.expected_revision == std::numeric_limits<std::uint64_t>::max())
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "conversation policy changed or cannot be reconstructed"));
+    domain::ConversationPolicy policy{change.expected_revision + 1, change.mode,
+                                      std::move(change.pinned_run_ids)};
+    if (!domain::validate_conversation_policy(policy))
+      return std::unexpected(kernel_error(RunKernelErrorCode::invalid_start,
+                                          "conversation policy is invalid"));
+    if (!policy.pinned_run_ids.empty()) {
+      auto history = reconstruct_conversation_history({m_impl->event_log, {}});
+      if (!history)
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::invalid_start,
+            "pinned conversation history cannot be reconstructed"));
+      for (const auto& pin : policy.pinned_run_ids)
+        if (std::ranges::find(*history, pin,
+                              &ConversationHistoryGroup::run_id) ==
+            history->end())
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::invalid_start,
+              "conversation pin has no eligible completed source run"));
+    }
+    auto transaction = m_impl->transaction();
+    if (auto recorded = m_impl->record(
+            change.run_id, std::move(change.attributes), transaction);
+        !recorded)
+      return recorded;
+    if (auto recorded =
+            m_impl->record(change.run_id,
+                           domain::ConversationPolicySet{
+                               change.expected_revision, std::move(policy)},
+                           transaction);
+        !recorded)
+      return recorded;
+    if (auto recorded =
+            m_impl->record(change.run_id, domain::RunCompleted{}, transaction);
+        !recorded)
+      return recorded;
+    return m_impl->commit(std::move(transaction));
+  } catch (...) {
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::internal_failure,
+                     "conversation policy change failed internally"));
   }
 }
 
@@ -5841,26 +6175,16 @@ auto RunKernel::continue_run(
               return active.invocations.at(invocation_id).state !=
                      Impl::InvocationState::terminal;
             }) ||
-        request.tools != active.tools.declarations() ||
-        !persona_context_matches(
-            request.context,
-            recorded_persona_selection(m_impl->event_log, run_id)) ||
-        !user_global_context_matches(
-            request.context,
-            recorded_user_global_instruction(m_impl->event_log, run_id)) ||
-        (pricing_observation &&
-         (pricing_observation->model_id != request.model_id ||
-          !domain::validate_pricing_observation(*pricing_observation)))) {
+        request.tools != active.tools.declarations()) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::continuation_not_ready,
                        "run is not ready for another inference"));
     }
-    if (!continuation_contains_tool_results(request.context,
-                                            active.invocation_order)) {
-      return std::unexpected(
-          kernel_error(RunKernelErrorCode::continuation_not_ready,
-                       "continuation omits a terminal tool result"));
-    }
+    if (auto validated = validate_continuation_context(
+            m_impl->event_log, run_id, request, pricing_observation,
+            active.invocation_order);
+        !validated)
+      return validated;
 
     auto transaction = m_impl->transaction();
     // clang-format off

@@ -1192,7 +1192,7 @@ TEST_CASE("all typed payloads and opaque future payloads round trip",
             domain::UnknownEvent{
                 "run.started", {"application/json", "{\"future_field\":true}"}},
             "future-event");
-  future.metadata.schema_version = 3;
+  future.metadata.schema_version = 99;
   const auto future_append =
       store->append_events(future_session, std::array{future});
   INFO((future_append ? "future schema appended"

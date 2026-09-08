@@ -19,6 +19,8 @@
 
 #include <aiforge/instructions/editor.hpp>
 #include <aiforge/runtime/memory_tool.hpp>
+#include <aiforge/runtime/run_kernel.hpp>
+#include <aiforge/runtime/session_context.hpp>
 #include <aiforge/surfaces/one_shot.hpp>
 #include <aiforge/testing/scripted_persona_source.hpp>
 #include <aiforge/testing/scripted_tool_executor.hpp>
@@ -571,6 +573,15 @@ TEST_CASE("one-shot streams only sanitized text and builds neutral evidence",
   REQUIRE(rewriting.captured);
   REQUIRE(rewriting.captured->tools ==
           std::vector<backend::ToolDeclaration>{tool});
+  const auto tool_tokens =
+      runtime::estimate_session_tool_declarations(rewriting.captured->tools);
+  REQUIRE(tool_tokens);
+  CHECK(rewriting.captured->context.capacity.reserved_input_tokens ==
+        *tool_tokens);
+  auto expected_input = *tool_tokens;
+  for (const auto& entry : rewriting.captured->context.entries)
+    expected_input += entry.estimated_tokens;
+  CHECK(rewriting.captured->context.estimated_input_tokens == expected_input);
   REQUIRE(rewriting.captured->context.entries.size() == 3);
   REQUIRE(rewriting.captured->context.entries.back().kind ==
           domain::ContextEntryKind::evidence);
@@ -681,6 +692,8 @@ TEST_CASE("one-shot continues after a rejected tool result",
       continuation.context.entries[continuation.context.entries.size() - 2];
   REQUIRE(tool_call.kind == domain::ContextEntryKind::conversation);
   REQUIRE(tool_call.message.role == domain::Role::assistant);
+  CHECK(runtime::estimate_conversation_message(tool_call.message) ==
+        tool_call.estimated_tokens);
   REQUIRE(tool_call.message.tool_calls ==
           std::vector<domain::ToolCall>{{
               make_id<domain::InvocationId>("lookup-call"),
@@ -969,6 +982,119 @@ TEST_CASE("durable one-shot sessions resume completed conversation in order",
                   output, error);
   REQUIRE(continued);
   REQUIRE(continued->session_id == first->session_id);
+}
+
+TEST_CASE("one-shot refuses full history at tiny capacity then reuses saved "
+          "rolling policy",
+          "[one-shot][conversation][failure]") {
+  FakeModels models;
+  ConversationBackend backend;
+  MemoryStore store;
+  surfaces::OneShotSurface surface{backend, models, store, {1024 * 1024, 16}};
+  std::ostringstream output;
+  std::ostringstream error;
+  const auto model = make_id<domain::ModelId>("model");
+  auto first = surface.run({std::string(3000, 'x'), {}, model}, output, error);
+  REQUIRE(first);
+  REQUIRE(backend.captured.size() == 1);
+  const auto runtime_tokens =
+      backend.captured.front().context.entries.front().estimated_tokens;
+  models.info.context_window_tokens = runtime_tokens + 16 + 6 + 10;
+  const auto before = store.histories.at(first->session_id);
+  auto rejected = surface.run({"second",
+                               {},
+                               model,
+                               surfaces::OneShotRequest::SessionMode::resume,
+                               first->session_id},
+                              output, error);
+  REQUIRE_FALSE(rejected);
+  CHECK(rejected.error().code == surfaces::OneShotErrorCode::context_failed);
+  CHECK(backend.captured.size() == 1);
+  CHECK(store.histories.at(first->session_id) == before);
+
+  auto kernel = runtime::RunKernel::open_durable(
+      {first->session_id, runtime::DurableSessionMode::resume, {}}, store,
+      backend);
+  REQUIRE(kernel);
+  REQUIRE((*kernel)->record_conversation_policy(
+      {make_id<domain::RunId>("rolling-control"),
+       {make_id<domain::SurfaceId>("context"),
+        make_id<domain::WorkspaceId>("chat"),
+        make_id<domain::PermissionProfileId>("observe"),
+        {},
+        {},
+        domain::RunPurpose::control},
+       0,
+       domain::ConversationMode::rolling,
+       {}}));
+  kernel->reset();
+  for (const auto* prompt : {"second", "third"}) {
+    const auto prior_sequence =
+        store.histories.at(first->session_id).back().metadata.sequence;
+    auto result = surface.run({prompt,
+                               {},
+                               model,
+                               surfaces::OneShotRequest::SessionMode::resume,
+                               first->session_id},
+                              output, error);
+    REQUIRE(result);
+    const auto& entries = backend.captured.back().context.entries;
+    REQUIRE(entries.size() == 2);
+    CHECK(entries.back().message.role == domain::Role::user);
+    const auto& events = store.histories.at(first->session_id);
+    const auto start = std::ranges::find_if(events, [&](const auto& event) {
+      return event.metadata.sequence > prior_sequence &&
+             std::holds_alternative<domain::RunStarted>(event.payload);
+    });
+    REQUIRE(start != events.end());
+    const auto& started = std::get<domain::RunStarted>(start->payload);
+    CHECK(started.purpose == domain::RunPurpose::conversation);
+    REQUIRE(started.conversation_admission);
+    CHECK(started.conversation_admission->policy_revision == 1);
+    CHECK(started.conversation_admission->mode ==
+          domain::ConversationMode::rolling);
+    CHECK(started.conversation_admission->source_snapshot_sequence ==
+          prior_sequence);
+    CHECK(started.conversation_admission->groups.empty());
+    CHECK(started.conversation_admission->omitted_group_count > 0);
+    CHECK(domain::validate_conversation_admission(
+        *started.conversation_admission));
+    REQUIRE(started.memory_selection);
+    CHECK(domain::memory_selection_matches_context(
+        *started.memory_selection, backend.captured.back().context));
+  }
+  CHECK(backend.captured.size() == 3);
+}
+
+TEST_CASE("one-shot tool declarations reserve model capacity before dispatch",
+          "[one-shot][conversation][tools][failure]") {
+  FakeModels models;
+  models.info.context_window_tokens = 2048;
+  ConversationBackend backend;
+  runtime::ToolRegistry registry;
+  backend::ToolDeclaration declaration{
+      "lookup",
+      std::string(4096, 'x'),
+      {"application/schema+json", R"({"type":"object"})"},
+      {domain::Effect::read},
+      {{domain::Effect::read, "filesystem.root", "/repo"}}};
+  REQUIRE(registry.register_tool(
+      declaration, std::make_shared<testing::ScriptedToolExecutor>(
+                       std::vector<testing::ScriptedToolExchange>{})));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  surfaces::OneShotDependencies dependencies;
+  dependencies.tools = *tools;
+  surfaces::OneShotSurface surface{
+      backend, models, {1024 * 1024, 16}, nullptr, dependencies};
+  std::ostringstream output;
+  std::ostringstream error;
+  auto result = surface.run({"question", {}, make_id<domain::ModelId>("model")},
+                            output, error);
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == surfaces::OneShotErrorCode::context_failed);
+  CHECK(backend.captured.empty());
+  CHECK(output.str().empty());
 }
 
 TEST_CASE("one-shot spend ceiling allows crossing then blocks durable resume",

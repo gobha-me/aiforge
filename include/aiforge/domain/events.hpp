@@ -3,6 +3,7 @@
 #include <aiforge/domain/automatic_approval.hpp>
 #include <aiforge/domain/child_run.hpp>
 #include <aiforge/domain/content.hpp>
+#include <aiforge/domain/conversation_admission.hpp>
 #include <aiforge/domain/events_fwd.hpp>
 #include <aiforge/domain/memory.hpp>
 #include <aiforge/domain/money.hpp>
@@ -26,6 +27,8 @@
 namespace aiforge::domain {
 
 using Metadata = std::vector<std::pair<std::string, std::string>>;
+enum class RunPurpose { conversation, control, summary };
+
 struct RunStarted {
   SurfaceId surface_id;
   WorkspaceId workspace_id;
@@ -34,7 +37,15 @@ struct RunStarted {
   // Absent in legacy events; an explicit empty selection proves no memory was
   // admitted.
   std::optional<MemorySelection> memory_selection{};
+  RunPurpose purpose{RunPurpose::conversation};
+  std::optional<ConversationAdmission> conversation_admission{};
   auto operator==(const RunStarted&) const -> bool = default;
+};
+
+struct ConversationPolicySet {
+  std::uint64_t previous_revision{};
+  ConversationPolicy policy;
+  auto operator==(const ConversationPolicySet&) const -> bool = default;
 };
 
 // Recorded once per run, immediately after `RunStarted`, so a replayed run can
@@ -581,7 +592,7 @@ struct UnknownEvent {
 
 using RunEventPayload = std::variant<
     RunStarted, RunProvenanceRecorded, PersonaSelectionRecorded,
-    SessionSpendCeilingSet, RunAwaitingInput, RunResumed,
+    SessionSpendCeilingSet, ConversationPolicySet, RunAwaitingInput, RunResumed,
     RunCompletionRequested, RunCompleted, RunFailed, RunCancelRequested,
     RunCancelled, UserContentAdded, AssistantContentStarted,
     AssistantContentDeltaAdded, AssistantContentFinished, InferenceStarted,

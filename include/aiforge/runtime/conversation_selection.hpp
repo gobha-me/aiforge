@@ -31,6 +31,8 @@ struct ConversationHistoryGroup {
   // One complete source run (possibly several tool exchanges), or the
   // preserved user input of a failed/cancelled run. Tool calls and all their
   // results belong to the same group.
+  // A completed run whose final assistant answer was empty may end with a
+  // fully matched tool result; the caller establishes source-run completion.
   std::vector<ConversationHistoryEntry> entries;
   auto operator==(const ConversationHistoryGroup&) const -> bool = default;
 };
@@ -73,7 +75,8 @@ enum class ConversationSelectionDecision {
 
 struct ConversationSelectionDecisionRecord {
   domain::RunId run_id;
-  ConversationSelectionDecision decision;
+  ConversationSelectionDecision decision{
+      ConversationSelectionDecision::omitted_older};
   std::size_t entry_count{};
   std::uint64_t estimated_tokens{};
   auto operator==(const ConversationSelectionDecisionRecord&) const

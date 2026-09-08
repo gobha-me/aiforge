@@ -3724,6 +3724,7 @@ class ChatRepositorySource final : public runtime::RepositoryContextSource {
       make_id<domain::RepositoryId>("chat-repository"), "/repo"};
   std::string instruction{"Keep changes bounded."};
   std::string evidence{"int value = 1;\n"};
+  std::map<std::string, std::string> evidence_by_path;
   std::string revision{"revision-one"};
   bool unavailable{};
   std::size_t observations{};
@@ -3770,10 +3771,13 @@ class ChatRepositorySource final : public runtime::RepositoryContextSource {
   auto read(repository::ExactSourceReadRequest request, std::stop_token)
       -> std::expected<repository::ExactSourceReadResult,
                        repository::ExactSourceEditError> override {
+    const auto found = evidence_by_path.find(request.relative_path);
+    const auto& content =
+        found == evidence_by_path.end() ? evidence : found->second;
     return repository::ExactSourceReadResult{
         {domain::snapshot_identity(request.baseline), request.relative_path,
-         hash(evidence), std::nullopt},
-        evidence};
+         hash(content), std::nullopt},
+        content};
   }
 };
 
@@ -4041,6 +4045,90 @@ TEST_CASE(
     REQUIRE((*latest)->evidence.size() == 1);
     CHECK((*latest)->evidence.front().source.relative_path == "src/value.cpp");
   }
+}
+
+TEST_CASE("Dev tool continuation follows sparse admitted evidence orders after "
+          "optional omissions",
+          "[chat][repository][conversation][recovery]") {
+  const bool reopen = GENERATE(false, true);
+  QuestionBackend backend;
+  ChatRepositorySource source;
+  source.evidence_by_path.emplace("src/large.cpp", std::string(150000, 'x'));
+  runtime::RepositoryContextController controller{source, source.root};
+  auto dependencies = chat_repository_dependencies(source, controller);
+  dependencies.repository_context_selection->evidence_paths = {"src/large.cpp",
+                                                               "src/value.cpp"};
+  runtime::ToolRegistry registry;
+  REQUIRE(runtime::register_ask_user_tool(registry, true));
+  dependencies.tools = registry.snapshot().value();
+  MemoryStore store;
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::create,
+       {},
+       domain::RunProvenance{"test",
+                             "test",
+                             {},
+                             make_id<domain::ModelId>("model"),
+                             {},
+                             {},
+                             {},
+                             {}}},
+      backend, backend, &store, nullptr, {}, {}, dependencies);
+  REQUIRE(session);
+  auto submitted = (*session)->submit("ask first");
+  INFO((submitted ? "submitted" : submitted.error().message));
+  REQUIRE(submitted);
+  const auto pending = drain_to_question(**session);
+  REQUIRE(backend.requests.size() == 1);
+  const auto original = runtime::recorded_repository_context_admission(
+      (*session)->event_log(), pending.run_id);
+  REQUIRE(original);
+  REQUIRE(*original);
+  REQUIRE((*original)->evidence.size() == 2);
+  CHECK((*original)->evidence[0].decision ==
+        domain::RepositoryContextDecision::omitted_budget);
+  CHECK((*original)->evidence[1].decision ==
+        domain::RepositoryContextDecision::admitted);
+  CHECK((*original)->evidence[1].order == 3);
+  if (reopen) {
+    const auto session_id = (*session)->session_id();
+    session->reset();
+    session = surfaces::ChatSession::open(
+        {make_id<domain::ModelId>("model"),
+         surfaces::ChatSessionOpen::Mode::resume, session_id},
+        backend, backend, &store, nullptr, {}, {}, dependencies);
+    REQUIRE(session);
+    REQUIRE((*session)->drain());
+    REQUIRE_FALSE((*session)->blocked_recovery());
+  }
+  REQUIRE((*session)->answer_questions(
+      pending.run_id, pending.invocation_id,
+      {{make_id<domain::QuestionId>("format"), {"short"}, std::nullopt}}));
+  drain_to_end(**session);
+  REQUIRE(backend.requests.size() == 2);
+  const auto& context = backend.requests.back().context;
+  const auto evidence =
+      std::ranges::find(context.entries, (*original)->evidence[1].entry_id,
+                        &domain::ContextEntry::entry_id);
+  REQUIRE(evidence != context.entries.end());
+  CHECK(evidence->order == 3);
+  const auto assistant =
+      std::ranges::find_if(context.entries, [](const auto& entry) {
+        return entry.message.role == domain::Role::assistant &&
+               !entry.message.tool_calls.empty();
+      });
+  REQUIRE(assistant != context.entries.end());
+  CHECK(assistant->order > evidence->order);
+  const auto result =
+      std::ranges::find_if(context.entries, [](const auto& entry) {
+        return entry.kind == domain::ContextEntryKind::tool_result;
+      });
+  REQUIRE(result != context.entries.end());
+  CHECK(result->order > assistant->order);
+  CHECK(std::ranges::none_of(context.entries, [&](const auto& entry) {
+    return entry.entry_id == (*original)->evidence[0].entry_id;
+  }));
 }
 
 TEST_CASE(

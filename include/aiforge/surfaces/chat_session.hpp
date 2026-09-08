@@ -5,6 +5,7 @@
 #include <aiforge/instructions/source.hpp>
 #include <aiforge/persona/editor.hpp>
 #include <aiforge/persona/source.hpp>
+#include <aiforge/runtime/conversation_policy.hpp>
 #include <aiforge/runtime/memory_controller.hpp>
 #include <aiforge/runtime/plan_task_controller.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
@@ -329,6 +330,15 @@ class ChatSession final {
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto expire_memory(runtime::MemoryExpireRequest request)
       -> std::expected<void, ChatSessionError>;
+
+  [[nodiscard]] auto conversation_policy() const
+      -> std::expected<runtime::ConversationPolicySnapshot, ChatSessionError>;
+  // Commits one explicit policy transaction. It affects subsequent top-level
+  // turns; an active run retains its exact admitted context.
+  [[nodiscard]] auto set_conversation_policy(
+      std::uint64_t expected_revision, domain::ConversationMode mode,
+      std::vector<domain::RunId> pinned_run_ids = {})
+      -> std::expected<std::vector<domain::RunEvent>, ChatSessionError>;
 
   [[nodiscard]] auto submitted_prompts() const -> std::vector<std::string>;
   [[nodiscard]] auto event_log() const noexcept

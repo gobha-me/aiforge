@@ -3155,6 +3155,9 @@ auto parse_v2_tool_policy_fields(const Json& value,
           [](const domain::SessionSpendCeilingSet&) {
             return std::string{"session.spend_ceiling_set"};
           },
+          [](const domain::ConversationPolicySet&) {
+            return std::string{"session.conversation_policy_set"};
+          },
           [](const domain::RunAwaitingInput&) {
             return std::string{"run.awaiting_input"};
           },
@@ -3380,7 +3383,7 @@ auto parse_v2_tool_policy_fields(const Json& value,
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 80,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 81,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started",
@@ -3388,6 +3391,7 @@ auto parse_v2_tool_policy_fields(const Json& value,
       "run.repository_context_admitted",
       "persona.selection_recorded",
       "session.spend_ceiling_set",
+      "session.conversation_policy_set",
       "run.awaiting_input",
       "run.resumed",
       "run.completion_requested",
@@ -3656,6 +3660,276 @@ auto validate_repository_json_shape(const Json& value, std::size_t remaining)
   return result;
 }
 
+auto require_conversation_fields(const Json& value,
+                                 std::initializer_list<std::string_view> fields)
+    -> void {
+  if (!value.is_object() || value.size() != fields.size())
+    throw CodecFailure{"invalid conversation metadata fields"};
+  for (const auto field : fields) {
+    if (!value.contains(field))
+      throw CodecFailure{"missing conversation metadata field"};
+  }
+}
+
+[[nodiscard]] auto conversation_mode_name(const domain::ConversationMode mode)
+    -> std::string_view {
+  switch (mode) {
+    case domain::ConversationMode::full: return "full";
+    case domain::ConversationMode::rolling: return "rolling";
+  }
+  throw CodecFailure{"invalid conversation mode"};
+}
+
+[[nodiscard]] auto parse_conversation_mode(const Json& value)
+    -> domain::ConversationMode {
+  if (value == "full") return domain::ConversationMode::full;
+  if (value == "rolling") return domain::ConversationMode::rolling;
+  throw CodecFailure{"invalid conversation mode"};
+}
+
+[[nodiscard]] auto run_purpose_name(const domain::RunPurpose purpose)
+    -> std::string_view {
+  switch (purpose) {
+    case domain::RunPurpose::conversation: return "conversation";
+    case domain::RunPurpose::control: return "control";
+    case domain::RunPurpose::summary: return "summary";
+  }
+  throw CodecFailure{"invalid run purpose"};
+}
+
+[[nodiscard]] auto parse_run_purpose(const Json& value) -> domain::RunPurpose {
+  if (value == "conversation") return domain::RunPurpose::conversation;
+  if (value == "control") return domain::RunPurpose::control;
+  if (value == "summary") return domain::RunPurpose::summary;
+  throw CodecFailure{"invalid run purpose"};
+}
+
+// The JSON document is already bounded by the store. Bound its aggregate
+// metadata before copying any strings or allocating domain reference vectors.
+auto check_conversation_node(const Json& value, std::size_t& nodes,
+                             std::size_t& bytes, const unsigned depth) -> void {
+  if (nodes == 0 || depth > 8 ||
+      (value.is_number() && !value.is_number_unsigned()))
+    throw CodecFailure{"conversation metadata exceeds shape bounds"};
+  --nodes;
+  if (value.is_string()) {
+    const auto& text = value.get_ref<const std::string&>();
+    if (text.size() > domain::conversation_maximum_provenance_bytes ||
+        text.size() > bytes)
+      throw CodecFailure{"conversation metadata exceeds text bounds"};
+    bytes -= text.size();
+  }
+}
+
+auto check_conversation_shape(const Json& value) -> void {
+  // One entry contains 21 JSON nodes; allow bounded envelope/group overhead.
+  auto nodes = (domain::conversation_maximum_entries * 32) +
+               (domain::conversation_maximum_groups * 4) + 64;
+  auto bytes = domain::conversation_maximum_manifest_bytes;
+  std::vector<std::pair<const Json*, unsigned>> pending{{&value, 0}};
+  while (!pending.empty()) {
+    const auto [item, depth] = pending.back();
+    pending.pop_back();
+    check_conversation_node(*item, nodes, bytes, depth);
+    if (!item->is_object() && !item->is_array()) continue;
+    // Reserve budget for every queued child before growing the work stack.
+    if (pending.size() > nodes || item->size() > nodes - pending.size())
+      throw CodecFailure{"conversation metadata exceeds shape bounds"};
+    for (const auto& child : *item)
+      pending.emplace_back(&child, depth + 1);
+  }
+}
+
+[[nodiscard]] auto conversation_policy_json(
+    const domain::ConversationPolicy& policy) -> Json {
+  if (!domain::validate_conversation_policy(policy))
+    throw CodecFailure{"invalid conversation policy"};
+  auto pins = Json::array();
+  for (const auto& pin : policy.pinned_run_ids)
+    pins.push_back(id_text(pin));
+  return {{"revision", policy.revision},
+          {"mode", conversation_mode_name(policy.mode)},
+          {"pinned_run_ids", std::move(pins)}};
+}
+
+[[nodiscard]] auto parse_conversation_policy(const Json& value)
+    -> domain::ConversationPolicy {
+  check_conversation_shape(value);
+  require_conversation_fields(value, {"revision", "mode", "pinned_run_ids"});
+  const auto& pins = value.at("pinned_run_ids");
+  if (!pins.is_array() || pins.size() > domain::conversation_maximum_pins)
+    throw CodecFailure{"conversation pin count exceeds limit"};
+  domain::ConversationPolicy result{value.at("revision").get<std::uint64_t>(),
+                                    parse_conversation_mode(value.at("mode")),
+                                    {}};
+  for (const auto& pin : pins)
+    result.pinned_run_ids.push_back(parse_id<domain::RunId>(pin));
+  if (conversation_policy_json(result) != value)
+    throw CodecFailure{"noncanonical conversation policy"};
+  return result;
+}
+
+[[nodiscard]] auto conversation_kind_name(const domain::ContextContentKind kind)
+    -> std::string_view {
+  switch (kind) {
+    case domain::ContextContentKind::conversation: return "conversation";
+    case domain::ContextContentKind::tool_result: return "tool_result";
+    case domain::ContextContentKind::evidence:
+    case domain::ContextContentKind::unknown: break;
+  }
+  throw CodecFailure{"invalid conversation entry kind"};
+}
+
+[[nodiscard]] auto parse_conversation_kind(const Json& value)
+    -> domain::ContextContentKind {
+  if (value == "conversation") return domain::ContextContentKind::conversation;
+  if (value == "tool_result") return domain::ContextContentKind::tool_result;
+  throw CodecFailure{"invalid conversation entry kind"};
+}
+
+[[nodiscard]] auto conversation_admission_json(
+    const domain::ConversationAdmission& admission) -> Json {
+  if (!domain::validate_conversation_admission(admission) ||
+      !admission.admission_digest)
+    throw CodecFailure{"invalid conversation admission"};
+  auto groups = Json::array();
+  for (const auto& group : admission.groups) {
+    auto entries = Json::array();
+    for (const auto& entry : group.entries) {
+      entries.push_back(
+          {{"completed_event_id", id_text(entry.completed_event_id)},
+           {"event_sequence", entry.event_sequence},
+           {"entry_id", id_text(entry.entry_id)},
+           {"message_id", id_text(entry.message_id)},
+           {"provenance",
+            {{"source_id", id_text(entry.provenance.source_id)},
+             {"source_location",
+              optional_string_json(entry.provenance.source_location)},
+             {"digest", optional_string_json(entry.provenance.digest)}}},
+           {"order", entry.order},
+           {"estimated_tokens", entry.estimated_tokens},
+           {"kind", conversation_kind_name(entry.kind)},
+           {"message_digest", digest_json(entry.message_digest)}});
+    }
+    groups.push_back({{"run_id", id_text(group.run_id)},
+                      {"entries", std::move(entries)},
+                      {"pinned", group.pinned}});
+  }
+  return {
+      {"version", admission.version},
+      {"estimator_version", admission.estimator_version},
+      {"session_id", id_text(admission.session_id)},
+      {"model_id", id_text(admission.model_id)},
+      {"source_snapshot_sequence", admission.source_snapshot_sequence},
+      {"policy_event_id", optional_id_json(admission.policy_event_id)},
+      {"policy_revision", admission.policy_revision},
+      {"mode", conversation_mode_name(admission.mode)},
+      {"capacity",
+       {{"context_window_tokens", admission.capacity.context_window_tokens},
+        {"reserved_output_tokens", admission.capacity.reserved_output_tokens},
+        {"reserved_input_tokens", admission.capacity.reserved_input_tokens}}},
+      {"mandatory_input_tokens", admission.mandatory_input_tokens},
+      {"groups", std::move(groups)},
+      {"omitted_group_count", admission.omitted_group_count},
+      {"omitted_groups_digest",
+       optional_digest_json(admission.omitted_groups_digest)},
+      {"admission_digest", digest_json(*admission.admission_digest)}};
+}
+
+[[nodiscard]] auto conversation_version(const Json& value) -> std::uint32_t {
+  if (!value.is_number_unsigned() ||
+      value.get<std::uint64_t>() > std::numeric_limits<std::uint32_t>::max())
+    throw CodecFailure{"invalid conversation version"};
+  return value.get<std::uint32_t>();
+}
+
+[[nodiscard]] auto parse_conversation_admission(const Json& value)
+    -> domain::ConversationAdmission {
+  check_conversation_shape(value);
+  require_conversation_fields(
+      value,
+      {"version", "estimator_version", "session_id", "model_id",
+       "source_snapshot_sequence", "policy_event_id", "policy_revision", "mode",
+       "capacity", "mandatory_input_tokens", "groups", "omitted_group_count",
+       "omitted_groups_digest", "admission_digest"});
+  require_conversation_fields(value.at("capacity"), {"context_window_tokens",
+                                                     "reserved_output_tokens",
+                                                     "reserved_input_tokens"});
+  require_conversation_fields(value.at("admission_digest"),
+                              {"algorithm", "value", "byte_size"});
+  if (!value.at("omitted_groups_digest").is_null())
+    require_conversation_fields(value.at("omitted_groups_digest"),
+                                {"algorithm", "value", "byte_size"});
+  const auto& groups = value.at("groups");
+  if (!groups.is_array() || groups.size() > domain::conversation_maximum_groups)
+    throw CodecFailure{"conversation group count exceeds limit"};
+  std::size_t remaining = domain::conversation_maximum_entries;
+  for (const auto& group : groups) {
+    require_conversation_fields(group, {"run_id", "entries", "pinned"});
+    if (!group.at("pinned").is_boolean())
+      throw CodecFailure{"conversation pin is not boolean"};
+    const auto& entries = group.at("entries");
+    if (!entries.is_array() || entries.size() > remaining)
+      throw CodecFailure{"conversation entry count exceeds aggregate limit"};
+    remaining -= entries.size();
+  }
+  for (const auto& group : groups) {
+    for (const auto& entry : group.at("entries")) {
+      require_conversation_fields(
+          entry, {"completed_event_id", "event_sequence", "entry_id",
+                  "message_id", "provenance", "order", "estimated_tokens",
+                  "kind", "message_digest"});
+      require_conversation_fields(entry.at("provenance"),
+                                  {"source_id", "source_location", "digest"});
+      require_conversation_fields(entry.at("message_digest"),
+                                  {"algorithm", "value", "byte_size"});
+    }
+  }
+  const auto& capacity = value.at("capacity");
+  domain::ConversationAdmission result{
+      conversation_version(value.at("version")),
+      conversation_version(value.at("estimator_version")),
+      parse_id<domain::SessionId>(value.at("session_id")),
+      parse_id<domain::ModelId>(value.at("model_id")),
+      value.at("source_snapshot_sequence").get<std::uint64_t>(),
+      parse_optional_id<domain::EventId>(value.at("policy_event_id")),
+      value.at("policy_revision").get<std::uint64_t>(),
+      parse_conversation_mode(value.at("mode")),
+      {capacity.at("context_window_tokens").get<std::uint64_t>(),
+       capacity.at("reserved_output_tokens").get<std::uint64_t>(),
+       capacity.at("reserved_input_tokens").get<std::uint64_t>()},
+      value.at("mandatory_input_tokens").get<std::uint64_t>(),
+      {},
+      value.at("omitted_group_count").get<std::uint64_t>(),
+      parse_optional_digest(value.at("omitted_groups_digest")),
+      parse_digest(value.at("admission_digest"))};
+  for (const auto& group : groups) {
+    domain::ConversationAdmittedGroup parsed{
+        parse_id<domain::RunId>(group.at("run_id")),
+        {},
+        group.at("pinned").get<bool>()};
+    for (const auto& entry : group.at("entries")) {
+      const auto& provenance = entry.at("provenance");
+      parsed.entries.push_back(
+          {parse_id<domain::EventId>(entry.at("completed_event_id")),
+           entry.at("event_sequence").get<std::uint64_t>(),
+           parse_id<domain::ContextEntryId>(entry.at("entry_id")),
+           parse_id<domain::MessageId>(entry.at("message_id")),
+           {parse_id<domain::ContextSourceId>(provenance.at("source_id")),
+            parse_optional_string(provenance.at("source_location")),
+            parse_optional_string(provenance.at("digest"))},
+           entry.at("order").get<std::uint64_t>(),
+           entry.at("estimated_tokens").get<std::uint64_t>(),
+           parse_conversation_kind(entry.at("kind")),
+           parse_digest(entry.at("message_digest"))});
+    }
+    result.groups.push_back(std::move(parsed));
+  }
+  if (conversation_admission_json(result) != value)
+    throw CodecFailure{"noncanonical conversation admission"};
+  return result;
+}
+
 [[nodiscard]] auto known_payload_schema(const std::string_view type,
                                         const std::uint32_t schema_version)
     -> bool {
@@ -3665,6 +3939,7 @@ auto validate_repository_json_shape(const Json& value, std::size_t remaining)
            type == "run.child_created" || type == "tool.proposed" ||
            type == "tool.policy_decided" ||
            (type.starts_with("memory.") && known_payload_type(type)))) ||
+         (schema_version == 3 && type == "run.started") ||
          ((schema_version == 3 || schema_version == 4) &&
           type == "run.child_created");
 }
@@ -3681,12 +3956,27 @@ auto validate_repository_json_shape(const Json& value, std::size_t remaining)
                 {"workspace_id", id_text(value.workspace_id)},
                 {"permission_profile_id", id_text(value.permission_profile_id)},
                 {"persona_id", optional_id_json(value.persona_id)}};
-            if ((schema_version == 2) != value.memory_selection.has_value())
-              throw CodecFailure{
-                  "run memory selection requires start schema version 2"};
-            if (value.memory_selection)
+            if (schema_version == 3) {
+              result["purpose"] = run_purpose_name(value.purpose);
               result["memory_selection"] =
-                  memory_selection_json(*value.memory_selection);
+                  value.memory_selection
+                      ? memory_selection_json(*value.memory_selection)
+                      : Json(nullptr);
+              result["conversation_admission"] =
+                  value.conversation_admission
+                      ? conversation_admission_json(
+                            *value.conversation_admission)
+                      : Json(nullptr);
+            } else {
+              if (value.purpose != domain::RunPurpose::conversation ||
+                  value.conversation_admission ||
+                  ((schema_version == 2) != value.memory_selection.has_value()))
+                throw CodecFailure{
+                    "run start fields do not match legacy schema"};
+              if (value.memory_selection)
+                result["memory_selection"] =
+                    memory_selection_json(*value.memory_selection);
+            }
             return result;
           },
           [](const domain::RepositoryContextAdmitted& value) -> Json {
@@ -3702,6 +3992,15 @@ auto validate_repository_json_shape(const Json& value, std::size_t remaining)
           [](const domain::SessionSpendCeilingSet& value) -> Json {
             return {{"ceiling", session_spend_ceiling_json(value.ceiling)},
                     {"source", spend_ceiling_source_name(value.source)}};
+          },
+          [](const domain::ConversationPolicySet& value) -> Json {
+            if (value.previous_revision ==
+                    std::numeric_limits<std::uint64_t>::max() ||
+                value.policy.revision != value.previous_revision + 1)
+              throw CodecFailure{
+                  "invalid conversation policy revision transition"};
+            return {{"previous_revision", value.previous_revision},
+                    {"policy", conversation_policy_json(value.policy)}};
           },
           [](const domain::RunAwaitingInput& value) -> Json {
             return {{"question_id", id_text(value.question_id)}};
@@ -4128,16 +4427,44 @@ auto validate_repository_json_shape(const Json& value, std::size_t remaining)
                                  const std::uint32_t schema_version)
     -> domain::RunEventPayload {
   if (type == "run.started") {
-    return domain::RunStarted{
+    if (schema_version == 3)
+      require_conversation_fields(value, {"surface_id", "workspace_id",
+                                          "permission_profile_id", "persona_id",
+                                          "memory_selection", "purpose",
+                                          "conversation_admission"});
+    else if (schema_version == 2)
+      require_conversation_fields(value, {"surface_id", "workspace_id",
+                                          "permission_profile_id", "persona_id",
+                                          "memory_selection"});
+    else
+      require_conversation_fields(value,
+                                  {"surface_id", "workspace_id",
+                                   "permission_profile_id", "persona_id"});
+    domain::RunStarted result{
         parse_id<domain::SurfaceId>(value.at("surface_id")),
         parse_id<domain::WorkspaceId>(value.at("workspace_id")),
         parse_id<domain::PermissionProfileId>(
             value.at("permission_profile_id")),
-        parse_optional_id<domain::PersonaId>(value.at("persona_id")),
-        schema_version == 2
-            ? std::optional<domain::MemorySelection>{parse_memory_selection(
-                  value.at("memory_selection"))}
-            : std::nullopt};
+        parse_optional_id<domain::PersonaId>(value.at("persona_id"))};
+    if (schema_version == 2 ||
+        (schema_version == 3 && !value.at("memory_selection").is_null()))
+      result.memory_selection =
+          parse_memory_selection(value.at("memory_selection"));
+    if (schema_version == 3) {
+      result.purpose = parse_run_purpose(value.at("purpose"));
+      if (!value.at("conversation_admission").is_null())
+        result.conversation_admission =
+            parse_conversation_admission(value.at("conversation_admission"));
+    }
+    return result;
+  }
+  if (type == "session.conversation_policy_set") {
+    require_conversation_fields(value, {"previous_revision", "policy"});
+    if (!value.at("previous_revision").is_number_unsigned())
+      throw CodecFailure{"invalid conversation policy revision"};
+    return domain::ConversationPolicySet{
+        value.at("previous_revision").get<std::uint64_t>(),
+        parse_conversation_policy(value.at("policy"))};
   }
   if (type == "run.repository_context_admitted") {
     if (!value.is_object() || value.size() != 2)
