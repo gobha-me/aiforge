@@ -40,6 +40,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   inference_spend.cpp
   json_config_file_store.cpp
   language_analysis.cpp
+  local_source.cpp
   model_catalog.cpp
   memory.cpp
   memory_controller.cpp
