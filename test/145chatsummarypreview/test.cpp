@@ -201,7 +201,15 @@ TEST_CASE("Chat reviewed summary applies only explicitly and inspection shows "
   auto inspected = f.chat->inspect_conversation_context(draft);
   INFO((inspected ? "inspected" : inspected.error().message));
   REQUIRE(inspected);
+  REQUIRE_FALSE(inspected->preparation_error);
   REQUIRE(inspected->next_admission);
+  REQUIRE(inspected->mandatory.content.size() == 1);
+  const auto& current_input = inspected->mandatory.content.front();
+  REQUIRE(current_input.message.content.size() == 1);
+  CHECK(
+      std::get<domain::TextBlock>(current_input.message.content.front()).text ==
+      draft);
+  CHECK(current_input.estimated_tokens > 0);
   REQUIRE(inspected->summaries.size() == 1);
   REQUIRE(inspected->groups.size() == 1);
   CHECK(inspected->groups.front().decision ==
@@ -308,7 +316,13 @@ TEST_CASE("Chat context inspection distinguishes active frozen admission from "
           "next policy",
           "[chatsummarypreview][active]") {
   Fixture f;
-  REQUIRE(f.chat->submit("Current run input"));
+  // This case exercises admissions, not durable tool authority. The shared
+  // summary fixture intentionally has no conversational tool provenance.
+  f.dependencies.tools = {};
+  f.reopen();
+  const auto submitted = f.chat->submit("Current run input");
+  INFO((submitted ? "submitted" : submitted.error().message));
+  REQUIRE(submitted);
   REQUIRE(f.chat->active());
   rolling(f);
   const auto inspection =

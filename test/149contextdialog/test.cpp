@@ -200,15 +200,21 @@ TEST_CASE(
   Fixture f;
   const auto first = f.candidate();
   const auto second = f.candidate();
-  REQUIRE(f.chat->edit_conversation_summary(f.chat->event_log().last_sequence(),
-                                            version(second),
-                                            std::string(60000, 'x')));
+  const auto edited = f.chat->edit_conversation_summary(
+      f.chat->event_log().last_sequence(), version(second),
+      std::string(3500, 'x'));
+  INFO((edited ? "edited within the producer bound" : edited.error().message));
+  REQUIRE(edited);
+  f.models.window = 3000;
+  REQUIRE(f.chat->select_model(id<domain::ModelId>("small")));
   REQUIRE(f.chat->set_conversation_policy(0, domain::ConversationMode::rolling,
                                           {}));
   adapters::ConversationContextDialog dialog{
       *f.chat, [] { return std::string{"draft"}; }};
-  REQUIRE(dialog.execute(
-      surfaces::PreviewConversationSummary{first.summary_id, {}}));
+  const auto first_preview = dialog.execute(
+      surfaces::PreviewConversationSummary{first.summary_id, {}});
+  INFO((first_preview ? "first preview fits" : first_preview.error().message));
+  REQUIRE(first_preview);
   REQUIRE(dialog.review_available());
   const auto before = f.chat->event_log().events();
   CHECK_FALSE(dialog.execute(

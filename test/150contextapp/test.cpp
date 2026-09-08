@@ -169,8 +169,10 @@ TEST_CASE("Context commands can preview and apply without opening a modal or "
   command(*f.app, "/context summary review " + std::string{summary->value()});
   command(*f.app, "/context summary preview " + std::string{summary->value()});
   CHECK_FALSE(f.app->modal());
-  CHECK(f.app->status_text().find("Preview ready") != std::string::npos);
+  INFO(f.app->status_text());
+  REQUIRE(f.app->status_text().find("Preview ready") != std::string::npos);
   command(*f.app, "/context summary apply");
+  INFO(f.app->status_text());
   CHECK(std::ranges::any_of(f.app->events(), [](const auto& event) {
     return std::holds_alternative<domain::ConversationSummaryActivated>(
         event.payload);

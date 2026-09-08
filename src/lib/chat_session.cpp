@@ -1693,6 +1693,13 @@ auto ChatSession::summary_mandatory_context(
          {}},
         1,
         draft.size()}}};
+  if (draft.empty()) {
+    // This unsubmitted placeholder retains the empty composer exactly. Its
+    // message envelope still consumes capacity; no user text is fabricated.
+    auto estimated = estimated_message_tokens(input.content.front().message);
+    if (!estimated) return std::unexpected(estimated.error());
+    input.content.front().estimated_tokens = *estimated;
+  }
   if (m_impl->persona_document) {
     auto instruction = reviewed_persona_instruction(
         *m_impl->persona_document, m_impl->persona_source,
