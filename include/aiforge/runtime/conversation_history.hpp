@@ -22,10 +22,10 @@ struct ConversationHistoryLimits {
   std::size_t maximum_content_items{65536};
   // Preflight includes the existing artifact renderer's maximum expansion;
   // final output is also checked against this ceiling using actual bytes.
-  std::size_t maximum_content_bytes{16 * 1024 * 1024};
+  std::size_t maximum_content_bytes{std::size_t{16} * 1024 * 1024};
   // Sum of relevant event count times potential message count per run bounds
   // the existing artifact continuation projector's nested lookup work.
-  std::size_t maximum_projection_work{4 * 1024 * 1024};
+  std::size_t maximum_projection_work{std::size_t{4} * 1024 * 1024};
   auto operator==(const ConversationHistoryLimits&) const -> bool = default;
 };
 
