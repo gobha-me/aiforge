@@ -368,16 +368,21 @@ TEST_CASE(
         {id<domain::ModelId>("model"),
          session_id ? surfaces::ChatSessionOpen::Mode::resume
                     : surfaces::ChatSessionOpen::Mode::create,
-         session_id},
+         session_id,
+         domain::RunProvenance{
+             "test", "test", {}, id<domain::ModelId>("model"), {}, {}, {}, {}}},
         backend, backend, &store, nullptr, {}, {1024 * 1024, 16},
         std::move(dependencies));
   };
   auto created = reopen();
   REQUIRE(created);
-  REQUIRE((*created)->submit("first"));
+  const auto first = (*created)->submit("first");
+  INFO((first ? "submitted source turn" : first.error().message));
+  REQUIRE(first);
   finish(**created);
   backend.ask_next = true;
   const auto submitted = (*created)->submit("ask next");
+  INFO((submitted ? "submitted pending turn" : submitted.error().message));
   REQUIRE(submitted);
   for (unsigned attempt = 0;
        attempt < 1000 && !(*created)->pending_question_input(); ++attempt) {

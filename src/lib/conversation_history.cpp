@@ -151,6 +151,25 @@ auto source_events(const ConversationHistoryRequest& request)
   return std::span{events.data(), count};
 }
 
+auto known_run_purpose(RunPurpose purpose) -> bool {
+  return purpose == RunPurpose::conversation ||
+         purpose == RunPurpose::control || purpose == RunPurpose::summary;
+}
+
+auto classify_run_event(RunIndex& run, const RunEvent& event)
+    -> std::expected<void, ConversationHistoryError> {
+  run.excluded = run.excluded || event.metadata.parent_run_id.has_value() ||
+                 std::holds_alternative<ChildRunCreated>(event.payload);
+  if (const auto* started = std::get_if<RunStarted>(&event.payload)) {
+    if (!known_run_purpose(started->purpose))
+      return failure(Code::invalid_history,
+                     "conversation run purpose is invalid",
+                     event.metadata.run_id);
+    run.excluded = run.excluded || started->purpose != RunPurpose::conversation;
+  }
+  return {};
+}
+
 auto index_runs(const ConversationHistoryRequest& request,
                 std::span<const RunEvent> events, std::stop_token stop)
     -> std::expected<std::vector<RunIndex>, ConversationHistoryError> {
@@ -179,11 +198,8 @@ auto index_runs(const ConversationHistoryRequest& request,
     }
     auto& run = result[found->second];
     run.events.push_back(&event);
-    run.excluded = run.excluded || event.metadata.parent_run_id.has_value() ||
-                   std::holds_alternative<ChildRunCreated>(event.payload);
-    if (const auto* started = std::get_if<RunStarted>(&event.payload))
-      run.excluded =
-          run.excluded || started->purpose != RunPurpose::conversation;
+    if (auto classified = classify_run_event(run, event); !classified)
+      return std::unexpected(classified.error());
   }
   return result;
 }
@@ -220,6 +236,7 @@ auto opaque_conversation_source(const RunEventPayload& payload) -> bool {
 
 struct RunSources {
   Terminal terminal{Terminal::none};
+  RunPurpose purpose{RunPurpose::conversation};
   const RunEvent* user{};
   bool started{};
 
@@ -232,9 +249,11 @@ struct RunSources {
         (!started || terminal != Terminal::none))
       return failure(Code::invalid_history,
                      "conversation activity outside live run");
-    if (std::holds_alternative<RunStarted>(event.payload)) {
-      if (started) return failure(Code::invalid_history, "duplicate run start");
+    if (const auto* value = std::get_if<RunStarted>(&event.payload)) {
+      if (started || !known_run_purpose(value->purpose))
+        return failure(Code::invalid_history, "duplicate or invalid run start");
       started = true;
+      purpose = value->purpose;
       return {};
     }
     if (std::holds_alternative<UserContentAdded>(event.payload)) {
@@ -647,10 +666,11 @@ auto active_tool_run(const SessionEventLog& log, const RunId& run_id,
   }
   auto sources = run_sources(run, stop);
   if (!sources) return std::unexpected(sources.error());
-  if (!sources->started || sources->user == nullptr ||
-      sources->terminal != Terminal::none)
+  if (!sources->started || sources->purpose != RunPurpose::conversation ||
+      sources->user == nullptr || sources->terminal != Terminal::none)
     return failure(Code::invalid_history,
-                   "tool continuation requires a live source run", run_id);
+                   "tool continuation requires a live conversation run",
+                   run_id);
   return run;
 }
 

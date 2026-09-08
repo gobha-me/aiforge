@@ -82,9 +82,9 @@ struct ConversationHistoryError {
     -> std::expected<std::vector<ConversationHistoryGroup>,
                      ConversationHistoryError>;
 
-// Projects complete tool exchanges from one live run, including buffered
-// early tool errors. An unfinished assistant inference rejects; exchanges
-// still waiting for tool results remain absent until complete. Bounds
+// Projects complete tool exchanges from one live conversation run, including
+// buffered early tool errors. An unfinished assistant inference rejects;
+// exchanges still waiting for tool results remain absent until complete. Bounds
 // the entire event scan and all copied payloads before the existing metadata
 // renderer runs; no artifact bytes or provider work are fetched.
 [[nodiscard]] auto reconstruct_active_tool_continuation(
