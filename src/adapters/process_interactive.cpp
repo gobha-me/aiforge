@@ -5002,17 +5002,21 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
                                         cli::CommandEnvironment& environment,
                                         std::ostream& output,
                                         std::ostream& diagnostics,
-                                        ProcessAgentExecution* agent)
+                                        ProcessAgentExecution* agent,
+                                        ProcessHeadlessExecution* headless)
     -> std::expected<void, cli::CommandFailure> {
   // clang-format on
   using SessionMode = cli::InteractiveCommand::SessionMode;
   try {
     static_cast<void>(output);
-    if (agent == nullptr &&
+    if (agent == nullptr && headless == nullptr &&
         (!environment.input_is_terminal || !environment.output_is_terminal)) {
       return failure(cli::CommandFailureKind::usage,
                      "interactive chat requires terminal input and output");
     }
+    if (headless != nullptr && (agent != nullptr || !headless->run))
+      return failure(cli::CommandFailureKind::usage,
+                     "headless Chat callback configuration is invalid");
     auto resolved = load_config(diagnostics, request.model, request.web_search);
     if (!resolved) return std::unexpected(std::move(resolved.error()));
     auto tool_profile_maximums =
@@ -5057,7 +5061,7 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
     if (!catalog)
       return failure(cli::CommandFailureKind::runtime, catalog.error().message);
     auto model = [&]() -> std::expected<domain::ModelId, cli::CommandFailure> {
-      if (agent == nullptr)
+      if (agent == nullptr && headless == nullptr)
         return resolve_interactive_model(*resolved, (*catalog)->service(),
                                          *generation_options,
                                          environment.stop_token);
@@ -5594,6 +5598,15 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
           runtime::RepositoryContextRequest{
               request.target.value_or("."), 1, {}};
     app_options.session_dependencies.runtime_version = runtime_version();
+    if (headless != nullptr) {
+      app_options.session_dependencies.async_repository_preparation = false;
+      auto session = surfaces::ChatSession::open(
+          std::move(open), *backend, (*catalog)->service(), store.get(),
+          nullptr, environment.stop_token, {},
+          std::move(app_options.session_dependencies));
+      if (!session) return std::unexpected(session_error(session.error()));
+      return headless->run(**session);
+    }
     auto app = make_interactive_chat_app(
         *backend, (*catalog)->service(), store.get(), std::move(open), editor,
         environment.stop_token, std::move(app_options));
