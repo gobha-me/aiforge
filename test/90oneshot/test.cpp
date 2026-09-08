@@ -1077,7 +1077,7 @@ TEST_CASE("one-shot tool declarations reserve model capacity before dispatch",
       std::string(4096, 'x'),
       {"application/schema+json", R"({"type":"object"})"},
       {domain::Effect::read},
-      {}};
+      {{domain::Effect::read, "filesystem.root", "/repo"}}};
   REQUIRE(registry.register_tool(
       declaration, std::make_shared<testing::ScriptedToolExecutor>(
                        std::vector<testing::ScriptedToolExchange>{})));
