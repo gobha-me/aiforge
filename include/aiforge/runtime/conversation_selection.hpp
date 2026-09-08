@@ -43,7 +43,7 @@ struct ConversationSelectionLimits {
   // Aggregate content blocks and tool declarations bound zero-byte work too.
   std::size_t maximum_content_items{65536};
   // Includes content, arguments, tool names and optional provenance strings.
-  std::size_t maximum_content_bytes{16 * 1024 * 1024};
+  std::size_t maximum_content_bytes{std::size_t{16} * 1024 * 1024};
   auto operator==(const ConversationSelectionLimits&) const -> bool = default;
 };
 
