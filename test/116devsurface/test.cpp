@@ -476,6 +476,8 @@ TEST_CASE(
   app->on_event(key_event(termforge::Key::F10));
   app->on_event(key_event(termforge::Key::Enter));
   static_cast<void>(rendered(*app));
+  // Local files precedes Repository evidence in the Context toolbar.
+  app->on_event(key_event(termforge::Key::Down));
   app->on_event(key_event(termforge::Key::Down));
   app->on_event(key_event(termforge::Key::Down));
   app->on_event(key_event(termforge::Key::Enter));
@@ -492,6 +494,8 @@ TEST_CASE(
   app->on_event(key_event(termforge::Key::F10));
   app->on_event(key_event(termforge::Key::Enter));
   static_cast<void>(rendered(*app));
+  // Local files precedes Repository evidence in the Context toolbar.
+  app->on_event(key_event(termforge::Key::Down));
   app->on_event(key_event(termforge::Key::Down));
   app->on_event(key_event(termforge::Key::Down));
   app->on_event(key_event(termforge::Key::Enter));

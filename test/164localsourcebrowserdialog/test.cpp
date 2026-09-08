@@ -188,6 +188,8 @@ TEST_CASE("Local files closing a blocked preview preserves tray and prepared "
   REQUIRE(f.dialog.execute(LocalBrowseAddEvidence{root(), "notes.txt"}));
   f.finish();
   const auto selected = f.browser->state().selection;
+  const auto prior_preview = f.browser->state().preview;
+  REQUIRE(prior_preview);
   auto token = f.browser->prepare_selection();
   REQUIRE(token);
   std::optional<runtime::LocalContextWorkCompletion> context;
@@ -210,7 +212,7 @@ TEST_CASE("Local files closing a blocked preview preserves tray and prepared "
   CHECK_FALSE(f.browser->state().reading);
   gate->release();
   f.finish();
-  CHECK_FALSE(f.browser->state().preview);
+  CHECK(f.browser->state().preview == prior_preview);
 }
 TEST_CASE("Local files session replacement clears displayed identities and "
           "ignores late listing") {
@@ -291,27 +293,42 @@ TEST_CASE(
   CHECK(f.factory->observation->lists == 0);
 }
 
-TEST_CASE(
-    "Local files mouse selection and directory navigation never add evidence") {
+TEST_CASE("Local files mouse and keyboard activation each request one preview "
+          "without adding evidence") {
   Fixture f;
   f.grant();
   f.list();
+  // ListWidget left-click activates the row; it does not merely focus it.
   REQUIRE(click_label(f.dialog, "[unsupported]"));
-  REQUIRE(f.dialog.on_event(key(termforge::Key::Enter)));
   CHECK(f.dialog.status().find("Only regular files") != std::string::npos);
   CHECK(f.factory->observation->previews == 0);
-  REQUIRE(click_label(f.dialog, "[file]"));
-  CHECK(f.factory->observation->previews == 0);
-  REQUIRE(f.dialog.on_event(key(termforge::Key::Enter)));
+  bool mouse{};
+  SECTION("one mouse click activates the file") {
+    mouse = true;
+    REQUIRE(click_label(f.dialog, "[file]"));
+  }
+  SECTION("keyboard navigation selects and Enter activates the file") {
+    REQUIRE(f.dialog.on_event(key(termforge::Key::Home)));
+    REQUIRE(f.dialog.on_event(key(termforge::Key::Down)));
+    CHECK(f.factory->observation->previews == 0);
+    REQUIRE(f.dialog.on_event(key(termforge::Key::Enter)));
+  }
   f.finish();
   CHECK(f.factory->observation->previews == 1);
   CHECK(f.factory->observation->last_path == "notes.txt");
   CHECK(f.browser->state().selection.empty());
-  REQUIRE(click_label(f.dialog, "[dir]"));
-  REQUIRE(f.dialog.on_event(key(termforge::Key::Enter)));
+  const auto listings = f.factory->observation->lists.load();
+  if (mouse) {
+    REQUIRE(click_label(f.dialog, "[dir]"));
+  } else {
+    REQUIRE(f.dialog.on_event(key(termforge::Key::Home)));
+    REQUIRE(f.dialog.on_event(key(termforge::Key::Enter)));
+  }
   f.finish();
   REQUIRE(f.browser->state().listing);
   CHECK(f.browser->state().listing->directory == "folder");
+  CHECK(f.factory->observation->lists == listings + 1);
+  CHECK(f.factory->observation->previews == 1);
   CHECK(f.browser->state().selection.empty());
   CHECK(f.factory->observation->exact == 0);
 }

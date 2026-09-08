@@ -3750,6 +3750,12 @@ auto ChatSession::dispatch_ready_tools()
 
 auto ChatSession::drain()
     -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
+  // Failed cancellation can retire the unusable kernel while preserving a
+  // recovery block. Keep that history inspectable until explicit reopening;
+  // there is no active work left whose observations could be recorded.
+  if (!m_impl->kernel->active_run_id() &&
+      (m_impl->recovery_block || m_impl->repository_block))
+    return std::exchange(m_impl->pending_surface_events, {});
   // Recording already-dispatched work never waits for a filesystem proof.
   auto drained = m_impl->kernel->drain(runtime::RunDrainMode::observe_only);
   if (!drained) return std::unexpected(kernel_error(drained.error()));

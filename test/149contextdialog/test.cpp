@@ -228,10 +228,11 @@ TEST_CASE(
 }
 
 namespace {
-auto evidence_outcome(Fixture& fixture) -> surfaces::ChatEvidenceOutcome {
+auto evidence_outcome(Fixture& fixture, std::string_view draft)
+    -> surfaces::ChatEvidenceOutcome {
   std::optional<surfaces::ChatEvidenceOutcome> outcome;
   REQUIRE(folder_grant_test::until([&] {
-    auto polled = fixture.chat->poll_evidence_work();
+    auto polled = fixture.chat->poll_evidence_work(draft);
     INFO((polled ? "polled" : polled.error().message));
     REQUIRE(polled);
     if (*polled) outcome = std::move(**polled);
@@ -241,8 +242,9 @@ auto evidence_outcome(Fixture& fixture) -> surfaces::ChatEvidenceOutcome {
   return std::move(*outcome);
 }
 auto finish_evidence(Fixture& fixture,
-                     adapters::ConversationContextDialog& dialog) -> void {
-  const auto outcome = evidence_outcome(fixture);
+                     adapters::ConversationContextDialog& dialog,
+                     std::string_view draft) -> void {
+  const auto outcome = evidence_outcome(fixture, draft);
   auto completed = dialog.complete_evidence_work(outcome);
   INFO((completed ? "completed" : completed.error().message));
   REQUIRE(completed);
@@ -263,7 +265,7 @@ TEST_CASE("Async Context completion binds exact operation and preserves the "
   const auto token = dialog.pending_evidence_work();
   REQUIRE(token);
   CHECK(dialog.display_text() == body);
-  auto outcome = evidence_outcome(f);
+  auto outcome = evidence_outcome(f, draft);
   auto foreign = outcome;
   ++foreign.token.generation;
   auto ignored = dialog.complete_evidence_work(std::move(foreign));
@@ -292,7 +294,7 @@ TEST_CASE("Async Context draft changes and close reject late outcomes without "
   adapters::ConversationContextDialog dialog{*f.chat, [&] { return draft; },
                                              true};
   REQUIRE(dialog.execute(surfaces::InspectConversation{}));
-  auto outcome = evidence_outcome(f);
+  auto outcome = evidence_outcome(f, draft);
   draft = "Changed draft";
   CHECK_FALSE(dialog.complete_evidence_work(std::move(outcome)));
   CHECK_FALSE(dialog.pending_evidence_work());
@@ -322,7 +324,7 @@ TEST_CASE("Async Context preview and apply stay explicit and do not duplicate "
   REQUIRE(dialog.execute(
       surfaces::PreviewConversationSummary{candidate.summary_id, {}}));
   CHECK_FALSE(dialog.review_available());
-  finish_evidence(f, dialog);
+  finish_evidence(f, dialog, draft);
   REQUIRE(dialog.review_available());
   CHECK(dialog.status() == "Preview ready; Apply is explicit");
   auto catalog = f.chat->summary_catalog();
@@ -338,10 +340,11 @@ TEST_CASE("Async Context preview and apply stay explicit and do not duplicate "
       {surfaces::ChatSessionErrorCode::cancelled, "Cancelled before commit"}));
   CHECK(dialog.review_available());
   REQUIRE(dialog.execute(surfaces::ApplyConversationSummary{}));
-  finish_evidence(f, dialog); // Apply commits; app handles committed events.
+  finish_evidence(f, dialog,
+                  draft); // Apply commits; app handles committed events.
   REQUIRE(dialog.pending_evidence_work()); // Updated inspection follows
                                            // asynchronously.
-  finish_evidence(f, dialog);
+  finish_evidence(f, dialog, draft);
   catalog = f.chat->summary_catalog();
   REQUIRE(catalog);
   CHECK(catalog->snapshot.active.size() == 1);
@@ -356,11 +359,12 @@ TEST_CASE("Failed new async summary preview retains displayed text without "
   const auto candidate = f.candidate();
   REQUIRE(f.chat->set_conversation_policy(0, domain::ConversationMode::rolling,
                                           {}));
-  adapters::ConversationContextDialog dialog{
-      *f.chat, [] { return std::string{"draft"}; }, true};
+  std::string draft{"draft"};
+  adapters::ConversationContextDialog dialog{*f.chat, [&] { return draft; },
+                                             true};
   REQUIRE(dialog.execute(
       surfaces::PreviewConversationSummary{candidate.summary_id, {}}));
-  finish_evidence(f, dialog);
+  finish_evidence(f, dialog, draft);
   REQUIRE(dialog.review_available());
   const auto displayed = dialog.display_text();
   REQUIRE(dialog.execute(
@@ -481,7 +485,7 @@ TEST_CASE("Async Context closes while a local exact read is blocked and "
   adapters::ConversationContextDialog dialog{*f.chat, [&] { return draft; },
                                              true};
   REQUIRE(dialog.execute(surfaces::InspectConversation{}));
-  finish_evidence(f, dialog);
+  finish_evidence(f, dialog, draft);
   CHECK(dialog.display_text().find("notes.txt | 5 tokens | included") !=
         std::string::npos);
   REQUIRE(folder_grant_test::until(
@@ -507,12 +511,13 @@ TEST_CASE("Async Context malformed completion ends preparation without "
           "replacing displayed review",
           "[contextdialog][async]") {
   Fixture f;
-  adapters::ConversationContextDialog dialog{
-      *f.chat, [] { return std::string{"draft"}; }, true};
+  std::string draft{"draft"};
+  adapters::ConversationContextDialog dialog{*f.chat, [&] { return draft; },
+                                             true};
   REQUIRE(dialog.execute(surfaces::InspectConversationSummaries{}));
   const auto body = dialog.display_text();
   REQUIRE(dialog.execute(surfaces::InspectConversation{}));
-  auto outcome = evidence_outcome(f);
+  auto outcome = evidence_outcome(f, draft);
   outcome.result = surfaces::ChatEvidenceActionCompleted{};
   CHECK_FALSE(dialog.complete_evidence_work(std::move(outcome)));
   CHECK_FALSE(dialog.pending_evidence_work());

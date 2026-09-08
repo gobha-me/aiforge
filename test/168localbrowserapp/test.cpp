@@ -155,8 +155,11 @@ TEST_CASE("hidden toolbar retains Context navigation and commands without "
   fixture.command("/context toolbar hide");
   fixture.app->on_event(termforge::PasteEvent{"Unsent draft"});
   fixture.app->on_event(key(termforge::Key::Char, U'g', true));
-  REQUIRE(rendered(*fixture.app).find("Context") != std::string::npos);
+  // on_render draws the background; TermForge draws modal overlays afterward.
+  REQUIRE(fixture.app->modal());
+  REQUIRE(fixture.app->top_overlay() != nullptr);
   fixture.app->on_event(key(termforge::Key::Escape));
+  REQUIRE_FALSE(fixture.app->modal());
   REQUIRE(rendered(*fixture.app).find("Unsent draft") != std::string::npos);
   REQUIRE(fixture.backend.requests().empty());
   REQUIRE(fixture.factory->observation->grants == 0);

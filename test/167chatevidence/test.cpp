@@ -129,14 +129,21 @@ struct Fixture {
     dependencies.identity_suffix_source = [this] { return ++identity; };
     runtime::ToolRegistry registry;
     REQUIRE(runtime::register_ask_user_tool(registry, true));
-    dependencies.tools = registry.snapshot().value();
+    auto tools = registry.snapshot();
+    REQUIRE(tools);
+    dependencies.tools = std::move(*tools);
     reopen();
   }
   auto reopen() -> void {
     chat.reset();
+    // Durable conversational tools require provenance on every start and
+    // reopen; the kernel fills the exact registered tool identity itself.
+    const domain::RunProvenance provenance{
+        "test", "fake", {}, id<domain::ModelId>("model"), {}, {}, {}, {}};
+    REQUIRE(domain::validate_run_provenance(provenance));
     auto result = surfaces::ChatSession::open(
         {id<domain::ModelId>("model"), surfaces::ChatSessionOpen::Mode::resume,
-         id<domain::SessionId>("session")},
+         id<domain::SessionId>("session"), provenance},
         backend, models, &store, nullptr, {}, {1024U * 1024U, 256},
         dependencies);
     INFO((result ? "opened" : result.error().message));
@@ -359,6 +366,7 @@ TEST_CASE("repository completion waits for local preparation before mixed "
   CHECK_FALSE(*waiting);
   gate->release();
   auto submitted = f.prepared();
+  INFO((submitted ? "submitted" : submitted.error().message));
   REQUIRE(submitted);
   const auto run = std::get<surfaces::ChatSubmission>(submitted->result).run_id;
   REQUIRE(until([&] { return !f.backend.requests().empty(); }));
@@ -394,6 +402,19 @@ TEST_CASE("reopened local question refuses missing grants and resumes exact "
     }
     return f.chat->pending_question_input().has_value();
   }));
+  const auto provenance = std::ranges::find_if(
+      f.chat->event_log().events(), [&](const auto& event) {
+        return event.metadata.run_id == run &&
+               std::holds_alternative<domain::RunProvenanceRecorded>(
+                   event.payload);
+      });
+  REQUIRE(provenance != f.chat->event_log().events().end());
+  const auto& tools =
+      std::get<domain::RunProvenanceRecorded>(provenance->payload)
+          .provenance.tools;
+  REQUIRE(tools.size() == 1);
+  CHECK(tools.front().tool_name == "ask_user");
+  CHECK(tools.front().registration_digest.has_value());
   auto original =
       runtime::recorded_local_context_admission(f.chat->event_log(), run);
   REQUIRE(original);
