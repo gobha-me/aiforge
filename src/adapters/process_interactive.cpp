@@ -1435,8 +1435,8 @@ class ChatAppImpl final : public InteractiveChatApp {
     std::string footer =
         m_session->active() ? "Running — Esc/Ctrl+C cancel | Ctrl+D unavailable"
         : m_help_visible    ? "Slash command help — Esc closes | Ctrl+D exits"
-                         : "Enter submit | Tab | Ctrl+C clear | Ctrl+D exit | "
-                           "^E editor | ^G Context | /help";
+                            : "Enter submit | Ctrl+C clear | Ctrl+D exit | "
+                              "^G Context | /help";
     if (!m_status.empty()) footer += " | " + m_status;
     return footer;
   }
