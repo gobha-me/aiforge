@@ -40,7 +40,7 @@ auto tool_snapshot() -> runtime::ToolRegistrySnapshot {
        "Read a value",
        {"application/schema+json", R"({"type":"object"})"},
        {domain::Effect::read},
-       {}},
+       {{domain::Effect::read, "filesystem.root", "/repo"}}},
       std::make_shared<RejectingExecutor>()));
   auto snapshot = registry.snapshot();
   REQUIRE(snapshot);

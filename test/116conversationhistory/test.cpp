@@ -484,7 +484,7 @@ TEST_CASE("kernel validation errors keep provider order and actual completed "
        "Read a value",
        {"application/schema+json", R"({"type":"object"})"},
        {domain::Effect::read},
-       {}},
+       {{domain::Effect::read, "filesystem.root", "/repo"}}},
       std::make_shared<RejectingExecutor>()));
   const auto snapshot = registry.snapshot();
   REQUIRE(snapshot);
