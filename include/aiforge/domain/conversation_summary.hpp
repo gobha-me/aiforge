@@ -1,5 +1,6 @@
 #pragma once
 #include <aiforge/domain/conversation_admission.hpp>
+#include <aiforge/domain/conversation_summary_reference.hpp>
 #include <span>
 
 namespace aiforge::domain {
@@ -11,7 +12,6 @@ inline constexpr std::size_t summary_maximum_source_bytes =
     std::size_t{16} * 1024 * 1024;
 inline constexpr std::size_t summary_maximum_text_bytes =
     std::size_t{64} * 1024;
-inline constexpr std::size_t summary_maximum_active = 32;
 
 struct ConversationSummarySourceGroup {
   RunId run_id;
@@ -53,12 +53,6 @@ struct ConversationSummaryIntent {
   auto operator==(const ConversationSummaryIntent&) const -> bool = default;
 };
 
-struct ConversationSummaryVersion {
-  ConversationSummaryId summary_id;
-  std::uint64_t revision{};
-  ContentDigest candidate_digest;
-  auto operator==(const ConversationSummaryVersion&) const -> bool = default;
-};
 enum class ConversationSummaryAuthor { model, user_edit };
 struct ConversationSummaryCandidate {
   std::uint32_t version{1};

@@ -506,6 +506,7 @@ TEST_CASE("summary codec retains unknown event versions and rejects typed "
   database.store.reset();
   database.reopen();
   const auto replay = database.store->replay_events(database.session);
+  INFO((replay ? "replay succeeded" : replay.error().message));
   REQUIRE(replay);
   CHECK(*replay == expected);
 }
@@ -550,6 +551,7 @@ TEST_CASE("summary codec roundtrips generation edits activation and disable",
   database.store.reset();
   database.reopen();
   const auto replay = database.store->replay_events(database.session);
+  INFO((replay ? "replay succeeded" : replay.error().message));
   REQUIRE(replay);
   CHECK(*replay == expected);
 }
@@ -598,6 +600,7 @@ TEST_CASE(
   CHECK(appended.error().code ==
         storage::SessionStoreErrorCode::invalid_argument);
   const auto replay = database.store->replay_events(database.session);
+  INFO((replay ? "replay succeeded" : replay.error().message));
   REQUIRE(replay);
   CHECK(replay->empty());
 }
@@ -611,6 +614,7 @@ TEST_CASE(
                   "payload_json=json_set(payload_json,'$.candidate.text','"
                   "changed after sealing')");
   const auto replay = database.store->replay_events(database.session);
+  INFO((replay ? "replay succeeded" : replay.error().message));
   REQUIRE(replay);
   REQUIRE(replay->size() == 1);
   const auto& value = std::get<domain::ConversationSummaryCandidatePublished>(

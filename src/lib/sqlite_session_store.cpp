@@ -3725,9 +3725,8 @@ auto require_conversation_fields(const Json& value,
 
 // The JSON document is already bounded by the store. Bound its aggregate
 // metadata before copying any strings or allocating domain reference vectors.
-auto check_conversation_shape(const Json& value, std::size_t& nodes,
-                              std::size_t& bytes, const unsigned depth = 0)
-    -> void {
+auto check_conversation_node(const Json& value, std::size_t& nodes,
+                             std::size_t& bytes, const unsigned depth) -> void {
   if (nodes == 0 || depth > 8 ||
       (value.is_number() && !value.is_number_unsigned()))
     throw CodecFailure{"conversation metadata exceeds shape bounds"};
@@ -3739,19 +3738,26 @@ auto check_conversation_shape(const Json& value, std::size_t& nodes,
       throw CodecFailure{"conversation metadata exceeds text bounds"};
     bytes -= text.size();
   }
-  if (!value.is_object() && !value.is_array()) return;
-  if (value.size() > nodes)
-    throw CodecFailure{"conversation metadata exceeds shape bounds"};
-  for (const auto& child : value)
-    check_conversation_shape(child, nodes, bytes, depth + 1);
 }
 
 auto check_conversation_shape(const Json& value) -> void {
   // One entry contains 21 JSON nodes; allow bounded envelope/group overhead.
-  auto nodes = domain::conversation_maximum_entries * 32 +
-               domain::conversation_maximum_groups * 4 + 64;
+  auto nodes = (domain::conversation_maximum_entries * 32) +
+               (domain::conversation_maximum_groups * 4) +
+               (domain::summary_maximum_active * 32) + 64;
   auto bytes = domain::conversation_maximum_manifest_bytes;
-  check_conversation_shape(value, nodes, bytes);
+  std::vector<std::pair<const Json*, unsigned>> pending{{&value, 0}};
+  while (!pending.empty()) {
+    const auto [item, depth] = pending.back();
+    pending.pop_back();
+    check_conversation_node(*item, nodes, bytes, depth);
+    if (!item->is_object() && !item->is_array()) continue;
+    // Reserve budget for every queued child before growing the work stack.
+    if (pending.size() > nodes || item->size() > nodes - pending.size())
+      throw CodecFailure{"conversation metadata exceeds shape bounds"};
+    for (const auto& child : *item)
+      pending.emplace_back(&child, depth + 1);
+  }
 }
 
 [[nodiscard]] auto conversation_policy_json(
@@ -3801,6 +3807,61 @@ auto check_conversation_shape(const Json& value) -> void {
   throw CodecFailure{"invalid conversation entry kind"};
 }
 
+auto admitted_summary_json(const domain::ConversationAdmittedSummary& value)
+    -> Json {
+  return {
+      {"candidate",
+       {{"summary_id", id_text(value.candidate.summary_id)},
+        {"revision", value.candidate.revision},
+        {"candidate_digest", digest_json(value.candidate.candidate_digest)}}},
+      {"activation_event_id", id_text(value.activation_event_id)},
+      {"activation_sequence", value.activation_sequence},
+      {"source_anchor_sequence", value.source_anchor_sequence},
+      {"entry_id", id_text(value.entry_id)},
+      {"message_id", id_text(value.message_id)},
+      {"provenance",
+       {{"source_id", id_text(value.provenance.source_id)},
+        {"source_location",
+         optional_string_json(value.provenance.source_location)},
+        {"digest", optional_string_json(value.provenance.digest)}}},
+      {"order", value.order},
+      {"estimated_tokens", value.estimated_tokens},
+      {"message_digest", digest_json(value.message_digest)}};
+}
+auto check_admitted_summary_fields(const Json& value) -> void {
+  require_conversation_fields(
+      value, {"candidate", "activation_event_id", "activation_sequence",
+              "source_anchor_sequence", "entry_id", "message_id", "provenance",
+              "order", "estimated_tokens", "message_digest"});
+  require_conversation_fields(value.at("candidate"),
+                              {"summary_id", "revision", "candidate_digest"});
+  require_conversation_fields(value.at("candidate").at("candidate_digest"),
+                              {"algorithm", "value", "byte_size"});
+  require_conversation_fields(value.at("provenance"),
+                              {"source_id", "source_location", "digest"});
+  require_conversation_fields(value.at("message_digest"),
+                              {"algorithm", "value", "byte_size"});
+}
+auto parse_admitted_summary(const Json& value)
+    -> domain::ConversationAdmittedSummary {
+  const auto& candidate = value.at("candidate");
+  const auto& provenance = value.at("provenance");
+  return {{parse_id<domain::ConversationSummaryId>(candidate.at("summary_id")),
+           candidate.at("revision").get<std::uint64_t>(),
+           parse_digest(candidate.at("candidate_digest"))},
+          parse_id<domain::EventId>(value.at("activation_event_id")),
+          value.at("activation_sequence").get<std::uint64_t>(),
+          value.at("source_anchor_sequence").get<std::uint64_t>(),
+          parse_id<domain::ContextEntryId>(value.at("entry_id")),
+          parse_id<domain::MessageId>(value.at("message_id")),
+          {parse_id<domain::ContextSourceId>(provenance.at("source_id")),
+           parse_optional_string(provenance.at("source_location")),
+           parse_optional_string(provenance.at("digest"))},
+          value.at("order").get<std::uint64_t>(),
+          value.at("estimated_tokens").get<std::uint64_t>(),
+          parse_digest(value.at("message_digest"))};
+}
+
 [[nodiscard]] auto conversation_admission_json(
     const domain::ConversationAdmission& admission) -> Json {
   if (!domain::validate_conversation_admission(admission) ||
@@ -3829,7 +3890,7 @@ auto check_conversation_shape(const Json& value) -> void {
                       {"entries", std::move(entries)},
                       {"pinned", group.pinned}});
   }
-  return {
+  Json result{
       {"version", admission.version},
       {"estimator_version", admission.estimator_version},
       {"session_id", id_text(admission.session_id)},
@@ -3848,6 +3909,13 @@ auto check_conversation_shape(const Json& value) -> void {
       {"omitted_groups_digest",
        optional_digest_json(admission.omitted_groups_digest)},
       {"admission_digest", digest_json(*admission.admission_digest)}};
+  if (admission.version == 2) {
+    auto summaries = Json::array();
+    for (const auto& summary : admission.summaries)
+      summaries.push_back(admitted_summary_json(summary));
+    result["summaries"] = std::move(summaries);
+  }
+  return result;
 }
 
 [[nodiscard]] auto conversation_version(const Json& value) -> std::uint32_t {
@@ -3857,24 +3925,7 @@ auto check_conversation_shape(const Json& value) -> void {
   return value.get<std::uint32_t>();
 }
 
-[[nodiscard]] auto parse_conversation_admission(const Json& value)
-    -> domain::ConversationAdmission {
-  check_conversation_shape(value);
-  require_conversation_fields(
-      value,
-      {"version", "estimator_version", "session_id", "model_id",
-       "source_snapshot_sequence", "policy_event_id", "policy_revision", "mode",
-       "capacity", "mandatory_input_tokens", "groups", "omitted_group_count",
-       "omitted_groups_digest", "admission_digest"});
-  require_conversation_fields(value.at("capacity"), {"context_window_tokens",
-                                                     "reserved_output_tokens",
-                                                     "reserved_input_tokens"});
-  require_conversation_fields(value.at("admission_digest"),
-                              {"algorithm", "value", "byte_size"});
-  if (!value.at("omitted_groups_digest").is_null())
-    require_conversation_fields(value.at("omitted_groups_digest"),
-                                {"algorithm", "value", "byte_size"});
-  const auto& groups = value.at("groups");
+auto check_conversation_group_fields(const Json& groups) -> void {
   if (!groups.is_array() || groups.size() > domain::conversation_maximum_groups)
     throw CodecFailure{"conversation group count exceeds limit"};
   std::size_t remaining = domain::conversation_maximum_entries;
@@ -3899,6 +3950,50 @@ auto check_conversation_shape(const Json& value) -> void {
                                   {"algorithm", "value", "byte_size"});
     }
   }
+}
+
+auto check_conversation_admission_fields(const Json& value,
+                                         std::uint32_t version) -> void {
+  if (version != 1 && version != 2)
+    throw CodecFailure{"unsupported conversation admission version"};
+  if (version == 1) {
+    require_conversation_fields(
+        value,
+        {"version", "estimator_version", "session_id", "model_id",
+         "source_snapshot_sequence", "policy_event_id", "policy_revision",
+         "mode", "capacity", "mandatory_input_tokens", "groups",
+         "omitted_group_count", "omitted_groups_digest", "admission_digest"});
+  } else {
+    require_conversation_fields(
+        value, {"version", "estimator_version", "session_id", "model_id",
+                "source_snapshot_sequence", "policy_event_id",
+                "policy_revision", "mode", "capacity", "mandatory_input_tokens",
+                "groups", "omitted_group_count", "omitted_groups_digest",
+                "admission_digest", "summaries"});
+    const auto& summaries = value.at("summaries");
+    if (!summaries.is_array() ||
+        summaries.size() > domain::summary_maximum_active)
+      throw CodecFailure{"admitted summary count exceeds limit"};
+    for (const auto& summary : summaries)
+      check_admitted_summary_fields(summary);
+  }
+  require_conversation_fields(value.at("capacity"), {"context_window_tokens",
+                                                     "reserved_output_tokens",
+                                                     "reserved_input_tokens"});
+  require_conversation_fields(value.at("admission_digest"),
+                              {"algorithm", "value", "byte_size"});
+  if (!value.at("omitted_groups_digest").is_null())
+    require_conversation_fields(value.at("omitted_groups_digest"),
+                                {"algorithm", "value", "byte_size"});
+  check_conversation_group_fields(value.at("groups"));
+}
+
+[[nodiscard]] auto parse_conversation_admission(const Json& value)
+    -> domain::ConversationAdmission {
+  check_conversation_shape(value);
+  const auto version = conversation_version(value.at("version"));
+  check_conversation_admission_fields(value, version);
+  const auto& groups = value.at("groups");
   const auto& capacity = value.at("capacity");
   domain::ConversationAdmission result{
       conversation_version(value.at("version")),
@@ -3939,6 +4034,9 @@ auto check_conversation_shape(const Json& value) -> void {
     }
     result.groups.push_back(std::move(parsed));
   }
+  if (version == 2)
+    for (const auto& summary : value.at("summaries"))
+      result.summaries.push_back(parse_admitted_summary(summary));
   if (conversation_admission_json(result) != value)
     throw CodecFailure{"noncanonical conversation admission"};
   return result;
@@ -3946,8 +4044,8 @@ auto check_conversation_shape(const Json& value) -> void {
 
 // Summary payloads are bounded before domain strings or reference arrays are
 // copied. Candidate text has a separate, larger limit than source metadata.
-auto check_summary_shape(const Json& value, std::size_t& nodes,
-                         std::size_t& bytes, unsigned depth = 0) -> void {
+auto check_summary_node(const Json& value, std::size_t& nodes,
+                        std::size_t& bytes, unsigned depth) -> void {
   if (nodes == 0 || depth > 12 ||
       (value.is_number() && !value.is_number_unsigned()))
     throw CodecFailure{"summary metadata exceeds shape bounds"};
@@ -3958,18 +4056,23 @@ auto check_summary_shape(const Json& value, std::size_t& nodes,
       throw CodecFailure{"summary metadata exceeds text bounds"};
     bytes -= text.size();
   }
-  if (!value.is_object() && !value.is_array()) return;
-  if (value.size() > nodes)
-    throw CodecFailure{"summary metadata exceeds shape bounds"};
-  for (const auto& child : value)
-    check_summary_shape(child, nodes, bytes, depth + 1);
 }
 auto check_summary_shape(const Json& value) -> void {
-  auto nodes = domain::summary_maximum_entries * 32 +
-               domain::summary_maximum_groups * 8 + 512;
+  auto nodes = (domain::summary_maximum_entries * 32) +
+               (domain::summary_maximum_groups * 8) + 512;
   auto bytes = domain::summary_maximum_manifest_bytes +
                domain::summary_maximum_text_bytes;
-  check_summary_shape(value, nodes, bytes);
+  std::vector<std::pair<const Json*, unsigned>> pending{{&value, 0}};
+  while (!pending.empty()) {
+    const auto [item, depth] = pending.back();
+    pending.pop_back();
+    check_summary_node(*item, nodes, bytes, depth);
+    if (!item->is_object() && !item->is_array()) continue;
+    if (pending.size() > nodes || item->size() > nodes - pending.size())
+      throw CodecFailure{"summary metadata exceeds shape bounds"};
+    for (const auto& child : *item)
+      pending.emplace_back(&child, depth + 1);
+  }
 }
 auto summary_unsigned(const Json& value) -> std::uint64_t {
   if (!value.is_number_unsigned())
@@ -4073,6 +4176,11 @@ auto parse_summary_entry(const Json& value)
           parse_summary_digest(value.at("message_digest"),
                                domain::summary_maximum_source_bytes)};
 }
+auto required_summary_digest_json(
+    const std::optional<domain::ContentDigest>& value) -> Json {
+  if (!value) throw CodecFailure{"required summary digest is missing"};
+  return digest_json(*value);
+}
 auto summary_sources_json(const domain::ConversationSummarySources& value)
     -> Json {
   if (!domain::validate_conversation_summary_sources(value))
@@ -4092,7 +4200,7 @@ auto summary_sources_json(const domain::ConversationSummarySources& value)
           {"session_id", id_text(value.session_id)},
           {"snapshot_sequence", value.snapshot_sequence},
           {"groups", std::move(groups)},
-          {"source_digest", digest_json(*value.source_digest)}};
+          {"source_digest", required_summary_digest_json(value.source_digest)}};
 }
 auto parse_summary_sources(const Json& value)
     -> domain::ConversationSummarySources {
@@ -4153,7 +4261,7 @@ auto summary_intent_json(const domain::ConversationSummaryIntent& value)
             {"reserved_input_tokens", value.capacity.reserved_input_tokens}}},
           {"estimated_input_tokens", value.estimated_input_tokens},
           {"maximum_output_bytes", value.maximum_output_bytes},
-          {"intent_digest", digest_json(*value.intent_digest)}};
+          {"intent_digest", required_summary_digest_json(value.intent_digest)}};
 }
 auto parse_summary_intent(const Json& value)
     -> domain::ConversationSummaryIntent {
@@ -4252,9 +4360,10 @@ auto summary_candidate_json(const domain::ConversationSummaryCandidate& value)
           {"author", summary_author_name(value.author)},
           {"edited_from", value.edited_from
                               ? summary_reference_json(*value.edited_from)
-                              : Json{nullptr}},
+                              : Json(nullptr)},
           {"text", value.text},
-          {"candidate_digest", digest_json(*value.candidate_digest)}};
+          {"candidate_digest",
+           required_summary_digest_json(value.candidate_digest)}};
 }
 auto parse_summary_candidate(const Json& value)
     -> domain::ConversationSummaryCandidate {
@@ -4300,7 +4409,8 @@ auto summary_activation_json(const domain::ConversationSummaryActivation& value)
           {"source_anchor_sequence", value.source_anchor_sequence},
           {"activation_event_id", id_text(value.activation_event_id)},
           {"activation_sequence", value.activation_sequence},
-          {"activation_digest", digest_json(*value.activation_digest)}};
+          {"activation_digest",
+           required_summary_digest_json(value.activation_digest)}};
 }
 auto parse_summary_activation(const Json& value)
     -> domain::ConversationSummaryActivation {
@@ -4366,9 +4476,21 @@ auto check_summary_policy_revision(std::uint64_t revision) -> void {
            type == "run.child_created" || type == "tool.proposed" ||
            type == "tool.policy_decided" ||
            (type.starts_with("memory.") && known_payload_type(type)))) ||
-         (schema_version == 3 && type == "run.started") ||
+         ((schema_version == 3 || schema_version == 4) &&
+          type == "run.started") ||
          ((schema_version == 3 || schema_version == 4) &&
           type == "run.child_created");
+}
+
+auto check_run_started_admission_schema(const domain::RunStarted& value,
+                                        std::uint32_t schema) -> void {
+  const auto& admission = value.conversation_admission;
+  if (schema == 3 && admission && admission->version != 1)
+    throw CodecFailure{"run start schema 3 requires a legacy v1 admission"};
+  if (schema == 4 && (value.purpose != domain::RunPurpose::conversation ||
+                      !admission || admission->version != 2))
+    throw CodecFailure{
+        "run start schema 4 requires a conversation v2 admission"};
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Event encoder.
@@ -4378,12 +4500,13 @@ auto check_summary_policy_revision(std::uint64_t revision) -> void {
   return std::visit(
       Overloaded{
           [schema_version](const domain::RunStarted& value) -> Json {
+            check_run_started_admission_schema(value, schema_version);
             Json result{
                 {"surface_id", id_text(value.surface_id)},
                 {"workspace_id", id_text(value.workspace_id)},
                 {"permission_profile_id", id_text(value.permission_profile_id)},
                 {"persona_id", optional_id_json(value.persona_id)}};
-            if (schema_version == 3) {
+            if (schema_version == 3 || schema_version == 4) {
               result["purpose"] = run_purpose_name(value.purpose);
               result["memory_selection"] =
                   value.memory_selection
@@ -4877,7 +5000,7 @@ auto check_summary_policy_revision(std::uint64_t revision) -> void {
                                  const std::uint32_t schema_version)
     -> domain::RunEventPayload {
   if (type == "run.started") {
-    if (schema_version == 3)
+    if (schema_version == 3 || schema_version == 4)
       require_conversation_fields(value, {"surface_id", "workspace_id",
                                           "permission_profile_id", "persona_id",
                                           "memory_selection", "purpose",
@@ -4896,16 +5019,17 @@ auto check_summary_policy_revision(std::uint64_t revision) -> void {
         parse_id<domain::PermissionProfileId>(
             value.at("permission_profile_id")),
         parse_optional_id<domain::PersonaId>(value.at("persona_id"))};
-    if (schema_version == 2 ||
-        (schema_version == 3 && !value.at("memory_selection").is_null()))
+    if (schema_version == 2 || ((schema_version == 3 || schema_version == 4) &&
+                                !value.at("memory_selection").is_null()))
       result.memory_selection =
           parse_memory_selection(value.at("memory_selection"));
-    if (schema_version == 3) {
+    if (schema_version == 3 || schema_version == 4) {
       result.purpose = parse_run_purpose(value.at("purpose"));
       if (!value.at("conversation_admission").is_null())
         result.conversation_admission =
             parse_conversation_admission(value.at("conversation_admission"));
     }
+    check_run_started_admission_schema(result, schema_version);
     return result;
   }
   if (type == "session.conversation_policy_set") {

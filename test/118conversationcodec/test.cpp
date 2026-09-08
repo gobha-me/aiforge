@@ -160,7 +160,7 @@ TEST_CASE("conversation start codec rejects malformed admission metadata",
         "json_set(payload_json,'$.conversation_admission.version',4294967297)";
   }
   SECTION("unknown admission version") {
-    expression = "json_set(payload_json,'$.conversation_admission.version',2)";
+    expression = "json_set(payload_json,'$.conversation_admission.version',99)";
   }
   SECTION("unknown estimator") {
     expression =
