@@ -17,7 +17,8 @@ jobs:
   clang-tidy:
     name: Clang Tidy 20
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Full-source analysis grows with the runtime and adapter failure coverage.
+    timeout-minutes: 90
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
