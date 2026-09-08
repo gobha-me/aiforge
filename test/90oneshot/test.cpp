@@ -1839,7 +1839,8 @@ struct SavedOneShotSummary {
             {},
             make_id<domain::ModelId>("model"),
             surfaces::OneShotRequest::SessionMode::resume,
-            source.log.session_id()};
+            source.log.session_id(),
+            run_provenance()};
   }
 };
 } // namespace
@@ -1905,7 +1906,7 @@ TEST_CASE("one-shot resumes approved rolling summary through an actual tool "
        {"application/schema+json", R"({"type":"object"})"},
        {},
        {}},
-      executor));
+      executor, {}, runtime::ToolExecutorContract{"test.lookup", "1"}));
   auto tools = registry.snapshot();
   REQUIRE(tools);
   surfaces::OneShotDependencies dependencies;
