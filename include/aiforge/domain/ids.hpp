@@ -79,6 +79,7 @@ struct PlanTaskIdTag;
 struct ProjectBacklogItemIdTag;
 struct MemoryProposalIdTag;
 struct MemoryRecordIdTag;
+struct ConversationSummaryIdTag;
 struct VideoOperationIdTag;
 struct VideoJobIdTag;
 
@@ -118,6 +119,7 @@ using PlanTaskId = Id<PlanTaskIdTag>;
 using ProjectBacklogItemId = Id<ProjectBacklogItemIdTag>;
 using MemoryProposalId = Id<MemoryProposalIdTag>;
 using MemoryRecordId = Id<MemoryRecordIdTag>;
+using ConversationSummaryId = Id<ConversationSummaryIdTag>;
 using VideoOperationId = Id<VideoOperationIdTag>;
 using VideoJobId = Id<VideoJobIdTag>;
 

@@ -19,6 +19,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   conversation_policy.cpp
   session_context.cpp
   conversation_selection.cpp
+  conversation_summary.cpp
   config.cpp
   config_provenance.cpp
   credential.cpp
