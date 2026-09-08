@@ -745,14 +745,47 @@ TEST_CASE("one-shot continues after a successful tool result",
   std::ostringstream output;
   std::ostringstream error;
 
+  std::optional<std::string> stdin_evidence;
+  SECTION("without stdin") {
+  }
+  SECTION("with required stdin") {
+    stdin_evidence = "untrusted lookup facts";
+  }
   const auto result = surface.run(
-      {"use the lookup", std::nullopt, make_id<domain::ModelId>("model")},
+      {"use the lookup", stdin_evidence, make_id<domain::ModelId>("model")},
       output, error);
 
   REQUIRE(result);
   REQUIRE(executor->remaining_exchanges() == 0);
   REQUIRE(backend.captured.size() == 2);
+  const auto& initial = backend.captured.front().context;
   const auto& continuation = backend.captured.back();
+  if (stdin_evidence) {
+    const auto evidence =
+        std::ranges::find_if(initial.entries, [](const auto& entry) {
+          return entry.provenance.source_location == "stdin";
+        });
+    REQUIRE(evidence != initial.entries.end());
+    CHECK(evidence->kind == domain::ContextEntryKind::evidence);
+    CHECK(evidence->message.role == domain::Role::evidence);
+    CHECK(evidence->message.content == std::vector<domain::ContentBlock>{
+                                           domain::TextBlock{*stdin_evidence}});
+    const auto retained =
+        std::ranges::find(continuation.context.entries, evidence->entry_id,
+                          &domain::ContextEntry::entry_id);
+    REQUIRE(retained != continuation.context.entries.end());
+    CHECK(*retained == *evidence);
+  }
+  std::uint64_t previous_order{};
+  for (const auto& entry : initial.entries) {
+    if (!entry.instruction_layer)
+      previous_order = std::max(previous_order, entry.order);
+  }
+  for (std::size_t index = initial.entries.size();
+       index < continuation.context.entries.size(); ++index) {
+    CHECK(continuation.context.entries[index].order > previous_order);
+    previous_order = continuation.context.entries[index].order;
+  }
   REQUIRE(continuation.context.entries.size() >= 4);
   const auto& tool_call =
       continuation.context.entries[continuation.context.entries.size() - 2];
@@ -810,6 +843,36 @@ TEST_CASE("invalid and oversized one-shot input never reaches a backend",
   REQUIRE(result.error().code == surfaces::OneShotErrorCode::input_too_large);
   REQUIRE(backend.starts == 0);
   REQUIRE(models.lookups == 0);
+}
+
+TEST_CASE(
+    "one-shot never drops required stdin to fit optional evidence capacity",
+    "[one-shot][context][failure]") {
+  FakeModels models;
+  models.info.context_window_tokens = 1024;
+  ConversationBackend backend;
+  MemoryStore store;
+  surfaces::OneShotSurface surface{backend, models, store, {4096, 16}};
+  std::ostringstream output, error;
+  const auto model = make_id<domain::ModelId>("model");
+  const auto refused =
+      surface.run({"hello", std::string(1024, 'x'), model}, output, error);
+  REQUIRE_FALSE(refused);
+  CHECK(refused.error().code == surfaces::OneShotErrorCode::context_failed);
+  CHECK(backend.captured.empty());
+  CHECK(store.append_calls == 0);
+
+  const auto accepted = surface.run({"hello", {}, model}, output, error);
+  INFO((accepted ? "completed" : accepted.error().message));
+  REQUIRE(accepted);
+  REQUIRE(backend.captured.size() == 1);
+  const auto& events = store.histories.at(accepted->session_id);
+  CHECK(std::ranges::none_of(events, [](const auto& event) {
+    return std::holds_alternative<domain::LocalContextAdmitted>(
+               event.payload) ||
+           std::holds_alternative<domain::RepositoryContextAdmitted>(
+               event.payload);
+  }));
 }
 
 TEST_CASE("model and context failures are typed before inference",

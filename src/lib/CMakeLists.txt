@@ -20,6 +20,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   conversation_admission_context.cpp
   conversation_policy.cpp
   session_context.cpp
+  session_evidence.cpp
   summary_controller.cpp
   conversation_selection.cpp
   conversation_summary.cpp
