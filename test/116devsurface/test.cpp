@@ -445,7 +445,12 @@ TEST_CASE(
   command(*app, "/dev target src");
   REQUIRE(drive_until(*app, [&] { return source.entered.load(); }));
   CHECK(backend.requests.empty());
-  app->on_event(key_event(termforge::Key::Char, U'g', true));
+  app->on_event(key_event(termforge::Key::F10));
+  app->on_event(key_event(termforge::Key::Enter));
+  static_cast<void>(rendered(*app));
+  app->on_event(key_event(termforge::Key::Down));
+  app->on_event(key_event(termforge::Key::Down));
+  app->on_event(key_event(termforge::Key::Enter));
   CHECK(rendered(*app).find("Root: ") != std::string::npos);
   app->on_event(key_event(termforge::Key::Escape));
   REQUIRE(drive_until(*app, [&] {
@@ -456,7 +461,12 @@ TEST_CASE(
     app->on_tick(1ms);
     std::this_thread::sleep_for(1ms);
   }
-  app->on_event(key_event(termforge::Key::Char, U'g', true));
+  app->on_event(key_event(termforge::Key::F10));
+  app->on_event(key_event(termforge::Key::Enter));
+  static_cast<void>(rendered(*app));
+  app->on_event(key_event(termforge::Key::Down));
+  app->on_event(key_event(termforge::Key::Down));
+  app->on_event(key_event(termforge::Key::Enter));
   CHECK(rendered(*app).find("Workspace: Chat") != std::string::npos);
   CHECK(rendered(*app).find("/dev target src") != std::string::npos);
   CHECK(backend.requests.empty());

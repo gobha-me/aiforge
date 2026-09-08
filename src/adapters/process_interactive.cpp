@@ -1,4 +1,5 @@
 #include <aiforge/adapters/ask_user_dialog.hpp>
+#include <aiforge/adapters/conversation_context_dialog.hpp>
 #include <aiforge/adapters/filesystem_artifact_store.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
 #include <aiforge/adapters/filesystem_user_global_instruction_source.hpp>
@@ -54,6 +55,7 @@
 #include <mutex>
 #include <optional>
 #include <ostream>
+#include <set>
 #include <span>
 #include <string>
 #include <termforge/core/app.hpp>
@@ -866,6 +868,18 @@ struct InferenceCounts {
   return lines;
 }
 
+auto rebuild_chat_transcript(TranscriptView& view,
+                             std::span<const domain::RunEvent> events,
+                             std::set<domain::RunId>& summary_runs)
+    -> std::expected<void, TranscriptViewError> {
+  summary_runs.clear();
+  for (const auto& event : events)
+    if (const auto* started = std::get_if<domain::RunStarted>(&event.payload);
+        started != nullptr && started->purpose == domain::RunPurpose::summary)
+      summary_runs.insert(event.metadata.run_id);
+  return view.rebuild(events, summary_runs);
+}
+
 class ChatAppImpl final : public InteractiveChatApp {
  public:
   ChatAppImpl(backend::Backend& backend,
@@ -900,6 +914,23 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_poll_worker_updates(options.poll_worker_updates),
         m_repository_root_display(std::move(options.repository_root_display)),
         m_repository_context_source(options.repository_context_source) {
+    m_context_toolbar.set_menus(
+        {{"Context",
+          {{"Conversation (Ctrl+G)",
+            [this] {
+              static_cast<void>(
+                  manage_context(surfaces::InspectConversation{}));
+            }},
+           {"Summaries",
+            [this] {
+              static_cast<void>(
+                  manage_context(surfaces::InspectConversationSummaries{}));
+            }},
+           {"Repository evidence", [this] { show_repository_context(false); }},
+           {"Hide toolbar", [this] {
+              static_cast<void>(
+                  manage_context(surfaces::SetContextToolbar{false}, false));
+            }}}}});
     set_frame_ms(33);
     m_composer.set_max_height(8);
     m_focus.add(&m_composer);
@@ -909,7 +940,8 @@ class ChatAppImpl final : public InteractiveChatApp {
       return;
     }
     m_session = std::move(*session);
-    auto rebuilt = m_transcript.rebuild(m_session->event_log().events());
+    auto rebuilt = rebuild_chat_transcript(
+        m_transcript, m_session->event_log().events(), m_summary_runs);
     if (!rebuilt) {
       m_setup_error =
           cli::CommandFailure{cli::CommandFailureKind::runtime,
@@ -1068,7 +1100,7 @@ class ChatAppImpl final : public InteractiveChatApp {
         key != nullptr && key->action == termforge::KeyAction::Press &&
         key->ctrl && key->key == termforge::Key::Char && key->ch == U'g' &&
         !modal()) {
-      show_repository_context(false);
+      static_cast<void>(manage_context(surfaces::InspectConversation{}));
       return;
     }
 
@@ -1106,6 +1138,11 @@ class ChatAppImpl final : public InteractiveChatApp {
       return;
     }
     if (!apply_events(*bridged)) return;
+    if (m_context_dialog_active) {
+      static_cast<void>(m_context_dialog->on_event(event));
+      return;
+    }
+    if (!modal() && context_toolbar_event(event)) return;
 
     if (const auto* mouse = std::get_if<termforge::MouseEvent>(&event)) {
       if (mouse->pressed && !m_session->active()) {
@@ -1127,6 +1164,9 @@ class ChatAppImpl final : public InteractiveChatApp {
       if (key->key == termforge::Key::Escape) {
         if (m_session->active()) return;
         if (m_help_visible) {
+          if (m_context_panel_visible && m_context_dialog)
+            m_context_dialog->invalidate_review();
+          m_context_panel_visible = false;
           m_help_visible = false;
           m_status = "Ready";
         }
@@ -1237,6 +1277,8 @@ class ChatAppImpl final : public InteractiveChatApp {
     if (columns <= 0 || rows <= 0 || !m_session) return;
 
     if (rows <= 2) {
+      m_context_toolbar.set_geometry({});
+      m_context_toolbar.close_dropdown();
       m_composer.set_geometry({0, 0, columns, 1});
       m_composer.draw(screen);
       if (rows == 2) {
@@ -1269,19 +1311,24 @@ class ChatAppImpl final : public InteractiveChatApp {
                       termforge::detail::truncate_to_width(header, columns),
                       termforge::theme::kFg, termforge::Rgb{0x20, 0x20, 0x40});
 
-    const int usable = std::max(0, rows - 2);
+    const int toolbar_rows = m_context_toolbar_visible && rows > 4 ? 1 : 0;
+    m_context_toolbar.set_geometry({0, 1, columns, toolbar_rows});
+    const int content_top = 1 + toolbar_rows;
+    const int usable = std::max(0, rows - 2 - toolbar_rows);
     const int composer_rows =
         std::min(usable, m_composer.preferred_height(columns));
     const int transcript_rows = usable - composer_rows;
-    m_transcript.set_geometry({0, 1, columns, transcript_rows});
-    m_help.set_geometry({0, 1, columns, transcript_rows});
-    m_composer.set_geometry({0, 1 + transcript_rows, columns, composer_rows});
+    m_transcript.set_geometry({0, content_top, columns, transcript_rows});
+    m_help.set_geometry({0, content_top, columns, transcript_rows});
+    m_composer.set_geometry(
+        {0, content_top + transcript_rows, columns, composer_rows});
     if (m_help_visible) {
       m_help.draw(screen);
     } else {
       m_transcript.draw(screen);
     }
     m_composer.draw(screen);
+    if (toolbar_rows > 0) m_context_toolbar.draw(screen);
 
     const auto footer = chat_footer();
     screen.write_text(0, rows - 1, footer, termforge::theme::kDim,
@@ -1290,12 +1337,106 @@ class ChatAppImpl final : public InteractiveChatApp {
   }
 
  private:
+  [[nodiscard]] auto context_draft() const -> std::string {
+    const auto& text = m_composer.text();
+    const auto command =
+        m_slash_commands.dispatch(text, {.run_active = m_session->active(),
+                                         .editor_available = true,
+                                         .stop_token = m_stop_token});
+    if (command && command->has_value()) return {};
+    return text;
+  }
+
+  auto ensure_context_dialog() -> void {
+    if (m_context_dialog) return;
+    m_context_dialog = std::make_unique<ConversationContextDialog>(
+        *m_session, [this] { return context_draft(); });
+    m_context_dialog->on_toolbar([this](bool visible) {
+      m_context_toolbar_visible = visible;
+      if (!visible) {
+        m_context_toolbar.close_dropdown();
+        m_context_toolbar.set_focused(false);
+      }
+    });
+    m_context_dialog->on_committed(
+        [this](std::vector<domain::RunEvent> events) {
+          static_cast<void>(apply_events(events));
+          sync_history();
+        });
+    m_context_dialog->on_repository([this] {
+      pop_modal();
+      m_context_dialog_active = false;
+      m_context_dialog->invalidate_review();
+      show_repository_context(false);
+    });
+    m_context_dialog->on_close([this] {
+      pop_modal();
+      m_context_dialog_active = false;
+      m_status = m_context_dialog->status();
+      sync_composer_focus();
+    });
+  }
+
+  auto manage_context(surfaces::ConversationCommand command, bool show = true)
+      -> bool {
+    ensure_context_dialog();
+    auto result = m_context_dialog->execute(command);
+    m_status = m_context_dialog->status();
+    if (!result) return false;
+    if (show && !m_context_dialog_active) {
+      m_context_dialog_active = true;
+      push_modal(*m_context_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                     .dismiss_on_click_outside = false});
+    }
+    return true;
+  }
+
+  auto execute_context_command(const surfaces::ConversationCommand& command)
+      -> bool {
+    const bool modal_editor =
+        std::holds_alternative<surfaces::EditConversationSummary>(command);
+    if (!manage_context(command, modal_editor)) return false;
+    if (!modal_editor &&
+        !std::holds_alternative<surfaces::SetContextToolbar>(command)) {
+      show_panel("Conversation context", {m_context_dialog->display_text()},
+                 m_context_dialog->status());
+      m_context_panel_visible = true;
+    }
+    return true;
+  }
+
+  auto context_toolbar_event(const termforge::Event& event) -> bool {
+    if (!m_context_toolbar_visible) return false;
+    if (const auto* mouse = std::get_if<termforge::MouseEvent>(&event)) {
+      if (m_context_toolbar.hit_test(mouse->x, mouse->y)) {
+        m_context_toolbar.set_focused(true);
+        return m_context_toolbar.on_event(event);
+      }
+      if (mouse->pressed) {
+        m_context_toolbar.close_dropdown();
+        m_context_toolbar.set_focused(false);
+      }
+      return false;
+    }
+    if (const auto* key = std::get_if<termforge::KeyEvent>(&event);
+        key != nullptr && key->action == termforge::KeyAction::Press &&
+        key->key == termforge::Key::F10) {
+      m_context_toolbar.set_focused(true);
+      return true;
+    }
+    if (!m_context_toolbar.focused()) return false;
+    const auto handled = m_context_toolbar.on_event(event);
+    if (!m_context_toolbar.dropdown_open())
+      m_context_toolbar.set_focused(false);
+    return handled;
+  }
+
   [[nodiscard]] auto chat_footer() const -> std::string {
     std::string footer =
         m_session->active() ? "Running — Esc/Ctrl+C cancel | Ctrl+D unavailable"
         : m_help_visible    ? "Slash command help — Esc closes | Ctrl+D exits"
-                         : "Enter submit | Tab | Ctrl+C clear | Ctrl+D exit | "
-                           "^E editor | /help";
+                            : "Enter submit | Ctrl+C clear | Ctrl+D exit | "
+                              "^G Context | /help";
     if (!m_status.empty()) footer += " | " + m_status;
     return footer;
   }
@@ -1513,6 +1654,10 @@ class ChatAppImpl final : public InteractiveChatApp {
 
   auto show_panel(std::string title, std::vector<std::string> lines,
                   std::string status) -> void {
+    if (m_context_panel_visible && title != "Conversation context") {
+      if (m_context_dialog) m_context_dialog->invalidate_review();
+      m_context_panel_visible = false;
+    }
     m_help.clear();
     m_help.append(std::move(title));
     for (auto& line : lines)
@@ -2413,8 +2558,10 @@ class ChatAppImpl final : public InteractiveChatApp {
     }
 
     TranscriptView candidate_view;
-    auto candidate_projection =
-        candidate_view.rebuild((*candidate)->event_log().events());
+    std::set<domain::RunId> candidate_summaries;
+    auto candidate_projection = rebuild_chat_transcript(
+        candidate_view, (*candidate)->event_log().events(),
+        candidate_summaries);
     if (!candidate_projection) {
       m_status = "Interactive transcript replay failed";
       return false;
@@ -2439,7 +2586,8 @@ class ChatAppImpl final : public InteractiveChatApp {
                  candidate_tool_spend.error();
       return false;
     }
-    auto rebuilt = m_transcript.rebuild((*candidate)->event_log().events());
+    auto rebuilt = rebuild_chat_transcript(
+        m_transcript, (*candidate)->event_log().events(), m_summary_runs);
     if (!rebuilt) {
       m_status = "Interactive transcript replay failed";
       return false;
@@ -2447,6 +2595,8 @@ class ChatAppImpl final : public InteractiveChatApp {
 
     m_repository_worker.request_stop();
     m_repository_draft.reset();
+    m_context_dialog.reset();
+    m_context_dialog_active = false;
     m_session = std::move(*candidate);
     m_request_setting_overrides = {};
     m_usage_ledger = std::move(*candidate_usage);
@@ -2523,6 +2673,8 @@ class ChatAppImpl final : public InteractiveChatApp {
         request_close();
         return true;
       case surfaces::SlashCommandAction::clear_view: {
+        if (m_context_dialog) m_context_dialog->invalidate_review();
+        m_context_panel_visible = false;
         auto cleared = m_transcript.clear_view();
         if (!cleared) {
           m_status = cleared.error().message;
@@ -2745,9 +2897,21 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_composer.clear();
         return true;
       case surfaces::SlashCommandAction::show_context:
-        show_repository_context(false);
+        if (!execute_context_command(surfaces::InspectConversation{}))
+          return false;
         m_composer.clear();
         return true;
+      case surfaces::SlashCommandAction::manage_conversation_context: {
+        auto parsed = surfaces::parse_conversation_command(
+            command.subject.value_or(""), m_stop_token);
+        if (!parsed) {
+          m_status = parsed.error().message;
+          return false;
+        }
+        if (!execute_context_command(*parsed)) return false;
+        m_composer.clear();
+        return true;
+      }
       case surfaces::SlashCommandAction::select_dev_target:
         return change_repository_context(
             {surfaces::ChatRepositoryChangeKind::select_target,
@@ -4703,6 +4867,34 @@ class ChatAppImpl final : public InteractiveChatApp {
     return true;
   }
 
+  [[nodiscard]] auto apply_conversation_event(const domain::RunEvent& event)
+      -> bool {
+    if (const auto* started = std::get_if<domain::RunStarted>(&event.payload);
+        started != nullptr && started->purpose == domain::RunPurpose::summary)
+      m_summary_runs.insert(event.metadata.run_id);
+    if (!m_summary_runs.contains(event.metadata.run_id)) {
+      auto applied = m_transcript.apply(event);
+      if (!applied) {
+        fail({cli::CommandFailureKind::runtime,
+              "interactive transcript update failed: " +
+                  applied.error().message});
+        return false;
+      }
+    }
+    if (std::holds_alternative<domain::RunCompleted>(event.payload)) {
+      m_status = m_summary_runs.contains(event.metadata.run_id)
+                     ? "Summary generation finished; Context > Summary > "
+                       "Review (not applied)"
+                     : "Ready";
+    } else if (std::holds_alternative<domain::RunCancelled>(event.payload)) {
+      m_status = "Cancelled";
+    } else if (const auto* failed =
+                   std::get_if<domain::RunFailed>(&event.payload)) {
+      m_status = failed->error.message;
+    }
+    return true;
+  }
+
   [[nodiscard]] auto apply_events(const std::vector<domain::RunEvent>& events)
       -> bool {
     for (const auto& event : events) {
@@ -4726,21 +4918,7 @@ class ChatAppImpl final : public InteractiveChatApp {
                   tool_spend.error().message});
         return false;
       }
-      auto applied = m_transcript.apply(event);
-      if (!applied) {
-        fail({cli::CommandFailureKind::runtime,
-              "interactive transcript update failed: " +
-                  applied.error().message});
-        return false;
-      }
-      if (std::holds_alternative<domain::RunCompleted>(event.payload)) {
-        m_status = "Ready";
-      } else if (std::holds_alternative<domain::RunCancelled>(event.payload)) {
-        m_status = "Cancelled";
-      } else if (const auto* failed =
-                     std::get_if<domain::RunFailed>(&event.payload)) {
-        m_status = failed->error.message;
-      }
+      if (!apply_conversation_event(event)) return false;
     }
     sync_composer_focus();
     return ensure_tool_approval_dialog() &&
@@ -4777,6 +4955,12 @@ class ChatAppImpl final : public InteractiveChatApp {
   domain::UsageLedgerProjection m_usage_ledger;
   domain::SessionSpendCeilingProjection m_spend_ceiling;
   domain::ToolSpendLedgerProjection m_tool_spend_ledger;
+  termforge::MenuBar m_context_toolbar;
+  bool m_context_toolbar_visible{true};
+  std::unique_ptr<ConversationContextDialog> m_context_dialog;
+  bool m_context_dialog_active{};
+  bool m_context_panel_visible{};
+  std::set<domain::RunId> m_summary_runs;
   TranscriptView m_transcript;
   termforge::TextBox m_help;
   termforge::Composer m_composer;
@@ -5002,17 +5186,21 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
                                         cli::CommandEnvironment& environment,
                                         std::ostream& output,
                                         std::ostream& diagnostics,
-                                        ProcessAgentExecution* agent)
+                                        ProcessAgentExecution* agent,
+                                        ProcessHeadlessExecution* headless)
     -> std::expected<void, cli::CommandFailure> {
   // clang-format on
   using SessionMode = cli::InteractiveCommand::SessionMode;
   try {
     static_cast<void>(output);
-    if (agent == nullptr &&
+    if (agent == nullptr && headless == nullptr &&
         (!environment.input_is_terminal || !environment.output_is_terminal)) {
       return failure(cli::CommandFailureKind::usage,
                      "interactive chat requires terminal input and output");
     }
+    if (headless != nullptr && (agent != nullptr || !headless->run))
+      return failure(cli::CommandFailureKind::usage,
+                     "headless Chat callback configuration is invalid");
     auto resolved = load_config(diagnostics, request.model, request.web_search);
     if (!resolved) return std::unexpected(std::move(resolved.error()));
     auto tool_profile_maximums =
@@ -5057,7 +5245,7 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
     if (!catalog)
       return failure(cli::CommandFailureKind::runtime, catalog.error().message);
     auto model = [&]() -> std::expected<domain::ModelId, cli::CommandFailure> {
-      if (agent == nullptr)
+      if (agent == nullptr && headless == nullptr)
         return resolve_interactive_model(*resolved, (*catalog)->service(),
                                          *generation_options,
                                          environment.stop_token);
@@ -5594,6 +5782,15 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
           runtime::RepositoryContextRequest{
               request.target.value_or("."), 1, {}};
     app_options.session_dependencies.runtime_version = runtime_version();
+    if (headless != nullptr) {
+      app_options.session_dependencies.async_repository_preparation = false;
+      auto session = surfaces::ChatSession::open(
+          std::move(open), *backend, (*catalog)->service(), store.get(),
+          nullptr, environment.stop_token, {},
+          std::move(app_options.session_dependencies));
+      if (!session) return std::unexpected(session_error(session.error()));
+      return headless->run(**session);
+    }
     auto app = make_interactive_chat_app(
         *backend, (*catalog)->service(), store.get(), std::move(open), editor,
         environment.stop_token, std::move(app_options));

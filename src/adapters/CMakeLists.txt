@@ -1,6 +1,9 @@
 add_library(${PROJECT_NAME}_adapters STATIC
   agent_transport.cpp
   process_agent.cpp
+  context_jsonl.cpp
+  conversation_context_dialog.cpp
+  process_context.cpp
   audio_device_gate.cpp
   audio_backend.cpp
   capture_device.cpp

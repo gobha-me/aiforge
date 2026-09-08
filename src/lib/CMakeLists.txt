@@ -12,6 +12,8 @@ add_library(${PROJECT_NAME}_lib STATIC
   chat_session.cpp
   child_run.cpp
   command_registry.cpp
+  context_control.cpp
+  conversation_commands.cpp
   conversation_context.cpp
   conversation_history.cpp
   conversation_admission.cpp

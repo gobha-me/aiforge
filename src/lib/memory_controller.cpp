@@ -456,6 +456,7 @@ auto MemoryController::capture_committed(
 
       std::optional<domain::PersonaId> producing_persona_id;
       bool run_started{};
+      bool conversation_run{};
       for (std::size_t source_index{}; source_index <= index; ++source_index) {
         const auto& event = source_events[source_index];
         if (event.metadata.run_id != source_events[index].metadata.run_id)
@@ -463,10 +464,13 @@ auto MemoryController::capture_committed(
         if (const auto* started =
                 std::get_if<domain::RunStarted>(&event.payload)) {
           run_started = true;
+          conversation_run =
+              started->purpose == domain::RunPurpose::conversation;
           producing_persona_id = started->persona_id;
           break;
         }
       }
+      if (run_started && !conversation_run) continue;
       MemoryToolConfiguration tool_configuration{
           true, true, true, producing_persona_id, m_limits};
       auto draft =

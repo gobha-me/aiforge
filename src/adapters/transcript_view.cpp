@@ -166,7 +166,7 @@ auto TranscriptView::apply(const domain::RunEvent& event)
       return error(TranscriptViewErrorCode::projection_rejected,
                    applied.error().message);
     }
-    auto rendered = render(candidate, m_reasoning_visibility);
+    auto rendered = render(candidate, m_reasoning_visibility, m_excluded_runs);
     if (!rendered) return std::unexpected(std::move(rendered.error()));
     if (auto synced = sync(std::move(*rendered)); !synced) return synced;
     m_projection = std::move(candidate);
@@ -177,7 +177,8 @@ auto TranscriptView::apply(const domain::RunEvent& event)
   }
 }
 
-auto TranscriptView::rebuild(const std::span<const domain::RunEvent> events)
+auto TranscriptView::rebuild(const std::span<const domain::RunEvent> events,
+                             const std::set<domain::RunId>& excluded_runs)
     -> std::expected<void, TranscriptViewError> {
   if (!owner_thread()) {
     return error(
@@ -185,16 +186,18 @@ auto TranscriptView::rebuild(const std::span<const domain::RunEvent> events)
         "transcript widgets may be changed only on their owner thread");
   }
   try {
+    auto exclusions = excluded_runs;
     auto candidate = domain::SessionTranscriptProjection::rebuild(events);
     if (!candidate) {
       return error(TranscriptViewErrorCode::projection_rejected,
                    candidate.error().message);
     }
-    auto rendered = render(*candidate, m_reasoning_visibility);
+    auto rendered = render(*candidate, m_reasoning_visibility, excluded_runs);
     if (!rendered) return std::unexpected(std::move(rendered.error()));
     replace_all(*rendered);
     m_rendered = std::move(*rendered);
     m_projection = std::move(*candidate);
+    m_excluded_runs = std::move(exclusions);
     return {};
   } catch (...) {
     return error(TranscriptViewErrorCode::internal_failure,
@@ -211,6 +214,7 @@ auto TranscriptView::clear_view() -> std::expected<void, TranscriptViewError> {
   try {
     m_text_box.clear();
     m_projection = {};
+    m_excluded_runs.clear();
     m_empty_projection = {};
     m_rendered.clear();
     m_live = {};
@@ -230,7 +234,7 @@ auto TranscriptView::set_reasoning_visibility(
         "transcript widgets may be changed only on their owner thread");
   }
   try {
-    auto rendered = render(m_projection, visibility);
+    auto rendered = render(m_projection, visibility, m_excluded_runs);
     if (!rendered) return std::unexpected(std::move(rendered.error()));
     replace_all(*rendered);
     m_rendered = std::move(*rendered);
@@ -244,11 +248,14 @@ auto TranscriptView::set_reasoning_visibility(
 
 auto TranscriptView::render(
     const domain::SessionTranscriptProjection& projection,
-    const ReasoningVisibility visibility) const
+    const ReasoningVisibility visibility,
+    const std::set<domain::RunId>& excluded_runs) const
     -> std::expected<std::vector<RenderedEntry>, TranscriptViewError> {
   try {
     std::vector<RenderedEntry> result;
     for (const auto& run : projection.runs()) {
+      const auto& run_id = run.run_id();
+      if (run_id && excluded_runs.contains(*run_id)) continue;
       auto rendered = render_run(run, visibility);
       if (!rendered) return std::unexpected(std::move(rendered.error()));
       result.reserve(result.size() + rendered->size());

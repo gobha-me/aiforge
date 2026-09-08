@@ -1,3 +1,4 @@
+#include "../135summarycontext/fixture.hpp"
 #include <aiforge/detail/sha256.hpp>
 #include <aiforge/instructions/editor.hpp>
 #include <aiforge/runtime/ask_user_tool.hpp>
@@ -4596,4 +4597,111 @@ TEST_CASE("plain Chat recovery counts earlier complete tool groups before "
     REQUIRE_FALSE(tool_text.empty());
     CHECK(tool_text.front() == large_result);
   }
+}
+
+TEST_CASE("Rolling context keeps its reviewed session summary while persona "
+          "memory switches owners",
+          "[chat][persona][memory][rolling][summary]") {
+  Backend backend;
+  MemoryStore store;
+  const auto alpha = named_persona_document("persona:rolling-alpha", "alpha",
+                                            "Alpha persona instructions");
+  const auto beta = named_persona_document("persona:rolling-beta", "beta",
+                                           "Beta persona instructions");
+  MutablePersonaSource personas{{{"alpha", alpha}, {"beta", beta}}};
+  seed_recovery_memory(store,
+                       domain::MemoryOwner::persona(alpha.reference.persona_id),
+                       "rolling-alpha");
+  seed_recovery_memory(store,
+                       domain::MemoryOwner::persona(beta.reference.persona_id),
+                       "rolling-beta");
+  summary_context_test::Fixture source;
+  source.source("shared-original", "Original shared story facts.");
+  const auto summary = source.summary(
+      "shared-summary", {make_id<domain::RunId>("shared-original")},
+      "Shared reviewed story and unfinished task.");
+  const auto activation = source.activate(summary);
+  source.policy(domain::ConversationMode::rolling);
+  REQUIRE(store.create_session({source.log.session_id(), {}}, {}));
+  REQUIRE(
+      store.append_events(source.log.session_id(), source.log.events(), {}));
+  std::uint64_t suffix{1000};
+  runtime::MemoryController memories{store, [&] { return ++suffix; },
+                                     [] { return domain::EventTimestamp{}; }};
+  surfaces::ChatSessionDependencies dependencies;
+  dependencies.persona_source = &personas;
+  dependencies.memory_controller = &memories;
+  dependencies.memory_settings.context_tokens = 2048;
+  dependencies.identity_suffix_source = [&] { return ++suffix; };
+  auto session = surfaces::ChatSession::open(
+      {make_id<domain::ModelId>("model"),
+       surfaces::ChatSessionOpen::Mode::resume,
+       source.log.session_id(),
+       {},
+       {persona::PersonaDirectiveKind::select, "alpha",
+        domain::PersonaSelectionSource::command_line}},
+      backend, backend, &store, nullptr, {}, {}, dependencies);
+  INFO((session ? "opened" : session.error().message));
+  REQUIRE(session);
+  const auto original_policy = (*session)->conversation_policy();
+  REQUIRE(original_policy);
+  REQUIRE(original_policy->policy.mode == domain::ConversationMode::rolling);
+  const auto check_turn = [&](const std::string& name,
+                              std::optional<domain::PersonaId> owner) {
+    const auto submitted = (*session)->submit(name + " next turn");
+    INFO((submitted ? "submitted" : submitted.error().message));
+    REQUIRE(submitted);
+    const auto started = std::ranges::find_if(
+        submitted->committed_events, [](const auto& event) {
+          return std::holds_alternative<domain::RunStarted>(event.payload);
+        });
+    REQUIRE(started != submitted->committed_events.end());
+    const auto& attributes = std::get<domain::RunStarted>(started->payload);
+    REQUIRE(attributes.conversation_admission);
+    CHECK(attributes.conversation_admission->mode ==
+          domain::ConversationMode::rolling);
+    REQUIRE(attributes.conversation_admission->summaries.size() == 1);
+    CHECK(attributes.conversation_admission->summaries.front().candidate ==
+          activation.candidate);
+    CHECK(attributes.conversation_admission->summaries.front()
+              .activation_event_id == activation.activation_event_id);
+    REQUIRE(attributes.memory_selection);
+    CHECK(attributes.memory_selection->entries.size() == (owner ? 1 : 0));
+    for (const auto& entry : attributes.memory_selection->entries) {
+      REQUIRE(owner);
+      CHECK(entry.owner == domain::MemoryOwner::persona(*owner));
+    }
+    drain_to_end(**session);
+    const auto evidence =
+        text_messages(backend.requests.back(), domain::Role::evidence);
+    CHECK(std::ranges::any_of(evidence, [](const auto& text) {
+      return text.contains("Shared reviewed story and unfinished task.");
+    }));
+    for (const auto* persona_name : {"alpha", "beta"}) {
+      const auto present = std::ranges::any_of(evidence, [&](const auto& text) {
+        return text.contains(std::string{"Prefer rolling-"} + persona_name);
+      });
+      CHECK(present == (name == persona_name));
+    }
+    const auto policy = (*session)->conversation_policy();
+    REQUIRE(policy);
+    CHECK(*policy == *original_policy);
+    const auto catalog = (*session)->summary_catalog();
+    REQUIRE(catalog);
+    REQUIRE(catalog->snapshot.active.size() == 1);
+    CHECK(catalog->snapshot.active.front() == activation);
+    CHECK(catalog->snapshot.candidates.size() == 1);
+  };
+  check_turn("alpha", alpha.reference.persona_id);
+  REQUIRE((*session)->select_persona("beta"));
+  check_turn("beta", beta.reference.persona_id);
+  REQUIRE((*session)->disable_persona());
+  check_turn("off", {});
+  CHECK(backend.requests.size() == 3);
+  CHECK(
+      std::ranges::count_if(
+          (*session)->event_log().events(), [](const auto& event) {
+            return std::holds_alternative<domain::ConversationSummaryActivated>(
+                event.payload);
+          }) == 1);
 }

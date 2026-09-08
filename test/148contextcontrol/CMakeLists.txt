@@ -1,0 +1,6 @@
+if (NOT TARGET ${PROJECT_NAME}::adapters)
+  return()
+endif ()
+add_executable(148contextcontrol-test ../main.cpp test.cpp)
+target_include_directories(148contextcontrol-test PRIVATE ${PROJECT_SOURCE_DIR}/test/include)
+target_link_libraries(148contextcontrol-test PRIVATE Catch2::Catch2 aiforge::adapters)

@@ -584,3 +584,27 @@ TEST_CASE("tool slash mutations are typed, bounded, and fail closed",
   REQUIRE(descriptions->front().arguments.find("persona-max") !=
           std::string::npos);
 }
+
+TEST_CASE("conversation policy commands remain available during an active run",
+          "[slashcommands][context]") {
+  const auto& registry = builtin_slash_command_registry();
+  SlashCommandContext active;
+  active.run_active = true;
+  for (const auto* command :
+       {"/context history", "/context mode rolling", "/context mode full",
+        "/context pin run-1", "/context unpin run-1", "/context summary list",
+        "/context summary preview candidate", "/context toolbar hide"}) {
+    INFO(command);
+    const auto result = registry.dispatch(command, active);
+    REQUIRE(result);
+    REQUIRE(*result);
+    CHECK((*result)->action == SlashCommandAction::manage_conversation_context);
+  }
+  CHECK_FALSE(registry.dispatch("/context summary generate run-1", active));
+  CHECK_FALSE(registry.dispatch("/context mode unknown", active));
+  CHECK_FALSE(registry.dispatch("/context add source.cpp", active));
+  const auto repository = registry.dispatch("/context add source.cpp");
+  REQUIRE(repository);
+  REQUIRE(*repository);
+  CHECK((*repository)->action == SlashCommandAction::add_context_evidence);
+}

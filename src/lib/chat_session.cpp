@@ -2,6 +2,7 @@
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/runtime/context_builder.hpp>
 #include <aiforge/runtime/conversation_summary_context.hpp>
+#include <aiforge/runtime/conversation_summary_generation.hpp>
 #include <aiforge/runtime/inference_spend.hpp>
 #include <aiforge/runtime/memory_tool.hpp>
 #include <aiforge/runtime/persona.hpp>
@@ -579,6 +580,47 @@ auto finalize_conversation_admission(domain::ConversationAdmission& admission,
   if (!sealed)
     return error(ChatSessionErrorCode::context_failed, sealed.error().message);
   return {};
+}
+
+struct SelectedChatRepository {
+  domain::ConstructedContext context;
+  domain::RepositoryContextAdmission admission;
+};
+auto select_chat_repository(domain::ContextBuildInput input,
+                            runtime::PreparedRepositoryContext& prepared)
+    -> std::expected<SelectedChatRepository, ChatSessionError> {
+  runtime::ContextSelectionRequest selection;
+  selection.capacity = input.capacity;
+  selection.instructions = input.instructions;
+  for (const auto& content_entry : input.content) {
+    selection.candidates.push_back(
+        {content_entry,
+         content_entry.kind == domain::ContextContentKind::tool_result
+             ? runtime::ContextBudgetClass::tool_result
+             : runtime::ContextBudgetClass::conversation,
+         runtime::ContextRepresentation::direct,
+         domain::EvidenceFreshness::current, true, 0, std::nullopt});
+  }
+  for (std::size_t index{}; index < prepared.evidence.items.size(); ++index) {
+    const auto order =
+        static_cast<std::uint64_t>(input.content.size() + index + 1);
+    prepared.evidence.items[index].order = order;
+    prepared.admission.evidence[index].order = order;
+  }
+  if (!prepared.evidence.items.empty())
+    selection.parcels.push_back(prepared.evidence);
+  auto selected =
+      runtime::ContextBuilder{}.select_and_build(std::move(selection));
+  if (!selected)
+    return error(ChatSessionErrorCode::context_failed,
+                 selected.error().message);
+  auto admission =
+      runtime::finalize_repository_context_admission(prepared, *selected);
+  if (!admission)
+    return error(ChatSessionErrorCode::context_failed,
+                 admission.error().message);
+  return SelectedChatRepository{std::move(selected->context),
+                                std::move(*admission)};
 }
 
 auto append_recovered_user_input(
@@ -1347,6 +1389,584 @@ auto ChatSession::set_conversation_policy(
   }
 }
 
+struct ChatSummaryReviewData {
+  runtime::SummaryPreview review;
+  std::uint64_t identity;
+  std::optional<domain::RepositoryContextAdmission> repository;
+  domain::ConstructedContext context;
+};
+ChatSummaryPreview::ChatSummaryPreview(
+    std::shared_ptr<const ChatSummaryReviewData> data)
+    : m_data(std::move(data)) {
+}
+auto ChatSummaryPreview::context() const noexcept
+    -> const domain::ConstructedContext& {
+  return m_data->context;
+}
+auto ChatSummaryPreview::activation() const noexcept
+    -> const domain::ConversationSummaryActivation& {
+  return m_data->review.activation();
+}
+
+auto ChatSession::summary_control_attributes(std::uint64_t suffix) const
+    -> std::expected<domain::RunStarted, ChatSessionError> {
+  auto surface = make_id<domain::SurfaceId>("summary-control", suffix);
+  auto workspace = make_id<domain::WorkspaceId>("chat", suffix);
+  auto permission = make_id<domain::PermissionProfileId>("observe", suffix);
+  if (!surface || !workspace || !permission)
+    return error(ChatSessionErrorCode::internal_failure,
+                 "summary control identity is invalid");
+  return domain::RunStarted{
+      *surface, *workspace, m_impl->permission_profile_id.value_or(*permission),
+      {},       {},         domain::RunPurpose::control};
+}
+
+auto ChatSession::generate_conversation_summary(ChatSummaryGenerate request)
+    -> std::expected<ChatSummaryGeneration, ChatSessionError> {
+  bool committed{};
+  try {
+    if (m_impl->stop_token.stop_requested())
+      return error(ChatSessionErrorCode::cancelled,
+                   "summary generation cancelled");
+    if (active())
+      return error(ChatSessionErrorCode::run_failed,
+                   "summary generation requires an idle session");
+    const auto& log = m_impl->kernel->event_log();
+    if (request.expected_sequence != log.last_sequence())
+      return error(ChatSessionErrorCode::context_failed,
+                   "summary source selection is stale");
+    if (request.maximum_output_bytes == 0 ||
+        request.maximum_output_bytes > domain::summary_maximum_text_bytes)
+      return error(ChatSessionErrorCode::invalid_input,
+                   "summary output bound is invalid");
+    auto sources = runtime::prepare_conversation_summary_sources(
+        {log, std::move(request.covered_run_ids)}, m_impl->stop_token);
+    if (!sources)
+      return error(ChatSessionErrorCode::context_failed,
+                   sources.error().message);
+    const auto suffix = m_impl->identity_suffix_source();
+    auto attributes = summary_control_attributes(suffix);
+    auto run = make_id<domain::RunId>("summary-run", suffix);
+    auto summary = make_id<domain::ConversationSummaryId>("summary", suffix);
+    auto inference = make_id<domain::InferenceId>("summary-inference", suffix);
+    auto output = make_id<domain::MessageId>("summary-output", suffix);
+    if (!attributes || !run || !summary || !inference || !output)
+      return error(ChatSessionErrorCode::internal_failure,
+                   "summary generation identities are invalid");
+    auto prepared = runtime::prepare_conversation_summary_generation(
+        log,
+        {1,
+         1,
+         *summary,
+         std::move(sources->sources),
+         *run,
+         *inference,
+         m_impl->model_id,
+         *output,
+         m_impl->runtime_version,
+         {m_impl->model.context_window_tokens, m_impl->output_tokens, 0},
+         0,
+         request.maximum_output_bytes,
+         {}},
+        {}, m_impl->stop_token);
+    if (!prepared)
+      return error(ChatSessionErrorCode::context_failed,
+                   prepared.error().message);
+    if (auto spend = runtime::preflight_inference_spend(log); !spend)
+      return std::unexpected(inference_spend_error(spend.error()));
+    attributes->purpose = domain::RunPurpose::summary;
+    backend::GenerationOptions options;
+    options.max_output_tokens = m_impl->output_tokens;
+    const auto before = log.events().size();
+    auto started = m_impl->kernel->start({*run,
+                                          *attributes,
+                                          prepared->user_message,
+                                          {*inference,
+                                           *output,
+                                           m_impl->model_id,
+                                           std::move(prepared->context),
+                                           {},
+                                           options,
+                                           {}},
+                                          {},
+                                          {},
+                                          m_impl->model.pricing_observation,
+                                          {},
+                                          {},
+                                          std::move(prepared->intent)});
+    committed = log.events().size() != before;
+    if (!started) {
+      auto failure = kernel_error(started.error());
+      failure.effect_may_have_applied = committed;
+      return std::unexpected(std::move(failure));
+    }
+    return ChatSummaryGeneration{
+        *summary,
+        *run,
+        {log.events().begin() + static_cast<std::ptrdiff_t>(before),
+         log.events().end()}};
+  } catch (...) {
+    return std::unexpected(
+        ChatSessionError{ChatSessionErrorCode::internal_failure,
+                         "summary generation failed", false, committed});
+  }
+}
+
+auto ChatSession::summary_catalog() const
+    -> std::expected<ChatSummaryCatalog, ChatSessionError> {
+  try {
+    auto snapshot = runtime::SummaryController{*m_impl->kernel}.inspect();
+    if (!snapshot)
+      return error(ChatSessionErrorCode::context_failed,
+                   snapshot.error().message);
+    ChatSummaryCatalog result{std::move(*snapshot), {}};
+    std::set<domain::RunId> complete;
+    for (const auto& event : m_impl->kernel->event_log().events())
+      if (std::holds_alternative<domain::RunCompleted>(event.payload))
+        complete.insert(event.metadata.run_id);
+    for (const auto& intent : result.snapshot.intents) {
+      if (!complete.contains(intent.producing_run_id) ||
+          std::ranges::any_of(
+              result.snapshot.candidates, [&](const auto& candidate) {
+                return candidate.summary_id == intent.summary_id;
+              }))
+        continue;
+      auto draft = runtime::recover_conversation_summary_draft(
+          m_impl->kernel->event_log(), intent);
+      if (!draft) {
+        result.unpublishable.push_back(
+            {intent.summary_id, draft.error().message});
+        continue;
+      }
+      result.unpublished.push_back(std::move(*draft));
+    }
+    return result;
+  } catch (...) {
+    return error(ChatSessionErrorCode::internal_failure,
+                 "summary catalog inspection failed");
+  }
+}
+
+auto ChatSession::publish_conversation_summary(
+    domain::ConversationSummaryId summary_id)
+    -> std::expected<domain::ConversationSummaryCandidate, ChatSessionError> {
+  const auto before = m_impl->kernel->event_log().last_sequence();
+  try {
+    const auto suffix = m_impl->identity_suffix_source();
+    auto attributes = summary_control_attributes(suffix);
+    auto run = make_id<domain::RunId>("summary-publication", suffix);
+    if (!attributes || !run)
+      return error(ChatSessionErrorCode::internal_failure,
+                   "summary publication identity failed");
+    auto published = runtime::SummaryController{*m_impl->kernel}.publish(
+        {*run, *attributes, std::move(summary_id)});
+    if (!published)
+      return std::unexpected(ChatSessionError{
+          ChatSessionErrorCode::context_failed, published.error().message,
+          published.error().retryable,
+          m_impl->kernel->event_log().last_sequence() != before});
+    return std::move(*published);
+  } catch (...) {
+    return std::unexpected(ChatSessionError{
+        ChatSessionErrorCode::internal_failure, "summary publication failed",
+        false, m_impl->kernel->event_log().last_sequence() != before});
+  }
+}
+
+auto ChatSession::edit_conversation_summary(
+    std::uint64_t expected_sequence, domain::ConversationSummaryVersion parent,
+    std::string text)
+    -> std::expected<domain::ConversationSummaryCandidate, ChatSessionError> {
+  const auto before = m_impl->kernel->event_log().last_sequence();
+  try {
+    const auto suffix = m_impl->identity_suffix_source();
+    auto attributes = summary_control_attributes(suffix);
+    auto run = make_id<domain::RunId>("summary-edit", suffix);
+    if (!attributes || !run)
+      return error(ChatSessionErrorCode::internal_failure,
+                   "summary edit identity failed");
+    auto edited = runtime::SummaryController{*m_impl->kernel}.edit(
+        {*run, *attributes, expected_sequence, std::move(parent),
+         std::move(text)});
+    if (!edited)
+      return std::unexpected(ChatSessionError{
+          ChatSessionErrorCode::context_failed, edited.error().message,
+          edited.error().retryable,
+          m_impl->kernel->event_log().last_sequence() != before});
+    return std::move(*edited);
+  } catch (...) {
+    return std::unexpected(ChatSessionError{
+        ChatSessionErrorCode::internal_failure, "summary edit failed", false,
+        m_impl->kernel->event_log().last_sequence() != before});
+  }
+}
+
+auto ChatSession::summary_repository_context()
+    -> std::expected<std::optional<runtime::PreparedRepositoryContext>,
+                     ChatSessionError> {
+  if (m_impl->repository_work)
+    return error(ChatSessionErrorCode::run_failed,
+                 "repository preparation is still active");
+  if (!m_impl->repository_selection)
+    return std::optional<runtime::PreparedRepositoryContext>{};
+  if (m_impl->repository_controller == nullptr)
+    return error(ChatSessionErrorCode::context_failed,
+                 "repository context is unavailable");
+  auto prepared = m_impl->repository_controller->prepare(
+      *m_impl->repository_selection, m_impl->stop_token);
+  if (!prepared)
+    return error(ChatSessionErrorCode::context_failed,
+                 prepared.error().message);
+  return std::optional{std::move(*prepared)};
+}
+
+namespace {
+auto reviewed_persona_instruction(const domain::PersonaDocument& selected,
+                                  persona::PersonaSource* source,
+                                  const persona::PersonaLimits& limits,
+                                  std::stop_token stop)
+    -> std::expected<domain::InstructionInput, ChatSessionError> {
+  if (source == nullptr)
+    return error(ChatSessionErrorCode::context_failed,
+                 "persona source is unavailable");
+  auto loaded = source->load(selected.reference.name, limits, stop);
+  if (!loaded || loaded->reference != selected.reference ||
+      !domain::validate_persona_document(*loaded))
+    return error(ChatSessionErrorCode::context_failed,
+                 "persona changed since selection");
+  auto instruction =
+      runtime::persona_instruction_input(*loaded, loaded->text.size());
+  if (!instruction)
+    return error(ChatSessionErrorCode::context_failed,
+                 instruction.error().message);
+  return std::move(*instruction);
+}
+} // namespace
+
+auto ChatSession::summary_mandatory_context(
+    const std::string& draft, std::uint64_t identity,
+    const std::optional<runtime::PreparedRepositoryContext>& repository)
+    -> std::expected<domain::ContextBuildInput, ChatSessionError> {
+  if (draft.size() > m_impl->limits.maximum_input_bytes || !valid_text(draft))
+    return error(ChatSessionErrorCode::invalid_input,
+                 "summary preview draft is invalid or too large");
+  if (!m_impl->persona_attention.empty())
+    return error(ChatSessionErrorCode::context_failed,
+                 m_impl->persona_attention);
+  auto profile = resolve_profile(
+      m_impl->available_tools, m_impl->tool_selection(), *m_impl->tool_policy);
+  if (!profile) return std::unexpected(profile.error());
+  auto tools = tool_declaration_tokens(profile->effective_tools.declarations());
+  if (!tools) return std::unexpected(tools.error());
+  const auto suffix = std::to_string(identity);
+  domain::ContextBuildInput input{
+      {m_impl->model.context_window_tokens, m_impl->output_tokens, *tools},
+      {{domain::ContextEntryId::from("summary-review-runtime-" + suffix)
+            .value(),
+        domain::InstructionLayer::application_runtime,
+        domain::InstructionOperation::add,
+        {},
+        domain::Message{
+            domain::MessageId::from("summary-review-runtime-message-" + suffix)
+                .value(),
+            domain::Role::system,
+            {domain::TextBlock{std::string{detail::runtime_contract}}},
+            {}},
+        {domain::ContextSourceId::from("summary-review-runtime-source-" +
+                                       suffix)
+             .value(),
+         "aiforge:runtime",
+         {}},
+        0,
+        1,
+        detail::runtime_contract.size()}},
+      {{domain::ContextEntryId::from("summary-review-user-" + suffix).value(),
+        domain::ContextContentKind::conversation,
+        {domain::MessageId::from("summary-review-user-message-" + suffix)
+             .value(),
+         domain::Role::user,
+         {domain::TextBlock{draft}},
+         {}},
+        {domain::ContextSourceId::from("summary-review-user-source-" + suffix)
+             .value(),
+         "interactive-composer-preview",
+         {}},
+        1,
+        draft.size()}}};
+  if (draft.empty()) {
+    // This unsubmitted placeholder retains the empty composer exactly. Its
+    // message envelope still consumes capacity; no user text is fabricated.
+    auto estimated = estimated_message_tokens(input.content.front().message);
+    if (!estimated) return std::unexpected(estimated.error());
+    input.content.front().estimated_tokens = *estimated;
+  }
+  if (m_impl->persona_document) {
+    auto instruction = reviewed_persona_instruction(
+        *m_impl->persona_document, m_impl->persona_source,
+        m_impl->persona_limits, m_impl->stop_token);
+    if (!instruction) return std::unexpected(instruction.error());
+    input.instructions.push_back(std::move(*instruction));
+  }
+  if (m_impl->user_global_instructions_enabled) {
+    auto loaded = load_user_global_document(
+        m_impl->user_global_instruction_source,
+        m_impl->user_global_instruction_limits, m_impl->stop_token);
+    if (!loaded) return std::unexpected(loaded.error());
+    if (*loaded) {
+      auto appended = append_user_global_instruction(input, **loaded);
+      if (!appended) return std::unexpected(appended.error());
+    }
+  }
+  if (repository)
+    input.instructions.insert(input.instructions.end(),
+                              repository->instructions.begin(),
+                              repository->instructions.end());
+  return input;
+}
+
+namespace {
+struct SummaryFinalContext {
+  domain::ConstructedContext context;
+  std::optional<domain::RepositoryContextAdmission> repository;
+};
+auto final_summary_context(
+    const runtime::SummaryPreview& preview,
+    std::optional<runtime::PreparedRepositoryContext>& repository)
+    -> std::expected<SummaryFinalContext, ChatSessionError> {
+  if (repository) {
+    auto selected =
+        select_chat_repository(preview.context().input, *repository);
+    if (!selected) return std::unexpected(selected.error());
+    return SummaryFinalContext{std::move(selected->context),
+                               std::move(selected->admission)};
+  }
+  auto built = runtime::ContextBuilder{}.build(preview.context().input);
+  if (!built)
+    return error(ChatSessionErrorCode::context_failed, built.error().message);
+  return SummaryFinalContext{std::move(*built), {}};
+}
+} // namespace
+
+namespace {
+auto inspect_history_groups(const domain::SessionEventLog& log,
+                            ChatConversationContextInspection& result,
+                            std::stop_token stop)
+    -> std::expected<void, ChatSessionError> {
+  auto history = runtime::reconstruct_conversation_history({log}, stop);
+  if (!history)
+    return error(ChatSessionErrorCode::context_failed, history.error().message);
+  for (const auto& group : *history) {
+    std::uint64_t tokens{};
+    for (const auto& entry : group.entries) {
+      if (entry.content.estimated_tokens >
+          std::numeric_limits<std::uint64_t>::max() - tokens)
+        return error(ChatSessionErrorCode::context_failed,
+                     "conversation inspection estimate overflowed");
+      tokens += entry.content.estimated_tokens;
+    }
+    result.groups.push_back(
+        {group.run_id,
+         group.entries.size(),
+         tokens,
+         std::ranges::find(result.policy.policy.pinned_run_ids, group.run_id) !=
+             result.policy.policy.pinned_run_ids.end(),
+         {}});
+  }
+  auto summaries =
+      runtime::prepare_conversation_summary_context(log, 1, {}, stop);
+  if (!summaries)
+    return error(ChatSessionErrorCode::context_failed,
+                 summaries.error().message);
+  result.summaries = std::move(summaries->summaries);
+  return {};
+}
+auto inspect_selection_decisions(const domain::SessionEventLog& log,
+                                 ChatConversationContextInspection& result,
+                                 const domain::ConversationAdmission& admission,
+                                 std::stop_token stop)
+    -> std::expected<void, ChatSessionError> {
+  auto mandatory = admission.mandatory_input_tokens;
+  for (const auto& summary : admission.summaries) {
+    if (summary.estimated_tokens > mandatory)
+      return error(ChatSessionErrorCode::context_failed,
+                   "conversation inspection summary accounting is invalid");
+    mandatory -= summary.estimated_tokens;
+  }
+  auto selected = runtime::prepare_conversation_context(
+      {log, result.model_id, admission.capacity, mandatory, 1, {}, {}}, stop);
+  if (!selected)
+    return error(ChatSessionErrorCode::context_failed,
+                 selected.error().message);
+  if (selected->selection.decisions.size() != result.groups.size())
+    return error(ChatSessionErrorCode::context_failed,
+                 "conversation inspection source count changed");
+  for (std::size_t index{}; index < result.groups.size(); ++index)
+    result.groups[index].decision =
+        selected->selection.decisions[index].decision;
+  return {};
+}
+} // namespace
+
+auto ChatSession::inspect_conversation_context(std::string draft)
+    -> std::expected<ChatConversationContextInspection, ChatSessionError> {
+  try {
+    if (m_impl->stop_token.stop_requested())
+      return error(ChatSessionErrorCode::cancelled,
+                   "context inspection cancelled");
+    auto policy = conversation_policy();
+    if (!policy) return std::unexpected(policy.error());
+    auto repository = summary_repository_context();
+    if (!repository) return std::unexpected(repository.error());
+    auto input = summary_mandatory_context(
+        draft, m_impl->identity_suffix_source(), *repository);
+    if (!input) return std::unexpected(input.error());
+    ChatConversationContextInspection result{
+        *policy, m_impl->model_id, std::move(*input), {}, {}};
+    const auto& log = m_impl->kernel->event_log();
+    if (const auto* attributes =
+            context_run_attributes(log, m_impl->kernel->active_run_id()))
+      result.active_admission = attributes->conversation_admission;
+    auto groups = inspect_history_groups(log, result, m_impl->stop_token);
+    if (!groups) return std::unexpected(groups.error());
+    auto prepared = runtime::prepare_session_context(
+        {log,
+         m_impl->model_id,
+         result.mandatory,
+         m_impl->memory_controller,
+         {m_impl->repository_id,
+          m_impl->persona_document
+              ? std::optional{m_impl->persona_document->reference.persona_id}
+              : std::nullopt,
+          m_impl->memory_settings.context_tokens, 0, true},
+         {},
+         {}},
+        m_impl->stop_token);
+    if (!prepared) {
+      result.preparation_error = ChatSessionError{
+          ChatSessionErrorCode::context_failed, prepared.error().message,
+          prepared.error().retryable};
+      return result;
+    }
+    auto decisions = inspect_selection_decisions(
+        log, result, prepared->conversation_admission, m_impl->stop_token);
+    if (!decisions) return std::unexpected(decisions.error());
+    auto built = runtime::ContextBuilder{}.build(prepared->input);
+    if (*repository) {
+      auto selected = select_chat_repository(prepared->input, **repository);
+      if (!selected) {
+        result.preparation_error = selected.error();
+        return result;
+      }
+      built = std::move(selected->context);
+    }
+    if (!built) {
+      result.preparation_error = ChatSessionError{
+          ChatSessionErrorCode::context_failed, built.error().message, false};
+      return result;
+    }
+    auto finalized = finalize_conversation_admission(
+        prepared->conversation_admission, *built);
+    if (!finalized) return std::unexpected(finalized.error());
+    result.next_context = std::move(*built);
+    result.next_admission = std::move(prepared->conversation_admission);
+    return result;
+  } catch (...) {
+    return error(ChatSessionErrorCode::internal_failure,
+                 "context inspection failed");
+  }
+}
+
+auto ChatSession::preview_conversation_summary(
+    domain::ConversationSummaryVersion candidate,
+    std::vector<domain::ConversationSummaryVersion> replacements,
+    std::string draft) -> std::expected<ChatSummaryPreview, ChatSessionError> {
+  try {
+    const auto identity = m_impl->identity_suffix_source();
+    auto attributes = summary_control_attributes(identity);
+    auto run = make_id<domain::RunId>("summary-activation", identity);
+    if (!attributes || !run)
+      return error(ChatSessionErrorCode::internal_failure,
+                   "summary activation identity failed");
+    auto policy = conversation_policy();
+    if (!policy) return std::unexpected(policy.error());
+    auto repository = summary_repository_context();
+    if (!repository) return std::unexpected(repository.error());
+    auto input = summary_mandatory_context(draft, identity, *repository);
+    if (!input) return std::unexpected(input.error());
+    runtime::SummaryContextRequest request{
+        m_impl->model_id,
+        *input,
+        m_impl->memory_controller,
+        {m_impl->repository_id,
+         m_impl->persona_document
+             ? std::optional{m_impl->persona_document->reference.persona_id}
+             : std::nullopt,
+         m_impl->memory_settings.context_tokens, 0, true}};
+    auto review = runtime::SummaryController{*m_impl->kernel}.preview(
+        {*run, *attributes, m_impl->kernel->event_log().last_sequence(),
+         policy->policy.revision, std::move(candidate),
+         std::move(replacements)},
+        request, m_impl->stop_token);
+    if (!review)
+      return error(ChatSessionErrorCode::context_failed, review.error().message,
+                   review.error().retryable);
+    auto final = final_summary_context(*review, *repository);
+    if (!final) return std::unexpected(final.error());
+    return ChatSummaryPreview{std::make_shared<ChatSummaryReviewData>(
+        ChatSummaryReviewData{std::move(*review), identity,
+                              std::move(final->repository),
+                              std::move(final->context)})};
+  } catch (...) {
+    return error(ChatSessionErrorCode::internal_failure,
+                 "summary preview failed");
+  }
+}
+
+auto ChatSession::apply_conversation_summary(const ChatSummaryPreview& preview,
+                                             std::string current_draft)
+    -> std::expected<domain::ConversationSummaryActivation, ChatSessionError> {
+  const auto before = m_impl->kernel->event_log().last_sequence();
+  try {
+    if (!preview.m_data)
+      return error(ChatSessionErrorCode::invalid_input,
+                   "summary review is unavailable");
+    auto repository = summary_repository_context();
+    if (!repository) return std::unexpected(repository.error());
+    auto input = summary_mandatory_context(
+        current_draft, preview.m_data->identity, *repository);
+    if (!input) return std::unexpected(input.error());
+    // Rebuild the optional Dev evidence with the reviewed base. The controller
+    // separately rebuilds that base against current draft/model/memory below.
+    auto final = final_summary_context(preview.m_data->review, *repository);
+    if (!final) return std::unexpected(final.error());
+    if (final->repository != preview.m_data->repository ||
+        final->context != preview.m_data->context)
+      return error(ChatSessionErrorCode::context_failed,
+                   "repository context changed since summary review");
+    auto applied = runtime::SummaryController{*m_impl->kernel}.apply(
+        preview.m_data->review,
+        {m_impl->model_id,
+         *input,
+         m_impl->memory_controller,
+         {m_impl->repository_id,
+          m_impl->persona_document
+              ? std::optional{m_impl->persona_document->reference.persona_id}
+              : std::nullopt,
+          m_impl->memory_settings.context_tokens, 0, true}},
+        m_impl->stop_token);
+    if (!applied)
+      return std::unexpected(ChatSessionError{
+          ChatSessionErrorCode::context_failed, applied.error().message,
+          applied.error().retryable,
+          m_impl->kernel->event_log().last_sequence() != before});
+    return std::move(*applied);
+  } catch (...) {
+    return std::unexpected(ChatSessionError{
+        ChatSessionErrorCode::internal_failure, "summary activation failed",
+        false, m_impl->kernel->event_log().last_sequence() != before});
+  }
+}
+
 auto ChatSession::disable_conversation_summary(
     std::uint64_t expected_policy_revision,
     domain::ConversationSummaryVersion candidate,
@@ -1397,6 +2017,12 @@ auto ChatSession::disable_conversation_summary(
 auto ChatSession::validate_recovered_pending_run(bool repository_validated)
     -> std::expected<void, ChatSessionError> {
   const auto run_id = m_impl->kernel->active_run_id();
+  const auto* attributes =
+      context_run_attributes(m_impl->kernel->event_log(), run_id);
+  if (attributes != nullptr &&
+      attributes->purpose == domain::RunPurpose::summary)
+    return {};
+
   if (!run_id) {
     if (m_impl->repository_block)
       return std::unexpected(m_impl->repository_block->reason);
@@ -2237,38 +2863,9 @@ auto ChatSession::submit_prepared(std::string prompt,
     std::optional<domain::RepositoryContextAdmission> repository_admission;
     std::optional<domain::ConstructedContext> context;
     if (prepared) {
-      runtime::ContextSelectionRequest selection;
-      selection.capacity = input.capacity;
-      selection.instructions = input.instructions;
-      for (const auto& content_entry : input.content) {
-        selection.candidates.push_back(
-            {content_entry,
-             content_entry.kind == domain::ContextContentKind::tool_result
-                 ? runtime::ContextBudgetClass::tool_result
-                 : runtime::ContextBudgetClass::conversation,
-             runtime::ContextRepresentation::direct,
-             domain::EvidenceFreshness::current, true, 0, std::nullopt});
-      }
-      for (std::size_t index{}; index < prepared->evidence.items.size();
-           ++index) {
-        const auto order =
-            static_cast<std::uint64_t>(input.content.size() + index + 1);
-        prepared->evidence.items[index].order = order;
-        prepared->admission.evidence[index].order = order;
-      }
-      if (!prepared->evidence.items.empty())
-        selection.parcels.push_back(prepared->evidence);
-      auto selected =
-          runtime::ContextBuilder{}.select_and_build(std::move(selection));
-      if (!selected)
-        return error(ChatSessionErrorCode::context_failed,
-                     selected.error().message);
-      auto admission =
-          runtime::finalize_repository_context_admission(*prepared, *selected);
-      if (!admission)
-        return error(ChatSessionErrorCode::context_failed,
-                     admission.error().message);
-      repository_admission = std::move(*admission);
+      auto selected = select_chat_repository(input, *prepared);
+      if (!selected) return std::unexpected(selected.error());
+      repository_admission = selected->admission;
       for (const auto& entry : selected->context.entries) {
         if (std::ranges::any_of(repository_admission->evidence,
                                 [&](const auto& ref) {
@@ -2376,6 +2973,12 @@ auto ChatSession::continue_if_ready()
     -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
   // clang-format on
   const auto run_id = m_impl->kernel->active_run_id();
+  const auto* attributes =
+      context_run_attributes(m_impl->kernel->event_log(), run_id);
+  if (attributes != nullptr &&
+      attributes->purpose == domain::RunPurpose::summary)
+    return std::vector<domain::RunEvent>{};
+
   if (!run_id || m_impl->kernel->active_inference_id() ||
       m_impl->kernel->pending_tool_approval() ||
       m_impl->kernel->pending_question_input()) {
@@ -2623,6 +3226,11 @@ auto ChatSession::continue_if_ready()
 
 auto ChatSession::prepare_recovered_repository()
     -> std::expected<bool, ChatSessionError> {
+  const auto* attributes = context_run_attributes(
+      m_impl->kernel->event_log(), m_impl->kernel->active_run_id());
+  if (attributes != nullptr &&
+      attributes->purpose == domain::RunPurpose::summary)
+    return true;
   if (!m_impl->recovered_pending_run_validation_required ||
       m_impl->repository_recovery_pinned)
     return true;
@@ -3604,7 +4212,14 @@ auto ChatSession::expire_memory(runtime::MemoryExpireRequest request)
 
 auto ChatSession::submitted_prompts() const -> std::vector<std::string> {
   std::vector<std::string> result;
+  std::set<domain::RunId> excluded;
+  for (const auto& event : m_impl->kernel->event_log().events())
+    if (const auto* started = std::get_if<domain::RunStarted>(&event.payload);
+        started != nullptr &&
+        started->purpose != domain::RunPurpose::conversation)
+      excluded.insert(event.metadata.run_id);
   for (const auto& event : m_impl->kernel->event_log().events()) {
+    if (excluded.contains(event.metadata.run_id)) continue;
     const auto* added = std::get_if<domain::UserContentAdded>(&event.payload);
     if (added == nullptr) continue;
     std::string text;

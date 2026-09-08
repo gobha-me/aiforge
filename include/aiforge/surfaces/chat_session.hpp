@@ -9,6 +9,7 @@
 #include <aiforge/runtime/memory_controller.hpp>
 #include <aiforge/runtime/plan_task_controller.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
+#include <aiforge/runtime/summary_controller.hpp>
 #include <aiforge/runtime/tool_profiles.hpp>
 #include <aiforge/storage/session_store.hpp>
 #include <aiforge/surfaces/chat_repository_context.hpp>
@@ -177,6 +178,61 @@ class PreparedToolProfileMaximum final {
   std::uint64_t m_revision{};
 };
 
+struct ChatConversationGroupInspection {
+  domain::RunId run_id;
+  std::size_t entry_count{};
+  std::uint64_t estimated_tokens{};
+  bool pinned{};
+  std::optional<runtime::ConversationSelectionDecision> decision{};
+};
+struct ChatConversationContextInspection {
+  runtime::ConversationPolicySnapshot policy;
+  domain::ModelId model_id;
+  // Preserved even when the next context cannot fit. Includes external tool
+  // reservation, required instructions and the unsubmitted composer input.
+  domain::ContextBuildInput mandatory;
+  std::vector<ChatConversationGroupInspection> groups;
+  std::vector<domain::ConversationAdmittedSummary> summaries;
+  std::optional<domain::ConstructedContext> next_context{};
+  std::optional<domain::ConversationAdmission> next_admission{};
+  std::optional<domain::ConversationAdmission> active_admission{};
+  std::optional<ChatSessionError> preparation_error{};
+};
+
+struct ChatSummaryGenerate {
+  std::uint64_t expected_sequence{};
+  std::vector<domain::RunId> covered_run_ids;
+  std::size_t maximum_output_bytes{domain::summary_maximum_text_bytes};
+};
+struct ChatSummaryGeneration {
+  domain::ConversationSummaryId summary_id;
+  domain::RunId run_id;
+  std::vector<domain::RunEvent> committed_events;
+};
+struct ChatSummaryOutputFailure {
+  domain::ConversationSummaryId summary_id;
+  std::string message;
+};
+struct ChatSummaryCatalog {
+  runtime::ConversationSummarySnapshot snapshot;
+  std::vector<runtime::ConversationSummaryDraft> unpublished;
+  std::vector<ChatSummaryOutputFailure> unpublishable{};
+};
+struct ChatSummaryReviewData;
+class ChatSummaryPreview final {
+ public:
+  [[nodiscard]] auto context() const noexcept
+      -> const domain::ConstructedContext&;
+  [[nodiscard]] auto activation() const noexcept
+      -> const domain::ConversationSummaryActivation&;
+
+ private:
+  friend class ChatSession;
+  explicit ChatSummaryPreview(
+      std::shared_ptr<const ChatSummaryReviewData> data);
+  std::shared_ptr<const ChatSummaryReviewData> m_data;
+};
+
 class ChatSession final {
  public:
   [[nodiscard]] static auto open(ChatSessionOpen request,
@@ -340,6 +396,27 @@ class ChatSession final {
       std::vector<domain::RunId> pinned_run_ids = {})
       -> std::expected<std::vector<domain::RunEvent>, ChatSessionError>;
 
+  [[nodiscard]] auto inspect_conversation_context(std::string draft)
+      -> std::expected<ChatConversationContextInspection, ChatSessionError>;
+  [[nodiscard]] auto generate_conversation_summary(ChatSummaryGenerate request)
+      -> std::expected<ChatSummaryGeneration, ChatSessionError>;
+  [[nodiscard]] auto summary_catalog() const
+      -> std::expected<ChatSummaryCatalog, ChatSessionError>;
+  [[nodiscard]] auto publish_conversation_summary(
+      domain::ConversationSummaryId summary_id)
+      -> std::expected<domain::ConversationSummaryCandidate, ChatSessionError>;
+  [[nodiscard]] auto edit_conversation_summary(
+      std::uint64_t expected_sequence,
+      domain::ConversationSummaryVersion parent, std::string text)
+      -> std::expected<domain::ConversationSummaryCandidate, ChatSessionError>;
+  [[nodiscard]] auto preview_conversation_summary(
+      domain::ConversationSummaryVersion candidate,
+      std::vector<domain::ConversationSummaryVersion> replacements,
+      std::string draft) -> std::expected<ChatSummaryPreview, ChatSessionError>;
+  [[nodiscard]] auto apply_conversation_summary(
+      const ChatSummaryPreview& preview, std::string current_draft)
+      -> std::expected<domain::ConversationSummaryActivation, ChatSessionError>;
+
   [[nodiscard]] auto disable_conversation_summary(
       std::uint64_t expected_policy_revision,
       domain::ConversationSummaryVersion candidate,
@@ -357,6 +434,15 @@ class ChatSession final {
   [[nodiscard]] auto active() const noexcept -> bool;
 
  private:
+  [[nodiscard]] auto summary_mandatory_context(
+      const std::string& draft, std::uint64_t identity,
+      const std::optional<runtime::PreparedRepositoryContext>& repository)
+      -> std::expected<domain::ContextBuildInput, ChatSessionError>;
+  [[nodiscard]] auto summary_repository_context()
+      -> std::expected<std::optional<runtime::PreparedRepositoryContext>,
+                       ChatSessionError>;
+  [[nodiscard]] auto summary_control_attributes(std::uint64_t suffix) const
+      -> std::expected<domain::RunStarted, ChatSessionError>;
   struct Impl;
   explicit ChatSession(std::unique_ptr<Impl> impl);
   [[nodiscard]] auto validate_recovered_pending_run(

@@ -123,6 +123,10 @@ struct AgentTransport::Impl {
   std::stop_token stop;
   std::chrono::milliseconds output_timeout;
   bool read{};
+  bool lines{};
+  bool input_ended{};
+  bool input_failed{};
+  std::string line_buffer;
   bool failed{};
 };
 
@@ -168,7 +172,7 @@ auto AgentTransport::open(const int input_descriptor,
 auto AgentTransport::read_request()
     -> std::expected<std::string, surfaces::AgentError> {
   try {
-    if (m_impl->read || m_impl->failed)
+    if (m_impl->read || m_impl->lines || m_impl->failed)
       return failure(surfaces::AgentErrorCode::invalid_request,
                      "agent input was already consumed");
     m_impl->read = true;
@@ -194,6 +198,84 @@ auto AgentTransport::read_request()
   } catch (...) {
     return failure(surfaces::AgentErrorCode::internal_failure,
                    "agent input failed internally");
+  }
+}
+
+namespace {
+auto buffered_line(std::string& buffer, bool ended)
+    -> std::expected<std::optional<TransportLine>, surfaces::AgentError> {
+  const auto newline = buffer.find('\n');
+  if (newline != std::string::npos) {
+    if (newline > surfaces::agent_maximum_input_bytes)
+      return failure(surfaces::AgentErrorCode::resource_exhausted,
+                     "context input line exceeds its byte limit");
+    auto line = buffer.substr(0, newline);
+    buffer.erase(0, newline + 1);
+    return TransportLine{TransportLineState::line, std::move(line)};
+  }
+  if (buffer.size() > surfaces::agent_maximum_input_bytes)
+    return failure(surfaces::AgentErrorCode::resource_exhausted,
+                   "context input line exceeds its byte limit");
+  if (ended && !buffer.empty())
+    return failure(surfaces::AgentErrorCode::invalid_request,
+                   "context input ended before a newline");
+  if (ended) return TransportLine{TransportLineState::end, {}};
+  return std::nullopt;
+}
+} // namespace
+
+auto AgentTransport::poll_line()
+    -> std::expected<TransportLine, surfaces::AgentError> {
+  try {
+    if (m_impl->read || m_impl->input_failed)
+      return failure(surfaces::AgentErrorCode::invalid_request,
+                     "context line input is unavailable");
+    m_impl->lines = true;
+    if (m_impl->stop.stop_requested())
+      return failure(surfaces::AgentErrorCode::cancelled,
+                     "context input cancelled");
+    auto buffered = buffered_line(m_impl->line_buffer, m_impl->input_ended);
+    if (!buffered) {
+      m_impl->input_failed = true;
+      return std::unexpected(buffered.error());
+    }
+    if (*buffered) return std::move(**buffered);
+#ifndef _WIN32
+    pollfd descriptor{m_impl->input.descriptor(), POLLIN, 0};
+    const auto ready = ::poll(&descriptor, 1, 20);
+    if (m_impl->stop.stop_requested())
+      return failure(surfaces::AgentErrorCode::cancelled,
+                     "context input cancelled");
+    if (ready == 0 || (ready < 0 && errno == EINTR)) return TransportLine{};
+    if (ready < 0 || (descriptor.revents & POLLNVAL) != 0)
+      return failure(surfaces::AgentErrorCode::invalid_request,
+                     "context input failed");
+    std::array<char, 4096> chunk{};
+    const auto bytes =
+        ::read(m_impl->input.descriptor(), chunk.data(), chunk.size());
+    if (bytes < 0) {
+      if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+        return TransportLine{};
+      return failure(surfaces::AgentErrorCode::invalid_request,
+                     "context input failed");
+    }
+    m_impl->input_ended = bytes == 0;
+    m_impl->line_buffer.append(chunk.data(), static_cast<std::size_t>(bytes));
+    buffered = buffered_line(m_impl->line_buffer, m_impl->input_ended);
+    if (!buffered) {
+      m_impl->input_failed = true;
+      return std::unexpected(buffered.error());
+    }
+    if (*buffered) return std::move(**buffered);
+    return TransportLine{};
+#else
+    return failure(surfaces::AgentErrorCode::unavailable,
+                   "context line input unavailable");
+#endif
+  } catch (...) {
+    m_impl->input_failed = true;
+    return failure(surfaces::AgentErrorCode::internal_failure,
+                   "context line input failed internally");
   }
 }
 

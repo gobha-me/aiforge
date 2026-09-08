@@ -1,3 +1,4 @@
+#include <aiforge/surfaces/conversation_commands.hpp>
 #include <aiforge/surfaces/slash_commands.hpp>
 
 #include <algorithm>
@@ -485,6 +486,25 @@ using ToolTargetValidator = auto (*)(std::string_view) -> bool;
 [[nodiscard]] auto context_handler(std::string_view arguments,
                                    const SlashCommandContext& context)
     -> std::expected<SlashCommandResult, SlashCommandError> {
+  const auto trimmed = trim_arguments(arguments);
+  auto tail = trimmed;
+  const auto action = take_argument(tail);
+  if (action == "history" || action == "mode" || action == "pin" ||
+      action == "unpin" || action == "toolbar" || action == "summary") {
+    auto parsed = parse_conversation_command(trimmed, context.stop_token);
+    if (!parsed)
+      return command_error(parsed.error().code ==
+                                   ConversationCommandErrorCode::cancelled
+                               ? SlashCommandErrorCode::cancelled
+                               : SlashCommandErrorCode::invalid_arguments,
+                           parsed.error().message);
+    if (context.run_active &&
+        std::holds_alternative<GenerateConversationSummary>(*parsed))
+      return command_error(SlashCommandErrorCode::unavailable_command,
+                           "Summary generation requires an idle session");
+    return SlashCommandResult{SlashCommandAction::manage_conversation_context,
+                              std::string{trimmed}};
+  }
   return repository_context_handler(arguments, context, false);
 }
 
@@ -539,8 +559,11 @@ using ToolTargetValidator = auto (*)(std::string_view) -> bool;
       {"dev", "dev", "[target <subtree> | off | retry]",
        "Inspect Dev context or select its directory for future runs.",
        inspection_available, dev_handler},
-      {"context", "context", "[add <path> | remove <selection-id> | clear]",
-       "Inspect or select exact repository evidence for future runs.",
+      {"context", "context",
+       "[history | mode full/rolling | pin/unpin <run-id> | summary <action> | "
+       "toolbar show/hide | add <path> | remove <selection-id> | clear]",
+       "Inspect conversation capacity, review summaries, or select repository "
+       "evidence.",
        inspection_available, context_handler},
   };
 }

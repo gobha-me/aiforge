@@ -103,6 +103,20 @@ class AgentCommand {
       -> std::expected<void, CommandFailure> = 0;
 };
 
+class ContextCommand {
+ public:
+  virtual ~ContextCommand() = default;
+  struct Request {
+    domain::SessionId session_id;
+    domain::ModelId model_id;
+  };
+  [[nodiscard]] virtual auto execute(Request request,
+                                     CommandEnvironment& environment,
+                                     std::ostream& output,
+                                     std::ostream& diagnostics)
+      -> std::expected<void, CommandFailure> = 0;
+};
+
 class ModelsCommand {
  public:
   virtual ~ModelsCommand() = default;
@@ -270,6 +284,7 @@ struct CommandEnvironment {
   AudioCommand* audio{};
   VideoCommand* video{};
   AgentCommand* agent{};
+  ContextCommand* context{};
 };
 
 struct CommandContext {
