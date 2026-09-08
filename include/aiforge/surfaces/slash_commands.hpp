@@ -58,6 +58,7 @@ enum class SlashCommandAction {
   select_dev_target,
   disable_dev,
   show_context,
+  manage_conversation_context,
   add_context_evidence,
   remove_context_evidence,
   clear_context_evidence,
