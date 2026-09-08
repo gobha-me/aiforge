@@ -671,6 +671,83 @@ TEST_CASE(
   CHECK(result->back().entries.front().content.order == 3);
 }
 
+TEST_CASE("opaque consumed event schemas cannot silently remove source history",
+          "[conversationhistory][opaque][failure]") {
+  HistoryLog history;
+  history.tools("run");
+  std::string type;
+  std::uint64_t sequence{};
+  SECTION("future run completion") {
+    type = "run.completed";
+    sequence = history.log.last_sequence();
+  }
+  SECTION("future original user") {
+    type = "content.user_added";
+    sequence = 2;
+  }
+  SECTION("future tool terminal") {
+    type = "tool.result_recorded";
+    for (const auto& event : history.log.events())
+      if (std::holds_alternative<domain::ToolResultRecorded>(event.payload)) {
+        sequence = event.metadata.sequence;
+        break;
+      }
+  }
+  domain::SessionEventLog opaque{history.log.session_id()};
+  for (auto event : history.log.events()) {
+    if (event.metadata.sequence == sequence) {
+      event.metadata.schema_version = 99;
+      event.payload = domain::UnknownEvent{
+          type, domain::StructuredDataBlock{"application/json", "{}"}};
+    }
+    REQUIRE(opaque.append(std::move(event)));
+  }
+  const auto result = runtime::reconstruct_conversation_history({opaque});
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == Code::unsupported_content);
+  const auto excluded = runtime::reconstruct_conversation_history(
+      {opaque, {id<domain::RunId>("run")}});
+  REQUIRE(excluded);
+  CHECK(excluded->empty());
+}
+
+TEST_CASE("opaque child and active tool events fail but unrelated metadata "
+          "remains inert",
+          "[conversationhistory][opaque][failure]") {
+  for (const auto* type :
+       {"run.started", "run.completed", "run.failed", "run.cancelled",
+        "content.user_added", "content.assistant_started",
+        "content.assistant_delta_added", "content.assistant_finished",
+        "tool.proposed", "tool.result_recorded", "tool.errored",
+        "artifact.created", "run.child_created"}) {
+    INFO(type);
+    HistoryLog history;
+    history.start("run");
+    history.user("run");
+    history.add("run", domain::UnknownEvent{type});
+    const auto result = runtime::reconstruct_active_tool_continuation(
+        history.log, id<domain::RunId>("run"));
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == Code::unsupported_content);
+  }
+  HistoryLog history;
+  history.complete("run");
+  const auto snapshot = history.log.last_sequence();
+  history.add("run", domain::UnknownEvent{"inference.future_usage_metadata"});
+  auto result = runtime::reconstruct_conversation_history({history.log});
+  REQUIRE(result);
+  CHECK(result->size() == 1);
+  history.add("run", domain::UnknownEvent{"run.child_created"});
+  result = runtime::reconstruct_conversation_history({history.log});
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == Code::unsupported_content);
+  runtime::ConversationHistoryRequest original{history.log};
+  original.source_snapshot_sequence = snapshot;
+  const auto preserved = runtime::reconstruct_conversation_history(original);
+  REQUIRE(preserved);
+  CHECK(preserved->size() == 1);
+}
+
 TEST_CASE("active tool reconstruction bounds work before copying or rendering",
           "[conversationhistory][active][failure]") {
   HistoryLog history;
@@ -738,8 +815,8 @@ TEST_CASE("active tool reconstruction preserves complete prefix and early "
   history.tool_result("run", "call");
   auto result = runtime::reconstruct_active_tool_continuation(
       history.log, id<domain::RunId>("run"));
-  REQUIRE(result);
-  CHECK(result->empty());
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == Code::invalid_history);
   history.assistant_finish("run", "tools", true);
   // Unconsumed unknown payload is never copied into the renderer.
   history.add("run", domain::UnknownEvent{std::string(1024 * 1024, 'x')});

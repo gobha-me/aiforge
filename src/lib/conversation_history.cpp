@@ -3,11 +3,13 @@
 #include <aiforge/runtime/tool_registry.hpp>
 
 #include <algorithm>
+#include <array>
 #include <concepts>
 #include <limits>
 #include <map>
 #include <set>
 #include <span>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -196,12 +198,36 @@ auto conversation_activity(const RunEventPayload& payload) -> bool {
          std::holds_alternative<ToolErrored>(payload);
 }
 
+auto opaque_conversation_source(const RunEventPayload& payload) -> bool {
+  const auto* unknown = std::get_if<UnknownEvent>(&payload);
+  if (unknown == nullptr) return false;
+  constexpr std::array<std::string_view, 13> consumed{
+      "run.started",
+      "run.completed",
+      "run.failed",
+      "run.cancelled",
+      "content.user_added",
+      "content.assistant_started",
+      "content.assistant_delta_added",
+      "content.assistant_finished",
+      "tool.proposed",
+      "tool.result_recorded",
+      "tool.errored",
+      "artifact.created",
+      "run.child_created"};
+  return std::ranges::find(consumed, unknown->type_name) != consumed.end();
+}
+
 struct RunSources {
   Terminal terminal{Terminal::none};
   const RunEvent* user{};
   bool started{};
 
   auto apply(const RunEvent& event) -> Status {
+    if (opaque_conversation_source(event.payload))
+      return failure(
+          Code::unsupported_content,
+          "conversation source event has an unsupported representation");
     if (conversation_activity(event.payload) &&
         (!started || terminal != Terminal::none))
       return failure(Code::invalid_history,
