@@ -13,6 +13,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   child_run.cpp
   command_registry.cpp
   conversation_context.cpp
+  conversation_selection.cpp
   config.cpp
   config_provenance.cpp
   credential.cpp
