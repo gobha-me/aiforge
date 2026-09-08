@@ -5,6 +5,7 @@
 #include <aiforge/runtime/memory_tool.hpp>
 #include <aiforge/runtime/persona.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
+#include <aiforge/runtime/session_context.hpp>
 #include <aiforge/runtime/user_global_instructions.hpp>
 #include <aiforge/surfaces/one_shot.hpp>
 #include <algorithm>
@@ -270,51 +271,6 @@ template <typename IdType>
   const auto tick = static_cast<std::uint64_t>(
       std::chrono::steady_clock::now().time_since_epoch().count());
   return tick ^ count;
-}
-
-[[nodiscard]] auto estimated_message_tokens(const domain::Message& message)
-    -> std::expected<std::uint64_t, OneShotError> {
-  std::uint64_t total{};
-  const auto add = [&](const std::size_t size) -> bool {
-    if (size > std::numeric_limits<std::uint64_t>::max() - total) return false;
-    total += static_cast<std::uint64_t>(size);
-    return true;
-  };
-  for (const auto& block : message.content) {
-    const auto admitted = std::visit(
-        [&](const auto& value) -> bool {
-          using Value = std::remove_cvref_t<decltype(value)>;
-          if constexpr (std::same_as<Value, domain::TextBlock>) {
-            return add(value.text.size());
-          } else if constexpr (std::same_as<Value,
-                                            domain::StructuredDataBlock>) {
-            return add(value.media_type.size()) && add(value.data.size());
-          } else if constexpr (std::same_as<Value, domain::CitationBlock>) {
-            return add(value.uri.size()) &&
-                   (!value.title || add(value.title->size()));
-          } else if constexpr (std::same_as<Value,
-                                            domain::ArtifactReferenceBlock>) {
-            return add(value.artifact_id.value().size()) &&
-                   (!value.label || add(value.label->size()));
-          } else {
-            return false;
-          }
-        },
-        block);
-    if (!admitted) {
-      return one_shot_error(OneShotErrorCode::context_failed,
-                            "tool result cannot enter one-shot context");
-    }
-  }
-  for (const auto& call : message.tool_calls) {
-    if (!add(call.invocation_id.value().size()) ||
-        !add(call.tool_name.size()) || !add(call.arguments.media_type.size()) ||
-        !add(call.arguments.data.size())) {
-      return one_shot_error(OneShotErrorCode::context_failed,
-                            "tool call cannot enter one-shot context");
-    }
-  }
-  return std::max<std::uint64_t>(total, 1);
 }
 
 struct SpendState {
@@ -838,57 +794,18 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                                  domain::Role::user,
                                  {domain::TextBlock{request.prompt}},
                                  std::nullopt};
-    auto history = detail::replayed_conversation(kernel->event_log(), suffix);
-    if (!history) {
-      return one_shot_error(OneShotErrorCode::run_failed,
-                            std::move(history.error()));
+    auto declaration_tokens = runtime::estimate_session_tool_declarations(
+        run_tools.declarations(), runtime::conversation_estimator_version, {},
+        stop_token);
+    if (!declaration_tokens) {
+      return one_shot_error(declaration_tokens.error().code ==
+                                    runtime::SessionContextErrorCode::cancelled
+                                ? OneShotErrorCode::cancelled
+                                : OneShotErrorCode::context_failed,
+                            declaration_tokens.error().message);
     }
-    auto content = std::move(*history);
-    domain::MemorySelection memory_selection{
-        1,
-        m_dependencies.repository_id,
-        resolved_persona->document
-            ? std::optional{resolved_persona->document->reference.persona_id}
-            : std::nullopt,
-        0,
-        0,
-        {}};
-    if (m_dependencies.memory_controller != nullptr) {
-      std::uint64_t mandatory = detail::runtime_contract.size() +
-                                request.prompt.size() + evidence_size;
-      for (const auto& item : content)
-        mandatory += item.estimated_tokens;
-      if (resolved_persona->document) {
-        mandatory += resolved_persona->document->text.size();
-      }
-      if (user_global_instruction) {
-        mandatory += user_global_instruction->text.size();
-      }
-      const auto maximum_input = model->context_window_tokens - output_tokens;
-      const auto available = mandatory < maximum_input
-                                 ? maximum_input - mandatory
-                                 : std::uint64_t{};
-      auto memory = runtime::select_memory_context_with_provenance(
-          *m_dependencies.memory_controller,
-          {m_dependencies.repository_id,
-           resolved_persona->document
-               ? std::optional<domain::PersonaId>{resolved_persona->document
-                                                      ->reference.persona_id}
-               : std::nullopt,
-           m_dependencies.memory_settings.context_tokens, available});
-      if (!memory) {
-        return one_shot_error(OneShotErrorCode::context_failed,
-                              memory.error().message);
-      }
-      memory_selection = std::move(memory->selection);
-      for (std::size_t index{}; index < memory->content.size(); ++index) {
-        auto& item = memory->content[index];
-        item.order = static_cast<std::uint64_t>(content.size()) + 1;
-        memory_selection.entries[index].order = item.order;
-        content.push_back(std::move(item));
-      }
-    }
-    const auto user_order = static_cast<std::uint64_t>(content.size()) + 1;
+    std::vector<domain::ContextContentInput> content;
+    constexpr std::uint64_t user_order = 1;
     content.push_back(
         {*user_entry_id,
          domain::ContextContentKind::conversation,
@@ -898,7 +815,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
          request.prompt.size()});
 
     domain::ContextBuildInput build_input{
-        {model->context_window_tokens, output_tokens, 0},
+        {model->context_window_tokens, output_tokens, *declaration_tokens},
         {{*runtime_entry_id,
           domain::InstructionLayer::application_runtime,
           domain::InstructionOperation::add,
@@ -957,6 +874,24 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
            evidence_size});
     }
 
+    auto prepared_context = runtime::prepare_session_context(
+        {kernel->event_log(),
+         request.model_id,
+         build_input,
+         m_dependencies.memory_controller,
+         {m_dependencies.repository_id, selected_persona_id,
+          m_dependencies.memory_settings.context_tokens, 0},
+         {},
+         {}},
+        stop_token);
+    if (!prepared_context) {
+      return one_shot_error(prepared_context.error().code ==
+                                    runtime::SessionContextErrorCode::cancelled
+                                ? OneShotErrorCode::cancelled
+                                : OneShotErrorCode::context_failed,
+                            prepared_context.error().message);
+    }
+    build_input = std::move(prepared_context->input);
     auto context = runtime::ContextBuilder{}.build(build_input);
     if (!context) {
       return one_shot_error(OneShotErrorCode::context_failed,
@@ -983,11 +918,6 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                             "unavailable");
     }
     const auto run_event_offset = kernel->event_log().events().size();
-    if (auto sealed = domain::seal_memory_selection(memory_selection);
-        !sealed) {
-      return one_shot_error(OneShotErrorCode::context_failed,
-                            sealed.error().message);
-    }
     auto started = kernel->start(
         {*run_id,
          {*surface_id, *workspace_id, *permission_id,
@@ -995,7 +925,9 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
               ? std::optional<domain::PersonaId>{resolved_persona->document
                                                      ->reference.persona_id}
               : std::nullopt,
-          std::move(memory_selection)},
+          std::move(prepared_context->memory_selection),
+          domain::RunPurpose::conversation,
+          std::move(prepared_context->conversation_admission)},
          std::move(user_message),
          std::move(backend_request),
          std::move(request.provenance),
@@ -1051,11 +983,11 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
         }
         return std::unexpected(std::move(rendered.error()));
       }
-      if (kernel->active_run_id() && !kernel->active_inference_id()) {
+      if (!cancellation_sent && kernel->active_run_id() &&
+          !kernel->active_inference_id()) {
         const auto& history_events = kernel->event_log().events();
-        auto tool_messages = runtime::tool_continuation_messages(
-            std::span{history_events.data() + run_event_offset,
-                      history_events.size() - run_event_offset});
+        auto tool_messages = runtime::reconstruct_active_tool_continuation(
+            kernel->event_log(), *run_id, {}, stop_token);
         if (!tool_messages || tool_messages->size() < appended_tool_messages) {
           return one_shot_error(OneShotErrorCode::run_failed,
                                 "one-shot tool history is invalid");
@@ -1069,7 +1001,9 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                 "tool-result-entry", continuation_suffix);
             auto source_id = make_id<domain::ContextSourceId>(
                 "tool-result-source", continuation_suffix);
-            auto estimated = estimated_message_tokens((*tool_messages)[index]);
+            auto estimated = runtime::estimate_conversation_message(
+                (*tool_messages)[index],
+                runtime::conversation_estimator_version, {}, stop_token);
             if (!entry_id || !source_id || !estimated) {
               return one_shot_error(OneShotErrorCode::context_failed,
                                     "tool result context could not be built");
