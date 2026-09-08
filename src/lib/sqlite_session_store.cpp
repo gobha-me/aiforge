@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <aiforge/adapters/sqlite_session_store.hpp>
+#include <aiforge/detail/utf8_text.hpp>
 #include <aiforge/domain/plan_projection.hpp>
 #include <aiforge/domain/video_projection.hpp>
 #include <aiforge/repository/review_receipt.hpp>
@@ -3158,6 +3159,19 @@ auto parse_v2_tool_policy_fields(const Json& value,
           [](const domain::ConversationPolicySet&) {
             return std::string{"session.conversation_policy_set"};
           },
+          [](const domain::ConversationSummaryGenerationIntentRecorded&) {
+            return std::string{"session.conversation_summary_intent_recorded"};
+          },
+          [](const domain::ConversationSummaryCandidatePublished&) {
+            return std::string{
+                "session.conversation_summary_candidate_published"};
+          },
+          [](const domain::ConversationSummaryActivated&) {
+            return std::string{"session.conversation_summary_activated"};
+          },
+          [](const domain::ConversationSummaryDisabled&) {
+            return std::string{"session.conversation_summary_disabled"};
+          },
           [](const domain::RunAwaitingInput&) {
             return std::string{"run.awaiting_input"};
           },
@@ -3383,7 +3397,7 @@ auto parse_v2_tool_policy_fields(const Json& value,
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 81,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 85,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started",
@@ -3392,6 +3406,11 @@ auto parse_v2_tool_policy_fields(const Json& value,
       "persona.selection_recorded",
       "session.spend_ceiling_set",
       "session.conversation_policy_set",
+      "session.conversation_summary_intent_recorded",
+      "session.conversation_summary_candidate_published",
+      "session.conversation_summary_activated",
+      "session.conversation_summary_disabled",
+
       "run.awaiting_input",
       "run.resumed",
       "run.completion_requested",
@@ -3925,6 +3944,419 @@ auto check_conversation_shape(const Json& value) -> void {
   return result;
 }
 
+// Summary payloads are bounded before domain strings or reference arrays are
+// copied. Candidate text has a separate, larger limit than source metadata.
+auto check_summary_shape(const Json& value, std::size_t& nodes,
+                         std::size_t& bytes, unsigned depth = 0) -> void {
+  if (nodes == 0 || depth > 12 ||
+      (value.is_number() && !value.is_number_unsigned()))
+    throw CodecFailure{"summary metadata exceeds shape bounds"};
+  --nodes;
+  if (value.is_string()) {
+    const auto& text = value.get_ref<const std::string&>();
+    if (text.size() > domain::summary_maximum_text_bytes || text.size() > bytes)
+      throw CodecFailure{"summary metadata exceeds text bounds"};
+    bytes -= text.size();
+  }
+  if (!value.is_object() && !value.is_array()) return;
+  if (value.size() > nodes)
+    throw CodecFailure{"summary metadata exceeds shape bounds"};
+  for (const auto& child : value)
+    check_summary_shape(child, nodes, bytes, depth + 1);
+}
+auto check_summary_shape(const Json& value) -> void {
+  auto nodes = domain::summary_maximum_entries * 32 +
+               domain::summary_maximum_groups * 8 + 512;
+  auto bytes = domain::summary_maximum_manifest_bytes +
+               domain::summary_maximum_text_bytes;
+  check_summary_shape(value, nodes, bytes);
+}
+auto summary_unsigned(const Json& value) -> std::uint64_t {
+  if (!value.is_number_unsigned())
+    throw CodecFailure{"summary integer has an invalid type"};
+  return value.get<std::uint64_t>();
+}
+auto summary_version(const Json& value) -> std::uint32_t {
+  if (summary_unsigned(value) != 1)
+    throw CodecFailure{"unsupported summary metadata version"};
+  return 1;
+}
+auto valid_summary_digest(
+    const domain::ContentDigest& value,
+    std::uint64_t maximum = domain::summary_maximum_manifest_bytes) -> bool {
+  return value.algorithm == "sha256" && value.value.size() == 64 &&
+         value.byte_size > 0 && value.byte_size <= maximum &&
+         std::ranges::all_of(value.value, [](unsigned char ch) {
+           return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+         });
+}
+auto parse_summary_digest(
+    const Json& value,
+    std::uint64_t maximum = domain::summary_maximum_manifest_bytes)
+    -> domain::ContentDigest {
+  require_conversation_fields(value, {"algorithm", "value", "byte_size"});
+  auto result = parse_digest(value);
+  static_cast<void>(summary_unsigned(value.at("byte_size")));
+  if (!valid_summary_digest(result, maximum))
+    throw CodecFailure{"invalid summary digest"};
+  return result;
+}
+auto summary_reference_json(const domain::ConversationSummaryVersion& value)
+    -> Json {
+  if (value.revision == 0 || !valid_summary_digest(value.candidate_digest))
+    throw CodecFailure{"invalid summary version reference"};
+  return {{"summary_id", id_text(value.summary_id)},
+          {"revision", value.revision},
+          {"candidate_digest", digest_json(value.candidate_digest)}};
+}
+auto parse_summary_reference(const Json& value)
+    -> domain::ConversationSummaryVersion {
+  require_conversation_fields(value,
+                              {"summary_id", "revision", "candidate_digest"});
+  domain::ConversationSummaryVersion result{
+      parse_id<domain::ConversationSummaryId>(value.at("summary_id")),
+      summary_unsigned(value.at("revision")),
+      parse_summary_digest(value.at("candidate_digest"))};
+  if (summary_reference_json(result) != value)
+    throw CodecFailure{"noncanonical summary reference"};
+  return result;
+}
+auto summary_entry_json(const domain::ConversationAdmittedEntry& value)
+    -> Json {
+  return {{"completed_event_id", id_text(value.completed_event_id)},
+          {"event_sequence", value.event_sequence},
+          {"entry_id", id_text(value.entry_id)},
+          {"message_id", id_text(value.message_id)},
+          {"provenance",
+           {{"source_id", id_text(value.provenance.source_id)},
+            {"source_location",
+             optional_string_json(value.provenance.source_location)},
+            {"digest", optional_string_json(value.provenance.digest)}}},
+          {"order", value.order},
+          {"estimated_tokens", value.estimated_tokens},
+          {"kind", conversation_kind_name(value.kind)},
+          {"message_digest", digest_json(value.message_digest)}};
+}
+auto check_summary_entry_shape(const Json& value) -> void {
+  require_conversation_fields(value,
+                              {"completed_event_id", "event_sequence",
+                               "entry_id", "message_id", "provenance", "order",
+                               "estimated_tokens", "kind", "message_digest"});
+  const auto& provenance = value.at("provenance");
+  require_conversation_fields(provenance,
+                              {"source_id", "source_location", "digest"});
+  for (const auto field : {"source_location", "digest"}) {
+    const auto& text = provenance.at(field);
+    if (!text.is_null() &&
+        (!text.is_string() || text.get_ref<const std::string&>().empty() ||
+         text.get_ref<const std::string&>().size() >
+             domain::conversation_maximum_provenance_bytes))
+      throw CodecFailure{"invalid summary source provenance"};
+  }
+  require_conversation_fields(value.at("message_digest"),
+                              {"algorithm", "value", "byte_size"});
+}
+auto parse_summary_entry(const Json& value)
+    -> domain::ConversationAdmittedEntry {
+  check_summary_entry_shape(value);
+  const auto& provenance = value.at("provenance");
+  return {parse_id<domain::EventId>(value.at("completed_event_id")),
+          summary_unsigned(value.at("event_sequence")),
+          parse_id<domain::ContextEntryId>(value.at("entry_id")),
+          parse_id<domain::MessageId>(value.at("message_id")),
+          {parse_id<domain::ContextSourceId>(provenance.at("source_id")),
+           parse_optional_string(provenance.at("source_location")),
+           parse_optional_string(provenance.at("digest"))},
+          summary_unsigned(value.at("order")),
+          summary_unsigned(value.at("estimated_tokens")),
+          parse_conversation_kind(value.at("kind")),
+          parse_summary_digest(value.at("message_digest"),
+                               domain::summary_maximum_source_bytes)};
+}
+auto summary_sources_json(const domain::ConversationSummarySources& value)
+    -> Json {
+  if (!domain::validate_conversation_summary_sources(value))
+    throw CodecFailure{"invalid summary sources"};
+  auto groups = Json::array();
+  for (const auto& group : value.groups) {
+    auto entries = Json::array();
+    for (const auto& entry : group.entries)
+      entries.push_back(summary_entry_json(entry));
+    groups.push_back({{"run_id", id_text(group.run_id)},
+                      {"terminal_event_id", id_text(group.terminal_event_id)},
+                      {"terminal_sequence", group.terminal_sequence},
+                      {"entries", std::move(entries)}});
+  }
+  return {{"version", value.version},
+          {"estimator_version", value.estimator_version},
+          {"session_id", id_text(value.session_id)},
+          {"snapshot_sequence", value.snapshot_sequence},
+          {"groups", std::move(groups)},
+          {"source_digest", digest_json(*value.source_digest)}};
+}
+auto parse_summary_sources(const Json& value)
+    -> domain::ConversationSummarySources {
+  require_conversation_fields(value,
+                              {"version", "estimator_version", "session_id",
+                               "snapshot_sequence", "groups", "source_digest"});
+  const auto& groups = value.at("groups");
+  if (!groups.is_array() || groups.size() > domain::summary_maximum_groups)
+    throw CodecFailure{"summary source group count exceeds limit"};
+  auto remaining = domain::summary_maximum_entries;
+  for (const auto& group : groups) {
+    require_conversation_fields(
+        group, {"run_id", "terminal_event_id", "terminal_sequence", "entries"});
+    const auto& entries = group.at("entries");
+    if (!entries.is_array() || entries.size() > remaining)
+      throw CodecFailure{"summary source entry count exceeds aggregate limit"};
+    remaining -= entries.size();
+    for (const auto& entry : entries)
+      check_summary_entry_shape(entry);
+  }
+  domain::ConversationSummarySources result{
+      summary_version(value.at("version")),
+      summary_version(value.at("estimator_version")),
+      parse_id<domain::SessionId>(value.at("session_id")),
+      summary_unsigned(value.at("snapshot_sequence")),
+      {},
+      parse_summary_digest(value.at("source_digest"))};
+  for (const auto& group : groups) {
+    domain::ConversationSummarySourceGroup parsed{
+        parse_id<domain::RunId>(group.at("run_id")),
+        parse_id<domain::EventId>(group.at("terminal_event_id")),
+        summary_unsigned(group.at("terminal_sequence")),
+        {}};
+    for (const auto& entry : group.at("entries"))
+      parsed.entries.push_back(parse_summary_entry(entry));
+    result.groups.push_back(std::move(parsed));
+  }
+  if (summary_sources_json(result) != value)
+    throw CodecFailure{"noncanonical summary sources"};
+  return result;
+}
+auto summary_intent_json(const domain::ConversationSummaryIntent& value)
+    -> Json {
+  if (!domain::validate_conversation_summary_intent(value))
+    throw CodecFailure{"invalid summary generation intent"};
+  return {{"version", value.version},
+          {"format_version", value.format_version},
+          {"summary_id", id_text(value.summary_id)},
+          {"sources", summary_sources_json(value.sources)},
+          {"producing_run_id", id_text(value.producing_run_id)},
+          {"producing_inference_id", id_text(value.producing_inference_id)},
+          {"model_id", id_text(value.model_id)},
+          {"output_message_id", id_text(value.output_message_id)},
+          {"runtime_version", value.runtime_version},
+          {"capacity",
+           {{"context_window_tokens", value.capacity.context_window_tokens},
+            {"reserved_output_tokens", value.capacity.reserved_output_tokens},
+            {"reserved_input_tokens", value.capacity.reserved_input_tokens}}},
+          {"estimated_input_tokens", value.estimated_input_tokens},
+          {"maximum_output_bytes", value.maximum_output_bytes},
+          {"intent_digest", digest_json(*value.intent_digest)}};
+}
+auto parse_summary_intent(const Json& value)
+    -> domain::ConversationSummaryIntent {
+  require_conversation_fields(value, {"version", "format_version", "summary_id",
+                                      "sources", "producing_run_id",
+                                      "producing_inference_id", "model_id",
+                                      "output_message_id", "runtime_version",
+                                      "capacity", "estimated_input_tokens",
+                                      "maximum_output_bytes", "intent_digest"});
+  const auto& capacity = value.at("capacity");
+  require_conversation_fields(capacity, {"context_window_tokens",
+                                         "reserved_output_tokens",
+                                         "reserved_input_tokens"});
+  auto maximum = summary_unsigned(value.at("maximum_output_bytes"));
+  if (maximum > domain::summary_maximum_text_bytes)
+    throw CodecFailure{"summary output bound exceeds limit"};
+  domain::ConversationSummaryIntent result{
+      summary_version(value.at("version")),
+      summary_version(value.at("format_version")),
+      parse_id<domain::ConversationSummaryId>(value.at("summary_id")),
+      parse_summary_sources(value.at("sources")),
+      parse_id<domain::RunId>(value.at("producing_run_id")),
+      parse_id<domain::InferenceId>(value.at("producing_inference_id")),
+      parse_id<domain::ModelId>(value.at("model_id")),
+      parse_id<domain::MessageId>(value.at("output_message_id")),
+      value.at("runtime_version").get<std::string>(),
+      {summary_unsigned(capacity.at("context_window_tokens")),
+       summary_unsigned(capacity.at("reserved_output_tokens")),
+       summary_unsigned(capacity.at("reserved_input_tokens"))},
+      summary_unsigned(value.at("estimated_input_tokens")),
+      static_cast<std::size_t>(maximum),
+      parse_summary_digest(value.at("intent_digest"))};
+  if (summary_intent_json(result) != value)
+    throw CodecFailure{"noncanonical summary intent"};
+  return result;
+}
+auto summary_author_name(domain::ConversationSummaryAuthor author)
+    -> std::string_view {
+  switch (author) {
+    case domain::ConversationSummaryAuthor::model: return "model";
+    case domain::ConversationSummaryAuthor::user_edit: return "user_edit";
+  }
+  throw CodecFailure{"invalid summary candidate author"};
+}
+auto parse_summary_author(const Json& value)
+    -> domain::ConversationSummaryAuthor {
+  if (value == "model") return domain::ConversationSummaryAuthor::model;
+  if (value == "user_edit") return domain::ConversationSummaryAuthor::user_edit;
+  throw CodecFailure{"invalid summary candidate author"};
+}
+// Candidate integrity additionally requires its recorded intent and immediate
+// edit parent; that cross-event check belongs to runtime replay, not this
+// codec.
+auto validate_summary_candidate_shape(
+    const domain::ConversationSummaryCandidate& value) -> void {
+  if (value.version != 1 || value.revision == 0 || value.output_sequence == 0 ||
+      value.created_sequence <= value.output_sequence ||
+      value.output_event_id == value.created_event_id ||
+      value.text.size() > domain::summary_maximum_text_bytes ||
+      !detail::is_safe_utf8_text(value.text) ||
+      !valid_summary_digest(value.source_digest) ||
+      !valid_summary_digest(value.intent_digest) || !value.candidate_digest ||
+      !valid_summary_digest(*value.candidate_digest))
+    throw CodecFailure{"invalid summary candidate metadata"};
+  switch (value.author) {
+    case domain::ConversationSummaryAuthor::model:
+      if (value.revision != 1 || value.edited_from)
+        throw CodecFailure{"invalid generated summary revision"};
+      return;
+    case domain::ConversationSummaryAuthor::user_edit:
+      if (!value.edited_from ||
+          value.edited_from->summary_id != value.summary_id ||
+          value.edited_from->revision == 0 ||
+          value.edited_from->revision ==
+              std::numeric_limits<std::uint64_t>::max() ||
+          value.revision != value.edited_from->revision + 1 ||
+          !valid_summary_digest(value.edited_from->candidate_digest))
+        throw CodecFailure{"invalid edited summary revision"};
+      return;
+  }
+  throw CodecFailure{"invalid summary candidate author"};
+}
+auto summary_candidate_json(const domain::ConversationSummaryCandidate& value)
+    -> Json {
+  validate_summary_candidate_shape(value);
+  return {{"version", value.version},
+          {"session_id", id_text(value.session_id)},
+          {"summary_id", id_text(value.summary_id)},
+          {"revision", value.revision},
+          {"source_digest", digest_json(value.source_digest)},
+          {"intent_digest", digest_json(value.intent_digest)},
+          {"output_event_id", id_text(value.output_event_id)},
+          {"output_sequence", value.output_sequence},
+          {"created_event_id", id_text(value.created_event_id)},
+          {"created_sequence", value.created_sequence},
+          {"author", summary_author_name(value.author)},
+          {"edited_from", value.edited_from
+                              ? summary_reference_json(*value.edited_from)
+                              : Json{nullptr}},
+          {"text", value.text},
+          {"candidate_digest", digest_json(*value.candidate_digest)}};
+}
+auto parse_summary_candidate(const Json& value)
+    -> domain::ConversationSummaryCandidate {
+  require_conversation_fields(
+      value, {"version", "session_id", "summary_id", "revision",
+              "source_digest", "intent_digest", "output_event_id",
+              "output_sequence", "created_event_id", "created_sequence",
+              "author", "edited_from", "text", "candidate_digest"});
+  std::optional<domain::ConversationSummaryVersion> previous;
+  if (!value.at("edited_from").is_null())
+    previous = parse_summary_reference(value.at("edited_from"));
+  domain::ConversationSummaryCandidate result{
+      summary_version(value.at("version")),
+      parse_id<domain::SessionId>(value.at("session_id")),
+      parse_id<domain::ConversationSummaryId>(value.at("summary_id")),
+      summary_unsigned(value.at("revision")),
+      parse_summary_digest(value.at("source_digest")),
+      parse_summary_digest(value.at("intent_digest")),
+      parse_id<domain::EventId>(value.at("output_event_id")),
+      summary_unsigned(value.at("output_sequence")),
+      parse_id<domain::EventId>(value.at("created_event_id")),
+      summary_unsigned(value.at("created_sequence")),
+      parse_summary_author(value.at("author")),
+      std::move(previous),
+      value.at("text").get<std::string>(),
+      parse_summary_digest(value.at("candidate_digest"))};
+  if (summary_candidate_json(result) != value)
+    throw CodecFailure{"noncanonical summary candidate"};
+  return result;
+}
+auto summary_activation_json(const domain::ConversationSummaryActivation& value)
+    -> Json {
+  if (!domain::validate_conversation_summary_activation(value))
+    throw CodecFailure{"invalid summary activation"};
+  auto runs = Json::array();
+  for (const auto& run : value.covered_run_ids)
+    runs.push_back(id_text(run));
+  return {{"version", value.version},
+          {"session_id", id_text(value.session_id)},
+          {"candidate", summary_reference_json(value.candidate)},
+          {"source_digest", digest_json(value.source_digest)},
+          {"covered_run_ids", std::move(runs)},
+          {"source_anchor_sequence", value.source_anchor_sequence},
+          {"activation_event_id", id_text(value.activation_event_id)},
+          {"activation_sequence", value.activation_sequence},
+          {"activation_digest", digest_json(*value.activation_digest)}};
+}
+auto parse_summary_activation(const Json& value)
+    -> domain::ConversationSummaryActivation {
+  require_conversation_fields(value,
+                              {"version", "session_id", "candidate",
+                               "source_digest", "covered_run_ids",
+                               "source_anchor_sequence", "activation_event_id",
+                               "activation_sequence", "activation_digest"});
+  const auto& runs = value.at("covered_run_ids");
+  if (!runs.is_array() || runs.size() > domain::summary_maximum_groups)
+    throw CodecFailure{"summary activation coverage exceeds limit"};
+  domain::ConversationSummaryActivation result{
+      summary_version(value.at("version")),
+      parse_id<domain::SessionId>(value.at("session_id")),
+      parse_summary_reference(value.at("candidate")),
+      parse_summary_digest(value.at("source_digest")),
+      {},
+      summary_unsigned(value.at("source_anchor_sequence")),
+      parse_id<domain::EventId>(value.at("activation_event_id")),
+      summary_unsigned(value.at("activation_sequence")),
+      parse_summary_digest(value.at("activation_digest"))};
+  for (const auto& run : runs)
+    result.covered_run_ids.push_back(parse_id<domain::RunId>(run));
+  if (summary_activation_json(result) != value)
+    throw CodecFailure{"noncanonical summary activation"};
+  return result;
+}
+auto summary_replacements_json(
+    std::span<const domain::ConversationSummaryVersion> values) -> Json {
+  if (values.size() > domain::summary_maximum_active)
+    throw CodecFailure{"summary replacement count exceeds limit"};
+  std::set<domain::ConversationSummaryId> seen;
+  auto result = Json::array();
+  for (const auto& value : values) {
+    if (!seen.insert(value.summary_id).second)
+      throw CodecFailure{"duplicate summary replacement identity"};
+    result.push_back(summary_reference_json(value));
+  }
+  return result;
+}
+auto parse_summary_replacements(const Json& value)
+    -> std::vector<domain::ConversationSummaryVersion> {
+  if (!value.is_array() || value.size() > domain::summary_maximum_active)
+    throw CodecFailure{"summary replacement count exceeds limit"};
+  std::vector<domain::ConversationSummaryVersion> result;
+  for (const auto& item : value)
+    result.push_back(parse_summary_reference(item));
+  if (summary_replacements_json(result) != value)
+    throw CodecFailure{"noncanonical summary replacement set"};
+  return result;
+}
+auto check_summary_policy_revision(std::uint64_t revision) -> void {
+  if (revision == std::numeric_limits<std::uint64_t>::max())
+    throw CodecFailure{"summary policy revision cannot advance"};
+}
+
 [[nodiscard]] auto known_payload_schema(const std::string_view type,
                                         const std::uint32_t schema_version)
     -> bool {
@@ -3996,6 +4428,29 @@ auto check_conversation_shape(const Json& value) -> void {
                   "invalid conversation policy revision transition"};
             return {{"previous_revision", value.previous_revision},
                     {"policy", conversation_policy_json(value.policy)}};
+          },
+          [](const domain::ConversationSummaryGenerationIntentRecorded& value)
+              -> Json {
+            return {{"intent", summary_intent_json(value.intent)}};
+          },
+          [](const domain::ConversationSummaryCandidatePublished& value)
+              -> Json {
+            return {{"candidate", summary_candidate_json(value.candidate)}};
+          },
+          [](const domain::ConversationSummaryActivated& value) -> Json {
+            check_summary_policy_revision(value.previous_policy_revision);
+            return {
+                {"previous_policy_revision", value.previous_policy_revision},
+                {"activation", summary_activation_json(value.activation)},
+                {"replaced_versions",
+                 summary_replacements_json(value.replaced_versions)}};
+          },
+          [](const domain::ConversationSummaryDisabled& value) -> Json {
+            check_summary_policy_revision(value.previous_policy_revision);
+            return {
+                {"previous_policy_revision", value.previous_policy_revision},
+                {"candidate", summary_reference_json(value.candidate)},
+                {"activation_event_id", id_text(value.activation_event_id)}};
           },
           [](const domain::RunAwaitingInput& value) -> Json {
             return {{"question_id", id_text(value.question_id)}};
@@ -4460,6 +4915,40 @@ auto check_conversation_shape(const Json& value) -> void {
     return domain::ConversationPolicySet{
         value.at("previous_revision").get<std::uint64_t>(),
         parse_conversation_policy(value.at("policy"))};
+  }
+  if (type == "session.conversation_summary_intent_recorded") {
+    check_summary_shape(value);
+    require_conversation_fields(value, {"intent"});
+    return domain::ConversationSummaryGenerationIntentRecorded{
+        parse_summary_intent(value.at("intent"))};
+  }
+  if (type == "session.conversation_summary_candidate_published") {
+    check_summary_shape(value);
+    require_conversation_fields(value, {"candidate"});
+    return domain::ConversationSummaryCandidatePublished{
+        parse_summary_candidate(value.at("candidate"))};
+  }
+  if (type == "session.conversation_summary_activated") {
+    check_summary_shape(value);
+    require_conversation_fields(
+        value, {"previous_policy_revision", "activation", "replaced_versions"});
+    const auto revision =
+        summary_unsigned(value.at("previous_policy_revision"));
+    check_summary_policy_revision(revision);
+    return domain::ConversationSummaryActivated{
+        revision, parse_summary_activation(value.at("activation")),
+        parse_summary_replacements(value.at("replaced_versions"))};
+  }
+  if (type == "session.conversation_summary_disabled") {
+    check_summary_shape(value);
+    require_conversation_fields(value, {"previous_policy_revision", "candidate",
+                                        "activation_event_id"});
+    const auto revision =
+        summary_unsigned(value.at("previous_policy_revision"));
+    check_summary_policy_revision(revision);
+    return domain::ConversationSummaryDisabled{
+        revision, parse_summary_reference(value.at("candidate")),
+        parse_id<domain::EventId>(value.at("activation_event_id"))};
   }
   if (type == "run.repository_context_admitted") {
     if (!value.is_object() || value.size() != 2)
