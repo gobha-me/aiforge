@@ -303,3 +303,23 @@ TEST_CASE(
   CHECK(identities == 0);
   CHECK(store.recorded_calls().empty());
 }
+
+TEST_CASE("Chat context inspection distinguishes active frozen admission from "
+          "next policy",
+          "[chatsummarypreview][active]") {
+  Fixture f;
+  REQUIRE(f.chat->submit("Current run input"));
+  REQUIRE(f.chat->active());
+  rolling(f);
+  const auto inspection =
+      f.chat->inspect_conversation_context("Next unsubmitted draft");
+  INFO((inspection ? "inspected" : inspection.error().message));
+  REQUIRE(inspection);
+  REQUIRE(inspection->active_admission);
+  REQUIRE(inspection->next_admission);
+  CHECK(inspection->active_admission->mode == domain::ConversationMode::full);
+  CHECK(inspection->next_admission->mode == domain::ConversationMode::rolling);
+  CHECK(inspection->policy.policy.mode == domain::ConversationMode::rolling);
+  f.drain();
+  CHECK(f.backend.requests().size() == 1);
+}

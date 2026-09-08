@@ -1550,6 +1550,7 @@ auto ChatSession::summary_catalog() const
 auto ChatSession::publish_conversation_summary(
     domain::ConversationSummaryId summary_id)
     -> std::expected<domain::ConversationSummaryCandidate, ChatSessionError> {
+  const auto before = m_impl->kernel->event_log().last_sequence();
   try {
     const auto suffix = m_impl->identity_suffix_source();
     auto attributes = summary_control_attributes(suffix);
@@ -1560,12 +1561,15 @@ auto ChatSession::publish_conversation_summary(
     auto published = runtime::SummaryController{*m_impl->kernel}.publish(
         {*run, *attributes, std::move(summary_id)});
     if (!published)
-      return error(ChatSessionErrorCode::context_failed,
-                   published.error().message, published.error().retryable);
+      return std::unexpected(ChatSessionError{
+          ChatSessionErrorCode::context_failed, published.error().message,
+          published.error().retryable,
+          m_impl->kernel->event_log().last_sequence() != before});
     return std::move(*published);
   } catch (...) {
-    return error(ChatSessionErrorCode::internal_failure,
-                 "summary publication failed");
+    return std::unexpected(ChatSessionError{
+        ChatSessionErrorCode::internal_failure, "summary publication failed",
+        false, m_impl->kernel->event_log().last_sequence() != before});
   }
 }
 
@@ -1573,6 +1577,7 @@ auto ChatSession::edit_conversation_summary(
     std::uint64_t expected_sequence, domain::ConversationSummaryVersion parent,
     std::string text)
     -> std::expected<domain::ConversationSummaryCandidate, ChatSessionError> {
+  const auto before = m_impl->kernel->event_log().last_sequence();
   try {
     const auto suffix = m_impl->identity_suffix_source();
     auto attributes = summary_control_attributes(suffix);
@@ -1584,11 +1589,15 @@ auto ChatSession::edit_conversation_summary(
         {*run, *attributes, expected_sequence, std::move(parent),
          std::move(text)});
     if (!edited)
-      return error(ChatSessionErrorCode::context_failed, edited.error().message,
-                   edited.error().retryable);
+      return std::unexpected(ChatSessionError{
+          ChatSessionErrorCode::context_failed, edited.error().message,
+          edited.error().retryable,
+          m_impl->kernel->event_log().last_sequence() != before});
     return std::move(*edited);
   } catch (...) {
-    return error(ChatSessionErrorCode::internal_failure, "summary edit failed");
+    return std::unexpected(ChatSessionError{
+        ChatSessionErrorCode::internal_failure, "summary edit failed", false,
+        m_impl->kernel->event_log().last_sequence() != before});
   }
 }
 
@@ -1909,6 +1918,7 @@ auto ChatSession::preview_conversation_summary(
 auto ChatSession::apply_conversation_summary(const ChatSummaryPreview& preview,
                                              std::string current_draft)
     -> std::expected<domain::ConversationSummaryActivation, ChatSessionError> {
+  const auto before = m_impl->kernel->event_log().last_sequence();
   try {
     if (!preview.m_data)
       return error(ChatSessionErrorCode::invalid_input,
@@ -1938,12 +1948,15 @@ auto ChatSession::apply_conversation_summary(const ChatSummaryPreview& preview,
           m_impl->memory_settings.context_tokens, 0, true}},
         m_impl->stop_token);
     if (!applied)
-      return error(ChatSessionErrorCode::context_failed,
-                   applied.error().message, applied.error().retryable);
+      return std::unexpected(ChatSessionError{
+          ChatSessionErrorCode::context_failed, applied.error().message,
+          applied.error().retryable,
+          m_impl->kernel->event_log().last_sequence() != before});
     return std::move(*applied);
   } catch (...) {
-    return error(ChatSessionErrorCode::internal_failure,
-                 "summary activation failed");
+    return std::unexpected(ChatSessionError{
+        ChatSessionErrorCode::internal_failure, "summary activation failed",
+        false, m_impl->kernel->event_log().last_sequence() != before});
   }
 }
 
