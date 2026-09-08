@@ -307,7 +307,7 @@ TEST_CASE("explicit empty admission and absent legacy admission stay distinct",
     CHECK(recorded->conversation_admission->groups.empty());
     CHECK(recorded->conversation_admission->admission_digest.has_value());
     CHECK(fixture.kernel.event_log().events().front().metadata.schema_version ==
-          3);
+          4);
   } else {
     CHECK(fixture.kernel.event_log().events().front().metadata.schema_version ==
           1);
@@ -332,7 +332,7 @@ TEST_CASE(
   REQUIRE(fixture.backend.requests.size() == 2);
   CHECK(fixture.backend.requests.back() == expected);
   const auto& started = fixture.kernel.event_log().events()[previous_sequence];
-  REQUIRE(started.metadata.schema_version == 3);
+  REQUIRE(started.metadata.schema_version == 4);
   REQUIRE(std::holds_alternative<domain::RunStarted>(started.payload));
   CHECK(std::get<domain::RunStarted>(started.payload).conversation_admission ==
         admission);

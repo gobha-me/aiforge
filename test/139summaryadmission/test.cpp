@@ -56,7 +56,7 @@ struct KernelFixture {
          "Rejected fixture",
          {"application/schema+json", R"({"type":"object"})"},
          {domain::Effect::read},
-         {{domain::Effect::read, "fixture", "value"}}},
+         {{domain::Effect::read, "filesystem.root", "/fixture"}}},
         std::make_shared<Executor>()));
     auto snapshot = registry.snapshot();
     REQUIRE(snapshot);

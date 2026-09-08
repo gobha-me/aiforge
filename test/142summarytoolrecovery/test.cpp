@@ -127,7 +127,7 @@ struct KernelFixture {
          "Allowed recovery fixture",
          {"application/schema+json", R"({"type":"object"})"},
          {domain::Effect::read},
-         {{domain::Effect::read, "fixture", "value"}}},
+         {{domain::Effect::read, "filesystem.root", "/fixture"}}},
         executor, {},
         runtime::ToolExecutorContract{"test.summary-recovery", "1"}));
     auto snapshot = registry.snapshot();
