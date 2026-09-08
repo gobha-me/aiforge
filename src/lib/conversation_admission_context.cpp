@@ -183,6 +183,65 @@ auto build_admission(const ConversationContextRequest& request,
   return result;
 }
 
+auto recover_group(ConversationHistoryGroup& group,
+                   const ConversationAdmittedGroup& recorded,
+                   const std::set<RunId>& pins, std::stop_token stop)
+    -> std::expected<void, ConversationContextError> {
+  if (recorded.entries.size() != group.entries.size() ||
+      recorded.pinned != pins.contains(group.run_id))
+    return failure(Code::source_mismatch,
+                   "admitted conversation group shape changed", group.run_id);
+  for (std::size_t index = 0; index < group.entries.size(); ++index) {
+    if (stop.stop_requested())
+      return failure(Code::cancelled,
+                     "conversation context operation cancelled");
+    auto& entry = group.entries[index];
+    entry.content.order = recorded.entries[index].order;
+    auto metadata = admitted_entry(entry);
+    if (!metadata) return std::unexpected(metadata.error());
+    if (*metadata != recorded.entries[index])
+      return failure(Code::source_mismatch,
+                     "admitted conversation source changed", group.run_id);
+  }
+  return {};
+}
+
+auto recover_groups(std::vector<ConversationHistoryGroup>& history,
+                    const ConversationAdmission& admission,
+                    const std::set<RunId>& pins, std::stop_token stop)
+    -> std::expected<std::vector<ConversationHistoryGroup>,
+                     ConversationContextError> {
+  std::set<RunId> selected;
+  std::vector<ConversationHistoryGroup> result;
+  std::size_t admitted_index{};
+  for (auto& group : history) {
+    if (stop.stop_requested())
+      return failure(Code::cancelled,
+                     "conversation context operation cancelled");
+    if (admitted_index == admission.groups.size() ||
+        group.run_id != admission.groups[admitted_index].run_id)
+      continue;
+    auto recovered =
+        recover_group(group, admission.groups[admitted_index++], pins, stop);
+    if (!recovered) return std::unexpected(recovered.error());
+    selected.insert(group.run_id);
+    // Copy only admitted groups; omission hashing still needs all identities.
+    result.push_back(group);
+  }
+  if (admitted_index != admission.groups.size() ||
+      history.size() - selected.size() != admission.omitted_group_count ||
+      !std::ranges::all_of(
+          pins, [&](const auto& pin) { return selected.contains(pin); }))
+    return failure(Code::source_mismatch,
+                   "conversation source selection is incomplete");
+  auto omitted = omitted_digest(history, selected, stop);
+  if (!omitted) return std::unexpected(omitted.error());
+  if (*omitted != admission.omitted_groups_digest)
+    return failure(Code::source_mismatch,
+                   "conversation omitted source identities changed");
+  return result;
+}
+
 } // namespace
 
 auto prepare_conversation_context(const ConversationContextRequest& request,
@@ -264,50 +323,7 @@ auto recover_conversation_context(const SessionEventLog& log,
     if (!history) return history_failure(history.error());
     const std::set<RunId> pins{policy->policy.pinned_run_ids.begin(),
                                policy->policy.pinned_run_ids.end()};
-    std::set<RunId> selected;
-    std::vector<ConversationHistoryGroup> result;
-    std::size_t admitted_index{};
-    for (auto& group : *history) {
-      if (stop.stop_requested())
-        return failure(Code::cancelled,
-                       "conversation context operation cancelled");
-      if (admitted_index == admission.groups.size() ||
-          group.run_id != admission.groups[admitted_index].run_id)
-        continue;
-      const auto& recorded = admission.groups[admitted_index++];
-      if (recorded.entries.size() != group.entries.size() ||
-          recorded.pinned != pins.contains(group.run_id))
-        return failure(Code::source_mismatch,
-                       "admitted conversation group shape changed",
-                       group.run_id);
-      for (std::size_t index = 0; index < group.entries.size(); ++index) {
-        if (stop.stop_requested())
-          return failure(Code::cancelled,
-                         "conversation context operation cancelled");
-        auto& entry = group.entries[index];
-        entry.content.order = recorded.entries[index].order;
-        auto metadata = admitted_entry(entry);
-        if (!metadata) return std::unexpected(metadata.error());
-        if (*metadata != recorded.entries[index])
-          return failure(Code::source_mismatch,
-                         "admitted conversation source changed", group.run_id);
-      }
-      selected.insert(group.run_id);
-      // Copy only admitted groups; omission hashing still needs all identities.
-      result.push_back(group);
-    }
-    if (admitted_index != admission.groups.size() ||
-        history->size() - selected.size() != admission.omitted_group_count ||
-        !std::ranges::all_of(
-            pins, [&](const auto& pin) { return selected.contains(pin); }))
-      return failure(Code::source_mismatch,
-                     "conversation source selection is incomplete");
-    auto omitted = omitted_digest(*history, selected, stop);
-    if (!omitted) return std::unexpected(omitted.error());
-    if (*omitted != admission.omitted_groups_digest)
-      return failure(Code::source_mismatch,
-                     "conversation omitted source identities changed");
-    return result;
+    return recover_groups(*history, admission, pins, stop);
   } catch (...) {
     return failure(Code::internal_failure,
                    "conversation context recovery failed internally");
