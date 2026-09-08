@@ -148,7 +148,26 @@ TEST_CASE("summary kernel will not execute a second inference after an "
   fixture.backend.tools = true;
   const auto start = fixture.request();
   REQUIRE(fixture.kernel->start(start));
-  fixture.drain();
+  // The unsolicited call fails the run. A provider finish already queued after
+  // that failure may also report a protocol error while the worker drains.
+  for (unsigned count = 0;
+       count < 1000 && fixture.kernel->active_inference_id(); ++count) {
+    const auto drained = fixture.kernel->drain();
+    if (!drained)
+      CHECK(drained.error().code ==
+            runtime::RunKernelErrorCode::protocol_failure);
+    if (fixture.kernel->active_inference_id())
+      std::this_thread::sleep_for(std::chrono::milliseconds{1});
+  }
+  REQUIRE_FALSE(fixture.kernel->active_inference_id());
+  const auto& failed_history = fixture.kernel->event_log().events();
+  CHECK(std::ranges::any_of(failed_history, [&](const auto& event) {
+    return event.metadata.run_id == start.run_id &&
+           std::holds_alternative<domain::RunFailed>(event.payload);
+  }));
+  CHECK(std::ranges::none_of(failed_history, [](const auto& event) {
+    return std::holds_alternative<domain::ToolStarted>(event.payload);
+  }));
   auto next = start.request;
   next.inference_id = id<domain::InferenceId>("second-inference");
   next.assistant_message_id = id<domain::MessageId>("second-output");
