@@ -1,4 +1,5 @@
 #include <aiforge/domain/conversation_admission.hpp>
+#include <aiforge/domain/conversation_summary.hpp>
 
 #include <aiforge/detail/sha256.hpp>
 #include <algorithm>
@@ -86,7 +87,8 @@ auto valid_optional_text(const std::optional<std::string>& value) -> bool {
 }
 
 auto header_shape(const ConversationAdmission& value) -> Result {
-  if (value.version != 1 || value.estimator_version != 1)
+  if ((value.version != 1 && value.version != 2) ||
+      value.estimator_version != 1)
     return failure(Code::unsupported_version,
                    "unsupported conversation admission version");
   if (!valid_mode(value.mode) ||
@@ -94,6 +96,12 @@ auto header_shape(const ConversationAdmission& value) -> Result {
       (!value.policy_event_id && value.mode != ConversationMode::full))
     return failure(Code::invalid_policy,
                    "conversation admission policy is inconsistent");
+  if ((value.version == 1 || value.mode == ConversationMode::full) &&
+      !value.summaries.empty())
+    return failure(Code::invalid_admission,
+                   "legacy or full admission cannot include summaries");
+  if (value.summaries.size() > summary_maximum_active)
+    return failure(Code::resource_exhausted, "too many admitted summaries");
   if (value.groups.size() > conversation_maximum_groups)
     return failure(Code::resource_exhausted,
                    "too many admitted conversation groups");
@@ -176,10 +184,60 @@ struct Sources {
   }
 };
 
+struct SummarySources {
+  std::set<ConversationSummaryId> summaries;
+  std::optional<std::pair<std::uint64_t, ConversationSummaryId>> previous;
+  std::uint64_t tokens{};
+
+  auto entry(const ConversationAdmittedSummary& value,
+             const ConversationAdmission& admission, Sources& sources)
+      -> Result {
+    const auto position =
+        std::pair{value.source_anchor_sequence, value.candidate.summary_id};
+    if (value.candidate.revision == 0 || value.source_anchor_sequence == 0 ||
+        value.activation_sequence <= value.source_anchor_sequence ||
+        value.activation_sequence > admission.source_snapshot_sequence ||
+        value.order <= sources.previous_order || value.estimated_tokens == 0 ||
+        (previous && position <= *previous) ||
+        !valid_optional_text(value.provenance.source_location) ||
+        !valid_optional_text(value.provenance.digest))
+      return failure(Code::invalid_admission,
+                     "admitted summary metadata is invalid");
+    if (!valid_digest(value.candidate.candidate_digest,
+                      summary_maximum_manifest_bytes) ||
+        !valid_digest(value.message_digest, conversation_maximum_message_bytes))
+      return failure(Code::invalid_digest,
+                     "admitted summary digest is invalid");
+    if (!summaries.insert(value.candidate.summary_id).second ||
+        !sources.events.insert(value.activation_event_id).second ||
+        !sources.sequences.insert(value.activation_sequence).second ||
+        !sources.entries.insert(value.entry_id).second ||
+        !sources.messages.insert(value.message_id).second ||
+        !sources.source_ids.insert(value.provenance.source_id).second)
+      return failure(Code::invalid_admission,
+                     "admitted summary identities are duplicated");
+    if (!add(tokens, value.estimated_tokens))
+      return failure(Code::token_overflow,
+                     "admitted summary estimates overflow");
+    sources.previous_order = value.order;
+    previous = position;
+    return {};
+  }
+};
+
 auto shape(const ConversationAdmission& value) -> Result {
   auto valid = header_shape(value);
   if (!valid) return valid;
   Sources sources;
+  SummarySources summaries;
+  for (const auto& summary : value.summaries) {
+    valid = summaries.entry(summary, value, sources);
+    if (!valid) return valid;
+  }
+  if (summaries.tokens > value.mandatory_input_tokens)
+    return failure(
+        Code::invalid_admission,
+        "mandatory input does not include admitted summary estimates");
   for (const auto& group : value.groups) {
     valid = sources.group(group, value);
     if (!valid) return valid;
@@ -211,10 +269,29 @@ auto encode_entry(Seal& seal, const ConversationAdmittedEntry& value) -> void {
   seal.digest(value.message_digest);
 }
 
+auto encode_summary(Seal& seal, const ConversationAdmittedSummary& value)
+    -> void {
+  seal.field(value.candidate.summary_id.value());
+  seal.number(value.candidate.revision);
+  seal.digest(value.candidate.candidate_digest);
+  seal.field(value.activation_event_id.value());
+  seal.number(value.activation_sequence);
+  seal.number(value.source_anchor_sequence);
+  seal.field(value.entry_id.value());
+  seal.field(value.message_id.value());
+  seal.field(value.provenance.source_id.value());
+  seal.optional_text(value.provenance.source_location);
+  seal.optional_text(value.provenance.digest);
+  seal.number(value.order);
+  seal.number(value.estimated_tokens);
+  seal.digest(value.message_digest);
+}
+
 auto encoded_admission(const ConversationAdmission& value)
     -> std::expected<ContentDigest, ConversationAdmissionError> {
   Seal seal{conversation_maximum_manifest_bytes};
-  seal.field("aiforge.conversation-admission.v1");
+  seal.field(value.version == 1 ? "aiforge.conversation-admission.v1"
+                                : "aiforge.conversation-admission.v2");
   seal.number(value.version);
   seal.number(value.estimator_version);
   seal.field(value.session_id.value());
@@ -240,6 +317,11 @@ auto encoded_admission(const ConversationAdmission& value)
   seal.number(
       static_cast<std::uint64_t>(value.omitted_groups_digest.has_value()));
   if (value.omitted_groups_digest) seal.digest(*value.omitted_groups_digest);
+  if (value.version == 2) {
+    seal.number(value.summaries.size());
+    for (const auto& summary : value.summaries)
+      encode_summary(seal, summary);
+  }
   return seal.finish();
 }
 

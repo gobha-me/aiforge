@@ -71,6 +71,10 @@ events in the existing session store. A saved job may select that policy for
 later top-level turns. Restoration of full-history mode does not erase derived
 records or old source events. Persona changes preserve the selected conversation
 policy while the existing memory owner rules determine memory eligibility.
+Full-history mode uses original conversation groups without substituting or
+duplicating summary evidence. Recorded activations remain dormant until rolling
+mode resumes; restoring full history does not implicitly disable an immutable
+summary version already admitted by a running rolling-context request.
 
 A new run records its exact selected source identities, versions/digests,
 ordering and budget decisions atomically with its start before provider
@@ -105,6 +109,13 @@ producer. If inference output is durable but candidate publication fails,
 recovery derives the same candidate from that output and intent idempotently;
 it never generates again to repair this append gap. Indeterminate dispatch
 remains an explicit failed/recovery state, not an automatic paid retry.
+An unpublished recoverable draft has no creation event or final candidate seal.
+Publication assigns the actual committed event identity and sequence. A retry
+reuses an existing immutable publication, or publishes the same source/output
+text at the current real sequence after intervening appends. Applying it still
+requires a fresh review binding; recovering publication cannot revive an old
+application preview. An explicit reactivation has a new activation identity and
+cannot make a previously disabled admission available to unresolved recovery.
 
 The request identifies the exact historical range proposed for removal from
 active context while that source remains available. It asks the model to

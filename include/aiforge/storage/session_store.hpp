@@ -111,6 +111,18 @@ class SessionStore {
         "session store does not support project-backlog queries", false});
   }
 
+  // Exact owner lookup without creating a journal or enumerating user sessions.
+  [[nodiscard]] virtual auto find_memory_journal(
+      const domain::MemoryOwner& owner, std::stop_token stop_token = {})
+      -> std::expected<std::optional<SessionInfo>, SessionStoreError> {
+    static_cast<void>(owner);
+    static_cast<void>(stop_token);
+    return std::unexpected(SessionStoreError{
+        SessionStoreErrorCode::unsupported_version,
+        "session store does not support read-only memory journal lookup",
+        false});
+  }
+
   [[nodiscard]] virtual auto open_or_create_memory_journal(
       MemoryJournalOpen request, std::stop_token stop_token = {})
       -> std::expected<SessionInfo, SessionStoreError> {

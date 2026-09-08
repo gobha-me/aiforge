@@ -68,7 +68,7 @@ TEST_CASE("admission rejects unsupported schema and estimator",
           "[conversationadmission][failure]") {
   auto value = admission();
   SECTION("schema") {
-    value.version = 2;
+    value.version = 99;
   }
   SECTION("estimator") {
     value.estimator_version = 2;

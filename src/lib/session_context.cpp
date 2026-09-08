@@ -1,3 +1,4 @@
+#include "conversation_context_internal.hpp"
 #include <aiforge/runtime/session_context.hpp>
 
 #include <aiforge/runtime/context_builder.hpp>
@@ -135,12 +136,20 @@ auto preflight(const SessionContextRequest& request, std::stop_token stop)
 }
 
 auto preview(const SessionContextRequest& request, std::uint64_t mandatory,
-             std::uint64_t first_order, std::stop_token stop)
+             std::uint64_t first_order, std::stop_token stop,
+             const context_detail::ConversationContextSources* sources)
     -> std::expected<PreparedConversationContext, SessionContextError> {
-  auto result = prepare_conversation_context(
-      {request.log, request.model_id, request.mandatory.capacity, mandatory,
-       first_order, request.history_limits, request.selection_limits},
-      stop);
+  const ConversationContextRequest conversation{request.log,
+                                                request.model_id,
+                                                request.mandatory.capacity,
+                                                mandatory,
+                                                first_order,
+                                                request.history_limits,
+                                                request.selection_limits};
+  auto result = sources != nullptr
+                    ? context_detail::prepare_conversation_context_from_sources(
+                          conversation, *sources, stop)
+                    : prepare_conversation_context(conversation, stop);
   if (!result)
     return failure(result.error().code ==
                            ConversationContextErrorCode::cancelled
@@ -208,6 +217,7 @@ auto merge(const SessionContextRequest& request, SelectedMemoryContext memory,
   auto count = std::uint64_t{request.mandatory.instructions.size()};
   for (const auto amount :
        {request.mandatory.content.size(), memory.content.size(),
+        conversation.summary_content.size(),
         conversation.selection.selected_entry_count}) {
     auto valid = add(count, amount);
     if (!valid) return std::unexpected(valid.error());
@@ -219,6 +229,8 @@ auto merge(const SessionContextRequest& request, SelectedMemoryContext memory,
   std::ranges::sort(input.content, {}, &ContextContentInput::order);
   auto required = std::move(input.content);
   input.content = std::move(memory.content);
+  for (auto& summary : conversation.summary_content)
+    input.content.push_back(std::move(summary));
   for (auto& group : conversation.selection.selected_groups)
     for (auto& entry : group.entries)
       input.content.push_back(std::move(entry.content));
@@ -237,7 +249,9 @@ auto merge(const SessionContextRequest& request, SelectedMemoryContext memory,
                                 std::move(conversation.admission)};
 }
 
-auto prepare(const SessionContextRequest& request, std::stop_token stop)
+auto prepare(
+    const SessionContextRequest& request, std::stop_token stop,
+    const context_detail::ConversationContextSources* sources = nullptr)
     -> std::expected<PreparedSessionContext, SessionContextError> {
   auto valid = preflight(request, stop);
   if (!valid) return std::unexpected(valid.error());
@@ -246,7 +260,7 @@ auto prepare(const SessionContextRequest& request, std::stop_token stop)
     return failure(Code::invalid_mandatory, required.error().message);
   auto mandatory = required->estimated_input_tokens -
                    request.mandatory.capacity.reserved_input_tokens;
-  auto conversation = preview(request, mandatory, 1, stop);
+  auto conversation = preview(request, mandatory, 1, stop, sources);
   if (!conversation) return std::unexpected(conversation.error());
   auto available = memory_capacity(*conversation);
   if (!available) return std::unexpected(available.error());
@@ -256,7 +270,8 @@ auto prepare(const SessionContextRequest& request, std::stop_token stop)
     valid = add(mandatory, entry.estimated_tokens);
     if (!valid) return std::unexpected(valid.error());
   }
-  conversation = preview(request, mandatory, memory->content.size() + 1, stop);
+  conversation =
+      preview(request, mandatory, memory->content.size() + 1, stop, sources);
   if (!conversation) return std::unexpected(conversation.error());
   return merge(request, std::move(*memory), std::move(*conversation), stop);
 }
@@ -319,6 +334,31 @@ auto prepare_session_context(const SessionContextRequest& request,
   } catch (...) {
     return failure(Code::internal_failure,
                    "session context preparation failed");
+  }
+}
+
+auto preview_session_context_after_summary_activation(
+    const SessionContextRequest& request, std::span<const RunEvent> suffix,
+    std::stop_token stop)
+    -> std::expected<PreparedSessionContext, SessionContextError> {
+  try {
+    auto valid = preflight(request, stop);
+    if (!valid) return std::unexpected(valid.error());
+    auto sources = context_detail::resolve_summary_preview_sources(
+        {request.log, request.model_id, request.mandatory.capacity, 0, 1,
+         request.history_limits, request.selection_limits},
+        suffix, stop);
+    if (!sources)
+      return failure(sources.error().code ==
+                             ConversationContextErrorCode::cancelled
+                         ? Code::cancelled
+                         : Code::conversation_failed,
+                     sources.error().message);
+    auto readonly = request;
+    readonly.memory.read_only = true;
+    return prepare(readonly, stop, &*sources);
+  } catch (...) {
+    return failure(Code::internal_failure, "summary context preview failed");
   }
 }
 

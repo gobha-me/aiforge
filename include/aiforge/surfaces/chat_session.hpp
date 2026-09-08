@@ -340,6 +340,12 @@ class ChatSession final {
       std::vector<domain::RunId> pinned_run_ids = {})
       -> std::expected<std::vector<domain::RunEvent>, ChatSessionError>;
 
+  [[nodiscard]] auto disable_conversation_summary(
+      std::uint64_t expected_policy_revision,
+      domain::ConversationSummaryVersion candidate,
+      domain::EventId activation_event_id)
+      -> std::expected<std::vector<domain::RunEvent>, ChatSessionError>;
+
   [[nodiscard]] auto submitted_prompts() const -> std::vector<std::string>;
   [[nodiscard]] auto event_log() const noexcept
       -> const domain::SessionEventLog&;
@@ -353,9 +359,12 @@ class ChatSession final {
  private:
   struct Impl;
   explicit ChatSession(std::unique_ptr<Impl> impl);
-  [[nodiscard]] auto validate_recovered_pending_run()
+  [[nodiscard]] auto validate_recovered_pending_run(
+      bool repository_validated = false)
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto load_recovered_memory()
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto pin_recovered_summary_sources()
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto validate_recovered_memory_capacity()
       -> std::expected<void, ChatSessionError>;

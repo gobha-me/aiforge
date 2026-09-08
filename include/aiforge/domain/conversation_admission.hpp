@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <aiforge/domain/context.hpp>
+#include <aiforge/domain/conversation_summary_reference.hpp>
 #include <aiforge/domain/digest.hpp>
 
 namespace aiforge::domain {
@@ -51,6 +52,23 @@ struct ConversationAdmittedGroup {
   auto operator==(const ConversationAdmittedGroup&) const -> bool = default;
 };
 
+// A derived evidence entry bound to one immutable candidate and activation.
+// The runtime resolves the source text and enforces evidence role/kind, with
+// no tools or instruction layer. A later activation is a different identity.
+struct ConversationAdmittedSummary {
+  ConversationSummaryVersion candidate;
+  EventId activation_event_id;
+  std::uint64_t activation_sequence{};
+  std::uint64_t source_anchor_sequence{};
+  ContextEntryId entry_id;
+  MessageId message_id;
+  ContextProvenance provenance;
+  std::uint64_t order{};
+  std::uint64_t estimated_tokens{};
+  ContentDigest message_digest;
+  auto operator==(const ConversationAdmittedSummary&) const -> bool = default;
+};
+
 // Source event references are scoped to session_id. No source text is copied.
 // A missing policy event with revision zero means the implicit full policy.
 // An explicit empty admission is valid; absence is represented by its caller.
@@ -66,14 +84,18 @@ struct ConversationAdmission {
   std::uint64_t policy_revision{};
   ConversationMode mode{ConversationMode::full};
   ContextCapacity capacity;
-  // Sum of supplied required-input and memory estimates, excluding history
-  // and the external input reservation. This is an estimate, not token usage.
+  // Sum of supplied required-input and memory estimates, including admitted
+  // summary evidence in v2, excluding original history and external input
+  // reservation. Summary estimates are counted once, not added again.
   std::uint64_t mandatory_input_tokens{};
   std::vector<ConversationAdmittedGroup> groups;
   std::uint64_t omitted_group_count{};
   // Bounded summary of omitted source identities; never an unbounded ID list.
   std::optional<ContentDigest> omitted_groups_digest;
   std::optional<ContentDigest> admission_digest;
+  // V1 forbids summaries and retains its original encoding. V2 explicitly
+  // records even an empty summary selection; full mode requires it empty.
+  std::vector<ConversationAdmittedSummary> summaries{};
   auto operator==(const ConversationAdmission&) const -> bool = default;
 };
 

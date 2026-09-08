@@ -18,7 +18,13 @@ add_library(${PROJECT_NAME}_lib STATIC
   conversation_admission_context.cpp
   conversation_policy.cpp
   session_context.cpp
+  summary_controller.cpp
   conversation_selection.cpp
+  conversation_summary.cpp
+  conversation_summary_context.cpp
+  conversation_summary_generation.cpp
+  conversation_summary_projection.cpp
+  conversation_summary_sources.cpp
   config.cpp
   config_provenance.cpp
   credential.cpp
@@ -29,6 +35,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   exact_source_edit.cpp
   generation_options.cpp
   image.cpp
+  inference_spend.cpp
   json_config_file_store.cpp
   language_analysis.cpp
   model_catalog.cpp

@@ -57,12 +57,21 @@ struct SessionContextError {
 };
 
 // Reserves pins in rolling mode, or all history in full mode, before selecting
-// scoped memory. Remaining capacity admits a contiguous newest history suffix.
-// The final content order is memory, history, then required content. Both
-// manifests are sealed against those orders, and ContextBuilder validates the
-// merged input. No history/policy events or provider requests are produced.
+// scoped memory. Active rolling summaries are mandatory before that budget.
+// Remaining capacity admits a contiguous newest history suffix.
+// The final content order is memory, summaries, history, then required content.
+// Both manifests are sealed against those orders, and ContextBuilder validates
+// the merged input. No history/policy events or provider requests are produced.
 [[nodiscard]] auto prepare_session_context(const SessionContextRequest& request,
                                            std::stop_token stop = {})
+    -> std::expected<PreparedSessionContext, SessionContextError>;
+
+// Specialized read-only preview of the exact three-event activation suffix.
+// Sources are resolved from the unchanged real log; only bounded projections
+// receive the validated transition. No arbitrary projected state is accepted.
+[[nodiscard]] auto preview_session_context_after_summary_activation(
+    const SessionContextRequest& request,
+    std::span<const domain::RunEvent> suffix, std::stop_token stop = {})
     -> std::expected<PreparedSessionContext, SessionContextError>;
 
 // Version 1 counts every byte of name, description, schema media type and

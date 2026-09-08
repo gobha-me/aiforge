@@ -94,6 +94,8 @@ struct MemoryContextRequest {
   std::optional<domain::PersonaId> persona_id;
   std::uint64_t maximum_tokens{2048};
   std::uint64_t available_tokens{};
+  // Inspect existing owner journals only; absent journals are empty.
+  bool read_only{false};
 };
 
 struct SelectedMemoryContext {
@@ -131,11 +133,12 @@ class MemoryController final {
       std::optional<domain::RepositoryId> repository_id,
       std::string runtime_version)
       -> std::expected<std::size_t, MemoryControllerError>;
-  [[nodiscard]] auto inspect(MemoryMutationTarget target)
+  [[nodiscard]] auto inspect(MemoryMutationTarget target,
+                             bool read_only = false)
       -> std::expected<MemoryState, MemoryControllerError>;
   [[nodiscard]] auto current_for_context(
       std::optional<domain::RepositoryId> repository_id,
-      std::optional<domain::PersonaId> persona_id)
+      std::optional<domain::PersonaId> persona_id, bool read_only = false)
       -> std::expected<std::vector<MemoryRecordView>, MemoryControllerError>;
   // Recovery reads only exact recorded journals and versions; it never creates
   // a journal.
@@ -153,6 +156,12 @@ class MemoryController final {
   struct Journal;
   [[nodiscard]] auto open(MemoryMutationTarget target)
       -> std::expected<Journal, MemoryControllerError>;
+  [[nodiscard]] auto load(MemoryMutationTarget target,
+                          const storage::SessionInfo& info)
+      -> std::expected<Journal, MemoryControllerError>;
+  [[nodiscard]] auto inspect_journal(const Journal& journal,
+                                     const domain::MemoryOwner& owner)
+      -> std::expected<MemoryState, MemoryControllerError>;
   [[nodiscard]] auto append(Journal& journal, const domain::RunId& run_id,
                             std::optional<domain::InvocationId> invocation_id,
                             std::vector<domain::RunEventPayload> payloads)
