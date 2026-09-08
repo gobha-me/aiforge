@@ -461,6 +461,14 @@ using WorkerUpdate =
       created_ids, [&](const auto& id) { return referenced.contains(id); });
 }
 
+[[nodiscard]] auto valid_summary_output(const backend::BackendEvent& event)
+    -> bool {
+  if (const auto* content = std::get_if<backend::ContentDelta>(&event))
+    return std::holds_alternative<domain::TextBlock>(content->delta);
+  return !std::holds_alternative<backend::ArtifactProduced>(event) &&
+         !std::holds_alternative<backend::CitationObserved>(event);
+}
+
 [[nodiscard]] auto valid_generated_artifact(
     const domain::ArtifactMetadata& artifact,
     const domain::InferenceId& inference_id,
@@ -1577,6 +1585,7 @@ struct RunKernel::Impl {
     ToolRegistrySnapshot tools;
     bool recovered_tool_launch_pending{};
     bool conversation_summaries_resolved{};
+    domain::RunPurpose purpose{domain::RunPurpose::conversation};
   };
 
   struct Transaction {
@@ -2442,6 +2451,10 @@ struct RunKernel::Impl {
           kernel_error(RunKernelErrorCode::protocol_failure,
                        "backend event followed a terminal run event"));
     }
+
+    if (active->purpose == domain::RunPurpose::summary &&
+        !valid_summary_output(event))
+      return fail_live_run(transaction, protocol_domain_error());
 
     const auto record_or_fail =
         [&](domain::RunEventPayload payload,
@@ -4778,6 +4791,7 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                                                  std::nullopt,
                                                  0,
                                                  std::move(active_tools)};
+        kernel->m_impl->active->purpose = started->purpose;
         kernel->m_impl->active->recovered_tool_launch_pending =
             recovered_tool_launch_pending;
         if (!renewed_approval_ids.empty()) {
@@ -5114,6 +5128,7 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
                            0,
                            std::move(*effective_tools)};
     active.conversation_summaries_resolved = true;
+    active.purpose = start.attributes.purpose;
     auto transaction = m_impl->transaction();
     if (auto result = m_impl->record(start.run_id, std::move(start.attributes),
                                      transaction);
