@@ -260,7 +260,9 @@ TEST_CASE("Session preparation preserves memory selection errors") {
   auto result = runtime::prepare_session_context(value);
   REQUIRE_FALSE(result);
   CHECK(result.error().code == Code::memory_failed);
-  CHECK_FALSE(store.recorded_calls().empty());
+  CHECK(result.error().message ==
+        "session store does not support memory journals");
+  CHECK(store.recorded_calls().empty());
 }
 
 TEST_CASE(
