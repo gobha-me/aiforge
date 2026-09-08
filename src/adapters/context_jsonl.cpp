@@ -402,6 +402,7 @@ auto payload_json(const ContextPayload& payload) -> Json {
           [](const ContextPreviewed& v) -> Json {
             return {{"type", "preview"},
                     {"handle", v.handle},
+                    {"review_sequence", v.review_sequence},
                     {"activation", activation_json(v.activation)},
                     {"context", context_json(v.context, v.offset, v.limit)}};
           },

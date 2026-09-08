@@ -218,6 +218,21 @@ TEST_CASE("Context inspection exposes decisions and lineage within escaped "
   CHECK(row["producer"]["producing_run_id"] == run.value());
   CHECK(row["producer"]["model_id"] == "model");
   CHECK(row["producer"]["producing_inference_id"] == "inference");
+  const auto& first_candidate = inspected.catalog.snapshot.candidates.front();
+  const domain::ConversationSummaryActivation activation{
+      1,      session, {first_candidate.summary_id, 1, digest},
+      digest, {run},   7,
+      output, 10,      digest};
+  const auto preview = adapters::encode_context_reply(
+      {3, 99,
+       surfaces::ContextPreviewed{"instance-1", activation,
+                                  *inspected.context.next_context, 9, 16, 16}});
+  REQUIRE(preview);
+  const auto reviewed = Json::parse(*preview);
+  CHECK(reviewed["review_sequence"] == 9);
+  CHECK(reviewed["sequence"] == 99);
+  CHECK(reviewed["context"]["entries"][0]["entry_id"] == "entry-16");
+  CHECK(reviewed["context"]["entries_next_offset"] == 32);
   inspected.offset = page["summaries_next_offset"].get<std::size_t>();
   const auto next = adapters::encode_context_reply({2, 9, inspected});
   REQUIRE(next);
