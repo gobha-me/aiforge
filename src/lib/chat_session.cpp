@@ -893,6 +893,21 @@ struct ChatSession::Impl {
   std::optional<std::vector<domain::ContextContentInput>>
       recovered_summary_context{};
 
+  auto observe_pending_events()
+      -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
+    // Failed cancellation retires the unusable kernel but leaves its recovery
+    // block inspectable until reopening. No further observations can commit.
+    if (!kernel->active_run_id() && (recovery_block || repository_block))
+      return std::exchange(pending_surface_events, {});
+    // Recording already-dispatched work never waits for a filesystem proof.
+    auto drained = kernel->drain(runtime::RunDrainMode::observe_only);
+    if (!drained) return std::unexpected(kernel_error(drained.error()));
+    auto result = std::exchange(pending_surface_events, {});
+    result.insert(result.end(), std::make_move_iterator(drained->begin()),
+                  std::make_move_iterator(drained->end()));
+    return result;
+  }
+
   auto begin_repository_evidence(bool original_sources)
       -> std::expected<void, ChatSessionError> {
     if (!evidence_work)
@@ -3750,19 +3765,9 @@ auto ChatSession::dispatch_ready_tools()
 
 auto ChatSession::drain()
     -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
-  // Failed cancellation can retire the unusable kernel while preserving a
-  // recovery block. Keep that history inspectable until explicit reopening;
-  // there is no active work left whose observations could be recorded.
-  if (!m_impl->kernel->active_run_id() &&
-      (m_impl->recovery_block || m_impl->repository_block))
-    return std::exchange(m_impl->pending_surface_events, {});
-  // Recording already-dispatched work never waits for a filesystem proof.
-  auto drained = m_impl->kernel->drain(runtime::RunDrainMode::observe_only);
-  if (!drained) return std::unexpected(kernel_error(drained.error()));
-  auto result = std::move(m_impl->pending_surface_events);
-  m_impl->pending_surface_events.clear();
-  result.insert(result.end(), std::make_move_iterator(drained->begin()),
-                std::make_move_iterator(drained->end()));
+  auto observed = m_impl->observe_pending_events();
+  if (!observed) return std::unexpected(observed.error());
+  auto result = std::move(*observed);
   if (auto validated = validate_recovered_pending_run(); !validated) {
     m_impl->repository_proof_ready = false;
     if (m_impl->recovery_block || m_impl->repository_block) return result;
