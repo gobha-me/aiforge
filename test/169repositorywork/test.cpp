@@ -4,6 +4,7 @@
 #include <aiforge/adapters/pinned_repository_root_authority.hpp>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -18,18 +19,31 @@ struct CloseTrap {
   std::atomic<bool> on_owner{};
   std::thread::id owner = std::this_thread::get_id();
 };
-std::atomic<std::shared_ptr<CloseTrap>> close_trap;
+std::mutex close_trap_mutex;
+std::shared_ptr<CloseTrap> close_trap;
+auto set_close_trap(std::shared_ptr<CloseTrap> replacement) -> void {
+  {
+    const std::lock_guard lock{close_trap_mutex};
+    close_trap.swap(replacement);
+  }
+  // Release the previous owner only after unlocking.
+}
+auto current_close_trap() -> std::shared_ptr<CloseTrap> {
+  const std::lock_guard lock{close_trap_mutex};
+  return close_trap;
+}
 struct ResetTrap {
   std::shared_ptr<CloseTrap> trap;
   ~ResetTrap() {
-    close_trap.store({});
+    set_close_trap({});
     trap->gate->release();
   }
 };
 } // namespace
 extern "C" auto __real_close(int descriptor) -> int;
 extern "C" auto __wrap_close(int descriptor) -> int {
-  const auto trap = close_trap.load();
+  const auto trap = current_close_trap();
+  // The publication lock is released; this owner survives concurrent reset.
   struct stat identity{};
   if (!trap || ::fstat(descriptor, &identity) != 0 ||
       identity.st_dev != trap->device || identity.st_ino != trap->inode)
@@ -238,7 +252,7 @@ TEST_CASE("Last production repository aliases retire physical roots off owner "
   trap->device = identity.st_dev;
   trap->inode = identity.st_ino;
   ResetTrap reset{trap};
-  close_trap.store(trap);
+  set_close_trap(trap);
   // Releasing all aliases must only signal the already-running reclaimer.
   // The physical close barrier cannot hold up the caller releasing aliases.
   returns_before_release(
@@ -259,7 +273,7 @@ TEST_CASE("Last production repository aliases retire physical roots off owner "
         "Repository source retirement capacity remains occupied");
   trap->gate->release();
   REQUIRE(until([&] { return trap->completed.load() >= 2; }));
-  close_trap.store({});
+  set_close_trap({});
   // Cleanup completion returns capacity without a join or another cleanup job.
   auto replacement = await_sources(repository);
   REQUIRE(replacement.context);
