@@ -8,6 +8,7 @@
 #include <aiforge/runtime/conversation_context.hpp>
 #include <aiforge/runtime/conversation_history.hpp>
 #include <aiforge/runtime/conversation_policy.hpp>
+#include <aiforge/runtime/conversation_summary_context.hpp>
 #include <aiforge/runtime/conversation_summary_generation.hpp>
 #include <aiforge/runtime/conversation_summary_projection.hpp>
 #include <aiforge/runtime/inference_spend.hpp>
@@ -1018,7 +1019,13 @@ class ConversationRequestMatch final {
       : m_user(user), m_active(active), m_total_input(reserved_input) {}
 
   auto initialize(const std::vector<ConversationHistoryGroup>& history,
+                  std::span<const domain::ContextContentInput> summaries,
                   std::uint32_t estimator_version) -> bool {
+    for (const auto& entry : summaries) {
+      if (!m_expected.emplace(entry.entry_id, &entry).second) return false;
+      m_source_order.push_back(entry.entry_id);
+      m_last_history_order = entry.order;
+    }
     for (const auto& group : history) {
       for (const auto& entry : group.entries) {
         if (!m_expected.emplace(entry.content.entry_id, &entry.content).second)
@@ -1075,11 +1082,14 @@ class ConversationRequestMatch final {
 
   auto consume_history(const domain::ContextEntry& entry,
                        HistoryLookup::iterator source) -> bool {
-    if (m_users != 0 || m_source_order[m_matched] != entry.entry_id)
+    if (m_users != 0 || m_source_order[m_matched] != entry.entry_id ||
+        entry.order <= m_previous_content_order)
       return false;
     const auto& value = *source->second;
     const auto kind = value.kind == domain::ContextContentKind::tool_result
                           ? domain::ContextEntryKind::tool_result
+                      : value.kind == domain::ContextContentKind::evidence
+                          ? domain::ContextEntryKind::evidence
                           : domain::ContextEntryKind::conversation;
     if (entry.kind != kind || entry.instruction_layer ||
         entry.specificity != 0 || entry.message != value.message ||
@@ -1089,7 +1099,8 @@ class ConversationRequestMatch final {
     m_expected.erase(source);
     ++m_matched;
     m_previous_content_order = entry.order;
-    return true;
+    return entry.kind != domain::ContextEntryKind::evidence ||
+           consume_mandatory(entry);
   }
 
   auto consume_user(const domain::ContextEntry& entry) -> bool {
@@ -1148,7 +1159,8 @@ auto validate_conversation_request(
     const domain::ConversationAdmission& admission,
     const domain::Message& user_message, const backend::BackendRequest& request,
     std::span<const domain::Message> active_messages,
-    RunKernelErrorCode error_code) -> std::expected<void, RunKernelError> {
+    RunKernelErrorCode error_code, bool require_current_summaries = true)
+    -> std::expected<void, RunKernelError> {
   const auto reject = [error_code] {
     return std::unexpected(kernel_error(
         error_code,
@@ -1162,7 +1174,17 @@ auto validate_conversation_request(
   if (!resolved) return reject();
   ConversationRequestMatch match{user_message, active_messages,
                                  context.capacity.reserved_input_tokens};
-  if (!match.initialize(*resolved, admission.estimator_version))
+  PreparedConversationSummaryContext summaries;
+  if (admission.version == 2 &&
+      admission.mode == domain::ConversationMode::rolling) {
+    auto recovered = recover_conversation_summary_context(
+        log, admission.summaries, admission.source_snapshot_sequence, {}, {},
+        require_current_summaries);
+    if (!recovered) return reject();
+    summaries = std::move(*recovered);
+  }
+  if (!match.initialize(*resolved, summaries.content,
+                        admission.estimator_version))
     return reject();
   for (const auto& entry : context.entries)
     if (!match.consume(entry)) return reject();
@@ -1215,6 +1237,9 @@ auto validate_summary_start(const domain::SessionEventLog& log,
 auto event_schema_version(const domain::RunEventPayload& payload)
     -> std::uint32_t {
   if (const auto* started = std::get_if<domain::RunStarted>(&payload)) {
+    if (started->conversation_admission &&
+        started->conversation_admission->version == 2)
+      return 4;
     if (started->purpose != domain::RunPurpose::conversation ||
         started->conversation_admission)
       return 3;
@@ -1244,6 +1269,14 @@ auto validate_conversation_start(const domain::SessionEventLog& log,
           kernel_error(RunKernelErrorCode::invalid_start,
                        "conversation policy requires an exact admission"));
     return {};
+  }
+  if (admission->version == 1 &&
+      admission->mode == domain::ConversationMode::rolling) {
+    auto summaries = recorded_conversation_summaries(log);
+    if (!summaries || !summaries->active.empty())
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "active summaries require a versioned summary admission"));
   }
   if (admission->source_snapshot_sequence != log.last_sequence())
     return std::unexpected(
@@ -1276,7 +1309,8 @@ auto original_conversation_user(const domain::SessionEventLog& log,
 
 auto validate_conversation_continuation(const domain::SessionEventLog& log,
                                         const domain::RunId& run_id,
-                                        const backend::BackendRequest& request)
+                                        const backend::BackendRequest& request,
+                                        bool summaries_resolved)
     -> std::expected<void, RunKernelError> {
   const auto reject = [] {
     return std::unexpected(kernel_error(
@@ -1314,15 +1348,15 @@ auto validate_conversation_continuation(const domain::SessionEventLog& log,
   if (!active_messages || active_messages->empty()) return reject();
   return validate_conversation_request(
       log, *admission, *user, request, *active_messages,
-      RunKernelErrorCode::continuation_not_ready);
+      RunKernelErrorCode::continuation_not_ready, !summaries_resolved);
 }
 
 auto validate_continuation_context(
     const domain::SessionEventLog& log, const domain::RunId& run_id,
     const backend::BackendRequest& request,
     const std::optional<domain::PricingObservation>& pricing,
-    const std::vector<domain::InvocationId>& invocations)
-    -> std::expected<void, RunKernelError> {
+    const std::vector<domain::InvocationId>& invocations,
+    bool summaries_resolved) -> std::expected<void, RunKernelError> {
   if (!persona_context_matches(request.context,
                                recorded_persona_selection(log, run_id)) ||
       !user_global_context_matches(
@@ -1336,7 +1370,8 @@ auto validate_continuation_context(
     return std::unexpected(
         kernel_error(RunKernelErrorCode::continuation_not_ready,
                      "continuation omits a terminal tool result"));
-  return validate_conversation_continuation(log, run_id, request);
+  return validate_conversation_continuation(log, run_id, request,
+                                            summaries_resolved);
 }
 
 } // namespace
@@ -1541,6 +1576,7 @@ struct RunKernel::Impl {
     std::size_t reasoning_text_bytes{};
     ToolRegistrySnapshot tools;
     bool recovered_tool_launch_pending{};
+    bool conversation_summaries_resolved{};
   };
 
   struct Transaction {
@@ -3248,6 +3284,36 @@ struct RunKernel::Impl {
     return {};
   }
 
+  auto ensure_summary_sources_resolved()
+      -> std::expected<void, RunKernelError> {
+    if (!active)
+      return std::unexpected(kernel_error(RunKernelErrorCode::no_active_run,
+                                          "there is no active run"));
+    if (active->conversation_summaries_resolved) return {};
+    const auto found =
+        std::ranges::find_if(event_log.events(), [&](const auto& event) {
+          return event.metadata.run_id == active->run_id &&
+                 std::holds_alternative<domain::RunStarted>(event.payload);
+        });
+    if (found == event_log.events().end())
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "recorded summary admission is unavailable"));
+    const auto& admission =
+        std::get<domain::RunStarted>(found->payload).conversation_admission;
+    if (admission && admission->version == 2 &&
+        admission->mode == domain::ConversationMode::rolling) {
+      auto resolved = recover_conversation_summary_context(
+          event_log, admission->summaries, admission->source_snapshot_sequence);
+      if (!resolved)
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::continuation_not_ready,
+                         resolved.error().message));
+    }
+    active->conversation_summaries_resolved = true;
+    return {};
+  }
+
   // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Tool startup.
   [[nodiscard]] auto launch_next_tool() -> std::expected<void, RunKernelError> {
     if (!active || active->run_terminal || active->inference_id ||
@@ -3264,6 +3330,9 @@ struct RunKernel::Impl {
       break;
     }
     if (ready == active->invocation_order.end()) return {};
+
+    if (auto resolved = ensure_summary_sources_resolved(); !resolved)
+      return resolved;
 
     auto transaction = this->transaction();
     if (!transaction.active) {
@@ -3670,6 +3739,167 @@ struct RunKernel::Impl {
   std::condition_variable queue_space;
   std::deque<WorkerUpdate> queue;
   bool queue_closed{};
+  [[nodiscard]] auto summary_control_snapshot(
+      const domain::RunId& run_id, const domain::RunStarted& attributes,
+      std::uint64_t sequence, std::uint64_t revision) const
+      -> std::expected<ConversationSummarySnapshot, RunKernelError> {
+    if (unusable)
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    if (projections.contains(run_id) ||
+        attributes.purpose != domain::RunPurpose::control ||
+        attributes.memory_selection || attributes.conversation_admission ||
+        sequence != event_log.last_sequence())
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary decision requires a fresh control run"));
+    auto current = recorded_conversation_summaries(event_log);
+    if (!current || current->policy_revision != revision ||
+        revision == std::numeric_limits<std::uint64_t>::max())
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary policy changed or is unavailable"));
+    return std::move(*current);
+  }
+
+  auto commit_summary_control(Transaction staged, const domain::RunId& run_id)
+      -> std::expected<void, RunKernelError> {
+    if (auto result = record(run_id, domain::RunCompleted{}, staged); !result)
+      return result;
+    if (!recorded_conversation_summaries(staged.event_log))
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary decision has invalid coverage or lineage"));
+    return commit(std::move(staged));
+  }
+
+  [[nodiscard]] auto summary_control_event(
+      const domain::RunId& run_id, std::uint64_t sequence,
+      domain::RunEventPayload payload) const
+      -> std::expected<domain::RunEvent, RunKernelError> {
+    auto event_id = domain::EventId::from("event-" + std::to_string(sequence));
+    if (!event_id ||
+        std::ranges::any_of(event_log.events(), [&](const auto& prior) {
+          return prior.metadata.event_id == *event_id;
+        }))
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::event_log_rejected,
+                       "summary event identity is unavailable"));
+    const auto schema = event_schema_version(payload);
+    return domain::RunEvent{
+        {*event_id, run_id, sequence, schema, timestamp(), {}, {}, {}},
+        std::move(payload)};
+  }
+
+  auto summary_parent(const ConversationSummarySnapshot& current,
+                      const domain::ConversationSummaryCandidate& candidate)
+      -> const domain::ConversationSummaryCandidate* {
+    if (!candidate.edited_from) return nullptr;
+    const auto version = *candidate.edited_from;
+    const auto found =
+        std::ranges::find_if(current.candidates, [&](const auto& value) {
+          return value.summary_id == version.summary_id &&
+                 value.revision == version.revision &&
+                 value.candidate_digest == version.candidate_digest;
+        });
+    return found == current.candidates.end() ? nullptr : &*found;
+  }
+
+  auto prepare_summary_activation(ConversationSummaryActivationChange change)
+      -> std::expected<ConversationSummaryActivationPreview, RunKernelError> {
+    if (change.replaced_versions.size() > domain::summary_maximum_active)
+      return std::unexpected(kernel_error(RunKernelErrorCode::invalid_start,
+                                          "too many summary replacements"));
+    for (const auto& replaced : change.replaced_versions)
+      if (replaced.candidate_digest.algorithm != "sha256" ||
+          replaced.candidate_digest.value.size() != 64 ||
+          replaced.candidate_digest.byte_size >
+              domain::summary_maximum_manifest_bytes)
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::invalid_start,
+                         "summary replacement reference is invalid"));
+    auto current = summary_control_snapshot(change.run_id, change.attributes,
+                                            change.expected_sequence,
+                                            change.expected_policy_revision);
+    if (!current) return std::unexpected(current.error());
+    const auto candidate =
+        std::ranges::find_if(current->candidates, [&](const auto& value) {
+          return value.summary_id == change.candidate.summary_id &&
+                 value.revision == change.candidate.revision &&
+                 value.candidate_digest == change.candidate.candidate_digest;
+        });
+    const auto intent =
+        std::ranges::find(current->intents, change.candidate.summary_id,
+                          &domain::ConversationSummaryIntent::summary_id);
+    if (candidate == current->candidates.end() ||
+        intent == current->intents.end())
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "reviewed summary candidate is unavailable"));
+    const auto& source_digest = intent->sources.source_digest;
+    if (!source_digest)
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary source digest is unavailable"));
+    const auto* parent = summary_parent(*current, *candidate);
+    std::vector<domain::RunId> coverage;
+    for (const auto& group : intent->sources.groups)
+      coverage.push_back(group.run_id);
+    domain::ConversationSummaryActivation activation{
+        1,
+        event_log.session_id(),
+        change.candidate,
+        *source_digest,
+        std::move(coverage),
+        intent->sources.groups.front().entries.front().event_sequence,
+        candidate->created_event_id,
+        candidate->created_sequence,
+        {}};
+    if (event_log.last_sequence() >
+        std::numeric_limits<std::uint64_t>::max() - 3)
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::event_sequence_overflow,
+                       "summary event sequence overflow"));
+    auto started =
+        summary_control_event(change.run_id, event_log.last_sequence() + 1,
+                              std::move(change.attributes));
+    if (!started) return std::unexpected(started.error());
+    auto envelope = summary_control_event(
+        change.run_id, event_log.last_sequence() + 2,
+        domain::ConversationSummaryActivated{
+            change.expected_policy_revision, activation, {}});
+    if (!envelope) return std::unexpected(envelope.error());
+    activation.activation_event_id = envelope->metadata.event_id;
+    activation.activation_sequence = envelope->metadata.sequence;
+    if (!domain::seal_conversation_summary_activation(activation, *candidate,
+                                                      *intent, parent))
+      return std::unexpected(kernel_error(RunKernelErrorCode::invalid_start,
+                                          "summary activation is invalid"));
+    envelope->payload = domain::ConversationSummaryActivated{
+        change.expected_policy_revision, activation,
+        std::move(change.replaced_versions)};
+    auto completed = summary_control_event(
+        change.run_id, event_log.last_sequence() + 3, domain::RunCompleted{});
+    if (!completed) return std::unexpected(completed.error());
+    std::vector<domain::RunEvent> events;
+    events.push_back(std::move(*started));
+    events.push_back(std::move(*envelope));
+    events.push_back(std::move(*completed));
+    if (!preview_conversation_summary_transition(event_log, events))
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary decision has invalid coverage or lineage"));
+    domain::RunProjection projected;
+    for (const auto& event : events)
+      if (!projected.apply(event))
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::projection_rejected,
+                         "summary control projection rejected preview"));
+    return ConversationSummaryActivationPreview{std::move(activation),
+                                                std::move(events)};
+  }
+
   auto publish_summary(
       const domain::RunId& run_id, domain::RunStarted attributes,
       domain::ConversationSummaryCandidate candidate,
@@ -4883,6 +5113,7 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
                            std::nullopt,
                            0,
                            std::move(*effective_tools)};
+    active.conversation_summaries_resolved = true;
     auto transaction = m_impl->transaction();
     if (auto result = m_impl->record(start.run_id, std::move(start.attributes),
                                      transaction);
@@ -5128,6 +5359,25 @@ auto RunKernel::record_conversation_policy(ConversationPolicyChange change)
   }
 }
 
+auto RunKernel::pin_conversation_summaries(const domain::RunId& run_id)
+    -> std::expected<void, RunKernelError> {
+  try {
+    if (m_impl->unusable)
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    if (!m_impl->active || m_impl->active->run_id != run_id)
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::wrong_run,
+                       "summary pin does not identify the active run"));
+    return m_impl->ensure_summary_sources_resolved();
+  } catch (...) {
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::internal_failure,
+                     "summary source pinning failed internally"));
+  }
+}
+
 auto RunKernel::publish_conversation_summary(
     ConversationSummaryPublication change)
     -> std::expected<domain::ConversationSummaryCandidate, RunKernelError> {
@@ -5229,6 +5479,84 @@ auto RunKernel::edit_conversation_summary(ConversationSummaryEdit change)
   } catch (...) {
     return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
                                         "summary edit failed internally"));
+  }
+}
+
+auto RunKernel::activate_conversation_summary(
+    ConversationSummaryActivationChange change)
+    -> std::expected<domain::ConversationSummaryActivation, RunKernelError> {
+  try {
+    auto prepared = m_impl->prepare_summary_activation(std::move(change));
+    if (!prepared) return std::unexpected(prepared.error());
+    auto activation = std::move(prepared->activation);
+    auto staged = m_impl->transaction();
+    for (auto& event : prepared->events) {
+      if (auto result = m_impl->record(event.metadata.run_id,
+                                       std::move(event.payload), staged);
+          !result)
+        return std::unexpected(result.error());
+    }
+    if (!recorded_conversation_summaries(staged.event_log))
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary activation failed prospective replay"));
+    if (auto result = m_impl->commit(std::move(staged)); !result)
+      return std::unexpected(result.error());
+    return activation;
+  } catch (...) {
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::internal_failure,
+                     "summary activation failed internally"));
+  }
+}
+
+auto RunKernel::preview_conversation_summary(
+    ConversationSummaryActivationChange change)
+    -> std::expected<ConversationSummaryActivationPreview, RunKernelError> {
+  try {
+    auto prepared = m_impl->prepare_summary_activation(std::move(change));
+    if (!prepared) return std::unexpected(prepared.error());
+    return std::move(*prepared);
+  } catch (...) {
+    return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
+                                        "summary preview failed internally"));
+  }
+}
+
+auto RunKernel::disable_conversation_summary(
+    ConversationSummaryDisableChange change)
+    -> std::expected<void, RunKernelError> {
+  try {
+    auto current = m_impl->summary_control_snapshot(
+        change.run_id, change.attributes, change.expected_sequence,
+        change.expected_policy_revision);
+    if (!current) return std::unexpected(current.error());
+    const auto found =
+        std::ranges::find_if(current->active, [&](const auto& active) {
+          return active.candidate == change.candidate &&
+                 active.activation_event_id == change.activation_event_id;
+        });
+    if (found == current->active.end())
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary activation changed or is unavailable"));
+    auto staged = m_impl->transaction();
+    if (auto result =
+            m_impl->record(change.run_id, std::move(change.attributes), staged);
+        !result)
+      return result;
+    if (auto result =
+            m_impl->record(change.run_id,
+                           domain::ConversationSummaryDisabled{
+                               change.expected_policy_revision,
+                               change.candidate, change.activation_event_id},
+                           staged);
+        !result)
+      return result;
+    return m_impl->commit_summary_control(std::move(staged), change.run_id);
+  } catch (...) {
+    return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
+                                        "summary disable failed internally"));
   }
 }
 
@@ -6395,7 +6723,7 @@ auto RunKernel::continue_run(
     }
     if (auto validated = validate_continuation_context(
             m_impl->event_log, run_id, request, pricing_observation,
-            active.invocation_order);
+            active.invocation_order, active.conversation_summaries_resolved);
         !validated)
       return validated;
 
@@ -6404,6 +6732,7 @@ auto RunKernel::continue_run(
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access) -- Active state checked
     auto& transaction_active = *transaction.active;
     // clang-format on
+    transaction_active.conversation_summaries_resolved = true;
     transaction_active.inference_id = request.inference_id;
     transaction_active.assistant_message_id = request.assistant_message_id;
     transaction_active.invocations.clear();

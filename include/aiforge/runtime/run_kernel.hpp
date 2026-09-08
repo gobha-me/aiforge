@@ -198,6 +198,31 @@ struct ConversationSummaryEdit {
   std::string text;
 };
 
+struct ConversationSummaryActivationChange {
+  domain::RunId run_id;
+  domain::RunStarted attributes;
+  std::uint64_t expected_sequence{};
+  std::uint64_t expected_policy_revision{};
+  domain::ConversationSummaryVersion candidate;
+  std::vector<domain::ConversationSummaryVersion> replaced_versions;
+};
+
+struct ConversationSummaryDisableChange {
+  domain::RunId run_id;
+  domain::RunStarted attributes;
+  std::uint64_t expected_sequence{};
+  std::uint64_t expected_policy_revision{};
+  domain::ConversationSummaryVersion candidate;
+  domain::EventId activation_event_id;
+};
+
+struct ConversationSummaryActivationPreview {
+  domain::ConversationSummaryActivation activation;
+  // Prospective control events, for bounded context preparation only. Preview
+  // neither persists these events nor makes the activation available to runs.
+  std::vector<domain::RunEvent> events;
+};
+
 struct PendingQuestionInput {
   domain::RunId run_id;
   domain::InvocationId invocation_id;
@@ -354,6 +379,19 @@ class RunKernel final {
       -> std::expected<domain::ConversationSummaryCandidate, RunKernelError>;
   [[nodiscard]] auto edit_conversation_summary(ConversationSummaryEdit change)
       -> std::expected<domain::ConversationSummaryCandidate, RunKernelError>;
+  // Resolves the current availability of a recovered run's immutable summary
+  // sources once. Subsequent policy changes cannot replace that pinned base.
+  [[nodiscard]] auto pin_conversation_summaries(const domain::RunId& run_id)
+      -> std::expected<void, RunKernelError>;
+  [[nodiscard]] auto activate_conversation_summary(
+      ConversationSummaryActivationChange change)
+      -> std::expected<domain::ConversationSummaryActivation, RunKernelError>;
+  [[nodiscard]] auto preview_conversation_summary(
+      ConversationSummaryActivationChange change)
+      -> std::expected<ConversationSummaryActivationPreview, RunKernelError>;
+  [[nodiscard]] auto disable_conversation_summary(
+      ConversationSummaryDisableChange change)
+      -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto start_plan(PlanStart start)
       -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto revise_plan(const domain::RunId& run_id,

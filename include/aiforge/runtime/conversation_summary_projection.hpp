@@ -2,13 +2,14 @@
 
 #include <aiforge/domain/event_log.hpp>
 #include <optional>
+#include <span>
 
 namespace aiforge::runtime {
 
 inline constexpr std::size_t summary_maximum_intents = 256;
 inline constexpr std::size_t summary_maximum_candidates = 1024;
 inline constexpr std::size_t summary_maximum_retained_text_bytes =
-    8U * 1024U * 1024U;
+    std::size_t{8} * 1024 * 1024;
 
 // A recoverable draft has no publication identity. Only the kernel's committed
 // publication supplies created_event_id/sequence and seals a candidate.
@@ -32,6 +33,14 @@ struct ConversationSummarySnapshot {
 [[nodiscard]] auto recorded_conversation_summaries(
     const domain::SessionEventLog& log,
     std::optional<std::uint64_t> snapshot_sequence = std::nullopt)
+    -> std::expected<ConversationSummarySnapshot,
+                     domain::ConversationSummaryError>;
+
+// Validates one exact prospective activation transaction against the current
+// bounded catalog. Original events are only read; no event-log copy or append.
+[[nodiscard]] auto preview_conversation_summary_transition(
+    const domain::SessionEventLog& log,
+    std::span<const domain::RunEvent> suffix)
     -> std::expected<ConversationSummarySnapshot,
                      domain::ConversationSummaryError>;
 

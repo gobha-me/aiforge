@@ -422,6 +422,76 @@ auto consume_output(OutputState& state, const RunEvent& event,
   }
   return {};
 }
+auto validate_producer_event(const RunEvent& event)
+    -> ConversationSummaryStatus {
+  if (event.metadata.parent_run_id)
+    return invalid("summary producer cannot be a child");
+  const auto* started = std::get_if<RunStarted>(&event.payload);
+  if (started != nullptr) {
+    if (event.metadata.schema_version != 3 ||
+        started->purpose != RunPurpose::summary)
+      return invalid("summary producer purpose or schema is unsupported");
+  } else if (event.metadata.schema_version != 1) {
+    return invalid("summary producer event schema is unsupported");
+  }
+  return {};
+}
+
+auto transition_references(const ConversationSummaryActivated& action)
+    -> ConversationSummaryStatus {
+  if (action.replaced_versions.size() > summary_maximum_active)
+    return invalid("summary replacement limit exceeded",
+                   ConversationSummaryErrorCode::resource_exhausted);
+  auto valid = validate_conversation_summary_activation(action.activation);
+  if (!valid) return valid;
+  for (const auto& version : action.replaced_versions) {
+    const auto& digest = version.candidate_digest;
+    if (digest.algorithm != "sha256" || digest.value.size() != 64 ||
+        digest.byte_size > summary_maximum_manifest_bytes)
+      return invalid("summary replacement reference is invalid");
+  }
+  return {};
+}
+
+auto transition_envelope(const SessionEventLog& log,
+                         std::span<const RunEvent> suffix)
+    -> ConversationSummaryStatus {
+  constexpr std::size_t maximum_events = 65536;
+  if (suffix.size() != 3)
+    return invalid("summary preview requires three control events");
+  if (log.events().size() > maximum_events - suffix.size())
+    return invalid("summary event limit exceeded",
+                   ConversationSummaryErrorCode::resource_exhausted);
+  if (log.last_sequence() > std::numeric_limits<std::uint64_t>::max() - 3 ||
+      !control_transaction(suffix, 1))
+    return invalid("summary preview control transaction is invalid");
+  for (std::size_t index = 0; index < suffix.size(); ++index) {
+    const auto& metadata = suffix[index].metadata;
+    if (metadata.sequence != log.last_sequence() + index + 1 ||
+        metadata.caused_by_event_id || metadata.invocation_id)
+      return invalid("summary preview event metadata is invalid");
+    for (std::size_t prior = 0; prior < index; ++prior)
+      if (suffix[prior].metadata.event_id == metadata.event_id)
+        return invalid("summary preview event identity is reused");
+  }
+  std::size_t intents{};
+  for (const auto& event : log.events()) {
+    if (event.metadata.run_id == suffix.front().metadata.run_id ||
+        std::ranges::any_of(suffix, [&](const auto& appended) {
+          return appended.metadata.event_id == event.metadata.event_id;
+        }))
+      return invalid("summary preview reuses a durable identity");
+    if (std::holds_alternative<ConversationSummaryGenerationIntentRecorded>(
+            event.payload))
+      ++intents;
+  }
+  constexpr std::size_t maximum_work = std::size_t{8} * 1024U * 1024U;
+  if (intents > maximum_work / (log.events().size() + suffix.size()))
+    return invalid("summary catalog work limit exceeded",
+                   ConversationSummaryErrorCode::resource_exhausted);
+  return {};
+}
+
 } // namespace
 
 auto recover_conversation_summary_draft(
@@ -441,16 +511,8 @@ auto recover_conversation_summary_draft(
     OutputState state;
     for (const auto& event : *events) {
       if (event.metadata.run_id != intent.producing_run_id) continue;
-      if (event.metadata.parent_run_id)
-        return invalid("summary producer cannot be a child");
-      const auto* started = std::get_if<domain::RunStarted>(&event.payload);
-      if (started != nullptr) {
-        if (event.metadata.schema_version != 3 ||
-            started->purpose != domain::RunPurpose::summary)
-          return invalid("summary producer purpose or schema is unsupported");
-      } else if (event.metadata.schema_version != 1) {
-        return invalid("summary producer event schema is unsupported");
-      }
+      if (auto valid = validate_producer_event(event); !valid)
+        return std::unexpected(valid.error());
       if (auto consumed = consume_output(state, event, intent); !consumed)
         return std::unexpected(consumed.error());
     }
@@ -505,4 +567,40 @@ auto recorded_conversation_summaries(
                    domain::ConversationSummaryErrorCode::internal_failure);
   }
 }
+auto preview_conversation_summary_transition(
+    const domain::SessionEventLog& log,
+    std::span<const domain::RunEvent> suffix)
+    -> std::expected<ConversationSummarySnapshot,
+                     domain::ConversationSummaryError> {
+  try {
+    auto envelope = transition_envelope(log, suffix);
+    if (!envelope) return std::unexpected(envelope.error());
+    const auto* action =
+        std::get_if<domain::ConversationSummaryActivated>(&suffix[1].payload);
+    if (action == nullptr)
+      return invalid("summary preview requires an activation event");
+    auto references = transition_references(*action);
+    if (!references) return std::unexpected(references.error());
+    auto state = recorded_conversation_summaries(log);
+    if (!state) return std::unexpected(state.error());
+    if (state->policy_revision == std::numeric_limits<std::uint64_t>::max() ||
+        action->previous_policy_revision != state->policy_revision)
+      return invalid("summary preview policy revision is stale",
+                     domain::ConversationSummaryErrorCode::stale_revision);
+    auto applied = activate(*state, *action, suffix[1]);
+    if (!applied) return std::unexpected(applied.error());
+    ++state->policy_revision;
+    state->snapshot_sequence = suffix.back().metadata.sequence;
+    std::ranges::sort(state->active, [](const auto& left, const auto& right) {
+      if (left.source_anchor_sequence != right.source_anchor_sequence)
+        return left.source_anchor_sequence < right.source_anchor_sequence;
+      return left.candidate.summary_id < right.candidate.summary_id;
+    });
+    return std::move(*state);
+  } catch (...) {
+    return invalid("summary transition preview failed internally",
+                   domain::ConversationSummaryErrorCode::internal_failure);
+  }
+}
+
 } // namespace aiforge::runtime
