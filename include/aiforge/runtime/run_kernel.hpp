@@ -350,6 +350,8 @@ class RunWakeSink {
 
 using TimestampSource = std::function<domain::EventTimestamp()>;
 
+enum class RunDrainMode { dispatch_ready, observe_only };
+
 class RunKernel final {
  public:
   RunKernel(domain::SessionId session_id, backend::Backend& backend,
@@ -448,8 +450,12 @@ class RunKernel final {
 
   // Drain worker observations and apply their run events on the calling
   // thread. The returned events are exactly those committed by this call.
-  [[nodiscard]] auto drain()
+  // observe_only never launches queued tools; a later dispatch_ready call
+  // may launch them after the caller has revalidated its source proofs.
+  [[nodiscard]] auto drain(RunDrainMode mode = RunDrainMode::dispatch_ready)
       -> std::expected<std::vector<domain::RunEvent>, RunKernelError>;
+
+  [[nodiscard]] auto pending_tool_dispatch() const noexcept -> bool;
 
   [[nodiscard]] auto event_log() const noexcept
       -> const domain::SessionEventLog&;
