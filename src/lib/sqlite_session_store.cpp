@@ -3706,9 +3706,8 @@ auto require_conversation_fields(const Json& value,
 
 // The JSON document is already bounded by the store. Bound its aggregate
 // metadata before copying any strings or allocating domain reference vectors.
-auto check_conversation_shape(const Json& value, std::size_t& nodes,
-                              std::size_t& bytes, const unsigned depth = 0)
-    -> void {
+auto check_conversation_node(const Json& value, std::size_t& nodes,
+                             std::size_t& bytes, const unsigned depth) -> void {
   if (nodes == 0 || depth > 8 ||
       (value.is_number() && !value.is_number_unsigned()))
     throw CodecFailure{"conversation metadata exceeds shape bounds"};
@@ -3720,19 +3719,25 @@ auto check_conversation_shape(const Json& value, std::size_t& nodes,
       throw CodecFailure{"conversation metadata exceeds text bounds"};
     bytes -= text.size();
   }
-  if (!value.is_object() && !value.is_array()) return;
-  if (value.size() > nodes)
-    throw CodecFailure{"conversation metadata exceeds shape bounds"};
-  for (const auto& child : value)
-    check_conversation_shape(child, nodes, bytes, depth + 1);
 }
 
 auto check_conversation_shape(const Json& value) -> void {
   // One entry contains 21 JSON nodes; allow bounded envelope/group overhead.
-  auto nodes = domain::conversation_maximum_entries * 32 +
-               domain::conversation_maximum_groups * 4 + 64;
+  auto nodes = (domain::conversation_maximum_entries * 32) +
+               (domain::conversation_maximum_groups * 4) + 64;
   auto bytes = domain::conversation_maximum_manifest_bytes;
-  check_conversation_shape(value, nodes, bytes);
+  std::vector<std::pair<const Json*, unsigned>> pending{{&value, 0}};
+  while (!pending.empty()) {
+    const auto [item, depth] = pending.back();
+    pending.pop_back();
+    check_conversation_node(*item, nodes, bytes, depth);
+    if (!item->is_object() && !item->is_array()) continue;
+    // Reserve budget for every queued child before growing the work stack.
+    if (pending.size() > nodes || item->size() > nodes - pending.size())
+      throw CodecFailure{"conversation metadata exceeds shape bounds"};
+    for (const auto& child : *item)
+      pending.emplace_back(&child, depth + 1);
+  }
 }
 
 [[nodiscard]] auto conversation_policy_json(

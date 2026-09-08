@@ -57,7 +57,7 @@ class Seal final {
   }
   auto number(std::uint64_t value) -> void { field(std::to_string(value)); }
   auto optional_text(const std::optional<std::string>& value) -> void {
-    number(value.has_value());
+    number(static_cast<std::uint64_t>(value.has_value()));
     if (value) field(*value);
   }
   auto digest(const ContentDigest& value) -> void {
@@ -220,7 +220,7 @@ auto encoded_admission(const ConversationAdmission& value)
   seal.field(value.session_id.value());
   seal.field(value.model_id.value());
   seal.number(value.source_snapshot_sequence);
-  seal.number(value.policy_event_id.has_value());
+  seal.number(static_cast<std::uint64_t>(value.policy_event_id.has_value()));
   if (value.policy_event_id) seal.field(value.policy_event_id->value());
   seal.number(value.policy_revision);
   seal.number(static_cast<std::uint64_t>(value.mode));
@@ -231,13 +231,14 @@ auto encoded_admission(const ConversationAdmission& value)
   seal.number(value.groups.size());
   for (const auto& group : value.groups) {
     seal.field(group.run_id.value());
-    seal.number(group.pinned);
+    seal.number(static_cast<std::uint64_t>(group.pinned));
     seal.number(group.entries.size());
     for (const auto& entry : group.entries)
       encode_entry(seal, entry);
   }
   seal.number(value.omitted_group_count);
-  seal.number(value.omitted_groups_digest.has_value());
+  seal.number(
+      static_cast<std::uint64_t>(value.omitted_groups_digest.has_value()));
   if (value.omitted_groups_digest) seal.digest(*value.omitted_groups_digest);
   return seal.finish();
 }
@@ -306,7 +307,7 @@ auto message_digest(const Message& value, std::uint32_t version)
   seal.number(version);
   seal.field(value.message_id.value());
   seal.number(static_cast<std::uint64_t>(value.role));
-  seal.number(value.invocation_id.has_value());
+  seal.number(static_cast<std::uint64_t>(value.invocation_id.has_value()));
   if (value.invocation_id) seal.field(value.invocation_id->value());
   seal.number(value.content.size());
   for (const auto& block : value.content)
