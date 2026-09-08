@@ -15,6 +15,21 @@ class GitRepositorySnapshotSource;
 
 namespace aiforge::adapters {
 
+// Every exported handle aliases the same stable owning envelope. The snapshot,
+// exact reader and instruction adapter outlive both pinned authority and
+// source.
+struct OwnedPinnedRepositorySources {
+  std::shared_ptr<GitRepositorySnapshotSource> snapshots;
+  std::shared_ptr<GitExactSourceEditor> exact;
+  std::shared_ptr<const runtime::PinnedRepositoryReadAuthority> authority;
+  std::shared_ptr<runtime::RepositoryContextSource> context;
+};
+[[nodiscard]] auto open_owned_pinned_repository_sources(
+    std::filesystem::path repository_root, GitRepositorySnapshotSource source,
+    repository::RepositorySnapshotLimits snapshot_limits = {})
+    -> std::expected<OwnedPinnedRepositorySources,
+                     runtime::AutomaticApprovalMatcherError>;
+
 // Pins one absolute repository root for the application lifetime. Every match
 // reopens the recorded root chain without following symlinks and traverses the
 // candidate relative to that verified descriptor.

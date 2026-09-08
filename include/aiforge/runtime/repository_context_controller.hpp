@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <expected>
+#include <memory>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -67,8 +68,24 @@ struct PreparedRepositoryContext {
   auto operator==(const PreparedRepositoryContext&) const -> bool = default;
 };
 
+// Bounded value preflight only; performs no source observation.
+[[nodiscard]] auto validate_repository_context_request(
+    const RepositoryContextRequest& request,
+    const RepositoryContextLimits& limits = {})
+    -> std::expected<void, domain::RepositoryContextError>;
+
 class RepositoryContextController final {
  public:
+  // The supplied source must transitively own every adapter/lease it uses.
+  // Production's owning pinned-source factory provides this complete graph.
+  [[nodiscard]] static auto create_owned(
+      std::shared_ptr<RepositoryContextSource> source,
+      domain::RepositoryRootIdentity root, RepositoryContextLimits limits = {})
+      -> std::expected<std::shared_ptr<RepositoryContextController>,
+                       domain::RepositoryContextError>;
+  [[nodiscard]] auto owns_source() const noexcept -> bool {
+    return m_owned_source != nullptr;
+  }
   RepositoryContextController(RepositoryContextSource& source,
                               domain::RepositoryRootIdentity root,
                               RepositoryContextLimits limits = {});
@@ -85,6 +102,7 @@ class RepositoryContextController final {
                        domain::RepositoryContextError>;
 
  private:
+  std::shared_ptr<RepositoryContextSource> m_owned_source;
   RepositoryContextSource& m_source;
   domain::RepositoryRootIdentity m_root;
   std::string m_binding;
