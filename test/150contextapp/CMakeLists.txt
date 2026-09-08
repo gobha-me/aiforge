@@ -1,0 +1,5 @@
+if (NOT TARGET ${PROJECT_NAME}::adapters)
+  return()
+endif ()
+add_executable(150contextapp-test ../main.cpp test.cpp)
+target_link_libraries(150contextapp-test PRIVATE Catch2::Catch2 PRIVATE ${PROJECT_NAME}::adapters)

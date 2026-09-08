@@ -1,6 +1,7 @@
 #pragma once
 
 #include <expected>
+#include <set>
 #include <span>
 #include <string>
 #include <thread>
@@ -60,7 +61,10 @@ class TranscriptView final {
 
   [[nodiscard]] auto apply(const domain::RunEvent& event)
       -> std::expected<void, TranscriptViewError>;
-  [[nodiscard]] auto rebuild(std::span<const domain::RunEvent> events)
+  // Excluded runs remain in the event projection; only their visible entries
+  // are omitted. This keeps replay a single projection/render pass.
+  [[nodiscard]] auto rebuild(std::span<const domain::RunEvent> events,
+                             const std::set<domain::RunId>& excluded_runs = {})
       -> std::expected<void, TranscriptViewError>;
   [[nodiscard]] auto clear_view() -> std::expected<void, TranscriptViewError>;
   [[nodiscard]] auto set_reasoning_visibility(ReasoningVisibility visibility)
@@ -95,7 +99,8 @@ class TranscriptView final {
 
   [[nodiscard]] auto render(
       const domain::SessionTranscriptProjection& projection,
-      ReasoningVisibility visibility) const
+      ReasoningVisibility visibility,
+      const std::set<domain::RunId>& excluded_runs) const
       -> std::expected<std::vector<RenderedEntry>, TranscriptViewError>;
   [[nodiscard]] auto render_run(const domain::TranscriptProjection& projection,
                                 ReasoningVisibility visibility) const
@@ -111,6 +116,7 @@ class TranscriptView final {
   ReasoningVisibility m_reasoning_visibility;
   std::thread::id m_owner;
   domain::SessionTranscriptProjection m_projection;
+  std::set<domain::RunId> m_excluded_runs;
   domain::TranscriptProjection m_empty_projection;
   termforge::TextBox m_text_box;
   std::vector<RenderedEntry> m_rendered;
