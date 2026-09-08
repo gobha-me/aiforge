@@ -19,6 +19,9 @@ struct ConversationHistoryEntry {
   // The caller resolves this completed message's durable source before
   // selection. Selection validates identity/order, not the event store.
   domain::EventId completed_event_id;
+  // Source sequence is unique and no earlier than this group's user input.
+  // A tool error can precede AssistantContentFinished in durable history;
+  // content.order, not completion sequence, records provider message order.
   std::uint64_t event_sequence{};
   auto operator==(const ConversationHistoryEntry&) const -> bool = default;
 };
