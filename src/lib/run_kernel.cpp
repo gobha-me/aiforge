@@ -3375,22 +3375,26 @@ struct RunKernel::Impl {
     return {};
   }
 
-  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Tool startup.
-  [[nodiscard]] auto launch_next_tool() -> std::expected<void, RunKernelError> {
+  [[nodiscard]] auto ready_tool() const noexcept
+      -> const domain::InvocationId* {
     if (!active || active->run_terminal || active->inference_id ||
         active->active_tool_id) {
-      return {};
+      return nullptr;
     }
-    auto ready = active->invocation_order.end();
-    for (auto current = active->invocation_order.begin();
-         current != active->invocation_order.end(); ++current) {
-      const auto state = active->invocations.at(*current).state;
+    for (const auto& invocation_id : active->invocation_order) {
+      const auto found = active->invocations.find(invocation_id);
+      if (found == active->invocations.end()) return nullptr;
+      const auto state = found->second.state;
       if (state == InvocationState::terminal) continue;
-      if (state != InvocationState::allowed) return {};
-      ready = current;
-      break;
+      return state == InvocationState::allowed ? &invocation_id : nullptr;
     }
-    if (ready == active->invocation_order.end()) return {};
+    return nullptr;
+  }
+
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Tool startup.
+  [[nodiscard]] auto launch_next_tool() -> std::expected<void, RunKernelError> {
+    const auto* ready = ready_tool();
+    if (ready == nullptr) return {};
 
     if (auto resolved = ensure_summary_sources_resolved(); !resolved)
       return resolved;
@@ -6860,7 +6864,7 @@ auto RunKernel::continue_run(
 
 // clang-format off
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicitly drains ordered worker updates and launches ready tools.
-auto RunKernel::drain()
+auto RunKernel::drain(RunDrainMode mode)
     -> std::expected<std::vector<domain::RunEvent>, RunKernelError> {
   // clang-format on
   try {
@@ -6870,22 +6874,26 @@ auto RunKernel::drain()
           "run kernel is unavailable after a persistence failure"));
     }
     std::vector<domain::RunEvent> committed;
-    if (m_impl->active && m_impl->active->recovered_tool_launch_pending) {
-      if (!recorded_local_context_admission(m_impl->event_log,
-                                            m_impl->active->run_id)) {
-        return std::unexpected(
-            kernel_error(RunKernelErrorCode::invalid_tool_state,
-                         "recovered tool dispatch requires intact local "
-                         "context admission history"));
+    if (mode == RunDrainMode::dispatch_ready && m_impl->active &&
+        (m_impl->active->recovered_tool_launch_pending ||
+         m_impl->ready_tool() != nullptr)) {
+      if (m_impl->active->recovered_tool_launch_pending) {
+        if (!recorded_local_context_admission(m_impl->event_log,
+                                              m_impl->active->run_id)) {
+          return std::unexpected(
+              kernel_error(RunKernelErrorCode::invalid_tool_state,
+                           "recovered tool dispatch requires intact local "
+                           "context admission history"));
+        }
+        if (!recorded_repository_context_admission(m_impl->event_log,
+                                                   m_impl->active->run_id)) {
+          return std::unexpected(
+              kernel_error(RunKernelErrorCode::invalid_tool_state,
+                           "recovered tool dispatch requires intact repository "
+                           "context admission history"));
+        }
+        m_impl->active->recovered_tool_launch_pending = false;
       }
-      if (!recorded_repository_context_admission(m_impl->event_log,
-                                                 m_impl->active->run_id)) {
-        return std::unexpected(
-            kernel_error(RunKernelErrorCode::invalid_tool_state,
-                         "recovered tool dispatch requires intact repository "
-                         "context admission history"));
-      }
-      m_impl->active->recovered_tool_launch_pending = false;
       const auto before_launch = m_impl->event_log.events().size();
       if (auto launched = m_impl->launch_next_tool(); !launched) {
         return std::unexpected(std::move(launched.error()));
@@ -6955,7 +6963,7 @@ auto RunKernel::drain()
           !m_impl->active_children.contains(*child_update_id)) {
         m_impl->finish_child_operation(*child_update_id);
       }
-      if (launch_ready) {
+      if (launch_ready && mode == RunDrainMode::dispatch_ready) {
         const auto before_launch = m_impl->event_log.events().size();
         auto launched = m_impl->launch_next_tool();
         const auto& after_launch = m_impl->event_log.events();
@@ -6974,6 +6982,10 @@ auto RunKernel::drain()
     return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
                                         "run drain failed internally"));
   }
+}
+
+auto RunKernel::pending_tool_dispatch() const noexcept -> bool {
+  return !m_impl->unusable && m_impl->ready_tool() != nullptr;
 }
 
 auto RunKernel::event_log() const noexcept -> const domain::SessionEventLog& {
