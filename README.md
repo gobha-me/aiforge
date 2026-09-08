@@ -1070,9 +1070,9 @@ process or write permission; `/tools profile dev` remains a separate choice.
 
 Use `/dev` to inspect the target and `/dev target <relative-directory>` to
 change it while idle. `/context add <relative-file>` selects exact tracked
-regular UTF-8 source. `/context` shows selected paths, source identities and
-inclusion or omission; `/context remove <selection-id>` and `/context clear`
-change the selection. `/dev off` disables Dev context for future runs. Changing
+regular UTF-8 source. Context > View > Repository evidence shows selected
+paths, source identities, and inclusion or omission; `/context remove
+<selection-id>` and `/context clear` change the selection. `/dev off` disables Dev context for future runs. Changing
 repository roots requires a new application launch.
 
 Preparation is cancellable and runs outside the UI thread. Failed or stale
