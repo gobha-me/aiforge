@@ -56,6 +56,8 @@ struct ConversationAdmittedGroup {
 // An explicit empty admission is valid; absence is represented by its caller.
 struct ConversationAdmission {
   std::uint32_t version{1};
+  // Governs reconstructed history and active tool messages. Required input
+  // and scoped memory retain the estimates supplied by their owning sources.
   std::uint32_t estimator_version{1};
   SessionId session_id;
   ModelId model_id;
@@ -64,6 +66,8 @@ struct ConversationAdmission {
   std::uint64_t policy_revision{};
   ConversationMode mode{ConversationMode::full};
   ContextCapacity capacity;
+  // Sum of supplied required-input and memory estimates, excluding history
+  // and the external input reservation. This is an estimate, not token usage.
   std::uint64_t mandatory_input_tokens{};
   std::vector<ConversationAdmittedGroup> groups;
   std::uint64_t omitted_group_count{};

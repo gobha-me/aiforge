@@ -16,9 +16,11 @@ struct SessionContextRequest {
   const domain::SessionEventLog& log;
   domain::ModelId model_id;
   // Required instructions, one current user input, and explicit evidence only.
-  // History and scoped memory are selected here. Existing estimates are never
-  // lowered. External input (including tool declarations) is reserved once in
-  // capacity.reserved_input_tokens.
+  // History and scoped memory are selected here. Required inputs and memory
+  // preserve their source estimates; conversation v1 applies to reconstructed
+  // history and active tool messages. Resource preflight does not replace
+  // those estimates. External input (including tool declarations) is reserved
+  // once in capacity.reserved_input_tokens.
   const domain::ContextBuildInput& mandatory;
   MemoryController* memory_controller{};
   // available_tokens is owned by this preparer; the supplied value is ignored.
