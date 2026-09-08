@@ -153,6 +153,39 @@ class RejectingExecutor final : public runtime::ToolExecutor {
   }
 };
 
+// Continuation message identities are runtime-owned, so install its exact
+// scripted expectation after the first inference has durably finished.
+class PhasedBackend final : public backend::Backend {
+ public:
+  auto expect(backend::BackendRequest request, testing::StreamScript script)
+      -> void {
+    if (m_backend != nullptr) REQUIRE(m_backend->remaining_exchanges() == 0);
+    m_backend = std::make_unique<testing::ScriptedBackend>(
+        std::vector<testing::ScriptedExchange>{
+            {std::move(request), std::move(script)}});
+  }
+  auto start(backend::BackendRequest request, std::stop_token stop)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    m_requests.push_back(request);
+    if (m_backend == nullptr)
+      return std::unexpected(
+          backend::BackendError{backend::BackendErrorKind::script_exhausted,
+                                "missing phase",
+                                false,
+                                {}});
+    return m_backend->start(std::move(request), stop);
+  }
+  [[nodiscard]] auto recorded_requests() const
+      -> const std::vector<backend::BackendRequest>& {
+    return m_requests;
+  }
+
+ private:
+  std::unique_ptr<testing::ScriptedBackend> m_backend;
+  std::vector<backend::BackendRequest> m_requests;
+};
+
 auto kernel_request(const std::string& suffix,
                     const std::vector<backend::ToolDeclaration>& tools)
     -> backend::BackendRequest {
@@ -490,26 +523,14 @@ TEST_CASE("kernel validation errors keep provider order and actual completed "
   REQUIRE(snapshot);
   const auto initial =
       kernel_request("tool-assistant", snapshot->declarations());
-  const auto final =
-      kernel_request("final-assistant", snapshot->declarations());
-  testing::ScriptedBackend backend{
-      {{initial,
-        testing::StreamScript{
-            {backend::BackendEvent{backend::ResponseStarted{"response-one"}},
-             backend::BackendEvent{backend::ToolCallDelta{
-                 id<domain::InvocationId>("call"), "read", "{}"}},
-             backend::BackendEvent{
-                 backend::ResponseFinished{domain::FinishReason::tool_call}},
-             testing::EndOfStream{}}}},
-       {final,
-        testing::StreamScript{
-            {backend::BackendEvent{backend::ResponseStarted{"response-two"}},
-             backend::BackendEvent{
-                 backend::ContentDelta{id<domain::MessageId>("final-assistant"),
-                                       domain::TextBlock{final_text}}},
-             backend::BackendEvent{
-                 backend::ResponseFinished{domain::FinishReason::stop}},
-             testing::EndOfStream{}}}}}};
+  PhasedBackend backend;
+  backend.expect(
+      initial, testing::StreamScript{
+                   {backend::ResponseStarted{"response-one"},
+                    backend::ToolCallDelta{id<domain::InvocationId>("call"),
+                                           "read", "{}"},
+                    backend::ResponseFinished{domain::FinishReason::tool_call},
+                    testing::EndOfStream{}}});
   runtime::RunKernel kernel{id<domain::SessionId>("kernel-session"),
                             backend,
                             nullptr,
@@ -526,6 +547,37 @@ TEST_CASE("kernel validation errors keep provider order and actual completed "
         std::nullopt},
        initial}));
   drain_inference(kernel);
+  auto final = kernel_request("final-assistant", snapshot->declarations());
+  const auto continuation = runtime::reconstruct_active_tool_continuation(
+      kernel.event_log(), id<domain::RunId>("run"));
+  REQUIRE(continuation);
+  REQUIRE(continuation->size() == 2);
+  std::uint64_t order{};
+  for (const auto& message : *continuation) {
+    const auto estimated = runtime::estimate_conversation_message(message);
+    REQUIRE(estimated);
+    const auto suffix = std::to_string(++order);
+    final.context.entries.push_back(
+        {id<domain::ContextEntryId>("continuation-" + suffix),
+         message.role == domain::Role::tool
+             ? domain::ContextEntryKind::tool_result
+             : domain::ContextEntryKind::conversation,
+         {},
+         message,
+         {id<domain::ContextSourceId>("continuation-source-" + suffix), {}, {}},
+         0,
+         order,
+         *estimated});
+    final.context.estimated_input_tokens += *estimated;
+  }
+  backend.expect(
+      final,
+      testing::StreamScript{
+          {backend::ResponseStarted{"response-two"},
+           backend::ContentDelta{id<domain::MessageId>("final-assistant"),
+                                 domain::TextBlock{final_text}},
+           backend::ResponseFinished{domain::FinishReason::stop},
+           testing::EndOfStream{}}});
   REQUIRE(kernel.continue_run(id<domain::RunId>("run"), final));
   drain_inference(kernel);
   const auto result =
