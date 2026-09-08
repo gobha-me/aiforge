@@ -192,8 +192,8 @@ auto select_memory_context_with_provenance(MemoryController& controller,
                      valid.error().message);
     return result;
   }
-  auto records =
-      controller.current_for_context(request.repository_id, request.persona_id);
+  auto records = controller.current_for_context(
+      request.repository_id, request.persona_id, request.read_only);
   if (!records) return std::unexpected(std::move(records.error()));
 
   runtime::ContextSelectionRequest selection;
@@ -311,7 +311,13 @@ auto MemoryController::open(MemoryMutationTarget target)
       {std::move(*candidate), target.owner, m_timestamp_source()},
       m_stop_token);
   if (!info) return storage_failure(info.error());
-  auto events = m_store.replay_events(info->session_id, m_stop_token);
+  return load(std::move(target), *info);
+}
+
+auto MemoryController::load(MemoryMutationTarget target,
+                            const storage::SessionInfo& info)
+    -> std::expected<Journal, MemoryControllerError> {
+  auto events = m_store.replay_events(info.session_id, m_stop_token);
   if (!events) return storage_failure(events.error());
   auto projection = domain::MemoryProjection::rebuild(*events, m_limits);
   if (!projection) {
@@ -328,7 +334,7 @@ auto MemoryController::open(MemoryMutationTarget target)
     return failure(MemoryControllerErrorCode::storage_failure,
                    "memory journal contains a different owner");
   }
-  return Journal{std::move(*info), std::move(*projection)};
+  return Journal{info, std::move(*projection)};
 }
 
 auto MemoryController::append(Journal& journal, const domain::RunId& run_id,
@@ -585,57 +591,93 @@ auto MemoryController::capture_committed(
   }
 }
 
-auto MemoryController::inspect(MemoryMutationTarget target)
+auto MemoryController::inspect(MemoryMutationTarget target, bool read_only)
     -> std::expected<MemoryState, MemoryControllerError> {
-  auto journal = open(target);
-  if (!journal) return std::unexpected(std::move(journal.error()));
-  MemoryState state{target.owner, {}, {}};
+  try {
+    if (m_stop_token.stop_requested())
+      return failure(MemoryControllerErrorCode::cancelled,
+                     "memory inspection cancelled");
+    if (!domain::validate_memory_owner(target.owner))
+      return failure(MemoryControllerErrorCode::invalid_configuration,
+                     "memory journal owner is invalid");
+    if (!read_only) {
+      auto journal = open(target);
+      if (!journal) return std::unexpected(std::move(journal.error()));
+      return inspect_journal(*journal, target.owner);
+    }
+    auto info = m_store.find_memory_journal(target.owner, m_stop_token);
+    if (!info) return storage_failure(info.error());
+    if (!*info) return MemoryState{target.owner, {}, {}};
+    auto journal = load(target, **info);
+    if (!journal) return std::unexpected(std::move(journal.error()));
+    return inspect_journal(*journal, target.owner);
+  } catch (...) {
+    return failure(MemoryControllerErrorCode::internal_failure,
+                   "memory inspection failed internally");
+  }
+}
+
+namespace {
+auto memory_source_event_ids(storage::SessionStore& store,
+                             const domain::SessionId& session,
+                             std::stop_token stop)
+    -> std::expected<std::optional<std::set<domain::EventId>>,
+                     MemoryControllerError> {
+  auto events = store.replay_events(session, stop);
+  if (!events) {
+    if (events.error().code != storage::SessionStoreErrorCode::not_found)
+      return storage_failure(events.error());
+    return std::optional<std::set<domain::EventId>>{};
+  }
+  std::set<domain::EventId> ids;
+  for (const auto& event : *events)
+    ids.insert(event.metadata.event_id);
+  return std::optional{std::move(ids)};
+}
+} // namespace
+
+auto MemoryController::inspect_journal(const Journal& journal,
+                                       const domain::MemoryOwner& owner)
+    -> std::expected<MemoryState, MemoryControllerError> {
+  MemoryState state{owner, {}, {}};
   std::map<domain::SessionId, std::optional<std::set<domain::EventId>>> sources;
   const auto source_available = [&](const domain::MemorySource& source)
       -> std::expected<bool, MemoryControllerError> {
     auto found = sources.find(source.session_id);
     if (found == sources.end()) {
-      auto events = m_store.replay_events(source.session_id, m_stop_token);
-      if (!events) {
-        if (events.error().code != storage::SessionStoreErrorCode::not_found) {
-          return storage_failure(events.error());
-        }
-        found = sources.emplace(source.session_id, std::nullopt).first;
-      } else {
-        std::set<domain::EventId> ids;
-        for (const auto& event : *events)
-          ids.insert(event.metadata.event_id);
-        found = sources.emplace(source.session_id, std::move(ids)).first;
-      }
+      auto ids =
+          memory_source_event_ids(m_store, source.session_id, m_stop_token);
+      if (!ids) return std::unexpected(std::move(ids.error()));
+      found = sources.emplace(source.session_id, std::move(*ids)).first;
     }
     if (!found->second) return false;
     return std::ranges::all_of(source.event_ids, [&](const auto& id) {
       return found->second->contains(id);
     });
   };
-  state.proposals.reserve(journal->projection.proposals().size());
-  for (const auto& projected : journal->projection.proposals()) {
+  state.proposals.reserve(journal.projection.proposals().size());
+  for (const auto& projected : journal.projection.proposals()) {
     auto available = source_available(projected.proposal.source);
     if (!available) return std::unexpected(std::move(available.error()));
     state.proposals.push_back({projected, *available});
   }
-  state.records.reserve(journal->projection.records().size());
-  for (const auto& projected : journal->projection.records()) {
+  state.records.reserve(journal.projection.records().size());
+  for (const auto& projected : journal.projection.records()) {
     auto available = source_available(projected.record.source);
     if (!available) return std::unexpected(std::move(available.error()));
-    state.records.push_back({projected, *available, journal->info.session_id});
+    state.records.push_back({projected, *available, journal.info.session_id});
   }
   return state;
 }
 
 auto MemoryController::current_for_context(
     std::optional<domain::RepositoryId> repository_id,
-    std::optional<domain::PersonaId> persona_id)
+    std::optional<domain::PersonaId> persona_id, bool read_only)
     -> std::expected<std::vector<MemoryRecordView>, MemoryControllerError> {
   std::vector<MemoryRecordView> result;
   const auto append_current = [&](domain::MemoryOwner owner)
       -> std::expected<void, MemoryControllerError> {
-    auto state = inspect({std::move(owner)});
+    auto state = inspect({std::move(owner)}, read_only);
     if (!state) return std::unexpected(std::move(state.error()));
     std::ranges::sort(state->records, [](const auto& left, const auto& right) {
       return left.projected.record.record_id > right.projected.record.record_id;

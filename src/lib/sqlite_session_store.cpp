@@ -6836,6 +6836,44 @@ auto SqliteSessionStore::list_sessions(const std::size_t limit,
   }
 }
 
+auto SqliteSessionStore::find_memory_journal(const domain::MemoryOwner& owner,
+                                             const std::stop_token stop_token)
+    -> std::expected<std::optional<storage::SessionInfo>,
+                     storage::SessionStoreError> {
+  try {
+    if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
+    if (!domain::validate_memory_owner(owner))
+      return std::unexpected(
+          store_error(SessionStoreErrorCode::invalid_argument,
+                      "memory journal owner is invalid"));
+    std::optional<std::string> owner_id;
+    if (owner.repository_id) owner_id = owner.repository_id->value();
+    if (owner.persona_id) owner_id = owner.persona_id->value();
+    std::lock_guard lock(m_impl->mutex);
+    auto statement = prepare(
+        m_impl->database,
+        std::string{session_info_select} +
+            " WHERE s.session_kind='memory' AND s.journal_owner_kind=?1 "
+            "AND COALESCE(s.journal_owner_id,'')=?2");
+    if (!statement) return std::unexpected(std::move(statement.error()));
+    auto bound =
+        bind_text(statement->get(), 1, memory_owner_kind_name(owner.kind));
+    if (bound) bound = bind_text(statement->get(), 2, owner_id.value_or(""));
+    if (!bound) return std::unexpected(std::move(bound.error()));
+    const auto stepped = sqlite3_step(statement->get());
+    if (stop_token.stop_requested()) return std::unexpected(cancelled_error());
+    if (stepped == SQLITE_DONE) return std::optional<storage::SessionInfo>{};
+    if (stepped != SQLITE_ROW) return std::unexpected(sqlite_error(stepped));
+    auto info = session_info_from_row(statement->get());
+    if (!info) return std::unexpected(std::move(info.error()));
+    return std::optional{std::move(*info)};
+  } catch (...) {
+    return std::unexpected(
+        store_error(SessionStoreErrorCode::internal_failure,
+                    "memory journal lookup failed internally"));
+  }
+}
+
 // clang-format off
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- One transaction validates, finds, creates, and verifies an exact-owner journal.
 auto SqliteSessionStore::open_or_create_memory_journal(

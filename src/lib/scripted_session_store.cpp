@@ -131,6 +131,20 @@ auto ScriptedSessionStore::replay_project_backlog(
             "scripted project-backlog replay outcome has the wrong type"));
 }
 
+auto ScriptedSessionStore::find_memory_journal(const domain::MemoryOwner& owner,
+                                               const std::stop_token stop_token)
+    -> std::expected<std::optional<storage::SessionInfo>,
+                     storage::SessionStoreError> {
+  auto result = next(FindMemoryJournalCall{owner}, stop_token);
+  if (!result) return std::unexpected(std::move(result.error()));
+  if (const auto* info =
+          std::get_if<std::optional<storage::SessionInfo>>(&*result))
+    return *info;
+  return std::unexpected(
+      error(storage::SessionStoreErrorCode::internal_failure,
+            "scripted memory lookup outcome has the wrong type"));
+}
+
 auto ScriptedSessionStore::recorded_calls() const noexcept
     -> const std::vector<SessionStoreCall>& {
   return m_recorded_calls;

@@ -74,6 +74,10 @@ class SqliteSessionStore final : public storage::SessionStore {
       std::stop_token stop_token = {})
       -> std::expected<std::vector<domain::ProjectBacklogSessionEvents>,
                        storage::SessionStoreError> override;
+  [[nodiscard]] auto find_memory_journal(const domain::MemoryOwner& owner,
+                                         std::stop_token stop_token = {})
+      -> std::expected<std::optional<storage::SessionInfo>,
+                       storage::SessionStoreError> override;
   [[nodiscard]] auto open_or_create_memory_journal(
       storage::MemoryJournalOpen request, std::stop_token stop_token = {})
       -> std::expected<storage::SessionInfo,
