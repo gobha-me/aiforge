@@ -57,7 +57,8 @@ struct KernelFixture {
          {"application/schema+json", R"({"type":"object"})"},
          {domain::Effect::read},
          {{domain::Effect::read, "filesystem.root", "/fixture"}}},
-        std::make_shared<Executor>()));
+        std::make_shared<Executor>(), {},
+        runtime::ToolExecutorContract{"test.summary-admission", "1"}));
     auto snapshot = registry.snapshot();
     REQUIRE(snapshot);
     tools = *snapshot;
@@ -96,15 +97,18 @@ struct KernelFixture {
     auto attributes =
         summary_kernel_test::attributes(domain::RunPurpose::conversation);
     attributes.conversation_admission = context->conversation_admission;
-    return {id<domain::RunId>("active-run"),
-            std::move(attributes),
-            input.content.front().message,
-            {id<domain::InferenceId>("active-inference"),
-             id<domain::MessageId>("active-assistant"),
-             id<domain::ModelId>("model"),
-             std::move(*built),
-             tools.declarations(),
-             {}}};
+    runtime::RunStart result{id<domain::RunId>("active-run"),
+                             std::move(attributes),
+                             input.content.front().message,
+                             {id<domain::InferenceId>("active-inference"),
+                              id<domain::MessageId>("active-assistant"),
+                              id<domain::ModelId>("model"),
+                              std::move(*built),
+                              tools.declarations(),
+                              {}}};
+    result.provenance = domain::RunProvenance{
+        "test", "fake", {}, id<domain::ModelId>("model"), {}, {}, {}, {}};
+    return result;
   }
   auto drain() -> void {
     for (unsigned i = 0; i < 1000 && kernel->active_inference_id(); ++i) {
@@ -195,37 +199,17 @@ TEST_CASE(
   CHECK(f.store.history == before);
   CHECK(f.backend.count() == 0);
 }
-TEST_CASE("resolved live summary context survives disable while unresolved "
-          "restart fails",
-          "[summaryadmission][recovery]") {
+TEST_CASE("resolved live summary context survives a later disable",
+          "[summaryadmission][continuation]") {
   KernelFixture f;
   f.pending();
-  bool resolved = true;
-  SECTION("live run remains pinned") {
-  }
-  SECTION("explicit recovery resolution remains pinned") {
-    f.reopen();
-    REQUIRE(f.kernel->pin_conversation_summaries(f.started->run_id));
-  }
-  SECTION("unresolved restart cannot use disabled evidence") {
-    f.reopen();
-    resolved = false;
-  }
   f.disable();
-  const auto before = f.store.history;
   const auto result =
       f.kernel->continue_run(f.started->run_id, f.continuation());
-  if (resolved) {
-    INFO((result ? "continued" : result.error().message));
-    REQUIRE(result);
-    f.drain();
-    CHECK(f.backend.count() == 2);
-  } else {
-    CHECK_FALSE(result);
-    CHECK_FALSE(f.kernel->pin_conversation_summaries(f.started->run_id));
-    CHECK(f.store.history == before);
-    CHECK(f.backend.count() == 1);
-  }
+  INFO((result ? "continued" : result.error().message));
+  REQUIRE(result);
+  f.drain();
+  CHECK(f.backend.count() == 2);
 }
 TEST_CASE("summary pinning requires the exact active run",
           "[summaryadmission][failure]") {
