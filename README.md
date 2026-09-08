@@ -806,6 +806,52 @@ refused while a run or question is active rather than implicitly cancelling it.
 In ephemeral mode listing explains that durable history is unavailable, resume
 is rejected, and `/session new` starts another ephemeral session.
 
+## Conversation context and reviewed summaries
+
+Open Context with the toolbar or `Ctrl+G` to inspect model capacity, selected
+and omitted conversation groups, pins, and summaries. The toolbar can be hidden
+with `/context toolbar hide` and restored with `/context toolbar show`; keyboard
+and slash controls remain available. Repository file selection remains separate
+under the existing `/context add`, `/context remove`, and `/context clear` commands.
+
+Full history is the default. `/context mode rolling` keeps the newest complete
+conversation groups that fit after mandatory instructions, the current draft,
+pins, and active summaries. `/context history` shows group IDs and budget
+choices; `/context pin <run-id>` and `/context unpin <run-id>` control originals
+that must remain available. An oversized mandatory input fails visibly. Changing
+policy affects the next run; an active run keeps its admitted context.
+`/context mode full` restores original history and makes summaries dormant.
+Neither mode deletes the transcript, and `/clear` only clears its presentation.
+
+The Context menu guides summary generation through source selection, review,
+optional editing, preview, and Apply. Equivalent slash actions are:
+
+```text
+/context summary generate <run-id> [<run-id> ...]
+/context summary list
+/context summary review <summary-id>
+/context summary edit <summary-id>
+/context summary preview <summary-id> [replace <summary-id> ...]
+/context summary apply
+/context summary discard
+/context summary disable <summary-id>
+```
+
+Generate explicitly requests one accounted, tool-free inference on the selected
+model, with a reminder to preserve important details while its sources remain
+available. Review publishes completed output as an immutable candidate; editing
+creates a new version. Preview shows the prospective context using the current
+draft. Only Apply activates the reviewed version, after checking that its inputs
+remain current. These actions preserve the chat draft and never submit it.
+Pinned original groups remain included even when a summary covers them.
+Summary generation does not write long-term memory.
+
+For scripts, `aiforge context --session SESSION_ID --model MODEL_ID --jsonl`
+provides the same explicit lifecycle over a persistent request/reply stream.
+It opens an existing idle session and requires a fresh preview after process
+restart. See [Context control JSONL v1](docs/CONTEXT-JSONL.md) for operations,
+exact candidate references, pagination, and review handles.
+
 ## Run provenance
 
 Every run may record a `run.provenance_recorded` event immediately after
