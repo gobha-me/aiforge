@@ -138,6 +138,8 @@ struct RunStart {
   // the same durable transaction as run start.
   std::vector<domain::ArtifactMetadata> imported_artifacts{};
   std::optional<domain::RepositoryContextAdmission> repository_admission{};
+  // Required for a tool-free summary producer; committed before dispatch.
+  std::optional<domain::ConversationSummaryIntent> summary_intent{};
   auto operator==(const RunStart&) const -> bool = default;
 };
 
@@ -180,6 +182,20 @@ struct ConversationPolicyChange {
   std::uint64_t expected_revision{};
   domain::ConversationMode mode{domain::ConversationMode::full};
   std::vector<domain::RunId> pinned_run_ids;
+};
+
+struct ConversationSummaryPublication {
+  domain::RunId run_id;
+  domain::RunStarted attributes;
+  domain::ConversationSummaryId summary_id;
+};
+
+struct ConversationSummaryEdit {
+  domain::RunId run_id;
+  domain::RunStarted attributes;
+  std::uint64_t expected_sequence{};
+  domain::ConversationSummaryVersion previous;
+  std::string text;
 };
 
 struct PendingQuestionInput {
@@ -333,6 +349,11 @@ class RunKernel final {
       SessionSpendCeilingChange change) -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto record_conversation_policy(ConversationPolicyChange change)
       -> std::expected<void, RunKernelError>;
+  [[nodiscard]] auto publish_conversation_summary(
+      ConversationSummaryPublication change)
+      -> std::expected<domain::ConversationSummaryCandidate, RunKernelError>;
+  [[nodiscard]] auto edit_conversation_summary(ConversationSummaryEdit change)
+      -> std::expected<domain::ConversationSummaryCandidate, RunKernelError>;
   [[nodiscard]] auto start_plan(PlanStart start)
       -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto revise_plan(const domain::RunId& run_id,

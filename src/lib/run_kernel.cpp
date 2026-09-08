@@ -8,6 +8,9 @@
 #include <aiforge/runtime/conversation_context.hpp>
 #include <aiforge/runtime/conversation_history.hpp>
 #include <aiforge/runtime/conversation_policy.hpp>
+#include <aiforge/runtime/conversation_summary_generation.hpp>
+#include <aiforge/runtime/conversation_summary_projection.hpp>
+#include <aiforge/runtime/inference_spend.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 
 #include <algorithm>
@@ -1167,6 +1170,48 @@ auto validate_conversation_request(
   return {};
 }
 
+auto validate_summary_start(const domain::SessionEventLog& log,
+                            const RunStart& start)
+    -> std::expected<void, RunKernelError> {
+  const bool summary = start.attributes.purpose == domain::RunPurpose::summary;
+  if (!summary && !start.summary_intent) return {};
+  const auto reject = [] {
+    return std::unexpected(kernel_error(
+        RunKernelErrorCode::invalid_start,
+        "summary generation requires its exact tool-free source request"));
+  };
+  if (!summary || !start.summary_intent) return reject();
+  const auto& intent = *start.summary_intent;
+  if (start.attributes.memory_selection ||
+      start.attributes.conversation_admission || start.repository_admission ||
+      !start.imported_artifacts.empty() || !start.request.tools.empty() ||
+      !start.request.assistant_continuation_state.empty() ||
+      intent.producing_run_id != start.run_id ||
+      intent.producing_inference_id != start.request.inference_id ||
+      intent.model_id != start.request.model_id ||
+      intent.output_message_id != start.request.assistant_message_id ||
+      intent.sources.snapshot_sequence != log.last_sequence() ||
+      !start.request.options.max_output_tokens ||
+      *start.request.options.max_output_tokens == 0 ||
+      *start.request.options.max_output_tokens !=
+          intent.capacity.reserved_output_tokens)
+    return reject();
+  if (!validate_conversation_summary_generation(log, intent, start.user_message,
+                                                start.request.context))
+    return reject();
+  auto summaries = recorded_conversation_summaries(log);
+  if (!summaries ||
+      std::ranges::any_of(summaries->intents, [&](const auto& prior) {
+        return prior.summary_id == intent.summary_id;
+      }))
+    return reject();
+  auto spend = preflight_inference_spend(log);
+  if (!spend)
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::invalid_start, spend.error().message));
+  return {};
+}
+
 auto validate_conversation_start(const domain::SessionEventLog& log,
                                  const RunStart& start)
     -> std::expected<void, RunKernelError> {
@@ -1223,6 +1268,12 @@ auto validate_conversation_continuation(const domain::SessionEventLog& log,
         return event.metadata.run_id == run_id &&
                std::holds_alternative<domain::RunStarted>(event.payload);
       });
+  if (first_start != log.events().end() &&
+      std::get<domain::RunStarted>(first_start->payload).purpose ==
+          domain::RunPurpose::summary)
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::continuation_not_ready,
+                     "summary generation permits one inference only"));
   if (first_start == log.events().end()) return reject();
   const auto& attributes = std::get<domain::RunStarted>(first_start->payload);
   const auto& admission = attributes.conversation_admission;
@@ -3623,6 +3674,46 @@ struct RunKernel::Impl {
   std::condition_variable queue_space;
   std::deque<WorkerUpdate> queue;
   bool queue_closed{};
+  auto publish_summary(
+      const domain::RunId& run_id, domain::RunStarted attributes,
+      domain::ConversationSummaryCandidate candidate,
+      const domain::ConversationSummaryIntent& intent,
+      const domain::ConversationSummaryCandidate* parent = nullptr)
+      -> std::expected<domain::ConversationSummaryCandidate, RunKernelError> {
+    if (projections.contains(run_id) ||
+        attributes.purpose != domain::RunPurpose::control ||
+        attributes.memory_selection || attributes.conversation_admission)
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary publication requires a new control run"));
+    auto staged = transaction();
+    if (auto result = record(run_id, std::move(attributes), staged); !result)
+      return std::unexpected(result.error());
+    auto envelope =
+        make_event(staged, run_id,
+                   domain::ConversationSummaryCandidatePublished{candidate});
+    if (!envelope) return std::unexpected(envelope.error());
+    candidate.created_event_id = envelope->metadata.event_id;
+    candidate.created_sequence = envelope->metadata.sequence;
+    if (!domain::seal_conversation_summary_candidate(candidate, intent, parent))
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary candidate could not be sealed"));
+    if (auto result = record(
+            run_id, domain::ConversationSummaryCandidatePublished{candidate},
+            staged);
+        !result)
+      return std::unexpected(result.error());
+    if (auto result = record(run_id, domain::RunCompleted{}, staged); !result)
+      return std::unexpected(result.error());
+    if (!recorded_conversation_summaries(staged.event_log))
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary publication history is inconsistent"));
+    if (auto result = commit(std::move(staged)); !result)
+      return std::unexpected(result.error());
+    return candidate;
+  }
 };
 
 RunKernel::RunKernel(domain::SessionId session_id, backend::Backend& backend,
@@ -4723,7 +4814,8 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
         }
       }
     }
-    if ((start.attributes.workspace_id.value() == "code" &&
+    if ((start.attributes.purpose == domain::RunPurpose::conversation &&
+         start.attributes.workspace_id.value() == "code" &&
          !start.repository_admission) ||
         !domain::repository_context_admission_matches_context(
             start.repository_admission, start.request.context)) {
@@ -4731,6 +4823,9 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
           RunKernelErrorCode::invalid_start,
           "repository context admission does not match constructed context"));
     }
+    if (auto admitted = validate_summary_start(m_impl->event_log, start);
+        !admitted)
+      return admitted;
     if (auto admitted = validate_conversation_start(m_impl->event_log, start);
         !admitted)
       return admitted;
@@ -4816,6 +4911,15 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
         return result;
       }
     }
+    if (start.summary_intent) {
+      if (auto result = m_impl->record(
+              start.run_id,
+              domain::ConversationSummaryGenerationIntentRecorded{
+                  std::move(*start.summary_intent)},
+              transaction);
+          !result)
+        return result;
+    }
     for (auto& artifact : start.imported_artifacts) {
       const auto artifact_id = artifact.artifact_id;
       if (auto result = m_impl->record(
@@ -4875,6 +4979,11 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
       }
     }
     transaction.active = std::move(active);
+    if (start.summary_intent &&
+        !recorded_conversation_summaries(transaction.event_log))
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "summary generation exceeds catalog limits or has invalid lineage"));
     if (auto committed = m_impl->commit(std::move(transaction)); !committed) {
       return committed;
     }
@@ -5020,6 +5129,110 @@ auto RunKernel::record_conversation_policy(ConversationPolicyChange change)
     return std::unexpected(
         kernel_error(RunKernelErrorCode::internal_failure,
                      "conversation policy change failed internally"));
+  }
+}
+
+auto RunKernel::publish_conversation_summary(
+    ConversationSummaryPublication change)
+    -> std::expected<domain::ConversationSummaryCandidate, RunKernelError> {
+  try {
+    if (m_impl->unusable)
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    auto state = recorded_conversation_summaries(m_impl->event_log);
+    if (!state)
+      return std::unexpected(kernel_error(RunKernelErrorCode::invalid_start,
+                                          state.error().message));
+    // Reuse the immutable original publication after an uncertain response.
+    for (const auto& candidate : state->candidates)
+      if (candidate.summary_id == change.summary_id && candidate.revision == 1)
+        return candidate;
+    const auto intent =
+        std::ranges::find(state->intents, change.summary_id,
+                          &domain::ConversationSummaryIntent::summary_id);
+    if (intent == state->intents.end())
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary generation intent is unavailable"));
+    auto draft = recover_conversation_summary_draft(m_impl->event_log, *intent);
+    if (!draft)
+      return std::unexpected(kernel_error(RunKernelErrorCode::invalid_start,
+                                          draft.error().message));
+    if (!intent->sources.source_digest || !intent->intent_digest)
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary generation intent is unsealed"));
+    domain::ConversationSummaryCandidate candidate{
+        1,
+        m_impl->event_log.session_id(),
+        intent->summary_id,
+        1,
+        *intent->sources.source_digest,
+        *intent->intent_digest,
+        draft->output_event_id,
+        draft->output_sequence,
+        draft->output_event_id,
+        draft->output_sequence,
+        domain::ConversationSummaryAuthor::model,
+        {},
+        std::move(draft->text),
+        {}};
+    return m_impl->publish_summary(change.run_id, std::move(change.attributes),
+                                   std::move(candidate), *intent);
+  } catch (...) {
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::internal_failure,
+                     "summary publication failed internally"));
+  }
+}
+
+auto RunKernel::edit_conversation_summary(ConversationSummaryEdit change)
+    -> std::expected<domain::ConversationSummaryCandidate, RunKernelError> {
+  try {
+    if (m_impl->unusable)
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    if (change.expected_sequence != m_impl->event_log.last_sequence() ||
+        change.text.size() > domain::summary_maximum_text_bytes ||
+        !detail::is_safe_utf8_text(change.text))
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary edit is stale or contains invalid text"));
+    auto state = recorded_conversation_summaries(m_impl->event_log);
+    if (!state)
+      return std::unexpected(kernel_error(RunKernelErrorCode::invalid_start,
+                                          state.error().message));
+    const domain::ConversationSummaryCandidate* previous = nullptr;
+    for (const auto& candidate : state->candidates)
+      if (candidate.summary_id == change.previous.summary_id &&
+          (previous == nullptr || candidate.revision > previous->revision))
+        previous = &candidate;
+    if (previous == nullptr || !previous->candidate_digest ||
+        previous->revision != change.previous.revision ||
+        *previous->candidate_digest != change.previous.candidate_digest ||
+        previous->revision == std::numeric_limits<std::uint64_t>::max())
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary edit parent is stale or unavailable"));
+    const auto intent =
+        std::ranges::find(state->intents, previous->summary_id,
+                          &domain::ConversationSummaryIntent::summary_id);
+    if (intent == state->intents.end())
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "summary edit intent is unavailable"));
+    auto candidate = *previous;
+    ++candidate.revision;
+    candidate.author = domain::ConversationSummaryAuthor::user_edit;
+    candidate.edited_from = change.previous;
+    candidate.text = std::move(change.text);
+    return m_impl->publish_summary(change.run_id, std::move(change.attributes),
+                                   std::move(candidate), *intent, previous);
+  } catch (...) {
+    return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
+                                        "summary edit failed internally"));
   }
 }
 

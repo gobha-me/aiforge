@@ -66,20 +66,38 @@ auto recorded_conversation_policy(
             "conversation policy history reuses a run identity");
       const auto* unknown = std::get_if<domain::UnknownEvent>(&event.payload);
       if (unknown != nullptr &&
-          unknown->type_name == "session.conversation_policy_set")
+          (unknown->type_name == "session.conversation_policy_set" ||
+           unknown->type_name == "session.conversation_summary_activated" ||
+           unknown->type_name == "session.conversation_summary_disabled"))
         return std::unexpected(domain::ConversationAdmissionError{
             domain::ConversationAdmissionErrorCode::unsupported_version,
             "conversation policy event is unsupported"});
       const auto* set =
           std::get_if<domain::ConversationPolicySet>(&event.payload);
-      if (set == nullptr) continue;
+      const auto* activated =
+          std::get_if<domain::ConversationSummaryActivated>(&event.payload);
+      const auto* disabled =
+          std::get_if<domain::ConversationSummaryDisabled>(&event.payload);
+      if (set == nullptr && activated == nullptr && disabled == nullptr)
+        continue;
+      const auto previous = set != nullptr ? set->previous_revision
+                            : activated != nullptr
+                                ? activated->previous_policy_revision
+                                : disabled->previous_policy_revision;
       if (!complete_control_transaction(log, index, count) ||
-          !domain::validate_conversation_policy(set->policy) ||
           result.policy.revision == std::numeric_limits<std::uint64_t>::max() ||
-          set->previous_revision != result.policy.revision ||
-          set->policy.revision != result.policy.revision + 1)
+          previous != result.policy.revision)
         return invalid_policy("conversation policy transaction is invalid");
-      result = {set->policy, event.metadata.event_id, event.metadata.sequence};
+      auto policy = result.policy;
+      ++policy.revision;
+      if (set != nullptr) {
+        if (!domain::validate_conversation_policy(set->policy) ||
+            set->policy.revision != policy.revision)
+          return invalid_policy("conversation policy transaction is invalid");
+        policy = set->policy;
+      }
+      result = {std::move(policy), event.metadata.event_id,
+                event.metadata.sequence};
     }
     return result;
   } catch (...) {

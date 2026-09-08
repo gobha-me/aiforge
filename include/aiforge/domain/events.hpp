@@ -4,6 +4,7 @@
 #include <aiforge/domain/child_run.hpp>
 #include <aiforge/domain/content.hpp>
 #include <aiforge/domain/conversation_admission.hpp>
+#include <aiforge/domain/conversation_summary.hpp>
 #include <aiforge/domain/events_fwd.hpp>
 #include <aiforge/domain/memory.hpp>
 #include <aiforge/domain/money.hpp>
@@ -46,6 +47,34 @@ struct ConversationPolicySet {
   std::uint64_t previous_revision{};
   ConversationPolicy policy;
   auto operator==(const ConversationPolicySet&) const -> bool = default;
+};
+
+// The generation intent is committed with the producer's run start, before
+// dispatch. Publication and user decisions each use a separate control run.
+struct ConversationSummaryGenerationIntentRecorded {
+  ConversationSummaryIntent intent;
+  auto operator==(const ConversationSummaryGenerationIntentRecorded&) const
+      -> bool = default;
+};
+
+struct ConversationSummaryCandidatePublished {
+  ConversationSummaryCandidate candidate;
+  auto operator==(const ConversationSummaryCandidatePublished&) const
+      -> bool = default;
+};
+
+struct ConversationSummaryActivated {
+  std::uint64_t previous_policy_revision{};
+  ConversationSummaryActivation activation;
+  std::vector<ConversationSummaryVersion> replaced_versions;
+  auto operator==(const ConversationSummaryActivated&) const -> bool = default;
+};
+
+struct ConversationSummaryDisabled {
+  std::uint64_t previous_policy_revision{};
+  ConversationSummaryVersion candidate;
+  EventId activation_event_id;
+  auto operator==(const ConversationSummaryDisabled&) const -> bool = default;
 };
 
 // Recorded once per run, immediately after `RunStarted`, so a replayed run can
@@ -592,7 +621,10 @@ struct UnknownEvent {
 
 using RunEventPayload = std::variant<
     RunStarted, RunProvenanceRecorded, PersonaSelectionRecorded,
-    SessionSpendCeilingSet, ConversationPolicySet, RunAwaitingInput, RunResumed,
+    SessionSpendCeilingSet, ConversationPolicySet,
+    ConversationSummaryGenerationIntentRecorded,
+    ConversationSummaryCandidatePublished, ConversationSummaryActivated,
+    ConversationSummaryDisabled, RunAwaitingInput, RunResumed,
     RunCompletionRequested, RunCompleted, RunFailed, RunCancelRequested,
     RunCancelled, UserContentAdded, AssistantContentStarted,
     AssistantContentDeltaAdded, AssistantContentFinished, InferenceStarted,
