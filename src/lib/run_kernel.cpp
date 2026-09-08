@@ -1212,6 +1212,26 @@ auto validate_summary_start(const domain::SessionEventLog& log,
   return {};
 }
 
+auto event_schema_version(const domain::RunEventPayload& payload)
+    -> std::uint32_t {
+  if (const auto* started = std::get_if<domain::RunStarted>(&payload)) {
+    if (started->purpose != domain::RunPurpose::conversation ||
+        started->conversation_admission)
+      return 3;
+    return started->memory_selection ? 2 : 1;
+  }
+  if (const auto* child = std::get_if<domain::ChildRunCreated>(&payload);
+      child != nullptr && child->descriptor)
+    return child->descriptor->review_receipt_id ? 4 : 3;
+  if (const auto* tool = std::get_if<domain::ToolProposed>(&payload);
+      tool != nullptr && tool->validated_arguments)
+    return 2;
+  if (std::holds_alternative<domain::ToolPolicyDecided>(payload) ||
+      std::holds_alternative<domain::PlanRevisionProposed>(payload))
+    return 2;
+  return 1;
+}
+
 auto validate_conversation_start(const domain::SessionEventLog& log,
                                  const RunStart& start)
     -> std::expected<void, RunKernelError> {
@@ -2056,31 +2076,7 @@ struct RunKernel::Impl {
       return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
                                           "could not create an event ID"));
     }
-    const auto enriched_child =
-        std::holds_alternative<domain::ChildRunCreated>(payload) &&
-        std::get<domain::ChildRunCreated>(payload).descriptor.has_value();
-    const auto* child_payload = std::get_if<domain::ChildRunCreated>(&payload);
-    const auto* proposed_tool = std::get_if<domain::ToolProposed>(&payload);
-    const auto policy_decided =
-        std::holds_alternative<domain::ToolPolicyDecided>(payload);
-    const auto* started = std::get_if<domain::RunStarted>(&payload);
-    const std::uint32_t schema_version =
-        started != nullptr &&
-                (started->purpose != domain::RunPurpose::conversation ||
-                 started->conversation_admission)
-            ? 3U
-        : enriched_child
-            ? (child_payload->descriptor->review_receipt_id ? 4U : 3U)
-            : (policy_decided ||
-                       (started != nullptr && started->memory_selection)
-                   ? 2U
-                   : (proposed_tool != nullptr &&
-                              proposed_tool->validated_arguments
-                          ? 2U
-                          : (std::holds_alternative<
-                                 domain::PlanRevisionProposed>(payload)
-                                 ? 2U
-                                 : 1U)));
+    const auto schema_version = event_schema_version(payload);
     std::optional<domain::RunId> parent_run_id;
     const auto child = transaction.active_children.find(run_id);
     if (child != transaction.active_children.end() && child->second.child_run) {
