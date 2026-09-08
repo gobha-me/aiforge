@@ -671,6 +671,42 @@ TEST_CASE(
   CHECK(result->back().entries.front().content.order == 3);
 }
 
+TEST_CASE(
+    "invalid typed run purpose cannot silently exclude conversation history",
+    "[conversationhistory][purpose][failure]") {
+  HistoryLog history;
+  history.complete("run", static_cast<domain::RunPurpose>(255));
+  const auto result = runtime::reconstruct_conversation_history({history.log});
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == Code::invalid_history);
+  const auto excluded = runtime::reconstruct_conversation_history(
+      {history.log, {id<domain::RunId>("run")}});
+  REQUIRE(excluded);
+  CHECK(excluded->empty());
+}
+
+TEST_CASE("active tool projection requires a valid conversation purpose",
+          "[conversationhistory][purpose][failure]") {
+  for (const auto purpose :
+       {domain::RunPurpose::control, domain::RunPurpose::summary,
+        static_cast<domain::RunPurpose>(255)}) {
+    HistoryLog history;
+    history.start("run", purpose);
+    history.user("run");
+    const auto result = runtime::reconstruct_active_tool_continuation(
+        history.log, id<domain::RunId>("run"));
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == Code::invalid_history);
+  }
+  HistoryLog ordinary;
+  ordinary.start("run");
+  ordinary.user("run");
+  const auto result = runtime::reconstruct_active_tool_continuation(
+      ordinary.log, id<domain::RunId>("run"));
+  REQUIRE(result);
+  CHECK(result->empty());
+}
+
 TEST_CASE("opaque consumed event schemas cannot silently remove source history",
           "[conversationhistory][opaque][failure]") {
   HistoryLog history;
