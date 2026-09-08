@@ -17,16 +17,20 @@ namespace {
 using Code = LocalSourceWorkerErrorCode;
 using SourceCode = domain::LocalSourceErrorCode;
 using Token = std::variant<LocalSourceRequestToken, LocalFolderGrantToken,
-                           LocalContextWorkToken>;
-using Request = std::variant<LocalSourceWorkRequest, LocalFolderGrantRequest,
-                             LocalContextWorkRequest>;
+                           LocalContextWorkToken, RepositoryContextWorkToken>;
+using Request =
+    std::variant<LocalSourceWorkRequest, LocalFolderGrantRequest,
+                 LocalContextWorkRequest, RepositoryContextWorkRequest>;
 using Port = std::variant<std::monostate, std::shared_ptr<LocalSourceReader>,
                           std::shared_ptr<LocalSourceGrantFactory>,
-                          std::shared_ptr<LocalContextController>>;
+                          std::shared_ptr<LocalContextController>,
+                          std::shared_ptr<RepositoryContextController>>;
 using ContextOutcome =
     std::expected<PreparedLocalContext, domain::LocalContextError>;
-using Result =
-    std::variant<LocalSourceWorkResult, LocalFolderGrantResult, ContextOutcome>;
+using RepositoryOutcome =
+    std::expected<PreparedRepositoryContext, domain::RepositoryContextError>;
+using Result = std::variant<LocalSourceWorkResult, LocalFolderGrantResult,
+                            ContextOutcome, RepositoryOutcome>;
 using Outcome = std::expected<Result, domain::LocalSourceError>;
 
 auto failure(Code code, std::string message)
@@ -216,6 +220,103 @@ auto invoke_context(LocalContextController& controller,
         "local context result does not match its work request"});
   return Result{std::move(result)};
 }
+auto valid_repository_work(const RepositoryContextWorkRequest& request)
+    -> bool {
+  const auto& token = request.token;
+  if (token.session_id.value().empty() || token.session_epoch == 0 ||
+      token.request_id == 0 || token.selection_revision == 0)
+    return false;
+  return std::visit(
+      [&](const auto& operation) {
+        if (operation.selection_revision != token.selection_revision)
+          return false;
+        using T = std::decay_t<decltype(operation)>;
+        if constexpr (std::same_as<T, RepositoryContextRequest>)
+          return validate_repository_context_request(operation).has_value();
+        else
+          return domain::validate_repository_context_admission(operation)
+              .has_value();
+      },
+      request.operation);
+}
+auto repository_error(domain::RepositoryContextError error)
+    -> domain::RepositoryContextError {
+  using RepoCode = domain::RepositoryContextErrorCode;
+  if (error.code < RepoCode::invalid_request ||
+      error.code > RepoCode::internal_failure)
+    return {RepoCode::internal_failure,
+            "repository context returned an invalid error"};
+  static constexpr std::array<std::string_view, 8> messages{
+      "repository context request is invalid",
+      "repository context admission is invalid",
+      "repository context source is unavailable",
+      "repository context source changed",
+      "repository context exceeds resource bounds",
+      "repository context work was cancelled",
+      "repository context work timed out",
+      "repository context failed internally"};
+  return {error.code,
+          std::string{messages[static_cast<std::size_t>(error.code)]}};
+}
+auto prepared_repository_matches(
+    const RepositoryContextRequest& operation,
+    const domain::RepositoryContextAdmission& admission) -> bool {
+  const auto target = operation.target_subtree == "."
+                          ? std::string_view{}
+                          : std::string_view{operation.target_subtree};
+  if (admission.version != 1 || admission.admission_digest ||
+      admission.capacity != domain::ContextCapacity{} ||
+      admission.target_subtree != target ||
+      admission.evidence.size() != operation.evidence_paths.size())
+    return false;
+  for (std::size_t index = 0; index < operation.evidence_paths.size(); ++index)
+    if (admission.evidence[index].source.relative_path !=
+            operation.evidence_paths[index] ||
+        admission.evidence[index].decision !=
+            domain::RepositoryContextDecision::admitted)
+      return false;
+  return true;
+}
+auto repository_result_matches(const RepositoryContextWorkRequest& request,
+                               const PreparedRepositoryContext& result)
+    -> bool {
+  const auto& admission = result.admission;
+  if (admission.selection_revision != request.token.selection_revision ||
+      admission.source_snapshot != domain::snapshot_identity(result.snapshot))
+    return false;
+  return std::visit(
+      [&](const auto& operation) {
+        using T = std::decay_t<decltype(operation)>;
+        if constexpr (std::same_as<T, domain::RepositoryContextAdmission>)
+          return domain::validate_repository_context_admission(admission)
+                     .has_value() &&
+                 domain::repository_context_admission_successor(operation,
+                                                                admission);
+        else
+          return prepared_repository_matches(operation, admission);
+      },
+      request.operation);
+}
+auto invoke_repository(RepositoryContextController& controller,
+                       const RepositoryContextWorkRequest& request,
+                       std::stop_token stop) -> Outcome {
+  auto result = std::visit(
+      [&](const auto& operation) {
+        using T = std::decay_t<decltype(operation)>;
+        if constexpr (std::same_as<T, RepositoryContextRequest>)
+          return controller.prepare(operation, stop);
+        else
+          return controller.revalidate(operation, stop);
+      },
+      request.operation);
+  if (!result)
+    result = std::unexpected(repository_error(std::move(result.error())));
+  else if (!repository_result_matches(request, *result))
+    result = std::unexpected(domain::RepositoryContextError{
+        domain::RepositoryContextErrorCode::invalid_admission,
+        "repository context result does not match its work request"});
+  return Result{std::move(result)};
+}
 template <typename Value>
 auto completion_error(domain::LocalSourceError error) {
   if constexpr (std::same_as<Value, ContextOutcome>) {
@@ -223,6 +324,12 @@ auto completion_error(domain::LocalSourceError error) {
                           ? domain::LocalContextErrorCode::cancelled
                           : domain::LocalContextErrorCode::internal_failure;
     return std::unexpected(context_error({code, {}}));
+  } else if constexpr (std::same_as<Value, RepositoryOutcome>) {
+    const auto code =
+        error.code == SourceCode::cancelled
+            ? domain::RepositoryContextErrorCode::cancelled
+            : domain::RepositoryContextErrorCode::internal_failure;
+    return std::unexpected(repository_error({code, {}}));
   } else {
     return std::unexpected(std::move(error));
   }
@@ -279,6 +386,11 @@ auto invoke_job(const std::shared_ptr<Job>& job) -> Outcome {
     if (job->discarded)
       return source_failure(SourceCode::cancelled, "local work cancelled");
   }
+  if (const auto* request =
+          std::get_if<RepositoryContextWorkRequest>(&job->request))
+    return invoke_repository(
+        *std::get<std::shared_ptr<RepositoryContextController>>(job->port),
+        *request, job->stop.get_token());
   if (const auto* request = std::get_if<LocalFolderGrantRequest>(&job->request))
     return invoke_factory(
         *std::get<std::shared_ptr<LocalSourceGrantFactory>>(job->port),
@@ -520,6 +632,40 @@ auto LocalSourceWorker::cancel(const LocalContextWorkToken& token)
     return failure(Code::internal_failure, "local context cancellation failed");
   }
 }
+auto LocalSourceWorker::submit(
+    const std::shared_ptr<RepositoryContextController>& controller,
+    RepositoryContextWorkRequest request)
+    -> std::expected<void, LocalSourceWorkerError> {
+  try {
+    if (!controller || !controller->owns_source() ||
+        !valid_repository_work(request))
+      return failure(Code::invalid_request,
+                     "owned repository context work request is invalid");
+    Token token = request.token;
+    return m_impl->submit(controller, std::move(token), std::move(request));
+  } catch (...) {
+    return failure(Code::internal_failure, "repository work submission failed");
+  }
+}
+auto LocalSourceWorker::poll(const RepositoryContextWorkToken& token)
+    -> std::expected<std::optional<RepositoryContextWorkCompletion>,
+                     LocalSourceWorkerError> {
+  try {
+    return m_impl->poll<RepositoryContextWorkCompletion, RepositoryOutcome>(
+        token);
+  } catch (...) {
+    return failure(Code::internal_failure, "repository work delivery failed");
+  }
+}
+auto LocalSourceWorker::cancel(const RepositoryContextWorkToken& token)
+    -> std::expected<void, LocalSourceWorkerError> {
+  try {
+    return m_impl->cancel(token);
+  } catch (...) {
+    return failure(Code::internal_failure,
+                   "repository work cancellation failed");
+  }
+}
 auto LocalSourceWorker::poll(const LocalSourceRequestToken& token)
     -> std::expected<std::optional<LocalSourceWorkCompletion>,
                      LocalSourceWorkerError> {
@@ -570,6 +716,15 @@ auto LocalSourceWorker::invalidate_session(const domain::SessionId& session_id)
 auto LocalSourceWorker::occupied_slots() const -> std::size_t {
   return static_cast<std::size_t>(std::ranges::count_if(
       m_impl->jobs, [](const auto& job) { return !job->retired(); }));
+}
+auto LocalSourceWorker::ready_result(
+    const RepositoryContextWorkToken& token) const -> bool {
+  const auto found = m_impl->find(token);
+  if (found == m_impl->jobs.end()) return false;
+  const auto& job = *found;
+  const std::lock_guard lock{job->mutex};
+  return !job->discarded && !job->consumed && job->reader_done &&
+         job->relay_done && job->result.has_value();
 }
 auto LocalSourceWorker::ready_results() const -> std::size_t {
   return static_cast<std::size_t>(

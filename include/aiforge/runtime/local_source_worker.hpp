@@ -8,6 +8,7 @@
 
 #include <aiforge/runtime/local_context_controller.hpp>
 #include <aiforge/runtime/local_source_grant.hpp>
+#include <aiforge/runtime/repository_context_controller.hpp>
 
 namespace aiforge::runtime {
 
@@ -39,6 +40,24 @@ struct LocalContextWorkRequest {
 struct LocalContextWorkCompletion {
   LocalContextWorkToken token;
   std::expected<PreparedLocalContext, domain::LocalContextError> result;
+};
+
+struct RepositoryContextWorkToken {
+  domain::SessionId session_id;
+  std::uint64_t session_epoch{};
+  std::uint64_t request_id{};
+  std::uint64_t selection_revision{};
+  auto operator==(const RepositoryContextWorkToken&) const -> bool = default;
+};
+struct RepositoryContextWorkRequest {
+  RepositoryContextWorkToken token;
+  std::variant<RepositoryContextRequest, domain::RepositoryContextAdmission>
+      operation;
+};
+struct RepositoryContextWorkCompletion {
+  RepositoryContextWorkToken token;
+  std::expected<PreparedRepositoryContext, domain::RepositoryContextError>
+      result;
 };
 
 enum class LocalSourceWorkerErrorCode {
@@ -87,6 +106,18 @@ class LocalSourceWorker final {
       const std::shared_ptr<LocalContextController>& controller,
       LocalContextWorkRequest request)
       -> std::expected<void, LocalSourceWorkerError>;
+  // Borrowed controllers are refused. The owning source graph must support
+  // concurrent read-only calls; it is released on the producer before
+  // retirement.
+  [[nodiscard]] auto submit(
+      const std::shared_ptr<RepositoryContextController>& controller,
+      RepositoryContextWorkRequest request)
+      -> std::expected<void, LocalSourceWorkerError>;
+  [[nodiscard]] auto poll(const RepositoryContextWorkToken& token)
+      -> std::expected<std::optional<RepositoryContextWorkCompletion>,
+                       LocalSourceWorkerError>;
+  [[nodiscard]] auto cancel(const RepositoryContextWorkToken& token)
+      -> std::expected<void, LocalSourceWorkerError>;
   // Null means still working. A completion is moved out exactly once; every
   // lookup compares the entire token, including root/lease/selection revision.
   [[nodiscard]] auto poll(const LocalSourceRequestToken& token)
@@ -109,6 +140,8 @@ class LocalSourceWorker final {
   [[nodiscard]] auto occupied_slots() const -> std::size_t;
   // Bounded readiness metadata only; leaves every completion owned by its slot.
   [[nodiscard]] auto ready_results() const -> std::size_t;
+  [[nodiscard]] auto ready_result(const RepositoryContextWorkToken& token) const
+      -> bool;
 
  private:
   struct Impl;

@@ -122,7 +122,9 @@ auto valid_limits(const RepositoryContextLimits& limits) -> bool {
 }
 auto valid_request(const RepositoryContextRequest& request,
                    const RepositoryContextLimits& limits) -> Result {
-  if (!valid_limits(limits) || !normalized_path(request.target_subtree, true) ||
+  if (!valid_limits(limits) ||
+      !(request.target_subtree == "." ||
+        normalized_path(request.target_subtree, true)) ||
       request.selection_revision == 0 ||
       request.evidence_paths.size() > limits.maximum_evidence_files)
     return failure(Code::invalid_request,
@@ -338,6 +340,35 @@ auto verify_instruction_chain(RepositoryContextSource& source,
 }
 } // namespace
 
+auto validate_repository_context_request(
+    const RepositoryContextRequest& request,
+    const RepositoryContextLimits& limits) -> std::expected<void, Error> {
+  try {
+    return valid_request(request, limits);
+  } catch (...) {
+    return failure(Code::internal_failure,
+                   "Repository request validation failed");
+  }
+}
+auto RepositoryContextController::create_owned(
+    std::shared_ptr<RepositoryContextSource> source,
+    domain::RepositoryRootIdentity root, RepositoryContextLimits limits)
+    -> std::expected<std::shared_ptr<RepositoryContextController>, Error> {
+  try {
+    if (!source || !source->guarantees_pinned_read_only_sources() ||
+        source->identity().empty() || source->identity().size() > 1024 ||
+        !detail::is_safe_utf8_text(source->identity()) || !valid_limits(limits))
+      return failure(Code::invalid_request,
+                     "Owned repository sources are invalid");
+    auto controller = std::make_shared<RepositoryContextController>(
+        *source, std::move(root), limits);
+    controller->m_owned_source = std::move(source);
+    return controller;
+  } catch (...) {
+    return failure(Code::internal_failure,
+                   "Owned repository controller creation failed");
+  }
+}
 RepositoryContextController::RepositoryContextController(
     RepositoryContextSource& source, domain::RepositoryRootIdentity root,
     RepositoryContextLimits limits)
