@@ -5,6 +5,9 @@
 #include <aiforge/domain/usage_ledger.hpp>
 #include <aiforge/repository/context_parcel.hpp>
 #include <aiforge/repository/review_receipt.hpp>
+#include <aiforge/runtime/conversation_context.hpp>
+#include <aiforge/runtime/conversation_history.hpp>
+#include <aiforge/runtime/conversation_policy.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 
 #include <algorithm>
@@ -1004,6 +1007,85 @@ auto repository_continuation_matches(
                                                               context);
 }
 
+auto validate_conversation_start(const domain::SessionEventLog& log,
+                                 const RunStart& start)
+    -> std::expected<void, RunKernelError> {
+  const auto reject = [] {
+    return std::unexpected(kernel_error(
+        RunKernelErrorCode::invalid_start,
+        "conversation admission does not match its source or request"));
+  };
+  const auto& admission = start.attributes.conversation_admission;
+  if (!admission) {
+    if (start.attributes.purpose != domain::RunPurpose::conversation) return {};
+    const auto policy = recorded_conversation_policy(log);
+    if (!policy || policy->policy.revision != 0) return reject();
+    return {};
+  }
+  const auto& context = start.request.context;
+  if (admission->source_snapshot_sequence != log.last_sequence() ||
+      admission->model_id != start.request.model_id ||
+      admission->capacity != context.capacity || context.entries.size() > 65536)
+    return reject();
+  const auto resolved = recover_conversation_context(log, *admission);
+  if (!resolved) return reject();
+  std::map<domain::ContextEntryId, const domain::ContextContentInput*> expected;
+  std::vector<domain::ContextEntryId> source_order;
+  std::uint64_t last_history_order{};
+  for (const auto& group : *resolved)
+    for (const auto& entry : group.entries) {
+      if (!expected.emplace(entry.content.entry_id, &entry.content).second)
+        return reject();
+      source_order.push_back(entry.content.entry_id);
+      last_history_order = entry.content.order;
+    }
+  std::uint64_t mandatory{};
+  auto total_input = context.capacity.reserved_input_tokens;
+  std::size_t users{};
+  std::size_t matched{};
+  std::set<domain::ContextEntryId> seen;
+  for (const auto& entry : context.entries) {
+    if (!seen.insert(entry.entry_id).second) return reject();
+    if (entry.estimated_tokens >
+        std::numeric_limits<std::uint64_t>::max() - total_input)
+      return reject();
+    total_input += entry.estimated_tokens;
+    const auto source = expected.find(entry.entry_id);
+    if (source != expected.end()) {
+      if (users != 0 || source_order[matched] != entry.entry_id)
+        return reject();
+      const auto& value = *source->second;
+      const auto kind = value.kind == domain::ContextContentKind::tool_result
+                            ? domain::ContextEntryKind::tool_result
+                            : domain::ContextEntryKind::conversation;
+      if (entry.kind != kind || entry.instruction_layer ||
+          entry.specificity != 0 || entry.message != value.message ||
+          entry.provenance != value.provenance || entry.order != value.order ||
+          entry.estimated_tokens != value.estimated_tokens)
+        return reject();
+      expected.erase(source);
+      ++matched;
+      continue;
+    }
+    if (matched != 0 && matched != source_order.size()) return reject();
+    if (entry.kind == domain::ContextEntryKind::tool_result) return reject();
+    if (entry.kind == domain::ContextEntryKind::conversation) {
+      if (entry.message != start.user_message || ++users != 1 ||
+          entry.order <= last_history_order)
+        return reject();
+    }
+    if (entry.estimated_tokens >
+        std::numeric_limits<std::uint64_t>::max() - mandatory)
+      return reject();
+    mandatory += entry.estimated_tokens;
+  }
+  if (!expected.empty() || users != 1 ||
+      mandatory != admission->mandatory_input_tokens ||
+      total_input != context.estimated_input_tokens)
+    return reject();
+  return {};
+}
+
 } // namespace
 
 auto recorded_repository_context_admission(
@@ -1750,7 +1832,11 @@ struct RunKernel::Impl {
         std::holds_alternative<domain::ToolPolicyDecided>(payload);
     const auto* started = std::get_if<domain::RunStarted>(&payload);
     const std::uint32_t schema_version =
-        enriched_child
+        started != nullptr &&
+                (started->purpose != domain::RunPurpose::conversation ||
+                 started->conversation_admission)
+            ? 3U
+        : enriched_child
             ? (child_payload->descriptor->review_receipt_id ? 4U : 3U)
             : (policy_decided ||
                        (started != nullptr && started->memory_selection)
@@ -4342,7 +4428,11 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
     }
     auto effective_tools = m_impl->tools.subset(requested_tool_names);
     const auto* policy_provenance = m_impl->policy->provenance();
-    if (start.user_message.role != domain::Role::user ||
+    if ((start.attributes.purpose != domain::RunPurpose::conversation &&
+         start.attributes.purpose != domain::RunPurpose::summary) ||
+        (start.attributes.purpose == domain::RunPurpose::summary &&
+         !start.request.tools.empty()) ||
+        start.user_message.role != domain::Role::user ||
         !start.user_message.tool_calls.empty() ||
         start.request.assistant_message_id == start.user_message.message_id ||
         !effective_tools ||
@@ -4459,6 +4549,9 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
           RunKernelErrorCode::invalid_start,
           "repository context admission does not match constructed context"));
     }
+    if (auto admitted = validate_conversation_start(m_impl->event_log, start);
+        !admitted)
+      return admitted;
     domain::MemorySelection empty_memory;
     if (!domain::seal_memory_selection(empty_memory)) {
       return std::unexpected(
@@ -4682,6 +4775,69 @@ auto RunKernel::record_session_spend_ceiling(SessionSpendCeilingChange change)
     return std::unexpected(
         kernel_error(RunKernelErrorCode::internal_failure,
                      "session spend ceiling change failed internally"));
+  }
+}
+
+auto RunKernel::record_conversation_policy(ConversationPolicyChange change)
+    -> std::expected<void, RunKernelError> {
+  try {
+    if (m_impl->unusable)
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    if (m_impl->projections.contains(change.run_id) ||
+        change.attributes.purpose != domain::RunPurpose::control ||
+        change.attributes.memory_selection ||
+        change.attributes.conversation_admission)
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "conversation policy requires a new control run"));
+    auto current = recorded_conversation_policy(m_impl->event_log);
+    if (!current || current->policy.revision != change.expected_revision ||
+        change.expected_revision == std::numeric_limits<std::uint64_t>::max())
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "conversation policy changed or cannot be reconstructed"));
+    domain::ConversationPolicy policy{change.expected_revision + 1, change.mode,
+                                      std::move(change.pinned_run_ids)};
+    if (!domain::validate_conversation_policy(policy))
+      return std::unexpected(kernel_error(RunKernelErrorCode::invalid_start,
+                                          "conversation policy is invalid"));
+    if (!policy.pinned_run_ids.empty()) {
+      auto history = reconstruct_conversation_history({m_impl->event_log, {}});
+      if (!history)
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::invalid_start,
+            "pinned conversation history cannot be reconstructed"));
+      for (const auto& pin : policy.pinned_run_ids)
+        if (std::ranges::find(*history, pin,
+                              &ConversationHistoryGroup::run_id) ==
+            history->end())
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::invalid_start,
+              "conversation pin has no eligible completed source run"));
+    }
+    auto transaction = m_impl->transaction();
+    if (auto recorded = m_impl->record(
+            change.run_id, std::move(change.attributes), transaction);
+        !recorded)
+      return recorded;
+    if (auto recorded =
+            m_impl->record(change.run_id,
+                           domain::ConversationPolicySet{
+                               change.expected_revision, std::move(policy)},
+                           transaction);
+        !recorded)
+      return recorded;
+    if (auto recorded =
+            m_impl->record(change.run_id, domain::RunCompleted{}, transaction);
+        !recorded)
+      return recorded;
+    return m_impl->commit(std::move(transaction));
+  } catch (...) {
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::internal_failure,
+                     "conversation policy change failed internally"));
   }
 }
 

@@ -1513,6 +1513,42 @@ TEST_CASE("run kernel records spend ceiling changes without backend work",
   REQUIRE_FALSE(kernel.projection(make_id<domain::RunId>("policy-6")));
 }
 
+TEST_CASE("conversation policy changes preserve an active request",
+          "[runtime][conversation]") {
+  auto expected = request();
+  testing::ScriptedBackend fake{{testing::ScriptedExchange{
+      expected, testing::StreamScript{{
+                    step(backend::ResponseStarted{"response"}),
+                    step(backend::ResponseFinished{domain::FinishReason::stop}),
+                    testing::EndOfStream{},
+                }}}}};
+  WakeCounter wake;
+  runtime::RunKernel kernel{make_id<domain::SessionId>("session"), fake, &wake};
+  REQUIRE(kernel.start(run_start(expected)));
+  const auto run = kernel.active_run_id();
+  const auto inference = kernel.active_inference_id();
+  REQUIRE(kernel.active_tool_declarations() != nullptr);
+  const auto tools = *kernel.active_tool_declarations();
+  domain::RunStarted attributes{make_id<domain::SurfaceId>("context-policy"),
+                                make_id<domain::WorkspaceId>("chat"),
+                                make_id<domain::PermissionProfileId>("observe"),
+                                std::nullopt};
+  attributes.purpose = domain::RunPurpose::control;
+  REQUIRE(kernel.record_conversation_policy({make_id<domain::RunId>("policy"),
+                                             attributes,
+                                             0,
+                                             domain::ConversationMode::rolling,
+                                             {}}));
+  CHECK(kernel.active_run_id() == run);
+  CHECK(kernel.active_inference_id() == inference);
+  REQUIRE(kernel.active_tool_declarations() != nullptr);
+  CHECK(*kernel.active_tool_declarations() == tools);
+  static_cast<void>(drain_to_end(kernel, wake));
+  CHECK(fake.recorded_requests() == std::vector{expected});
+  REQUIRE(run);
+  CHECK(kernel.projection(*run)->status() == domain::RunStatus::completed);
+}
+
 TEST_CASE("resume restores recorded provenance and rejects a duplicate record",
           "[runtime][provenance][failure]") {
   const auto session = make_id<domain::SessionId>("session");

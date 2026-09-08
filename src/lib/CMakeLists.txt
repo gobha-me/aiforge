@@ -14,6 +14,10 @@ add_library(${PROJECT_NAME}_lib STATIC
   command_registry.cpp
   conversation_context.cpp
   conversation_history.cpp
+  conversation_admission.cpp
+  conversation_admission_context.cpp
+  conversation_policy.cpp
+  session_context.cpp
   conversation_selection.cpp
   config.cpp
   config_provenance.cpp

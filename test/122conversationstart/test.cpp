@@ -198,6 +198,9 @@ TEST_CASE(
   SECTION("changed mandatory token total") {
     ++start.request.context.entries.front().estimated_tokens;
   }
+  SECTION("changed aggregate input estimate") {
+    ++start.request.context.estimated_input_tokens;
+  }
   SECTION("changed current user") {
     start.request.context.entries.back().message.content = {
         domain::TextBlock{"another question"}};

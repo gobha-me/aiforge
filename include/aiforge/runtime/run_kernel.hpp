@@ -174,6 +174,14 @@ struct SessionSpendCeilingChange {
   auto operator==(const SessionSpendCeilingChange&) const -> bool = default;
 };
 
+struct ConversationPolicyChange {
+  domain::RunId run_id;
+  domain::RunStarted attributes;
+  std::uint64_t expected_revision{};
+  domain::ConversationMode mode{domain::ConversationMode::full};
+  std::vector<domain::RunId> pinned_run_ids;
+};
+
 struct PendingQuestionInput {
   domain::RunId run_id;
   domain::InvocationId invocation_id;
@@ -323,6 +331,8 @@ class RunKernel final {
       -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto record_session_spend_ceiling(
       SessionSpendCeilingChange change) -> std::expected<void, RunKernelError>;
+  [[nodiscard]] auto record_conversation_policy(ConversationPolicyChange change)
+      -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto start_plan(PlanStart start)
       -> std::expected<void, RunKernelError>;
   [[nodiscard]] auto revise_plan(const domain::RunId& run_id,

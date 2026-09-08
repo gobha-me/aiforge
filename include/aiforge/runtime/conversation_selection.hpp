@@ -45,7 +45,7 @@ struct ConversationSelectionLimits {
   // Aggregate content blocks and tool declarations bound zero-byte work too.
   std::size_t maximum_content_items{65536};
   // Includes content, arguments, tool names and optional provenance strings.
-  std::size_t maximum_content_bytes{16 * 1024 * 1024};
+  std::size_t maximum_content_bytes{std::size_t{16} * 1024 * 1024};
   auto operator==(const ConversationSelectionLimits&) const -> bool = default;
 };
 
@@ -75,7 +75,8 @@ enum class ConversationSelectionDecision {
 
 struct ConversationSelectionDecisionRecord {
   domain::RunId run_id;
-  ConversationSelectionDecision decision;
+  ConversationSelectionDecision decision{
+      ConversationSelectionDecision::omitted_older};
   std::size_t entry_count{};
   std::uint64_t estimated_tokens{};
   auto operator==(const ConversationSelectionDecisionRecord&) const
