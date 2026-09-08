@@ -1,3 +1,4 @@
+#include "../135summarycontext/fixture.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
@@ -1812,4 +1813,188 @@ TEST_CASE("cancelled partial assistant content stays out of resumed context",
               return text != nullptr && text->text == "partial";
             });
       }));
+}
+
+namespace {
+struct SavedOneShotSummary {
+  summary_context_test::Fixture source;
+  MemoryStore store;
+  std::optional<summary_context_test::Summary> summary;
+  std::optional<domain::ConversationSummaryActivation> activation;
+  SavedOneShotSummary() {
+    source.source("old-story", "Original continuity facts remain inspectable.");
+    summary =
+        source.summary("story-summary", {make_id<domain::RunId>("old-story")},
+                       "Reviewed continuity facts and unfinished work.");
+    activation = source.activate(*summary);
+    source.policy(domain::ConversationMode::rolling);
+    store.sessions.emplace(
+        source.log.session_id(),
+        storage::SessionInfo{
+            source.log.session_id(), {}, {}, source.log.last_sequence()});
+    store.histories[source.log.session_id()] = source.log.events();
+  }
+  auto request() const -> surfaces::OneShotRequest {
+    return {"Continue the task",
+            {},
+            make_id<domain::ModelId>("model"),
+            surfaces::OneShotRequest::SessionMode::resume,
+            source.log.session_id()};
+  }
+};
+} // namespace
+TEST_CASE("one-shot refuses changed or unavailable approved summary sources "
+          "before dispatch",
+          "[one-shot][summary][failure]") {
+  SavedOneShotSummary saved;
+  auto& history = saved.store.histories.at(saved.source.log.session_id());
+  SECTION("source text no longer matches the summary seal") {
+    auto source = std::ranges::find_if(history, [](const auto& event) {
+      return event.metadata.run_id == make_id<domain::RunId>("old-story") &&
+             std::holds_alternative<domain::UserContentAdded>(event.payload);
+    });
+    REQUIRE(source != history.end());
+    std::get<domain::UserContentAdded>(source->payload).message.content = {
+        domain::TextBlock{"Substituted source"}};
+  }
+  SECTION("source run is unavailable") {
+    std::erase_if(history, [](const auto& event) {
+      return event.metadata.run_id == make_id<domain::RunId>("old-story");
+    });
+  }
+  FakeModels models;
+  ConversationBackend backend;
+  surfaces::OneShotSurface surface{
+      backend, models, saved.store, {1024U * 1024U, 16}};
+  std::ostringstream output, error;
+  const auto before = history;
+  const auto result = surface.run(saved.request(), output, error);
+  REQUIRE_FALSE(result);
+  CHECK(backend.captured.empty());
+  CHECK(history == before);
+  CHECK(saved.store.append_calls == 0);
+}
+TEST_CASE("one-shot resumes approved rolling summary through an actual tool "
+          "continuation",
+          "[one-shot][summary][tools][recovery]") {
+  SavedOneShotSummary saved;
+  const auto expected =
+      runtime::prepare_conversation_summary_context(saved.source.log);
+  REQUIRE(expected);
+  REQUIRE(expected->summaries.size() == 1);
+  REQUIRE(expected->content.size() == 1);
+  FakeModels models;
+  ToolLoopBackend backend;
+  const auto invocation = make_id<domain::InvocationId>("lookup-call");
+  auto executor = std::make_shared<testing::ScriptedToolExecutor>(
+      std::vector<testing::ScriptedToolExchange>{
+          {{invocation,
+            std::nullopt,
+            "lookup",
+            runtime::ValidatedToolArguments{{"application/json", "{}"}},
+            {},
+            {}},
+           testing::ToolStreamScript{
+               {runtime::ToolExecutionEvent{
+                    runtime::ToolResult{{domain::TextBlock{"done"}}}},
+                testing::ToolEndOfStream{}}}}});
+  runtime::ToolRegistry registry;
+  REQUIRE(registry.register_tool(
+      {"lookup",
+       "Look up a value",
+       {"application/schema+json", R"({"type":"object"})"},
+       {},
+       {}},
+      executor));
+  auto tools = registry.snapshot();
+  REQUIRE(tools);
+  surfaces::OneShotDependencies dependencies;
+  dependencies.tools = *tools;
+  surfaces::OneShotSurface surface{
+      backend, models, saved.store, {1024U * 1024U, 16}, nullptr, dependencies};
+  std::ostringstream output, error;
+  const auto original = saved.store.histories.at(saved.source.log.session_id());
+  const auto result = surface.run(saved.request(), output, error);
+  INFO((result ? "completed" : result.error().message));
+  REQUIRE(result);
+  CHECK(result->session_id == saved.source.log.session_id());
+  REQUIRE(backend.captured.size() == 2);
+  REQUIRE(executor->recorded_invocations().size() == 1);
+  CHECK(executor->remaining_exchanges() == 0);
+  const auto& first = backend.captured.front().context;
+  const auto& continued = backend.captured.back().context;
+  const auto& admitted = expected->summaries.front();
+  const auto summary = std::ranges::find(first.entries, admitted.entry_id,
+                                         &domain::ContextEntry::entry_id);
+  REQUIRE(summary != first.entries.end());
+  CHECK(summary->kind == domain::ContextEntryKind::evidence);
+  CHECK_FALSE(summary->instruction_layer);
+  CHECK(summary->message == expected->content.front().message);
+  CHECK(summary->provenance == admitted.provenance);
+  CHECK(summary->order == admitted.order);
+  CHECK(summary->estimated_tokens == admitted.estimated_tokens);
+  const auto retained = std::ranges::find(continued.entries, admitted.entry_id,
+                                          &domain::ContextEntry::entry_id);
+  REQUIRE(retained != continued.entries.end());
+  CHECK(*retained == *summary);
+  const auto frozen_summary = *retained;
+  for (const auto& request : backend.captured) {
+    CHECK(std::ranges::none_of(request.context.entries, [](const auto& entry) {
+      return entry.message.message_id ==
+                 make_id<domain::MessageId>("old-story-user") ||
+             entry.message.message_id ==
+                 make_id<domain::MessageId>("story-summary-task") ||
+             entry.message.message_id ==
+                 make_id<domain::MessageId>("story-summary-output");
+    }));
+  }
+  REQUIRE(continued.entries.size() == first.entries.size() + 2);
+  const auto& call = continued.entries[continued.entries.size() - 2];
+  REQUIRE(call.message.tool_calls.size() == 1);
+  CHECK(call.message.tool_calls.front().invocation_id == invocation);
+  CHECK(continued.entries.back().kind == domain::ContextEntryKind::tool_result);
+  CHECK(continued.entries.back().message.invocation_id == invocation);
+  auto& history = saved.store.histories.at(saved.source.log.session_id());
+  REQUIRE(history.size() > original.size());
+  CHECK(std::equal(original.begin(), original.end(), history.begin()));
+  const auto started = std::ranges::find_if(history, [&](const auto& event) {
+    return event.metadata.sequence > saved.source.log.last_sequence() &&
+           std::holds_alternative<domain::RunStarted>(event.payload);
+  });
+  REQUIRE(started != history.end());
+  CHECK(started->metadata.schema_version == 4);
+  const auto& attributes = std::get<domain::RunStarted>(started->payload);
+  REQUIRE(attributes.conversation_admission);
+  const auto& manifest = *attributes.conversation_admission;
+  CHECK(manifest.version == 2);
+  CHECK(manifest.mode == domain::ConversationMode::rolling);
+  CHECK(manifest.policy_revision == saved.source.revision);
+  CHECK(manifest.source_snapshot_sequence == saved.source.log.last_sequence());
+  CHECK(manifest.groups.empty());
+  CHECK(manifest.omitted_group_count == 1);
+  CHECK(manifest.summaries == expected->summaries);
+  CHECK(manifest.summaries.front().candidate == saved.activation->candidate);
+  CHECK(manifest.summaries.front().activation_event_id ==
+        saved.activation->activation_event_id);
+  CHECK(std::ranges::count_if(history, [](const auto& event) {
+          return std::holds_alternative<
+              domain::ConversationSummaryGenerationIntentRecorded>(
+              event.payload);
+        }) == 1);
+  CHECK(std::ranges::none_of(
+      std::span{history}.subspan(original.size()), [](const auto& event) {
+        const auto* start = std::get_if<domain::RunStarted>(&event.payload);
+        return start != nullptr &&
+               start->purpose == domain::RunPurpose::summary;
+      }));
+  const auto next = surface.run(saved.request(), output, error);
+  INFO((next ? "resumed again" : next.error().message));
+  REQUIRE(next);
+  CHECK(backend.captured.size() == 3);
+  const auto& resumed = backend.captured.back().context;
+  const auto restored = std::ranges::find(resumed.entries, admitted.entry_id,
+                                          &domain::ContextEntry::entry_id);
+  REQUIRE(restored != resumed.entries.end());
+  CHECK(*restored == frozen_summary);
+  CHECK(executor->recorded_invocations().size() == 1);
 }
