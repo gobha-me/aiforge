@@ -1,7 +1,10 @@
 #include "../131summarykernel/fixture.hpp"
 #include "../135summarycontext/fixture.hpp"
+#include <aiforge/detail/sha256.hpp>
 #include <aiforge/runtime/ask_user_tool.hpp>
+#include <aiforge/runtime/repository_context_controller.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
+#include <map>
 
 namespace {
 using namespace summary_context_test;
@@ -90,6 +93,69 @@ class Backend final : public backend::Backend,
   std::vector<backend::BackendRequest> m_requests;
 };
 
+class ChatRepositorySource final : public runtime::RepositoryContextSource {
+ public:
+  domain::RepositoryRootIdentity root{
+      id<domain::RepositoryId>("chat-repository"), "/repo"};
+  std::string instruction{"Keep changes bounded."};
+  std::string evidence{"int value = 1;\n"};
+  std::map<std::string, std::string> evidence_by_path;
+  std::string revision{"revision-one"};
+  bool unavailable{};
+  std::size_t observations{};
+  static auto hash(std::string_view text) -> domain::ContentDigest {
+    detail::Sha256 hash;
+    hash.update(std::as_bytes(std::span{text.data(), text.size()}));
+    return {"sha256", hash.finish(), text.size()};
+  }
+  auto identity() const noexcept -> std::string_view override {
+    return "chat-root-lease";
+  }
+  auto guarantees_pinned_read_only_sources() const noexcept -> bool override {
+    return true;
+  }
+  auto observe(repository::RepositorySnapshotLimits, std::stop_token)
+      -> std::expected<domain::RepositorySnapshot,
+                       repository::RepositorySnapshotError> override {
+    ++observations;
+    if (unavailable)
+      return std::unexpected(repository::RepositorySnapshotError{
+          repository::RepositorySnapshotErrorCode::not_found, "unavailable"});
+    return domain::RepositorySnapshot{
+        root,
+        domain::VcsState{"git", "sha1", domain::VcsHeadKind::branch, "main",
+                         std::string(40, 'a')},
+        {},
+        hash(revision),
+        std::chrono::sys_time<std::chrono::milliseconds>{1ms}};
+  }
+  auto discover(repository::ProjectInstructionRequest request, std::stop_token)
+      -> std::expected<domain::ProjectInstructionDiscovery,
+                       repository::ProjectInstructionError> override {
+    const auto snapshot = domain::snapshot_identity(request.baseline);
+    return domain::ProjectInstructionDiscovery{
+        snapshot,
+        request.target_subtree,
+        {{id<domain::ProjectInstructionId>("chat-project-instruction"),
+          {snapshot, "AGENTS.md", hash(instruction), std::nullopt},
+          "",
+          instruction,
+          0,
+          1}}};
+  }
+  auto read(repository::ExactSourceReadRequest request, std::stop_token)
+      -> std::expected<repository::ExactSourceReadResult,
+                       repository::ExactSourceEditError> override {
+    const auto found = evidence_by_path.find(request.relative_path);
+    const auto& content =
+        found == evidence_by_path.end() ? evidence : found->second;
+    return repository::ExactSourceReadResult{
+        {domain::snapshot_identity(request.baseline), request.relative_path,
+         hash(content), std::nullopt},
+        content};
+  }
+};
+
 struct ChatFixture {
   Fixture source;
   summary_kernel_test::Store store;
@@ -101,7 +167,12 @@ struct ChatFixture {
   std::optional<Summary> summary;
   std::optional<domain::ConversationSummaryActivation> activation;
 
-  ChatFixture() {
+  ChatRepositorySource repository_source;
+  runtime::RepositoryContextController repository_controller{
+      repository_source, repository_source.root};
+  bool repository_enabled{};
+
+  explicit ChatFixture(bool dev = false) : repository_enabled(dev) {
     runtime::ToolRegistry registry;
     REQUIRE(runtime::register_ask_user_tool(registry, true));
     auto registered = registry.snapshot();
@@ -118,6 +189,12 @@ struct ChatFixture {
   auto reopen() -> void {
     surfaces::ChatSessionDependencies dependencies;
     dependencies.tools = tools;
+    if (repository_enabled) {
+      dependencies.repository_id = repository_source.root.repository_id;
+      dependencies.repository_context_controller = &repository_controller;
+      dependencies.repository_context_selection =
+          runtime::RepositoryContextRequest{"", 1, {"src/value.cpp"}};
+    }
     dependencies.identity_suffix_source = [counter = identity] {
       return ++*counter;
     };
@@ -162,6 +239,9 @@ struct ChatFixture {
         {{id<domain::QuestionId>("format"), {"short"}, {}}});
     INFO((answered ? "answered" : answered.error().message));
     REQUIRE(answered);
+    finish();
+  }
+  auto finish() -> void {
     for (unsigned attempt = 0; attempt < 1000 && chat->active(); ++attempt) {
       const auto drained = chat->drain();
       INFO((drained ? "drained" : drained.error().message));
@@ -248,4 +328,72 @@ TEST_CASE("Chat restores exact summary evidence and keeps the active rolling "
   CHECK(std::ranges::none_of(next.entries, [](const auto& entry) {
     return entry.message.role == domain::Role::evidence;
   }));
+}
+
+TEST_CASE("direct recovered Dev question decisions freeze summaries before "
+          "a later disable",
+          "[summarychat][repository][freeze]") {
+  ChatFixture f{true};
+  f.pending();
+  const auto original = f.backend.requests().front().context;
+  f.reopen();
+  const auto question = f.chat->pending_question_input();
+  REQUIRE(question);
+  // Deliberately make the decision before the first resumed drain.
+  SECTION("answer") {
+    REQUIRE(f.chat->answer_questions(
+        question->run_id, question->invocation_id,
+        {{id<domain::QuestionId>("format"), {"short"}, {}}}));
+  }
+  SECTION("cancel question") {
+    REQUIRE(f.chat->cancel_questions(question->run_id, question->invocation_id,
+                                     "Use defaults"));
+  }
+  const auto policy = f.chat->conversation_policy();
+  REQUIRE(policy);
+  const auto disabled = f.chat->disable_conversation_summary(
+      policy->policy.revision, f.activation->candidate,
+      f.activation->activation_event_id);
+  INFO((disabled ? "disabled" : disabled.error().message));
+  REQUIRE(disabled);
+  REQUIRE(disabled->size() == 3);
+  REQUIRE(runtime::recorded_conversation_summaries(f.chat->event_log()));
+  CHECK(runtime::recorded_conversation_summaries(f.chat->event_log())
+            ->active.empty());
+  f.finish();
+  REQUIRE_FALSE(f.chat->blocked_recovery());
+  const auto requests = f.backend.requests();
+  REQUIRE(requests.size() == 2);
+  const auto evidence =
+      std::ranges::find_if(original.entries, [](const auto& entry) {
+        return std::string{entry.entry_id.value()}.starts_with("summary-");
+      });
+  REQUIRE(evidence != original.entries.end());
+  const auto resumed =
+      std::ranges::find(requests.back().context.entries, evidence->entry_id,
+                        &domain::ContextEntry::entry_id);
+  REQUIRE(resumed != requests.back().context.entries.end());
+  CHECK(*resumed == *evidence);
+}
+
+TEST_CASE("Chat summary disable refuses stale reviews and failed persistence",
+          "[summarychat][disable][failure]") {
+  ChatFixture f;
+  const auto before = f.store.history;
+  const auto policy = f.chat->conversation_policy();
+  REQUIRE(policy);
+  auto revision = policy->policy.revision;
+  SECTION("stale revision") {
+    ++revision;
+  }
+  SECTION("storage refuses commit") {
+    f.store.fail_append = true;
+  }
+  const auto disabled = f.chat->disable_conversation_summary(
+      revision, f.activation->candidate, f.activation->activation_event_id);
+  REQUIRE_FALSE(disabled);
+  CHECK_FALSE(disabled.error().effect_may_have_applied);
+  CHECK(f.store.history == before);
+  CHECK(f.chat->event_log().events() == before);
+  CHECK(f.backend.requests().empty());
 }

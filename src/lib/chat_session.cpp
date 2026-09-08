@@ -1347,7 +1347,54 @@ auto ChatSession::set_conversation_policy(
   }
 }
 
-auto ChatSession::validate_recovered_pending_run()
+auto ChatSession::disable_conversation_summary(
+    std::uint64_t expected_policy_revision,
+    domain::ConversationSummaryVersion candidate,
+    domain::EventId activation_event_id)
+    -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
+  bool committed{};
+  try {
+    if (m_impl->stop_token.stop_requested())
+      return error(ChatSessionErrorCode::cancelled,
+                   "conversation summary disable cancelled");
+    const auto suffix = m_impl->identity_suffix_source();
+    auto run = make_id<domain::RunId>("summary-disable", suffix);
+    auto surface = make_id<domain::SurfaceId>("session-policy", suffix);
+    auto workspace = make_id<domain::WorkspaceId>("chat", suffix);
+    auto permission = make_id<domain::PermissionProfileId>("observe", suffix);
+    if (!run || !surface || !workspace || !permission)
+      return error(ChatSessionErrorCode::internal_failure,
+                   "conversation summary identity generation failed");
+    const auto before = m_impl->kernel->event_log().events().size();
+    auto changed = m_impl->kernel->disable_conversation_summary(
+        {*run,
+         {*surface, *workspace,
+          m_impl->permission_profile_id.value_or(*permission),
+          m_impl->persona_document
+              ? std::optional<domain::PersonaId>{m_impl->persona_document
+                                                     ->reference.persona_id}
+              : std::nullopt,
+          std::nullopt, domain::RunPurpose::control},
+         m_impl->kernel->event_log().last_sequence(),
+         expected_policy_revision,
+         std::move(candidate),
+         std::move(activation_event_id)});
+    if (!changed) return std::unexpected(kernel_error(changed.error()));
+    committed = true;
+    const auto& events = m_impl->kernel->event_log().events();
+    return std::vector<domain::RunEvent>{
+        events.begin() + static_cast<std::ptrdiff_t>(before), events.end()};
+  } catch (...) {
+    return std::unexpected(
+        ChatSessionError{ChatSessionErrorCode::internal_failure,
+                         committed ? "conversation summary disabled but its "
+                                     "result could not be returned"
+                                   : "conversation summary disable failed",
+                         false, committed});
+  }
+}
+
+auto ChatSession::validate_recovered_pending_run(bool repository_validated)
     -> std::expected<void, ChatSessionError> {
   const auto run_id = m_impl->kernel->active_run_id();
   if (!run_id) {
@@ -1357,9 +1404,15 @@ auto ChatSession::validate_recovered_pending_run()
       return std::unexpected(m_impl->recovery_block->reason);
   }
   if (m_impl->recovered_sources_pinned) return {};
+  const bool previous_repository_pin = m_impl->repository_recovery_pinned;
   auto validated = load_recovered_pending_sources();
   if (validated) validated = validate_recovered_memory_capacity();
+  // Decision callers have already completed the exact repository proof.
+  // Freeze summaries only after the remaining source/capacity checks succeed.
+  if (validated && repository_validated)
+    m_impl->repository_recovery_pinned = true;
   if (validated) validated = pin_recovered_summary_sources();
+  if (!validated) m_impl->repository_recovery_pinned = previous_repository_pin;
   if (!validated && run_id &&
       validated.error().code != ChatSessionErrorCode::cancelled) {
     m_impl->recovery_block =
@@ -2730,7 +2783,7 @@ auto ChatSession::decide_tool_approval(
       return {};
     }
   }
-  if (auto validated = validate_recovered_pending_run(); !validated) {
+  if (auto validated = validate_recovered_pending_run(true); !validated) {
     return std::unexpected(std::move(validated.error()));
   }
   const auto before = m_impl->kernel->event_log().events().size();
@@ -2764,7 +2817,7 @@ auto ChatSession::answer_questions(const domain::RunId& run_id,
     };
     return {};
   }
-  if (auto validated = validate_recovered_pending_run(); !validated) {
+  if (auto validated = validate_recovered_pending_run(true); !validated) {
     return std::unexpected(std::move(validated.error()));
   }
   const auto before = m_impl->kernel->event_log().events().size();
@@ -2798,7 +2851,7 @@ auto ChatSession::cancel_questions(const domain::RunId& run_id,
     };
     return {};
   }
-  if (auto validated = validate_recovered_pending_run(); !validated) {
+  if (auto validated = validate_recovered_pending_run(true); !validated) {
     return std::unexpected(std::move(validated.error()));
   }
   const auto before = m_impl->kernel->event_log().events().size();
