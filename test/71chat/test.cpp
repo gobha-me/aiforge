@@ -4154,6 +4154,37 @@ TEST_CASE(
   REQUIRE((*session)->request_repository_submit("ask first"));
   REQUIRE((*session)->complete_repository_work(
       prepare_chat_repository(**session, controller)));
+  // The owner must complete a fresh proof for the queued tool launch as well
+  // as for submit and the later answer. A plain drain cannot grant it.
+  for (int attempt = 0; attempt < 200 && !(*session)->pending_repository_work();
+       ++attempt) {
+    const auto events = (*session)->drain();
+    INFO((events ? "observed" : events.error().message));
+    REQUIRE(events);
+    if (events->empty()) std::this_thread::sleep_for(2ms);
+  }
+  const auto dispatch_work = (*session)->pending_repository_work();
+  REQUIRE(dispatch_work);
+  CHECK(dispatch_work->token.purpose ==
+        surfaces::ChatRepositoryWorkPurpose::continuation);
+  CHECK(std::holds_alternative<domain::RepositoryContextAdmission>(
+      dispatch_work->input));
+  const auto before_dispatch = (*session)->event_log().events();
+  CHECK(std::ranges::none_of(before_dispatch, [](const auto& event) {
+    return std::holds_alternative<domain::ToolStarted>(event.payload);
+  }));
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    REQUIRE((*session)->drain());
+    CHECK_FALSE((*session)->pending_question_input());
+    REQUIRE((*session)->pending_repository_work());
+    CHECK((*session)->pending_repository_work()->token == dispatch_work->token);
+  }
+  CHECK((*session)->event_log().events() == before_dispatch);
+  CHECK(backend.requests.size() == 1);
+  const auto launched = (*session)->complete_repository_work(
+      prepare_chat_repository(**session, controller));
+  INFO((launched ? "tool proof committed" : launched.error().message));
+  REQUIRE(launched);
   const auto pending = drain_to_question(**session);
   REQUIRE((*session)->answer_questions(
       pending.run_id, pending.invocation_id,
