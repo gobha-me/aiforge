@@ -337,3 +337,62 @@ TEST_CASE("Chat context inspection distinguishes active frozen admission from "
   f.drain();
   CHECK(f.backend.requests().size() == 1);
 }
+
+TEST_CASE("Chat summary preview inspection and submit share optional evidence "
+          "accounting",
+          "[chatsummarypreview][repository][admission]") {
+  Fixture f;
+  const auto candidate = f.candidate();
+  rolling(f);
+  auto source = std::make_shared<ChatRepositorySource>();
+  source->evidence_by_path["large.cpp"] = std::string(200000, 'x');
+  source->evidence_by_path["small.cpp"] = "small optional evidence";
+  runtime::RepositoryContextController controller{*source, source->root};
+  f.dependencies.repository_id = source->root.repository_id;
+  f.dependencies.repository_context_controller = &controller;
+  f.dependencies.repository_context_selection =
+      runtime::RepositoryContextRequest{"", 1, {"large.cpp", "small.cpp"}};
+  f.reopen();
+  const auto preview =
+      f.chat->preview_conversation_summary(version(candidate), {}, "draft");
+  REQUIRE(preview);
+  REQUIRE(f.chat->apply_conversation_summary(*preview, "draft"));
+  const auto inspection = f.chat->inspect_conversation_context("draft");
+  REQUIRE(inspection);
+  REQUIRE_FALSE(inspection->preparation_error);
+  REQUIRE(inspection->next_context);
+  REQUIRE(inspection->next_admission);
+  CHECK(inspection->next_context->estimated_input_tokens ==
+        preview->context().estimated_input_tokens);
+  const auto submitted = f.chat->submit("draft");
+  INFO((submitted ? "submitted" : submitted.error().message));
+  REQUIRE(submitted);
+  f.drain();
+  const auto requests = f.backend.requests();
+  REQUIRE(requests.size() == 2);
+  const auto& actual = requests.back().context;
+  CHECK(actual.estimated_input_tokens ==
+        inspection->next_context->estimated_input_tokens);
+  CHECK(actual.capacity == inspection->next_context->capacity);
+  const auto& events = f.chat->event_log().events();
+  const auto start = std::ranges::find_if(events, [&](const auto& event) {
+    return event.metadata.run_id == submitted->run_id &&
+           std::holds_alternative<domain::RunStarted>(event.payload);
+  });
+  REQUIRE(start != events.end());
+  const auto& started = std::get<domain::RunStarted>(start->payload);
+  REQUIRE(started.conversation_admission);
+  CHECK(started.conversation_admission->mandatory_input_tokens ==
+        inspection->next_admission->mandatory_input_tokens);
+  const auto repository = runtime::recorded_repository_context_admission(
+      f.chat->event_log(), submitted->run_id);
+  REQUIRE(repository);
+  REQUIRE(*repository);
+  REQUIRE((**repository).evidence.size() == 2);
+  CHECK((**repository).evidence[0].decision ==
+        domain::RepositoryContextDecision::omitted_budget);
+  CHECK((**repository).evidence[1].decision ==
+        domain::RepositoryContextDecision::admitted);
+  CHECK(domain::repository_context_admission_matches_context(**repository,
+                                                             actual));
+}

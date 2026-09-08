@@ -7,6 +7,7 @@
 #include <aiforge/runtime/memory_tool.hpp>
 #include <aiforge/runtime/persona.hpp>
 #include <aiforge/runtime/session_context.hpp>
+#include <aiforge/runtime/session_evidence.hpp>
 #include <aiforge/runtime/tool_profiles.hpp>
 #include <aiforge/runtime/user_global_instructions.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
@@ -33,6 +34,14 @@ namespace {
                          const bool retryable = false)
     -> std::unexpected<ChatSessionError> {
   return std::unexpected(ChatSessionError{code, std::move(message), retryable});
+}
+
+auto evidence_error(const runtime::SessionEvidenceError& failure)
+    -> ChatSessionError {
+  return {failure.code == runtime::SessionEvidenceErrorCode::cancelled
+              ? ChatSessionErrorCode::cancelled
+              : ChatSessionErrorCode::context_failed,
+          failure.message, false};
 }
 
 [[nodiscard]] auto valid_text(const std::string_view value) -> bool {
@@ -557,70 +566,6 @@ auto legacy_context(const domain::SessionEventLog& log,
                     const std::optional<domain::RunId>& run_id) -> bool {
   const auto* attributes = context_run_attributes(log, run_id);
   return attributes == nullptr || !attributes->conversation_admission;
-}
-
-auto finalize_conversation_admission(domain::ConversationAdmission& admission,
-                                     const domain::ConstructedContext& context)
-    -> std::expected<void, ChatSessionError> {
-  std::set<domain::ContextEntryId> history;
-  for (const auto& group : admission.groups)
-    for (const auto& entry : group.entries)
-      history.insert(entry.entry_id);
-  std::uint64_t mandatory{};
-  for (const auto& entry : context.entries) {
-    if (history.contains(entry.entry_id)) continue;
-    if (entry.estimated_tokens >
-        std::numeric_limits<std::uint64_t>::max() - mandatory)
-      return error(ChatSessionErrorCode::context_failed,
-                   "conversation admission accounting overflowed");
-    mandatory += entry.estimated_tokens;
-  }
-  admission.mandatory_input_tokens = mandatory;
-  auto sealed = domain::seal_conversation_admission(admission);
-  if (!sealed)
-    return error(ChatSessionErrorCode::context_failed, sealed.error().message);
-  return {};
-}
-
-struct SelectedChatRepository {
-  domain::ConstructedContext context;
-  domain::RepositoryContextAdmission admission;
-};
-auto select_chat_repository(domain::ContextBuildInput input,
-                            runtime::PreparedRepositoryContext& prepared)
-    -> std::expected<SelectedChatRepository, ChatSessionError> {
-  runtime::ContextSelectionRequest selection;
-  selection.capacity = input.capacity;
-  selection.instructions = input.instructions;
-  for (const auto& content_entry : input.content) {
-    selection.candidates.push_back(
-        {content_entry,
-         content_entry.kind == domain::ContextContentKind::tool_result
-             ? runtime::ContextBudgetClass::tool_result
-             : runtime::ContextBudgetClass::conversation,
-         runtime::ContextRepresentation::direct,
-         domain::EvidenceFreshness::current, true, 0, std::nullopt});
-  }
-  for (std::size_t index{}; index < prepared.evidence.items.size(); ++index) {
-    const auto order =
-        static_cast<std::uint64_t>(input.content.size() + index + 1);
-    prepared.evidence.items[index].order = order;
-    prepared.admission.evidence[index].order = order;
-  }
-  if (!prepared.evidence.items.empty())
-    selection.parcels.push_back(prepared.evidence);
-  auto selected =
-      runtime::ContextBuilder{}.select_and_build(std::move(selection));
-  if (!selected)
-    return error(ChatSessionErrorCode::context_failed,
-                 selected.error().message);
-  auto admission =
-      runtime::finalize_repository_context_admission(prepared, *selected);
-  if (!admission)
-    return error(ChatSessionErrorCode::context_failed,
-                 admission.error().message);
-  return SelectedChatRepository{std::move(selected->context),
-                                std::move(*admission)};
 }
 
 auto append_recovered_user_input(
@@ -1731,20 +1676,16 @@ struct SummaryFinalContext {
 };
 auto final_summary_context(
     const runtime::SummaryPreview& preview,
-    std::optional<runtime::PreparedRepositoryContext>& repository)
+    const std::optional<runtime::PreparedRepositoryContext>& repository,
+    std::stop_token stop)
     -> std::expected<SummaryFinalContext, ChatSessionError> {
-  if (repository) {
-    auto selected =
-        select_chat_repository(preview.context().input, *repository);
-    if (!selected) return std::unexpected(selected.error());
-    return SummaryFinalContext{std::move(selected->context),
-                               std::move(selected->admission)};
-  }
-  auto built = runtime::ContextBuilder{}.build(preview.context().input);
-  if (!built)
-    return error(ChatSessionErrorCode::context_failed, built.error().message);
-  return SummaryFinalContext{std::move(*built), {}};
+  auto selected = runtime::select_session_evidence(
+      preview.context(), repository, std::nullopt, stop);
+  if (!selected) return std::unexpected(evidence_error(selected.error()));
+  return SummaryFinalContext{std::move(selected->context),
+                             std::move(selected->repository_admission)};
 }
+
 } // namespace
 
 namespace {
@@ -1850,25 +1791,14 @@ auto ChatSession::inspect_conversation_context(std::string draft)
     auto decisions = inspect_selection_decisions(
         log, result, prepared->conversation_admission, m_impl->stop_token);
     if (!decisions) return std::unexpected(decisions.error());
-    auto built = runtime::ContextBuilder{}.build(prepared->input);
-    if (*repository) {
-      auto selected = select_chat_repository(prepared->input, **repository);
-      if (!selected) {
-        result.preparation_error = selected.error();
-        return result;
-      }
-      built = std::move(selected->context);
-    }
-    if (!built) {
-      result.preparation_error = ChatSessionError{
-          ChatSessionErrorCode::context_failed, built.error().message, false};
+    auto selected = runtime::select_session_evidence(
+        *prepared, *repository, std::nullopt, m_impl->stop_token);
+    if (!selected) {
+      result.preparation_error = evidence_error(selected.error());
       return result;
     }
-    auto finalized = finalize_conversation_admission(
-        prepared->conversation_admission, *built);
-    if (!finalized) return std::unexpected(finalized.error());
-    result.next_context = std::move(*built);
-    result.next_admission = std::move(prepared->conversation_admission);
+    result.next_context = std::move(selected->context);
+    result.next_admission = std::move(selected->session.conversation_admission);
     return result;
   } catch (...) {
     return error(ChatSessionErrorCode::internal_failure,
@@ -1910,7 +1840,8 @@ auto ChatSession::preview_conversation_summary(
     if (!review)
       return error(ChatSessionErrorCode::context_failed, review.error().message,
                    review.error().retryable);
-    auto final = final_summary_context(*review, *repository);
+    auto final =
+        final_summary_context(*review, *repository, m_impl->stop_token);
     if (!final) return std::unexpected(final.error());
     return ChatSummaryPreview{std::make_shared<ChatSummaryReviewData>(
         ChatSummaryReviewData{std::move(*review), identity,
@@ -1937,7 +1868,8 @@ auto ChatSession::apply_conversation_summary(const ChatSummaryPreview& preview,
     if (!input) return std::unexpected(input.error());
     // Rebuild the optional Dev evidence with the reviewed base. The controller
     // separately rebuilds that base against current draft/model/memory below.
-    auto final = final_summary_context(preview.m_data->review, *repository);
+    auto final = final_summary_context(preview.m_data->review, *repository,
+                                       m_impl->stop_token);
     if (!final) return std::unexpected(final.error());
     if (final->repository != preview.m_data->repository ||
         final->context != preview.m_data->context)
@@ -2855,40 +2787,15 @@ auto ChatSession::submit_prepared(std::string prompt,
       return error(ChatSessionErrorCode::context_failed,
                    session_context.error().message,
                    session_context.error().retryable);
-    input = std::move(session_context->input);
-    auto memory_selection = std::move(session_context->memory_selection);
+    auto selected = runtime::select_session_evidence(
+        *session_context, prepared, std::nullopt, m_impl->stop_token);
+    if (!selected) return std::unexpected(evidence_error(selected.error()));
+    auto continuation_context = std::move(selected->session.input);
+    auto memory_selection = std::move(selected->session.memory_selection);
     auto conversation_admission =
-        std::move(session_context->conversation_admission);
-    auto continuation_context = input;
-    std::optional<domain::RepositoryContextAdmission> repository_admission;
-    std::optional<domain::ConstructedContext> context;
-    if (prepared) {
-      auto selected = select_chat_repository(input, *prepared);
-      if (!selected) return std::unexpected(selected.error());
-      repository_admission = selected->admission;
-      for (const auto& entry : selected->context.entries) {
-        if (std::ranges::any_of(repository_admission->evidence,
-                                [&](const auto& ref) {
-                                  return ref.entry_id == entry.entry_id;
-                                }))
-          continuation_context.content.push_back(
-              {entry.entry_id, domain::ContextContentKind::evidence,
-               entry.message, entry.provenance, entry.order,
-               entry.estimated_tokens});
-      }
-      context = std::move(selected->context);
-    } else {
-      auto built = runtime::ContextBuilder{}.build(std::move(input));
-      if (!built)
-        return error(ChatSessionErrorCode::context_failed,
-                     "prompt exceeds model context capacity");
-      context = std::move(*built);
-    }
-
-    if (auto finalized =
-            finalize_conversation_admission(conversation_admission, *context);
-        !finalized)
-      return std::unexpected(finalized.error());
+        std::move(selected->session.conversation_admission);
+    auto repository_admission = std::move(selected->repository_admission);
+    auto context = std::move(selected->context);
     const auto before = m_impl->kernel->event_log().events().size();
     auto provenance = m_impl->provenance;
     if (provenance) {
@@ -2913,7 +2820,7 @@ auto ChatSession::submit_prepared(std::string prompt,
         *inference_id,
         *assistant_message_id,
         m_impl->model_id,
-        std::move(*context),
+        std::move(context),
         tool_profile->effective_tools.declarations(),
         m_impl->generation_options};
     if (auto sealed = domain::seal_memory_selection(memory_selection);

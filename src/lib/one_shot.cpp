@@ -6,6 +6,7 @@
 #include <aiforge/runtime/persona.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/runtime/session_context.hpp>
+#include <aiforge/runtime/session_evidence.hpp>
 #include <aiforge/runtime/user_global_instructions.hpp>
 #include <aiforge/surfaces/one_shot.hpp>
 #include <algorithm>
@@ -31,6 +32,19 @@ namespace {
                                   std::string message)
     -> std::unexpected<OneShotError> {
   return std::unexpected(OneShotError{code, std::move(message)});
+}
+
+[[nodiscard]] auto continuation_content_order(
+    std::span<const domain::ContextContentInput> content,
+    std::size_t additional_entries)
+    -> std::expected<std::uint64_t, OneShotError> {
+  std::uint64_t order{};
+  for (const auto& entry : content)
+    order = std::max(order, entry.order);
+  if (additional_entries > std::numeric_limits<std::uint64_t>::max() - order)
+    return one_shot_error(OneShotErrorCode::context_failed,
+                          "tool result context order exceeds bounds");
+  return order;
 }
 
 [[nodiscard]] auto load_user_global_document(
@@ -891,17 +905,21 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                                 : OneShotErrorCode::context_failed,
                             prepared_context.error().message);
     }
-    build_input = std::move(prepared_context->input);
-    auto context = runtime::ContextBuilder{}.build(build_input);
-    if (!context) {
-      return one_shot_error(OneShotErrorCode::context_failed,
-                            "one-shot input exceeds model context capacity");
+    auto selected = runtime::select_session_evidence(
+        *prepared_context, std::nullopt, std::nullopt, stop_token);
+    if (!selected) {
+      return one_shot_error(selected.error().code ==
+                                    runtime::SessionEvidenceErrorCode::cancelled
+                                ? OneShotErrorCode::cancelled
+                                : OneShotErrorCode::context_failed,
+                            selected.error().message);
     }
+    build_input = std::move(selected->session.input);
 
     backend::BackendRequest backend_request{*inference_id,
                                             *assistant_message_id,
                                             request.model_id,
-                                            std::move(*context),
+                                            std::move(selected->context),
                                             run_tools.declarations(),
                                             request.generation_options};
     if (request.provenance) {
@@ -925,9 +943,9 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
               ? std::optional<domain::PersonaId>{resolved_persona->document
                                                      ->reference.persona_id}
               : std::nullopt,
-          std::move(prepared_context->memory_selection),
+          std::move(selected->session.memory_selection),
           domain::RunPurpose::conversation,
-          std::move(prepared_context->conversation_admission)},
+          std::move(selected->session.conversation_admission)},
          std::move(user_message),
          std::move(backend_request),
          std::move(request.provenance),
@@ -994,6 +1012,10 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
         }
         if (tool_messages->size() > appended_tool_messages) {
           auto continuation_input = build_input;
+          auto order = continuation_content_order(continuation_input.content,
+                                                  tool_messages->size() -
+                                                      appended_tool_messages);
+          if (!order) return std::unexpected(std::move(order.error()));
           for (auto index = appended_tool_messages;
                index < tool_messages->size(); ++index) {
             const auto continuation_suffix = next_suffix();
@@ -1016,8 +1038,7 @@ auto OneShotSurface::run(OneShotRequest request, std::ostream& output,
                  std::move((*tool_messages)[index]),
                  {*source_id, std::string{"one-shot:tool-continuation"},
                   std::nullopt},
-                 static_cast<std::uint64_t>(continuation_input.content.size()) +
-                     1,
+                 ++*order,
                  *estimated});
           }
 
