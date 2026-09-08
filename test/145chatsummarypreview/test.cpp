@@ -352,6 +352,9 @@ TEST_CASE("Chat summary preview inspection and submit share optional evidence "
   f.dependencies.repository_context_controller = &controller;
   f.dependencies.repository_context_selection =
       runtime::RepositoryContextRequest{"", 1, {"large.cpp", "small.cpp"}};
+  // This accounting fixture has no durable conversational tool provenance.
+  // Its explicit repository evidence does not require model tools.
+  f.dependencies.tools = {};
   f.reopen();
   const auto preview =
       f.chat->preview_conversation_summary(version(candidate), {}, "draft");
@@ -370,6 +373,7 @@ TEST_CASE("Chat summary preview inspection and submit share optional evidence "
   f.drain();
   const auto requests = f.backend.requests();
   REQUIRE(requests.size() == 2);
+  CHECK(requests.back().tools.empty());
   const auto& actual = requests.back().context;
   CHECK(actual.estimated_input_tokens ==
         inspection->next_context->estimated_input_tokens);

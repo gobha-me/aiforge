@@ -1,7 +1,71 @@
 #include "../144chatsummary/fixture.hpp"
 #include <aiforge/adapters/interactive_chat_app.hpp>
+#include <condition_variable>
+#include <mutex>
 namespace {
 using namespace chat_summary_test;
+struct StreamEndGate {
+  std::mutex mutex;
+  std::condition_variable changed;
+  bool entered{}, released{};
+  auto wait() -> void {
+    std::unique_lock lock{mutex};
+    entered = true;
+    changed.notify_all();
+    changed.wait(lock, [&] { return released; });
+  }
+  auto await() -> bool {
+    std::unique_lock lock{mutex};
+    return changed.wait_for(lock, std::chrono::seconds{3},
+                            [&] { return entered; });
+  }
+  auto release() -> void {
+    {
+      const std::lock_guard lock{mutex};
+      released = true;
+    }
+    changed.notify_all();
+  }
+};
+class GatedStream final : public backend::BackendStream {
+ public:
+  GatedStream(std::unique_ptr<backend::BackendStream> stream,
+              std::shared_ptr<StreamEndGate> gate)
+      : m_stream(std::move(stream)), m_gate(std::move(gate)) {}
+  auto next(std::stop_token stop)
+      -> std::expected<std::optional<backend::BackendEvent>,
+                       backend::BackendError> override {
+    if (m_finished) m_gate->wait();
+    auto result = m_stream->next(stop);
+    if (result && *result &&
+        std::holds_alternative<backend::ResponseFinished>(**result))
+      m_finished = true;
+    return result;
+  }
+
+ private:
+  std::unique_ptr<backend::BackendStream> m_stream;
+  std::shared_ptr<StreamEndGate> m_gate;
+  bool m_finished{};
+};
+class GatedBackend final : public backend::Backend {
+ public:
+  explicit GatedBackend(summary_kernel_test::Store& store) : m_backend(store) {}
+  std::shared_ptr<StreamEndGate> end_gate;
+  auto requests() -> std::vector<backend::BackendRequest> {
+    return m_backend.requests();
+  }
+  auto start(backend::BackendRequest request, std::stop_token stop)
+      -> std::expected<std::unique_ptr<backend::BackendStream>,
+                       backend::BackendError> override {
+    auto stream = m_backend.start(std::move(request), stop);
+    if (!stream || !end_gate) return stream;
+    return std::make_unique<GatedStream>(std::move(*stream), end_gate);
+  }
+
+ private:
+  chat_summary_test::Backend m_backend;
+};
 class Editor final : public surfaces::DraftEditor {
  public:
   auto edit(std::string_view text, std::stop_token)
@@ -30,9 +94,17 @@ auto command(adapters::InteractiveChatApp& app, std::string text) -> void {
   app.on_event(termforge::PasteEvent{std::move(text)});
   app.on_event(key(termforge::Key::Enter));
 }
+auto running(adapters::InteractiveChatApp& app) -> bool {
+  termforge::Screen screen{120, 30};
+  app.on_render(screen);
+  std::string prefix;
+  for (int x = 0; x < 7; ++x)
+    prefix += screen.text_at(x, 29);
+  return prefix == "Running";
+}
 struct AppFixture {
   summary_kernel_test::Store store;
-  Backend backend{store};
+  GatedBackend backend{store};
   Models models;
   Editor editor;
   std::unique_ptr<adapters::InteractiveChatApp> app;
@@ -58,20 +130,25 @@ struct AppFixture {
     static_cast<void>(rendered(*app));
     app->on_start();
   }
+  auto inference_finished() -> bool {
+    const auto requests = backend.requests();
+    return !requests.empty() &&
+           std::ranges::any_of(app->events(), [&](const auto& event) {
+             const auto* finished =
+                 std::get_if<domain::InferenceFinished>(&event.payload);
+             return finished != nullptr &&
+                    finished->inference_id == requests.back().inference_id;
+           });
+  }
   auto drain() -> void {
     for (unsigned count{}; count < 1000; ++count) {
       app->on_tick(std::chrono::milliseconds{1});
-      const auto requests = backend.requests();
-      if (!requests.empty() &&
-          std::ranges::any_of(app->events(), [&](const auto& event) {
-            const auto* finished =
-                std::get_if<domain::InferenceFinished>(&event.payload);
-            return finished != nullptr &&
-                   finished->inference_id == requests.back().inference_id;
-          }))
-        break;
+      // ResponseFinished records InferenceFinished before provider EOF. The
+      // composer stays disabled until that trailing stream work is drained.
+      if (inference_finished() && !running(*app)) return;
       std::this_thread::sleep_for(std::chrono::milliseconds{1});
     }
+    FAIL("Context app did not become input-ready after inference completion");
   }
 };
 } // namespace
@@ -155,7 +232,20 @@ TEST_CASE("Context commands can preview and apply without opening a modal or "
           "submitting their text",
           "[contextapp][commands]") {
   AppFixture f;
+  auto gate = std::make_shared<StreamEndGate>();
+  f.backend.end_gate = gate;
+  struct Release {
+    std::shared_ptr<StreamEndGate> gate;
+    ~Release() { gate->release(); }
+  } release{gate};
   command(*f.app, "/context summary generate source-run");
+  REQUIRE(gate->await());
+  f.app->on_tick(std::chrono::milliseconds{1});
+  REQUIRE(f.inference_finished());
+  REQUIRE(running(*f.app));
+  CHECK(f.app->status_text().find("Summary generation finished") !=
+        std::string::npos);
+  gate->release();
   f.drain();
   REQUIRE(f.backend.requests().size() == 1);
   std::optional<domain::ConversationSummaryId> summary;
