@@ -44,6 +44,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   local_context_controller.cpp
   local_context_history.cpp
   local_source.cpp
+  local_source_grant.cpp
   local_source_worker.cpp
   model_catalog.cpp
   memory.cpp

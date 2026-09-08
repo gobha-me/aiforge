@@ -690,6 +690,12 @@ auto LocalFileSource::root_identity() const noexcept
     -> const domain::LocalRootIdentity& {
   return m_impl->identity;
 }
+auto LocalFileSource::session_id() const noexcept -> const domain::SessionId& {
+  return m_impl->session;
+}
+auto LocalFileSource::lease_generation() const noexcept -> std::uint64_t {
+  return m_impl->generation;
+}
 auto LocalFileSource::revoke() noexcept -> void {
   m_impl->revoked.store(true);
 }
@@ -732,6 +738,25 @@ auto grant_local_folder(domain::SessionId session_id,
       return std::unexpected(valid.error());
     return std::shared_ptr<LocalFileSource>{
         new LocalFileSource{std::move(implementation)}};
+  } catch (...) {
+    return failure(Code::internal_failure, "local folder grant failed");
+  }
+}
+
+auto LocalFileGrantFactory::grant(
+    const runtime::LocalFolderGrantRequest& request, std::stop_token stop)
+    -> std::expected<runtime::LocalFolderGrantResult,
+                     domain::LocalSourceError> {
+  try {
+    if (auto valid = runtime::validate_local_folder_grant_request(request);
+        !valid)
+      return std::unexpected(valid.error());
+    auto lease =
+        grant_local_folder(request.token.session_id, request.absolute_path,
+                           request.lease_generation, request.limits, stop);
+    if (!lease) return std::unexpected(lease.error());
+    return runtime::LocalFolderGrantResult{
+        request.token, (*lease)->root_identity(), std::move(*lease)};
   } catch (...) {
     return failure(Code::internal_failure, "local folder grant failed");
   }
