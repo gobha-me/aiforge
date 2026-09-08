@@ -580,7 +580,7 @@ auto recovered_conversation_input(const domain::SessionEventLog& log,
                                   std::uint64_t suffix)
     -> std::expected<std::vector<domain::ContextContentInput>, std::string> {
   const auto* attributes = context_run_attributes(log, run_id);
-  if (attributes == nullptr || !attributes->conversation_admission)
+  if (!run_id || attributes == nullptr || !attributes->conversation_admission)
     return detail::replayed_conversation(log, suffix);
   auto history = runtime::recover_conversation_context(
       log, *attributes->conversation_admission);
@@ -2435,7 +2435,13 @@ auto ChatSession::continue_if_ready()
     m_impl->active_context = base;
   }
 
+  std::uint64_t continuation_order{};
+  for (const auto& entry : base.content)
+    continuation_order = std::max(continuation_order, entry.order);
   for (auto& message : *tool_messages) {
+    if (continuation_order == std::numeric_limits<std::uint64_t>::max())
+      return error(ChatSessionErrorCode::context_failed,
+                   "tool continuation order overflowed");
     const auto message_suffix = m_impl->identity_suffix_source();
     auto entry_id =
         make_id<domain::ContextEntryId>("tool-result-entry", message_suffix);
@@ -2454,7 +2460,7 @@ auto ChatSession::continue_if_ready()
          std::move(message),
          {*source_id, std::string{"interactive:tool-continuation"},
           std::nullopt},
-         static_cast<std::uint64_t>(base.content.size()) + 1,
+         ++continuation_order,
          *estimated});
   }
   auto context = runtime::ContextBuilder{}.build(std::move(base));
