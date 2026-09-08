@@ -27,7 +27,13 @@ history projection uses one completed source run per group, including all
 eligible messages and complete tool exchanges. Failed/cancelled runs retain
 their complete user input as a user-only group; incomplete assistant/tool
 exchanges are excluded. Live runs and summary-producing or policy-control runs
-do not become ordinary historical groups.
+do not become ordinary historical groups. Groups follow their first source
+sequence, while entries retain provider message order. A tool validation error
+can be recorded before the assistant's completion event; its tool message still
+follows that assistant's tool call. Source completion sequences are positive and
+unique, not necessarily increasing in provider order. Extraction validates the
+source event graph instead of relabeling events to manufacture chronological
+completion references.
 
 The default policy is full history. It continues to reject an oversized request
 instead of silently changing a user's context policy. Explicit rolling mode

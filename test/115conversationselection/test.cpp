@@ -146,6 +146,9 @@ TEST_CASE("conversation selection rejects nonchronological sources",
   SECTION("duplicate event sequence") {
     value.groups[1].entries[0].event_sequence = 11;
   }
+  SECTION("source predates its user input") {
+    value.groups[0].entries[1].event_sequence = 9;
+  }
   SECTION("zero content order") {
     value.groups[0].entries[0].content.order = 0;
   }
@@ -427,6 +430,24 @@ TEST_CASE("empty history and retained failed user input have exact boundaries",
   const auto failed_user = runtime::select_conversation(value);
   REQUIRE(failed_user);
   CHECK(failed_user->selected_groups == value.groups);
+}
+
+TEST_CASE("early tool errors retain their true source while following the call",
+          "[conversationselection]") {
+  auto value = request(25);
+  value.groups = {tool_group()};
+  // Rejected proposals can terminate before the assistant's completion event.
+  // Provider order remains assistant, tools, answer.
+  value.groups[0].entries[1].event_sequence = 13;
+  value.groups[0].entries[2].event_sequence = 11;
+  value.groups[0].entries[3].event_sequence = 12;
+  const auto selected = runtime::select_conversation(value);
+  REQUIRE(selected);
+  CHECK(selected->selected_groups == value.groups);
+  --value.capacity.context_window_tokens;
+  const auto omitted = runtime::select_conversation(value);
+  REQUIRE(omitted);
+  CHECK(omitted->selected_groups.empty());
 }
 
 TEST_CASE("completed interleaved runs retain group and flattened message order",

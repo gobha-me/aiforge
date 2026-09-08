@@ -91,8 +91,7 @@ struct ValidationState {
   std::size_t entry_count{};
 
   auto validate_identity(const ConversationHistoryEntry& entry,
-                         const RunId& run_id, std::uint64_t& previous_sequence)
-      -> Status {
+                         const RunId& run_id) -> Status {
     const auto& value = entry.content;
     if (!events.insert(entry.completed_event_id).second ||
         !messages.insert(value.message.message_id).second ||
@@ -100,13 +99,12 @@ struct ValidationState {
         !sources.insert(value.provenance.source_id).second)
       return failure(Code::duplicate_identity,
                      "duplicate conversation source identity", run_id);
-    if (entry.event_sequence <= previous_sequence ||
+    if (entry.event_sequence < previous_group_sequence ||
         value.order <= previous_order ||
         !event_sequences.insert(entry.event_sequence).second)
       return failure(Code::invalid_chronology,
-                     "conversation sources must be strictly chronological",
+                     "conversation source sequence or message order is invalid",
                      run_id);
-    previous_sequence = entry.event_sequence;
     previous_order = value.order;
     if (value.estimated_tokens == 0 ||
         (value.provenance.source_location &&
@@ -221,9 +219,8 @@ auto validate_group_header(const ConversationHistoryGroup& group,
 
 auto validate_entry(const ConversationHistoryEntry& entry, std::size_t index,
                     const RunId& run_id, ValidationState& state,
-                    std::uint64_t& previous_sequence,
                     std::set<InvocationId>& pending) -> Status {
-  auto valid = state.validate_identity(entry, run_id, previous_sequence);
+  auto valid = state.validate_identity(entry, run_id);
   if (!valid) return valid;
   valid = validate_role(entry.content, index, run_id, pending);
   if (!valid) return valid;
@@ -238,13 +235,11 @@ auto validate_group(const ConversationHistoryGroup& group,
   if (!valid) return valid;
   std::set<InvocationId> pending;
   std::uint64_t tokens{};
-  std::uint64_t previous_sequence{};
   for (std::size_t index = 0; index < group.entries.size(); ++index) {
     if (state.stop.stop_requested())
       return failure(Code::cancelled, "selection cancelled");
     const auto& entry = group.entries[index];
-    valid = validate_entry(entry, index, group.run_id, state, previous_sequence,
-                           pending);
+    valid = validate_entry(entry, index, group.run_id, state, pending);
     if (!valid) return valid;
     if (!add_tokens(tokens, entry.content.estimated_tokens))
       return failure(Code::token_overflow,
