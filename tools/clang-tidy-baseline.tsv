@@ -266,7 +266,6 @@ src/lib/language_analysis.cpp	readability-function-cognitive-complexity	19fb4b55
 src/lib/language_analysis.cpp	readability-function-cognitive-complexity	78a03f55652885c89aa4	function 'valid_utf8_text' has cognitive complexity of 29 (threshold 20)
 src/lib/language_analysis.cpp	readability-implicit-bool-conversion	2ab4baa817f0cbd2b839	implicit conversion 'const KnowledgeEntity *' -> 'bool'
 src/lib/memory_controller.cpp	bugprone-implicit-widening-of-multiplication-result	9f5a24ccd2aebf5c8905	performing an implicit widening conversion to type 'unsigned long' of a multiplication performed in type 'unsigned int'
-src/lib/memory_controller.cpp	readability-function-cognitive-complexity	85ae13ff397c99c3d26d	function 'inspect' has cognitive complexity of 23 (threshold 20)
 src/lib/memory_projection.cpp	readability-function-cognitive-complexity	ff0aa8ad5577d19062f7	function 'apply' has cognitive complexity of 53 (threshold 20)
 src/lib/memory_projection.cpp	readability-implicit-bool-conversion	22cf9d9288e931c0cc94	implicit conversion 'const ProjectedMemoryRecord *' -> 'bool'
 src/lib/memory_projection.cpp	readability-implicit-bool-conversion	7012bedb39c15fcbe109	implicit conversion 'const ProjectedMemoryRecord *' -> 'bool'
