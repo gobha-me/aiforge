@@ -57,12 +57,12 @@ PC
       echo "Changed system journal dependency retained a stale capability result: ${kind}" >&2
       exit 1
     fi
-    if ! rg -q 'SystemdJournal target lacks required client headers or symbols' "${WORK_DIR}/${kind}-reconfigure.log"; then
+    if ! grep -Eq 'SystemdJournal target lacks required client headers or symbols' "${WORK_DIR}/${kind}-reconfigure.log"; then
       cat "${WORK_DIR}/${kind}-reconfigure.log" >&2
       exit 1
     fi
   fi
-  if ! rg -q 'SystemdJournal' "${WORK_DIR}/${kind}.log"; then
+  if ! grep -Eq 'SystemdJournal' "${WORK_DIR}/${kind}.log"; then
     cat "${WORK_DIR}/${kind}.log" >&2
     exit 1
   fi
