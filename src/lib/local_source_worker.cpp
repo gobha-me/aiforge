@@ -17,20 +17,25 @@ namespace {
 using Code = LocalSourceWorkerErrorCode;
 using SourceCode = domain::LocalSourceErrorCode;
 using Token = std::variant<LocalSourceRequestToken, LocalFolderGrantToken,
-                           LocalContextWorkToken, RepositoryContextWorkToken>;
+                           LocalContextWorkToken, RepositoryContextWorkToken,
+                           OpsObservationWorkToken>;
 using Request =
     std::variant<LocalSourceWorkRequest, LocalFolderGrantRequest,
-                 LocalContextWorkRequest, RepositoryContextWorkRequest>;
+                 LocalContextWorkRequest, RepositoryContextWorkRequest,
+                 OpsObservationWorkRequest>;
 using Port = std::variant<std::monostate, std::shared_ptr<LocalSourceReader>,
                           std::shared_ptr<LocalSourceGrantFactory>,
                           std::shared_ptr<LocalContextController>,
-                          std::shared_ptr<RepositoryContextController>>;
+                          std::shared_ptr<RepositoryContextController>,
+                          std::shared_ptr<OpsObservationSource>>;
 using ContextOutcome =
     std::expected<PreparedLocalContext, domain::LocalContextError>;
 using RepositoryOutcome =
     std::expected<PreparedRepositoryContext, domain::RepositoryContextError>;
+using OpsOutcome =
+    std::expected<domain::OpsObservation, OpsObservationSourceError>;
 using Result = std::variant<LocalSourceWorkResult, LocalFolderGrantResult,
-                            ContextOutcome, RepositoryOutcome>;
+                            ContextOutcome, RepositoryOutcome, OpsOutcome>;
 using Outcome = std::expected<Result, domain::LocalSourceError>;
 
 auto failure(Code code, std::string message)
@@ -317,6 +322,29 @@ auto invoke_repository(RepositoryContextController& controller,
         "repository context result does not match its work request"});
   return Result{std::move(result)};
 }
+auto valid_ops_work(const OpsObservationWorkRequest& request) -> bool {
+  const auto& token = request.token;
+  return token.session_epoch != 0 && token.request_id != 0 &&
+         token.session_id == token.observation.session_id &&
+         request.authority.validate(token.observation).has_value();
+}
+auto ops_error(OpsObservationSourceError error) -> OpsObservationSourceError {
+  if (error < OpsObservationSourceError::unavailable ||
+      error > OpsObservationSourceError::internal_failure)
+    return OpsObservationSourceError::invalid_result;
+  return error;
+}
+auto invoke_ops(OpsObservationSource& source,
+                const OpsObservationWorkRequest& request, std::stop_token stop)
+    -> Outcome {
+  auto result = source.observe(request.token.observation, stop);
+  if (!result)
+    result = std::unexpected(ops_error(result.error()));
+  else if (!domain::validate_ops_observation(
+               request.authority, request.token.observation, *result))
+    result = std::unexpected(OpsObservationSourceError::invalid_result);
+  return Result{std::move(result)};
+}
 template <typename Value>
 auto completion_error(domain::LocalSourceError error) {
   if constexpr (std::same_as<Value, ContextOutcome>) {
@@ -330,6 +358,10 @@ auto completion_error(domain::LocalSourceError error) {
             ? domain::RepositoryContextErrorCode::cancelled
             : domain::RepositoryContextErrorCode::internal_failure;
     return std::unexpected(repository_error({code, {}}));
+  } else if constexpr (std::same_as<Value, OpsOutcome>) {
+    return std::unexpected(error.code == SourceCode::cancelled
+                               ? OpsObservationSourceError::cancelled
+                               : OpsObservationSourceError::internal_failure);
   } else {
     return std::unexpected(std::move(error));
   }
@@ -386,6 +418,11 @@ auto invoke_job(const std::shared_ptr<Job>& job) -> Outcome {
     if (job->discarded)
       return source_failure(SourceCode::cancelled, "local work cancelled");
   }
+  if (const auto* request =
+          std::get_if<OpsObservationWorkRequest>(&job->request))
+    return invoke_ops(
+        *std::get<std::shared_ptr<OpsObservationSource>>(job->port), *request,
+        job->stop.get_token());
   if (const auto* request =
           std::get_if<RepositoryContextWorkRequest>(&job->request))
     return invoke_repository(
@@ -645,6 +682,40 @@ auto LocalSourceWorker::submit(
     return m_impl->submit(controller, std::move(token), std::move(request));
   } catch (...) {
     return failure(Code::internal_failure, "repository work submission failed");
+  }
+}
+auto LocalSourceWorker::submit(
+    const std::shared_ptr<OpsObservationSource>& source,
+    OpsObservationWorkRequest request)
+    -> std::expected<void, LocalSourceWorkerError> {
+  try {
+    if (!source || !source->guarantees_bound_read_only_observations() ||
+        !valid_ops_work(request) ||
+        source->target_binding() != request.token.observation.target)
+      return failure(Code::invalid_request,
+                     "bound Ops observation work request is invalid");
+    Token token = request.token;
+    return m_impl->submit(source, std::move(token), std::move(request));
+  } catch (...) {
+    return failure(Code::internal_failure, "Ops observation submission failed");
+  }
+}
+auto LocalSourceWorker::poll(const OpsObservationWorkToken& token)
+    -> std::expected<std::optional<OpsObservationWorkCompletion>,
+                     LocalSourceWorkerError> {
+  try {
+    return m_impl->poll<OpsObservationWorkCompletion, OpsOutcome>(token);
+  } catch (...) {
+    return failure(Code::internal_failure, "Ops observation delivery failed");
+  }
+}
+auto LocalSourceWorker::cancel(const OpsObservationWorkToken& token)
+    -> std::expected<void, LocalSourceWorkerError> {
+  try {
+    return m_impl->cancel(token);
+  } catch (...) {
+    return failure(Code::internal_failure,
+                   "Ops observation cancellation failed");
   }
 }
 auto LocalSourceWorker::poll(const RepositoryContextWorkToken& token)
