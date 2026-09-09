@@ -8,6 +8,7 @@
 
 #include <aiforge/runtime/local_context_controller.hpp>
 #include <aiforge/runtime/local_source_grant.hpp>
+#include <aiforge/runtime/ops_observation_source.hpp>
 #include <aiforge/runtime/repository_context_controller.hpp>
 
 namespace aiforge::runtime {
@@ -112,6 +113,18 @@ class LocalSourceWorker final {
   [[nodiscard]] auto submit(
       const std::shared_ptr<RepositoryContextController>& controller,
       RepositoryContextWorkRequest request)
+      -> std::expected<void, LocalSourceWorkerError>;
+  // Metadata preflight performs no IO. Accepted Ops jobs own their immutable
+  // authority/request and source until producer-side physical cleanup finishes.
+  // This snapshot check does not replace current target/log-policy invalidation
+  // by the application controller before delivering a completion.
+  [[nodiscard]] auto submit(const std::shared_ptr<OpsObservationSource>& source,
+                            OpsObservationWorkRequest request)
+      -> std::expected<void, LocalSourceWorkerError>;
+  [[nodiscard]] auto poll(const OpsObservationWorkToken& token)
+      -> std::expected<std::optional<OpsObservationWorkCompletion>,
+                       LocalSourceWorkerError>;
+  [[nodiscard]] auto cancel(const OpsObservationWorkToken& token)
       -> std::expected<void, LocalSourceWorkerError>;
   [[nodiscard]] auto poll(const RepositoryContextWorkToken& token)
       -> std::expected<std::optional<RepositoryContextWorkCompletion>,
