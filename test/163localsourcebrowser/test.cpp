@@ -1,4 +1,5 @@
 #include "../159foldergrant/fixture.hpp"
+#include "../169repositorywork/fixture.hpp"
 #include <aiforge/surfaces/local_source_browser.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -382,4 +383,75 @@ TEST_CASE("browser teardown revokes authority while a context worker retains "
   fixture.browser.reset();
   REQUIRE(fixture.factory->observation->revokes == 1);
   gate->release();
+}
+
+TEST_CASE("explicit browser deactivation clears visibility without reusing old "
+          "job identities") {
+  Fixture fixture;
+  auto gate = std::make_shared<Gate>();
+  fixture.factory->observation->grant_gate = gate;
+  Release release{gate};
+  REQUIRE(fixture.browser->add_folder("/private/folder"));
+  REQUIRE(gate->await());
+  const auto epoch = fixture.browser->state().session_epoch;
+  REQUIRE(fixture.browser->deactivate_session());
+  REQUIRE_FALSE(fixture.browser->state().session_id);
+  REQUIRE_FALSE(fixture.browser->state().granting);
+  REQUIRE_FALSE(fixture.browser->add_folder("/private/folder"));
+  REQUIRE(fixture.browser->deactivate_session());
+  REQUIRE(fixture.browser->activate_session(request().token.session_id));
+  REQUIRE(fixture.browser->state().session_epoch > epoch);
+  gate->release();
+  REQUIRE(until([&] {
+    return fixture.browser->occupied_workers() == 0 &&
+           fixture.browser->occupied_grants() == 0;
+  }));
+  REQUIRE(fixture.browser->poll());
+  REQUIRE(fixture.browser->state().folders.empty());
+  fixture.grant();
+  REQUIRE(fixture.browser->state().folders.size() == 1);
+  REQUIRE(fixture.factory->observation->grants == 2);
+}
+
+TEST_CASE(
+    "Browser repository work shares capacity across session replacement") {
+  Fixture f({}, 1);
+  auto source = std::make_shared<repository_work_test::Source>();
+  auto controller = runtime::RepositoryContextController::create_owned(
+      source, source->snapshot.root);
+  REQUIRE(controller);
+  const runtime::RepositoryContextRequest operation{"", 3, {"file.txt"}};
+  auto gate = std::make_shared<Gate>();
+  source->block = gate;
+  Release release{gate};
+  auto started = f.browser->prepare_repository(*controller, operation);
+  REQUIRE(started);
+  REQUIRE(gate->await());
+  REQUIRE_FALSE(f.browser->repository_preparation_ready());
+  f.browser->cancel_browsing();
+  REQUIRE(f.browser->state().preparing_repository);
+  auto wrong = *started;
+  ++wrong.session_epoch;
+  REQUIRE_FALSE(f.browser->poll_repository(wrong));
+  REQUIRE(f.browser->activate_session(
+      repository_work_test::id<domain::SessionId>("next")));
+  REQUIRE_FALSE(f.browser->state().preparing_repository);
+  REQUIRE_FALSE(f.browser->poll_repository(*started));
+  auto busy = f.browser->add_folder("/private/second");
+  REQUIRE_FALSE(busy);
+  REQUIRE(busy.error().code == Code::resource_exhausted);
+  REQUIRE(f.browser->occupied_workers() == 1);
+  gate->release();
+  REQUIRE(until([&] { return f.browser->occupied_workers() == 0; }));
+  auto next = f.browser->prepare_repository(*controller, operation);
+  REQUIRE(next);
+  REQUIRE(next->request_id > started->request_id);
+  REQUIRE(next->session_epoch > started->session_epoch);
+  REQUIRE(until([&] { return f.browser->repository_preparation_ready(); }));
+  auto completed = f.browser->poll_repository(*next);
+  REQUIRE(completed);
+  REQUIRE(*completed);
+  REQUIRE((**completed).result);
+  REQUIRE_FALSE(f.browser->repository_preparation_ready());
+  REQUIRE_FALSE(f.browser->poll_repository(*next));
 }

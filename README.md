@@ -811,8 +811,10 @@ is rejected, and `/session new` starts another ephemeral session.
 Open Context with the toolbar or `Ctrl+G` to inspect model capacity, selected
 and omitted conversation groups, pins, and summaries. The toolbar can be hidden
 with `/context toolbar hide` and restored with `/context toolbar show`; keyboard
-and slash controls remain available. Repository file selection remains separate
-under the existing `/context add`, `/context remove`, and `/context clear` commands.
+and slash controls remain available. Choose **View > Local files** for
+[ordinary file browsing and evidence selection](#local-files-in-chat).
+Dev repository selection uses `/context add`, `/context remove`, and
+`/context clear`.
 
 Full history is the default. `/context mode rolling` keeps the newest complete
 conversation groups that fit after mandatory instructions, the current draft,
@@ -1053,6 +1055,78 @@ findings, candidate drift and unsupported references fail closed, and replay
 rebuilds the receipt without redispatching a reviewer. This is a neutral runtime
 boundary with a deterministic fake; selecting a production reviewer executor or
 surface remains separate work.
+
+## Local files in Chat
+
+Interactive Chat on Linux can use ordinary local files alongside Dev repository
+evidence. Open the **Context** toolbar button, or press `Ctrl+G`, then choose
+**View > Local files**. The toolbar is optional: `/context toolbar hide` hides it,
+and `Ctrl+G` or `/files` still opens the controls.
+
+1. Enter an absolute folder path and choose **Add folder**. This grants read
+   access for the current session; it does not select any files.
+2. Open a granted folder and browse its immediate entries. Use **Filter** for
+   a filename substring, or **Browse > Parent directory** to move up. A partial
+   listing is explicitly marked; narrow the directory or filter to find more.
+3. Activate a file to preview it. **Prefix preview** means only the beginning
+   is displayed. Previewing, moving the selection, and opening directories do
+   not add evidence.
+4. Choose **Add evidence** or **Evidence > Add selected file** to read the
+   complete bounded file and add its exact contents to the **Selection tray**.
+   Use **Remove** or **Evidence > Clear evidence** to change the tray.
+5. Close the browser, write or resume your chat draft, and submit it normally.
+   Preparation checks the selected sources before submission. Context inspection
+   shows which optional files fit and which were omitted by the budget.
+
+Selected ordinary files enter as attributed, untrusted evidence. Even an
+`AGENTS.md` selected here is evidence, not a project instruction. Folder access
+neither enables tools nor grants edit, execution, or approval authority.
+Repository instructions continue through the separate Dev context path.
+
+The equivalent slash commands are available in the chat composer:
+
+| Command | Action |
+| --- | --- |
+| `/files` | Open Local files. |
+| `/files folders` | Inspect current granted folders and their numbers. |
+| `/files add-folder "/absolute/folder with spaces"` | Grant a folder to this session. |
+| `/files remove-folder 1` | Revoke that folder and remove its selected evidence. |
+| `/files open 1` | Browse the root of folder 1. |
+| `/files open 1 "sub folder" "notes"` | Browse a relative directory with a filename substring filter. |
+| `/files preview 1 "sub folder/notes.txt"` | Preview a file without selecting it. |
+| `/files add 1 "sub folder/notes.txt"` | Read the exact file into the evidence tray. |
+| `/files tray` | Inspect the selected evidence. |
+| `/files remove 1 "sub folder/notes.txt"` | Remove that file from the tray. |
+| `/files clear` | Clear the ordinary-file tray. |
+| `/files cancel` | Cancel pending browsing or Add work. |
+
+Folder numbers start at 1 and refer to the current folder list; check them again
+after removing folders. File and directory paths are relative to the named
+folder. To filter its root, use `/files open 1 "" "notes"`. Filters are literal
+substrings, not glob patterns or regular expressions. Quote an entire argument
+with single or double quotes when it contains spaces; these paths are data,
+not shell commands. `/files clear` affects ordinary files; `/context clear`
+affects Dev repository evidence.
+
+Selection is bounded to 64 files, 256 KiB per file and 2 MiB total. Prefix
+previews cannot substitute for an exact selection. Oversized, empty or
+unsupported files report that evidence is unavailable. Closing or cancelling
+browsing keeps the chat draft and the previously selected tray. Failed or
+cancelled submission preparation also keeps the draft. If the browser reports
+busy capacity, wait for occupied work or cleanup to finish: cancelling a result
+does not force a stalled filesystem call to finish or create another worker.
+
+Folder grants and the tray are session scoped. Switching or reopening a session
+requires an explicit **Add folder** again before a saved run can read its
+original files. Changed, missing or revoked sources block further inference,
+tool launches, approvals and question answers; already-dispatched usage and
+results can still be recorded. Repair the exact contents or regrant the original
+folder, then use `/context retry`. Adding a folder alone never retries a blocked
+run. Retry does not answer a question or approve a tool; those remain explicit
+actions. Today's tray cannot replace the files already admitted to that run.
+If the original physical folder binding cannot be restored, such as after a
+reboot or mount replacement, cancel the old run and start a new one with the
+current files.
 
 ## Dev repository context
 

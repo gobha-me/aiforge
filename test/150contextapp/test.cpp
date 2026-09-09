@@ -140,6 +140,16 @@ struct AppFixture {
                     finished->inference_id == requests.back().inference_id;
            });
   }
+  template <typename Predicate> auto wait_for(Predicate ready) -> void {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    while (!ready() && std::chrono::steady_clock::now() < deadline) {
+      app->on_tick(std::chrono::milliseconds{1});
+      std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    INFO(app->status_text());
+    REQUIRE(ready());
+  }
   auto drain() -> void {
     for (unsigned count{}; count < 1000; ++count) {
       app->on_tick(std::chrono::milliseconds{1});
@@ -259,14 +269,22 @@ TEST_CASE("Context commands can preview and apply without opening a modal or "
   command(*f.app, "/context summary review " + std::string{summary->value()});
   command(*f.app, "/context summary preview " + std::string{summary->value()});
   CHECK_FALSE(f.app->modal());
-  INFO(f.app->status_text());
-  REQUIRE(f.app->status_text().find("Preview ready") != std::string::npos);
+  f.wait_for([&] {
+    return f.app->status_text().find("Preview ready") != std::string_view::npos;
+  });
+  REQUIRE(f.backend.requests().size() == 1);
+  const auto activated = [&] {
+    return std::ranges::any_of(f.app->events(), [&](const auto& event) {
+      const auto* activation =
+          std::get_if<domain::ConversationSummaryActivated>(&event.payload);
+      return activation != nullptr &&
+             activation->activation.candidate.summary_id == *summary;
+    });
+  };
+  REQUIRE_FALSE(activated());
   command(*f.app, "/context summary apply");
-  INFO(f.app->status_text());
-  CHECK(std::ranges::any_of(f.app->events(), [](const auto& event) {
-    return std::holds_alternative<domain::ConversationSummaryActivated>(
-        event.payload);
-  }));
+  f.wait_for(activated);
+  CHECK_FALSE(f.app->modal());
   CHECK(f.backend.requests().size() == 1);
   CHECK(rendered(*f.app).find("/context summary apply") == std::string::npos);
 }

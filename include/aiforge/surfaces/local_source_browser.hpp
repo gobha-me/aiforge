@@ -23,6 +23,7 @@ struct LocalBrowserState {
   bool granting{};
   bool reading{};
   bool preparing{};
+  bool preparing_repository{};
   std::string message;
 };
 
@@ -44,6 +45,9 @@ class LocalSourceBrowser final {
   auto operator=(const LocalSourceBrowser&) -> LocalSourceBrowser& = delete;
 
   [[nodiscard]] auto activate_session(const domain::SessionId& session)
+      -> std::expected<void, domain::LocalSourceError>;
+  // End logical access before other application-owned services are torn down.
+  [[nodiscard]] auto deactivate_session()
       -> std::expected<void, domain::LocalSourceError>;
   [[nodiscard]] auto add_folder(std::string absolute_path)
       -> std::expected<void, domain::LocalSourceError>;
@@ -70,6 +74,7 @@ class LocalSourceBrowser final {
   [[nodiscard]] auto poll() -> std::expected<void, domain::LocalSourceError>;
   auto cancel_browsing() -> void;
 
+  [[nodiscard]] auto pending_evidence_selection() const noexcept -> bool;
   [[nodiscard]] auto prepare_selection()
       -> std::expected<runtime::LocalContextWorkToken,
                        domain::LocalSourceError>;
@@ -81,6 +86,18 @@ class LocalSourceBrowser final {
       -> std::expected<std::optional<runtime::LocalContextWorkCompletion>,
                        domain::LocalSourceError>;
   auto cancel_context() -> void;
+  [[nodiscard]] auto prepare_repository(
+      const std::shared_ptr<runtime::RepositoryContextController>& controller,
+      const std::variant<runtime::RepositoryContextRequest,
+                         domain::RepositoryContextAdmission>& operation)
+      -> std::expected<runtime::RepositoryContextWorkToken,
+                       domain::LocalSourceError>;
+  [[nodiscard]] auto poll_repository(
+      const runtime::RepositoryContextWorkToken& token)
+      -> std::expected<std::optional<runtime::RepositoryContextWorkCompletion>,
+                       domain::LocalSourceError>;
+  auto cancel_repository() -> void;
+  [[nodiscard]] auto repository_preparation_ready() const noexcept -> bool;
   [[nodiscard]] auto state() const noexcept -> const LocalBrowserState&;
   [[nodiscard]] auto occupied_workers() const -> std::size_t;
   [[nodiscard]] auto occupied_grants() const -> std::size_t;

@@ -177,7 +177,7 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   const auto& registry = builtin_slash_command_registry();
   const auto listed = registry.describe();
   REQUIRE(listed);
-  REQUIRE(listed->size() == 18);
+  REQUIRE(listed->size() == 19);
   REQUIRE((*listed)[0].name == "help");
   REQUIRE((*listed)[1].name == "quit");
   REQUIRE((*listed)[2].name == "clear");
@@ -194,8 +194,9 @@ TEST_CASE("builtin slash commands expose bounded neutral actions", "[slash]") {
   REQUIRE((*listed)[13].name == "plan");
   REQUIRE((*listed)[14].name == "tasks");
   REQUIRE((*listed)[15].name == "memory");
-  REQUIRE((*listed)[16].name == "dev");
-  REQUIRE((*listed)[17].name == "context");
+  REQUIRE((*listed)[16].name == "files");
+  REQUIRE((*listed)[17].name == "dev");
+  REQUIRE((*listed)[18].name == "context");
 
   const auto memory = registry.dispatch("/memory search convention");
   REQUIRE(memory);
@@ -607,4 +608,31 @@ TEST_CASE("conversation policy commands remain available during an active run",
   REQUIRE(repository);
   REQUIRE(*repository);
   CHECK((*repository)->action == SlashCommandAction::add_context_evidence);
+}
+
+TEST_CASE("file browsing commands remain available while a run is blocked") {
+  const auto& registry = builtin_slash_command_registry();
+  const auto parsed = registry.dispatch("/files add-folder '/private/folder'",
+                                        {.run_active = true, .stop_token = {}});
+  REQUIRE(parsed);
+  REQUIRE(*parsed);
+  REQUIRE((*parsed)->action == SlashCommandAction::manage_local_files);
+  REQUIRE((*parsed)->subject == "add-folder '/private/folder'");
+  const auto completed = registry.complete("/fil");
+  REQUIRE(completed);
+  REQUIRE(completed->size() == 1);
+  REQUIRE(completed->front() == "files");
+}
+
+TEST_CASE("Context source retry stays available for blocked active runs") {
+  const auto& registry = builtin_slash_command_registry();
+  for (bool active : {false, true}) {
+    auto result = registry.dispatch("/context retry",
+                                    {.run_active = active, .stop_token = {}});
+    REQUIRE(result);
+    REQUIRE(*result);
+    REQUIRE((**result).action == SlashCommandAction::retry_dev_context);
+    REQUIRE_FALSE((**result).subject);
+  }
+  REQUIRE_FALSE(registry.dispatch("/context retry extra"));
 }

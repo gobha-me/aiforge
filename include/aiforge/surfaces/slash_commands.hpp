@@ -53,6 +53,7 @@ enum class SlashCommandAction {
   show_plan,
   show_tasks,
   manage_memory,
+  manage_local_files,
   show_dev,
   retry_dev_context,
   select_dev_target,

@@ -7,6 +7,8 @@
 #include <aiforge/adapters/git_project_instruction_source.hpp>
 #include <aiforge/adapters/image_tool.hpp>
 #include <aiforge/adapters/interactive_chat_app.hpp>
+#include <aiforge/adapters/local_file_source.hpp>
+#include <aiforge/adapters/local_source_browser_dialog.hpp>
 #include <aiforge/adapters/model_picker_dialog.hpp>
 #include <aiforge/adapters/persona_editor_dialog.hpp>
 #include <aiforge/adapters/pinned_repository_root_authority.hpp>
@@ -905,6 +907,8 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_persist_user_global_instruction_enabled(
             std::move(options.persist_user_global_instruction_enabled)),
         m_open_template(std::move(open)),
+        m_owned_repository_context_controller(
+            std::move(options.owned_repository_context_controller)),
         m_session_dependencies(std::move(options.session_dependencies)),
         m_bridge(*this, options.live_wake_enabled,
                  std::move(options.wake_observer)),
@@ -914,6 +918,21 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_poll_worker_updates(options.poll_worker_updates),
         m_repository_root_display(std::move(options.repository_root_display)),
         m_repository_context_source(options.repository_context_source) {
+    if (m_owned_repository_context_controller) {
+      if (m_session_dependencies.repository_context_controller != nullptr &&
+          m_session_dependencies.repository_context_controller !=
+              m_owned_repository_context_controller.get()) {
+        m_setup_error = cli::CommandFailure{
+            cli::CommandFailureKind::runtime,
+            "Repository controller ownership does not match the session"};
+        return;
+      }
+      m_session_dependencies.repository_context_controller =
+          m_owned_repository_context_controller.get();
+    }
+    if (m_session_dependencies.repository_context_controller != nullptr)
+      m_session_dependencies.async_repository_preparation = true;
+    if (!setup_local_browser(std::move(options.local_source_factory))) return;
     m_context_toolbar.set_menus(
         {{"Context",
           {{"Conversation (Ctrl+G)",
@@ -925,6 +944,11 @@ class ChatAppImpl final : public InteractiveChatApp {
             [this] {
               static_cast<void>(
                   manage_context(surfaces::InspectConversationSummaries{}));
+            }},
+           {"Local files",
+            [this] {
+              static_cast<void>(
+                  manage_files(surfaces::LocalBrowseInspect{}, true));
             }},
            {"Repository evidence", [this] { show_repository_context(false); }},
            {"Hide toolbar", [this] {
@@ -940,6 +964,11 @@ class ChatAppImpl final : public InteractiveChatApp {
       return;
     }
     m_session = std::move(*session);
+    if (!activate_local_browser(m_session->session_id())) {
+      m_setup_error =
+          cli::CommandFailure{cli::CommandFailureKind::runtime, m_status};
+      return;
+    }
     auto rebuilt = rebuild_chat_transcript(
         m_transcript, m_session->event_log().events(), m_summary_runs);
     if (!rebuilt) {
@@ -987,8 +1016,10 @@ class ChatAppImpl final : public InteractiveChatApp {
   }
 
   ~ChatAppImpl() override {
-    m_repository_worker.request_stop();
-    if (m_repository_worker.joinable()) m_repository_worker.join();
+    if (m_local_browser) {
+      [[maybe_unused]] const auto ended = m_local_browser->deactivate_session();
+    }
+    cancel_repository_job();
   }
 
   [[nodiscard]] auto ready() const noexcept -> bool override {
@@ -1053,7 +1084,7 @@ class ChatAppImpl final : public InteractiveChatApp {
 
   [[nodiscard]] auto repository_preparation_ready() const noexcept
       -> bool override {
-    return m_repository_ready.load();
+    return m_local_browser && m_local_browser->repository_preparation_ready();
   }
 
   [[nodiscard]] auto configure_terminal_for_scenario(
@@ -1080,7 +1111,9 @@ class ChatAppImpl final : public InteractiveChatApp {
       return;
     }
     if (!apply_events(*drained)) return;
+    service_local_browser();
     service_repository_work();
+    service_evidence_work();
     show_recovery_block();
     if (ensure_tool_approval_dialog() && !m_tool_approval_dialog_active &&
         ensure_question_dialog() && !m_question_dialog_active) {
@@ -1094,7 +1127,9 @@ class ChatAppImpl final : public InteractiveChatApp {
     // clang-format on
     if (!m_session) return;
     if (cancel_repository_event(event)) return;
+    service_local_browser();
     service_repository_work();
+    service_evidence_work();
     if (m_stop_token.stop_requested()) return;
     if (const auto* key = std::get_if<termforge::KeyEvent>(&event);
         key != nullptr && key->action == termforge::KeyAction::Press &&
@@ -1138,6 +1173,10 @@ class ChatAppImpl final : public InteractiveChatApp {
       return;
     }
     if (!apply_events(*bridged)) return;
+    if (m_local_dialog_active) {
+      static_cast<void>(m_local_dialog->on_event(event));
+      return;
+    }
     if (m_context_dialog_active) {
       static_cast<void>(m_context_dialog->on_event(event));
       return;
@@ -1167,6 +1206,7 @@ class ChatAppImpl final : public InteractiveChatApp {
           if (m_context_panel_visible && m_context_dialog)
             m_context_dialog->invalidate_review();
           m_context_panel_visible = false;
+          m_local_panel_visible = false;
           m_help_visible = false;
           m_status = "Ready";
         }
@@ -1244,7 +1284,9 @@ class ChatAppImpl final : public InteractiveChatApp {
 
   auto on_tick(std::chrono::duration<double>) -> void override {
     if (!m_session) return;
+    service_local_browser();
     service_repository_work();
+    service_evidence_work();
     if (m_poll_worker_updates) {
       auto drained = m_session->drain();
       if (!drained) {
@@ -1253,7 +1295,9 @@ class ChatAppImpl final : public InteractiveChatApp {
       }
       if (!apply_events(*drained)) return;
     }
+    service_local_browser();
     service_repository_work();
+    service_evidence_work();
     show_recovery_block();
     if (!ensure_tool_approval_dialog()) return;
     if (!m_tool_approval_dialog_active && !ensure_question_dialog()) return;
@@ -1347,10 +1391,74 @@ class ChatAppImpl final : public InteractiveChatApp {
     return text;
   }
 
+  auto setup_local_browser(
+      std::shared_ptr<runtime::LocalSourceGrantFactory> factory) -> bool {
+    if (!factory) factory = std::make_shared<LocalFileGrantFactory>();
+    auto browser = surfaces::LocalSourceBrowser::create(std::move(factory));
+    if (!browser) {
+      m_setup_error = cli::CommandFailure{cli::CommandFailureKind::runtime,
+                                          browser.error().message};
+      return false;
+    }
+    m_local_browser = std::move(*browser);
+    m_session_dependencies.local_sources = m_local_browser.get();
+    return true;
+  }
+  auto activate_local_browser(const domain::SessionId& session) -> bool {
+    auto activated = m_local_browser->activate_session(session);
+    if (!activated) {
+      m_status = activated.error().message;
+      return false;
+    }
+    return true;
+  }
+  auto ensure_local_dialog() -> void {
+    if (m_local_dialog) return;
+    m_local_dialog =
+        std::make_unique<LocalSourceBrowserDialog>(*m_local_browser);
+    m_local_dialog->on_close([this] {
+      pop_modal();
+      m_local_dialog_active = false;
+      m_status = m_local_dialog->status();
+      sync_composer_focus();
+    });
+  }
+  auto manage_files(const surfaces::LocalBrowserAction& action, bool show)
+      -> bool {
+    ensure_local_dialog();
+    auto executed = m_local_dialog->execute(action);
+    m_status = m_local_dialog->status();
+    if (!executed) return false;
+    if (show && !m_local_dialog_active) {
+      m_local_dialog_active = true;
+      push_modal(*m_local_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                   .dismiss_on_click_outside = false});
+    } else if (!show) {
+      show_panel("Local files", {m_local_dialog->display_text()}, m_status);
+      m_local_panel_visible = true;
+    }
+    return true;
+  }
+  auto service_local_browser() -> void {
+    if (!m_local_browser) return;
+    const bool pending =
+        m_local_browser->state().granting || m_local_browser->state().reading;
+    auto result = m_local_browser->poll();
+    const bool completed = pending && !m_local_browser->state().granting &&
+                           !m_local_browser->state().reading;
+    if (!result) m_status = result.error().message;
+    if (!result || completed) {
+      if (m_local_dialog) m_local_dialog->refresh();
+      if (m_local_panel_visible && m_local_dialog)
+        show_panel("Local files", {m_local_dialog->display_text()},
+                   m_local_dialog->status());
+    }
+  }
+
   auto ensure_context_dialog() -> void {
     if (m_context_dialog) return;
     m_context_dialog = std::make_unique<ConversationContextDialog>(
-        *m_session, [this] { return context_draft(); });
+        *m_session, [this] { return context_draft(); }, true);
     m_context_dialog->on_toolbar([this](bool visible) {
       m_context_toolbar_visible = visible;
       if (!visible) {
@@ -1363,6 +1471,12 @@ class ChatAppImpl final : public InteractiveChatApp {
           static_cast<void>(apply_events(events));
           sync_history();
         });
+    m_context_dialog->on_files([this] {
+      m_context_dialog->invalidate_review();
+      pop_modal();
+      m_context_dialog_active = false;
+      static_cast<void>(manage_files(surfaces::LocalBrowseInspect{}, true));
+    });
     m_context_dialog->on_repository([this] {
       pop_modal();
       m_context_dialog_active = false;
@@ -1382,13 +1496,14 @@ class ChatAppImpl final : public InteractiveChatApp {
     ensure_context_dialog();
     auto result = m_context_dialog->execute(command);
     m_status = m_context_dialog->status();
-    if (!result) return false;
+    // Keep navigation available even when inspection itself is blocked by a
+    // missing source or another pending action.
     if (show && !m_context_dialog_active) {
       m_context_dialog_active = true;
       push_modal(*m_context_dialog, {.backdrop = termforge::Backdrop::Dim,
                                      .dismiss_on_click_outside = false});
     }
-    return true;
+    return result.has_value();
   }
 
   auto execute_context_command(const surfaces::ConversationCommand& command)
@@ -1509,7 +1624,9 @@ class ChatAppImpl final : public InteractiveChatApp {
     if (m_session->pending_repository_work()) {
       m_repository_draft = std::string{m_composer.text()};
       m_status = "Preparing repository selection — Esc/Ctrl+C cancel";
+      service_local_browser();
       service_repository_work();
+      service_evidence_work();
     } else {
       m_composer.clear();
       show_repository_context(true);
@@ -1519,17 +1636,25 @@ class ChatAppImpl final : public InteractiveChatApp {
   }
 
   auto cancel_repository_event(const termforge::Event& event) -> bool {
-    if (!m_session->pending_repository_work()) return false;
+    if (m_local_dialog_active || m_context_dialog_active) return false;
+    if (!m_session->pending_repository_work() &&
+        !m_session->pending_evidence_work())
+      return false;
     const auto* key = std::get_if<termforge::KeyEvent>(&event);
     if (key == nullptr || key->action != termforge::KeyAction::Press)
       return false;
     const bool interrupt =
         key->ctrl && key->key == termforge::Key::Char && key->ch == U'c';
     if (key->key != termforge::Key::Escape && !interrupt) return false;
-    m_repository_worker.request_stop();
-    auto cancelled = m_session->cancel_active("interrupt");
-    m_status = cancelled ? "Repository preparation cancelled"
-                         : cancelled.error().message;
+    cancel_repository_job();
+    if (m_session->pending_evidence_work()) {
+      m_session->cancel_evidence_work();
+      m_status = "Context preparation cancelled; draft preserved";
+    } else {
+      auto cancelled = m_session->cancel_active("interrupt");
+      m_status = cancelled ? "Repository preparation cancelled"
+                           : cancelled.error().message;
+    }
     m_repository_draft.reset();
     sync_composer_focus();
     return true;
@@ -1538,6 +1663,10 @@ class ChatAppImpl final : public InteractiveChatApp {
   auto commit_repository_completion(
       surfaces::ChatRepositoryWorkCompletion completion) -> void {
     auto result = m_session->complete_repository_work(std::move(completion));
+    if (result && result->pending) {
+      m_status = "Validating remaining file context";
+      return;
+    }
     if (!result)
       m_status = result.error().message;
     else if (apply_events(result->events)) {
@@ -1557,62 +1686,124 @@ class ChatAppImpl final : public InteractiveChatApp {
     sync_composer_focus();
   }
 
+  auto finish_evidence_submission(surfaces::ChatSubmission submitted) -> void {
+    if (!apply_events(submitted.committed_events)) return;
+    if (m_repository_draft && m_composer.text() == *m_repository_draft)
+      m_composer.clear();
+    m_repository_draft.reset();
+    m_help_visible = false;
+    sync_history();
+    m_transcript.widget().scroll_to_bottom();
+    m_status = "Running";
+  }
+  auto complete_evidence_outcome(surfaces::ChatEvidenceOutcome outcome,
+                                 std::uint64_t previous_sequence) -> void {
+    if (auto* submitted =
+            std::get_if<surfaces::ChatSubmission>(&outcome.result)) {
+      finish_evidence_submission(std::move(*submitted));
+      return;
+    }
+    if (auto* action = std::get_if<surfaces::ChatEvidenceActionCompleted>(
+            &outcome.result)) {
+      [[maybe_unused]] const auto applied = apply_events(action->events);
+      return;
+    }
+    // A summary activation is a durable mutation; inspection and preview have
+    // no committed events. Apply the newly appended events exactly once here.
+    if (std::holds_alternative<domain::ConversationSummaryActivation>(
+            outcome.result)) {
+      std::vector<domain::RunEvent> events;
+      for (const auto& event : m_session->event_log().events())
+        if (event.metadata.sequence > previous_sequence)
+          events.push_back(event);
+      if (!apply_events(events)) return;
+    }
+    if (m_context_dialog) {
+      auto completed =
+          m_context_dialog->complete_evidence_work(std::move(outcome));
+      if (!completed)
+        m_status = completed.error().message;
+      else if (*completed) {
+        m_status = m_context_dialog->status();
+        if (m_context_panel_visible)
+          show_panel("Conversation context", {m_context_dialog->display_text()},
+                     m_status);
+      }
+    }
+  }
+  auto service_evidence_work() -> void {
+    if (!m_session) return;
+    const auto token = m_session->pending_evidence_work();
+    const auto previous_sequence = m_session->event_log().last_sequence();
+    const auto draft = context_draft();
+    auto completed = m_session->poll_evidence_work(draft);
+    if (!completed) {
+      m_status = completed.error().message;
+      if (token && m_context_dialog) {
+        [[maybe_unused]] const auto reported =
+            m_context_dialog->fail_evidence_work(*token, completed.error());
+      }
+      if (token && token->purpose == surfaces::ChatEvidenceWorkPurpose::submit)
+        m_repository_draft.reset();
+      sync_composer_focus();
+      return;
+    }
+    if (*completed) {
+      complete_evidence_outcome(std::move(**completed), previous_sequence);
+      sync_composer_focus();
+    }
+  }
+
+  auto cancel_repository_job() -> void {
+    if (m_local_browser) m_local_browser->cancel_repository();
+    m_repository_worker_token.reset();
+    m_repository_job.reset();
+  }
+
   auto launch_repository_work(surfaces::ChatRepositoryWork work) -> void {
-    auto* controller = m_session_dependencies.repository_context_controller;
-    if (controller == nullptr) return;
+    auto submitted = m_local_browser->prepare_repository(
+        m_owned_repository_context_controller, work.input);
+    if (!submitted) {
+      commit_repository_completion(
+          {work.token, std::unexpected(domain::RepositoryContextError{
+                           domain::RepositoryContextErrorCode::internal_failure,
+                           submitted.error().message})});
+      return;
+    }
     m_repository_job = work.token;
-    m_repository_worker = std::jthread{[this, controller,
-                                        work = std::move(work)](
-                                           std::stop_token stop) mutable {
-      auto result = [&]() -> std::expected<runtime::PreparedRepositoryContext,
-                                           domain::RepositoryContextError> {
-        try {
-          if (const auto* request =
-                  std::get_if<runtime::RepositoryContextRequest>(&work.input))
-            return controller->prepare(*request, stop);
-          return controller->revalidate(
-              std::get<domain::RepositoryContextAdmission>(work.input), stop);
-        } catch (...) {
-          return std::unexpected(domain::RepositoryContextError{
-              domain::RepositoryContextErrorCode::internal_failure,
-              "Repository preparation failed internally"});
-        }
-      }();
-      const std::lock_guard lock{m_repository_mutex};
-      m_repository_completion.emplace(surfaces::ChatRepositoryWorkCompletion{
-          work.token, std::move(result)});
-      m_repository_ready.store(true);
-      // The regular UI tick consumes completion; no widget or application
-      // access is needed here.
-    }};
+    m_repository_worker_token = *submitted;
   }
 
   auto service_repository_work() -> void {
     if (m_stop_token.stop_requested()) {
-      m_repository_worker.request_stop();
+      cancel_repository_job();
+      m_session->cancel_evidence_work();
       m_session->cancel_repository_work();
+      return;
     }
     auto pending = m_session->pending_repository_work();
-    if (m_repository_worker.joinable() &&
-        (!pending || !m_repository_job || pending->token != *m_repository_job))
-      m_repository_worker.request_stop();
-    std::optional<surfaces::ChatRepositoryWorkCompletion> completion;
-    {
-      const std::lock_guard lock{m_repository_mutex};
-      completion = std::move(m_repository_completion);
-      m_repository_completion.reset();
-      m_repository_ready.store(false);
-    }
-    if (completion) {
-      if (m_repository_worker.joinable()) m_repository_worker.join();
-      m_repository_job.reset();
-      if (pending && pending->token == completion->token &&
-          !m_stop_token.stop_requested())
-        commit_repository_completion(std::move(*completion));
+    if (m_repository_job && (!pending || pending->token != *m_repository_job))
+      cancel_repository_job();
+    if (m_repository_worker_token && m_repository_job) {
+      const auto session_token = *m_repository_job;
+      auto completion =
+          m_local_browser->poll_repository(*m_repository_worker_token);
+      if (!completion) {
+        cancel_repository_job();
+        commit_repository_completion(
+            {session_token,
+             std::unexpected(domain::RepositoryContextError{
+                 domain::RepositoryContextErrorCode::internal_failure,
+                 completion.error().message})});
+      } else if (*completion) {
+        m_repository_worker_token.reset();
+        m_repository_job.reset();
+        commit_repository_completion(
+            {session_token, std::move((**completion).result)});
+      }
       pending = m_session->pending_repository_work();
     }
-    if (pending && !m_repository_worker.joinable() &&
-        !m_stop_token.stop_requested())
+    if (pending && !m_repository_job)
       launch_repository_work(std::move(*pending));
   }
 
@@ -1654,6 +1845,7 @@ class ChatAppImpl final : public InteractiveChatApp {
 
   auto show_panel(std::string title, std::vector<std::string> lines,
                   std::string status) -> void {
+    if (title != "Local files") m_local_panel_visible = false;
     if (m_context_panel_visible && title != "Conversation context") {
       if (m_context_dialog) m_context_dialog->invalidate_review();
       m_context_panel_visible = false;
@@ -2515,6 +2707,10 @@ class ChatAppImpl final : public InteractiveChatApp {
   // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Session flow.
   auto switch_session(const surfaces::ChatSessionOpen::Mode mode,
                       std::optional<domain::SessionId> session_id) -> bool {
+    if (m_local_dialog_active || m_context_dialog_active) {
+      m_status = "Close the context dialog before switching sessions";
+      return false;
+    }
     if (m_session->active()) {
       m_status = "Finish or cancel the active run before switching sessions";
       return false;
@@ -2593,10 +2789,14 @@ class ChatAppImpl final : public InteractiveChatApp {
       return false;
     }
 
-    m_repository_worker.request_stop();
+    cancel_repository_job();
     m_repository_draft.reset();
     m_context_dialog.reset();
     m_context_dialog_active = false;
+    m_local_dialog.reset();
+    m_local_dialog_active = false;
+    m_local_panel_visible = false;
+    if (!activate_local_browser((*candidate)->session_id())) return false;
     m_session = std::move(*candidate);
     m_request_setting_overrides = {};
     m_usage_ledger = std::move(*candidate_usage);
@@ -2882,14 +3082,16 @@ class ChatAppImpl final : public InteractiveChatApp {
         return true;
       }
       case surfaces::SlashCommandAction::retry_dev_context: {
-        auto requested = m_session->retry_repository_context();
+        auto requested = m_session->retry_context_sources();
         if (!requested) {
           m_status = requested.error().message;
           return false;
         }
         m_composer.clear();
-        m_status = "Revalidating the recorded repository context";
+        m_status = "Revalidating the recorded context sources";
+        service_local_browser();
         service_repository_work();
+        service_evidence_work();
         return true;
       }
       case surfaces::SlashCommandAction::show_dev:
@@ -2942,6 +3144,18 @@ class ChatAppImpl final : public InteractiveChatApp {
         if (!show_tasks()) return false;
         m_composer.clear();
         return true;
+      case surfaces::SlashCommandAction::manage_local_files: {
+        auto action = surfaces::parse_local_browser_command(
+            "/files " + command.subject.value_or(""), m_local_browser->state());
+        if (!action || !*action) {
+          m_status =
+              action ? "File command is unavailable" : action.error().message;
+          return false;
+        }
+        if (!manage_files(**action, !command.subject)) return false;
+        m_composer.clear();
+        return true;
+      }
       case surfaces::SlashCommandAction::manage_memory:
         if (!manage_memory(command.subject)) return false;
         m_composer.clear();
@@ -2969,29 +3183,17 @@ class ChatAppImpl final : public InteractiveChatApp {
       static_cast<void>(execute_command(**command));
       return;
     }
-    if (m_session->repository_context_state().enabled) {
-      auto requested = m_session->request_repository_submit(draft);
-      if (!requested) {
-        m_status = requested.error().message;
-        return;
-      }
-      m_repository_draft = draft;
-      m_status = "Preparing exact repository context — Esc/Ctrl+C cancel";
-      service_repository_work();
-      sync_composer_focus();
+    auto requested = m_session->request_evidence_submit(draft);
+    if (!requested) {
+      m_status = requested.error().message;
       return;
     }
-    auto submitted = m_session->submit(draft);
-    if (!submitted) {
-      m_status = submitted.error().message;
-      return;
-    }
-    if (!apply_events(submitted->committed_events)) return;
-    m_help_visible = false;
-    m_composer.clear();
-    sync_history();
-    m_transcript.widget().scroll_to_bottom();
-    m_status = "Running";
+    m_repository_draft = draft;
+    m_status = "Preparing exact context — Esc/Ctrl+C cancel";
+    service_local_browser();
+    service_repository_work();
+    service_evidence_work();
+    sync_composer_focus();
   }
 
   auto sync_history() -> void {
@@ -4945,6 +5147,8 @@ class ChatAppImpl final : public InteractiveChatApp {
   PreviewUserGlobalInstructionEnabled m_preview_user_global_instruction_enabled;
   PersistUserGlobalInstructionEnabled m_persist_user_global_instruction_enabled;
   surfaces::ChatSessionOpen m_open_template;
+  std::shared_ptr<runtime::RepositoryContextController>
+      m_owned_repository_context_controller;
   surfaces::ChatSessionDependencies m_session_dependencies;
   TermForgeRunBridge m_bridge;
   surfaces::DraftEditor& m_editor;
@@ -4957,6 +5161,10 @@ class ChatAppImpl final : public InteractiveChatApp {
   domain::ToolSpendLedgerProjection m_tool_spend_ledger;
   termforge::MenuBar m_context_toolbar;
   bool m_context_toolbar_visible{true};
+  std::unique_ptr<surfaces::LocalSourceBrowser> m_local_browser;
+  std::unique_ptr<LocalSourceBrowserDialog> m_local_dialog;
+  bool m_local_dialog_active{};
+  bool m_local_panel_visible{};
   std::unique_ptr<ConversationContextDialog> m_context_dialog;
   bool m_context_dialog_active{};
   bool m_context_panel_visible{};
@@ -4970,10 +5178,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   runtime::RepositoryContextSource* m_repository_context_source{};
   std::optional<std::string> m_repository_draft;
   std::optional<surfaces::ChatRepositoryWorkToken> m_repository_job;
-  std::atomic<bool> m_repository_ready{};
-  std::mutex m_repository_mutex;
-  std::optional<surfaces::ChatRepositoryWorkCompletion> m_repository_completion;
-  std::jthread m_repository_worker;
+  std::optional<runtime::RepositoryContextWorkToken> m_repository_worker_token;
   std::optional<cli::CommandFailure> m_setup_error;
   std::optional<cli::CommandFailure> m_failure;
   std::string m_status;
@@ -5444,9 +5649,9 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
             });
     std::optional<GitRepositorySnapshotSource> repository_source;
     std::optional<GitExactSourceEditor> repository_editor;
-    std::optional<GitProjectInstructionSource> project_instruction_source;
+    std::optional<OwnedPinnedRepositorySources> owned_repository_sources;
     std::shared_ptr<runtime::RepositoryContextSource> repository_context_source;
-    std::unique_ptr<runtime::RepositoryContextController>
+    std::shared_ptr<runtime::RepositoryContextController>
         repository_context_controller;
     std::unique_ptr<runtime::MemoryController> memory_controller;
     runtime::ToolRegistry tool_registry;
@@ -5485,19 +5690,14 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
       auto source =
           open_process_repository_source(GitCommandPolicy::isolated_read_only);
       if (source) {
-        repository_source.emplace(std::move(*source));
-        repository_editor.emplace(
-            *repository_source,
-            GitExactSourceReadPolicy::tracked_regular_files);
         if (needs_repository_root || agent == nullptr) {
-          auto pinned = open_pinned_repository_root_authority(
-              repository_snapshot->root.canonical_path, *repository_source,
-              *repository_editor);
-          if (!pinned) {
+          auto owned = open_owned_pinned_repository_sources(
+              repository_snapshot->root.canonical_path, std::move(*source));
+          if (!owned)
             return failure(cli::CommandFailureKind::runtime,
-                           pinned.error().message);
-          }
-          repository_read_root = std::move(*pinned);
+                           owned.error().message);
+          owned_repository_sources = std::move(*owned);
+          repository_read_root = owned_repository_sources->authority;
           const auto& pinned_baseline = repository_read_root->baseline();
           if (!domain::same_source_state(*repository_snapshot,
                                          pinned_baseline) ||
@@ -5509,21 +5709,30 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
           }
           repository_snapshot = pinned_baseline;
           repository_id = pinned_baseline.root.repository_id;
+          if (agent == nullptr) {
+            repository_context_source = owned_repository_sources->context;
+            auto controller =
+                runtime::RepositoryContextController::create_owned(
+                    repository_context_source, repository_snapshot->root);
+            if (!controller)
+              return failure(cli::CommandFailureKind::runtime,
+                             controller.error().message);
+            repository_context_controller = std::move(*controller);
+          }
+        } else {
+          repository_source.emplace(std::move(*source));
+          repository_editor.emplace(
+              *repository_source,
+              GitExactSourceReadPolicy::tracked_regular_files);
         }
-        if (agent == nullptr && repository_read_root) {
-          project_instruction_source.emplace(*repository_source);
-          auto context_source = make_pinned_repository_context_source(
-              repository_read_root, *project_instruction_source);
-          if (!context_source)
-            return failure(cli::CommandFailureKind::runtime,
-                           context_source.error().message);
-          repository_context_source = std::move(*context_source);
-          repository_context_controller =
-              std::make_unique<runtime::RepositoryContextController>(
-                  *repository_context_source, repository_snapshot->root);
-        }
+        auto& read_source = owned_repository_sources
+                                ? *owned_repository_sources->snapshots
+                                : *repository_source;
+        auto& exact_source = owned_repository_sources
+                                 ? *owned_repository_sources->exact
+                                 : *repository_editor;
         if (auto registered = runtime::register_repository_read_tool(
-                tool_registry, *repository_source, *repository_editor,
+                tool_registry, read_source, exact_source,
                 {repository_snapshot->root.canonical_path},
                 needs_repository_root ? repository_read_root : nullptr);
             !registered) {
@@ -5776,6 +5985,8 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
     app_options.repository_context_source = repository_context_source.get();
     app_options.session_dependencies.repository_context_controller =
         repository_context_controller.get();
+    app_options.owned_repository_context_controller =
+        repository_context_controller;
     app_options.session_dependencies.async_repository_preparation = true;
     if (request.repository || request.target)
       app_options.session_dependencies.repository_context_selection =

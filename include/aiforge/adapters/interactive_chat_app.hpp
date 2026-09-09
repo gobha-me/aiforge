@@ -6,6 +6,7 @@
 #include <aiforge/cli/command_registry.hpp>
 #include <aiforge/domain/events.hpp>
 #include <aiforge/model/catalog.hpp>
+#include <aiforge/runtime/local_source_grant.hpp>
 #include <aiforge/storage/session_store.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
 #include <aiforge/surfaces/draft_editor.hpp>
@@ -92,6 +93,11 @@ struct InteractiveChatAppOptions {
   bool user_global_instructions_enabled{};
   PreviewUserGlobalInstructionEnabled preview_user_global_instruction_enabled;
   PersistUserGlobalInstructionEnabled persist_user_global_instruction_enabled;
+  // Optional injected pinned read-only factory; production uses local folders.
+  std::shared_ptr<runtime::LocalSourceGrantFactory> local_source_factory;
+  // Required for asynchronous repository work; owns every source dependency.
+  std::shared_ptr<runtime::RepositoryContextController>
+      owned_repository_context_controller;
 };
 
 struct InteractiveModelPickerAppOptions {

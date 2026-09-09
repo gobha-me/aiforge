@@ -12,6 +12,7 @@
 #include <aiforge/runtime/summary_controller.hpp>
 #include <aiforge/runtime/tool_profiles.hpp>
 #include <aiforge/storage/session_store.hpp>
+#include <aiforge/surfaces/chat_evidence_work.hpp>
 #include <aiforge/surfaces/chat_repository_context.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -22,10 +23,13 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
 namespace aiforge::surfaces {
+
+class LocalSourceBrowser;
 
 enum class ChatSessionErrorCode {
   invalid_input,
@@ -124,6 +128,9 @@ struct ChatSessionDependencies {
   std::optional<runtime::RepositoryContextRequest>
       repository_context_selection{};
   bool async_repository_preparation{};
+  // Borrowed on the session owner thread only. The application keeps the
+  // browser alive until this session is destroyed; workers never borrow it.
+  LocalSourceBrowser* local_sources{};
 };
 
 class PreparedChatGenerationOptions final {
@@ -197,6 +204,7 @@ struct ChatConversationContextInspection {
   std::optional<domain::ConversationAdmission> next_admission{};
   std::optional<domain::ConversationAdmission> active_admission{};
   std::optional<ChatSessionError> preparation_error{};
+  std::optional<domain::LocalContextAdmission> local_admission{};
 };
 
 struct ChatSummaryGenerate {
@@ -225,12 +233,26 @@ class ChatSummaryPreview final {
       -> const domain::ConstructedContext&;
   [[nodiscard]] auto activation() const noexcept
       -> const domain::ConversationSummaryActivation&;
+  [[nodiscard]] auto local_admission() const noexcept
+      -> const std::optional<domain::LocalContextAdmission>&;
 
  private:
   friend class ChatSession;
   explicit ChatSummaryPreview(
       std::shared_ptr<const ChatSummaryReviewData> data);
   std::shared_ptr<const ChatSummaryReviewData> m_data;
+};
+
+struct ChatEvidenceActionCompleted {
+  std::vector<domain::RunEvent> events;
+};
+using ChatEvidenceResult =
+    std::variant<ChatSubmission, ChatConversationContextInspection,
+                 ChatSummaryPreview, domain::ConversationSummaryActivation,
+                 ChatEvidenceActionCompleted>;
+struct ChatEvidenceOutcome {
+  ChatEvidenceWorkToken token;
+  ChatEvidenceResult result;
 };
 
 class ChatSession final {
@@ -257,6 +279,28 @@ class ChatSession final {
   [[nodiscard]] auto request_repository_change(ChatRepositoryChange change)
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto request_repository_submit(std::string prompt)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto request_evidence_submit(std::string prompt)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto request_context_inspection(std::string draft)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto request_summary_preview(
+      domain::ConversationSummaryVersion candidate,
+      std::vector<domain::ConversationSummaryVersion> replacements,
+      std::string draft) -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto request_summary_apply(const ChatSummaryPreview& preview,
+                                           std::string current_draft)
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto pending_evidence_work() const
+      -> std::optional<ChatEvidenceWorkToken>;
+  // Summary application requires the current composer draft on every poll;
+  // a missing or changed binding cancels the action before any mutation.
+  // Other operations retain their captured request and do not need a draft.
+  [[nodiscard]] auto poll_evidence_work(
+      std::optional<std::string_view> current_draft = {})
+      -> std::expected<std::optional<ChatEvidenceOutcome>, ChatSessionError>;
+  auto cancel_evidence_work() -> void;
+  [[nodiscard]] auto retry_context_sources()
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto pending_repository_work() const
       -> std::optional<ChatRepositoryWork>;
@@ -445,6 +489,17 @@ class ChatSession final {
       -> std::expected<domain::RunStarted, ChatSessionError>;
   struct Impl;
   explicit ChatSession(std::unique_ptr<Impl> impl);
+  [[nodiscard]] auto begin_evidence_work(
+      ChatEvidenceWorkPurpose purpose,
+      std::function<std::expected<ChatEvidenceResult, ChatSessionError>()>
+          action,
+      bool original_sources = false,
+      std::optional<std::string> required_draft = {})
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto begin_local_evidence_work()
+      -> std::expected<void, ChatSessionError>;
+  [[nodiscard]] auto validate_active_evidence(ChatRepositoryWorkPurpose purpose)
+      -> std::expected<bool, ChatSessionError>;
   [[nodiscard]] auto validate_recovered_pending_run(
       bool repository_validated = false)
       -> std::expected<void, ChatSessionError>;
@@ -458,6 +513,9 @@ class ChatSession final {
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto continue_if_ready()
       -> std::expected<std::vector<domain::RunEvent>, ChatSessionError>;
+  [[nodiscard]] auto dispatch_ready_tools()
+      -> std::expected<std::optional<std::vector<domain::RunEvent>>,
+                       ChatSessionError>;
   [[nodiscard]] auto apply_repository_change(
       runtime::RepositoryContextRequest& request,
       const ChatRepositoryChange& change)

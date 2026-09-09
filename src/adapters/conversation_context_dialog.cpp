@@ -52,6 +52,24 @@ auto latest(const surfaces::ChatSummaryCatalog& catalog)
     result.push_back(intent.summary_id);
   return result;
 }
+auto local_evidence_text(
+    const std::optional<domain::LocalContextAdmission>& admission)
+    -> std::string {
+  if (!admission) return {};
+  std::string text = "\n\nLocal file evidence (exact selection):";
+  for (const auto& evidence : admission->evidence) {
+    std::string_view decision = "included";
+    if (evidence.decision == domain::LocalContextDecision::omitted_budget)
+      decision = "omitted: total capacity";
+    if (evidence.decision == domain::LocalContextDecision::omitted_class_budget)
+      decision = "omitted: evidence allowance";
+    text += "\n" + evidence.source.root.binding.substr(0, 8) + ":" +
+            evidence.source.relative_path + " | " +
+            std::to_string(evidence.estimated_tokens) + " tokens | " +
+            std::string{decision};
+  }
+  return text;
+}
 auto context_text(const surfaces::ChatConversationContextInspection& view)
     -> std::string {
   std::string text =
@@ -94,6 +112,7 @@ auto context_text(const surfaces::ChatConversationContextInspection& view)
             std::to_string(summary.estimated_tokens) + " tokens";
   if (view.policy.policy.mode == domain::ConversationMode::full)
     text += "\nSummary activations are dormant in full mode.";
+  text += local_evidence_text(view.local_admission);
   text += "\n\nCtrl+G opens Context even with toolbar hidden. Escape closes; "
           "the chat draft stays intact.";
   return text;
@@ -101,9 +120,11 @@ auto context_text(const surfaces::ChatConversationContextInspection& view)
 } // namespace
 
 ConversationContextDialog::ConversationContextDialog(
-    surfaces::ChatSession& session, std::function<std::string()> draft)
-    : Dialog("Context - Conversation"), m_session(session),
-      m_draft(std::move(draft)), m_review_model(session.model_id()) {
+    surfaces::ChatSession& session, std::function<std::string()> draft,
+    bool async_preparation)
+    : Dialog("Context - Conversation"), m_async_preparation(async_preparation),
+      m_session(session), m_draft(std::move(draft)),
+      m_review_model(session.model_id()) {
   set_max_width(110);
   set_text("Context controls affect the next turn. Summary generation is an "
            "explicit paid request.");
@@ -132,7 +153,11 @@ ConversationContextDialog::ConversationContextDialog(
           [this] { perform(surfaces::ApplyConversationSummary{}); }},
          {"Disable active summary", [this] { choose_summary(3); }}}},
        {"View",
-        {{"Repository evidence",
+        {{"Local files",
+          [this] {
+            if (m_files) m_files();
+          }},
+         {"Repository evidence",
           [this] {
             if (m_repository) m_repository();
           }},
@@ -160,9 +185,106 @@ ConversationContextDialog::ConversationContextDialog(
   m_close.on_activate([this] { on_escape(); });
   standard_children();
 }
+auto ConversationContextDialog::pending_evidence_work() const
+    -> std::optional<surfaces::ChatEvidenceWorkToken> {
+  if (m_pending_evidence) return m_pending_evidence->token;
+  return std::nullopt;
+}
+auto ConversationContextDialog::begin_evidence_work(std::string draft)
+    -> std::expected<void, Error> {
+  auto token = m_session.pending_evidence_work();
+  if (!token)
+    return failure("Context preparation did not provide an operation identity");
+  m_pending_evidence = PendingEvidence{*token, std::move(draft), {}, {}};
+  m_status =
+      "Preparing exact context sources; prior view and chat draft retained";
+  m_primary.set_label("[ Preparing ]");
+  return {};
+}
+auto ConversationContextDialog::cancel_pending_evidence() -> void {
+  if (!m_pending_evidence) return;
+  if (m_session.pending_evidence_work() == m_pending_evidence->token)
+    m_session.cancel_evidence_work();
+  m_pending_evidence.reset();
+  if (!m_editing) m_primary.set_label(m_review ? "[ Apply ]" : "[ Refresh ]");
+}
+auto ConversationContextDialog::fail_evidence_work(
+    const surfaces::ChatEvidenceWorkToken& token, const Error& error) -> bool {
+  if (!m_pending_evidence || m_pending_evidence->token != token) return false;
+  m_pending_evidence.reset();
+  m_status = "Context preparation failed: " + error.message;
+  set_text(m_status);
+  if (!m_editing) m_primary.set_label(m_review ? "[ Apply ]" : "[ Refresh ]");
+  return true;
+}
+auto ConversationContextDialog::complete_evidence_work(
+    surfaces::ChatEvidenceOutcome outcome) -> std::expected<bool, Error> {
+  if (!m_pending_evidence || m_pending_evidence->token != outcome.token)
+    return false;
+  const auto rejected = [this](std::string message) -> std::unexpected<Error> {
+    m_pending_evidence.reset();
+    m_status = std::move(message);
+    set_text(m_status);
+    if (!m_editing) m_primary.set_label(m_review ? "[ Apply ]" : "[ Refresh ]");
+    return failure(m_status);
+  };
+  try {
+    if (m_pending_evidence->draft != m_draft() ||
+        outcome.token.model_id != m_session.model_id()) {
+      const auto error = failure("Context changed; prepare again").error();
+      static_cast<void>(fail_evidence_work(outcome.token, error));
+      return std::unexpected(error);
+    }
+    auto pending = std::move(*m_pending_evidence);
+    m_pending_evidence.reset();
+    const auto finished =
+        finish_evidence_work(std::move(outcome), std::move(pending));
+    if (!finished) return rejected(finished.error().message);
+    return true;
+  } catch (...) {
+    return rejected("Context completion failed internally");
+  }
+}
+auto ConversationContextDialog::finish_evidence_work(
+    surfaces::ChatEvidenceOutcome outcome, PendingEvidence pending)
+    -> std::expected<void, Error> {
+  if (outcome.token.purpose == surfaces::ChatEvidenceWorkPurpose::inspection) {
+    const auto* inspection =
+        std::get_if<surfaces::ChatConversationContextInspection>(
+            &outcome.result);
+    if (inspection == nullptr)
+      return failure("Context inspection result type does not match");
+    if (pending.choose_sources)
+      choose_source_groups(inspection->groups, *pending.choose_sources);
+    else
+      show_inspection(*inspection);
+  } else if (outcome.token.purpose ==
+             surfaces::ChatEvidenceWorkPurpose::summary_preview) {
+    auto* preview = std::get_if<surfaces::ChatSummaryPreview>(&outcome.result);
+    if (preview == nullptr || !pending.candidate)
+      return failure("Summary preview result type does not match");
+    show_preview(std::move(*preview), *pending.candidate,
+                 std::move(pending.draft));
+  } else if (outcome.token.purpose ==
+                 surfaces::ChatEvidenceWorkPurpose::summary_apply &&
+             std::holds_alternative<domain::ConversationSummaryActivation>(
+                 outcome.result)) {
+    invalidate_review();
+    if (auto inspected = inspect(); !inspected) {
+      m_status = "Summary applied; context inspection unavailable";
+      set_text(m_status);
+    }
+  } else
+    return failure("Context preparation result type does not match");
+  return {};
+}
 auto ConversationContextDialog::on_toolbar(std::function<void(bool)> callback)
     -> void {
   m_toolbar = std::move(callback);
+}
+auto ConversationContextDialog::on_files(std::function<void()> callback)
+    -> void {
+  m_files = std::move(callback);
 }
 auto ConversationContextDialog::on_repository(std::function<void()> callback)
     -> void {
@@ -176,7 +298,7 @@ auto ConversationContextDialog::status() const noexcept -> const std::string& {
   return m_status;
 }
 auto ConversationContextDialog::review_available() const noexcept -> bool {
-  return m_review.has_value();
+  return m_review.has_value() && !m_pending_evidence;
 }
 auto ConversationContextDialog::editing_text() const noexcept
     -> const std::string& {
@@ -188,6 +310,7 @@ auto ConversationContextDialog::body(std::string text) -> void {
   m_text.append(m_body);
 }
 auto ConversationContextDialog::invalidate_review() -> void {
+  cancel_pending_evidence();
   m_review.reset();
   m_review_draft.clear();
   if (!m_editing) m_primary.set_label("[ Refresh ]");
@@ -203,15 +326,25 @@ auto ConversationContextDialog::standard_children() -> void {
   m_secondary.set_label("[ Summaries ]");
 }
 auto ConversationContextDialog::inspect() -> std::expected<void, Error> {
+  if (m_async_preparation) {
+    auto draft = m_draft();
+    const auto requested = m_session.request_context_inspection(draft);
+    if (!requested) return std::unexpected(requested.error());
+    return begin_evidence_work(std::move(draft));
+  }
   auto inspected = m_session.inspect_conversation_context(m_draft());
   if (!inspected) return std::unexpected(inspected.error());
+  show_inspection(*inspected);
+  return {};
+}
+auto ConversationContextDialog::show_inspection(
+    const surfaces::ChatConversationContextInspection& inspected) -> void {
   m_editing = false;
   standard_children();
-  body(context_text(*inspected));
-  m_status = inspected->preparation_error
-                 ? inspected->preparation_error->message
+  body(context_text(inspected));
+  m_status = inspected.preparation_error
+                 ? inspected.preparation_error->message
                  : "Next-turn context inspected; no inference dispatched";
-  return {};
 }
 auto ConversationContextDialog::summaries() -> std::expected<void, Error> {
   auto catalog = m_session.summary_catalog();
@@ -347,29 +480,54 @@ auto ConversationContextDialog::preview(
   auto parent = version(*value);
   if (!parent) return std::unexpected(parent.error());
   auto draft = m_draft();
+  if (m_async_preparation) {
+    const auto requested = m_session.request_summary_preview(
+        *parent, std::move(replacements), draft);
+    if (!requested) return std::unexpected(requested.error());
+    if (auto started = begin_evidence_work(std::move(draft)); !started)
+      return started;
+    if (!m_pending_evidence)
+      return failure("Summary preview preparation identity disappeared");
+    m_pending_evidence->candidate = std::move(*value);
+    return {};
+  }
   auto prepared = m_session.preview_conversation_summary(
       *parent, std::move(replacements), draft);
   if (!prepared) return std::unexpected(prepared.error());
-  const auto tokens = prepared->context().estimated_input_tokens;
-  const auto covered = prepared->activation().covered_run_ids.size();
-  m_review = std::move(*prepared);
+  show_preview(std::move(*prepared), *value, std::move(draft));
+  return {};
+}
+auto ConversationContextDialog::show_preview(
+    surfaces::ChatSummaryPreview prepared,
+    const domain::ConversationSummaryCandidate& candidate, std::string draft)
+    -> void {
+  const auto tokens = prepared.context().estimated_input_tokens;
+  const auto covered = prepared.activation().covered_run_ids.size();
+  const auto local_text = local_evidence_text(prepared.local_admission());
+  m_review = std::move(prepared);
   m_review_draft = std::move(draft);
   m_review_model = m_session.model_id();
   m_review_sequence = m_session.event_log().last_sequence();
   m_editing = false;
   standard_children();
-  body("Apply reviewed summary " + std::string{command.summary_id.value()} +
+  body("Apply reviewed summary " + std::string{candidate.summary_id.value()} +
        "\nNext request estimate: " + std::to_string(tokens) +
        "\nCovered original runs: " + std::to_string(covered) +
        "\nModel: " + std::string{m_review_model.value()} +
        "\nChat draft preserved and bound to this preview. Apply rechecks "
        "current sources and budget.\n\n" +
-       value->text);
+       candidate.text + local_text);
   m_status = "Preview ready; Apply is explicit";
-  return {};
 }
+
 auto ConversationContextDialog::apply() -> std::expected<void, Error> {
   if (!m_review) return failure("Preview a reviewed summary before Apply");
+  if (m_async_preparation) {
+    auto draft = m_draft();
+    const auto requested = m_session.request_summary_apply(*m_review, draft);
+    if (!requested) return std::unexpected(requested.error());
+    return begin_evidence_work(std::move(draft));
+  }
   auto result = m_session.apply_conversation_summary(*m_review, m_draft());
   if (!result) return std::unexpected(result.error());
   invalidate_review();
@@ -444,6 +602,8 @@ auto ConversationContextDialog::execute(
     -> std::expected<void, Error> {
   const auto before = m_session.event_log().last_sequence();
   try {
+    if (!std::holds_alternative<surfaces::SetContextToolbar>(command))
+      cancel_pending_evidence();
     auto result = dispatch(command);
     if (m_committed && m_session.event_log().last_sequence() != before) {
       std::vector<domain::RunEvent> events;
@@ -489,12 +649,26 @@ auto ConversationContextDialog::choose(
   m_picking = true;
 }
 auto ConversationContextDialog::choose_sources(bool pin) -> void {
+  if (m_async_preparation) {
+    cancel_pending_evidence();
+    const auto result = inspect();
+    if (!result) {
+      m_status = result.error().message;
+      return;
+    }
+    if (m_pending_evidence) m_pending_evidence->choose_sources = pin;
+    return;
+  }
   auto inspected = m_session.inspect_conversation_context(m_draft());
   if (!inspected) {
     m_status = inspected.error().message;
     return;
   }
-  auto groups = std::move(inspected->groups);
+  choose_source_groups(std::move(inspected->groups), pin);
+}
+auto ConversationContextDialog::choose_source_groups(
+    std::vector<surfaces::ChatConversationGroupInspection> groups, bool pin)
+    -> void {
   termforge::ChoiceWizardPage page;
   page.title = pin ? "Pin or unpin one whole run"
                    : "Generate one summary from selected whole runs";
@@ -654,6 +828,13 @@ auto ConversationContextDialog::hit_test_tree(int x, int y) const -> bool {
   return m_picking ? m_picker.hit_test_tree(x, y) : Dialog::hit_test_tree(x, y);
 }
 auto ConversationContextDialog::draw(termforge::Screen& screen) -> void {
+  if (m_pending_evidence &&
+      (m_pending_evidence->draft != m_draft() ||
+       m_pending_evidence->token.model_id != m_session.model_id())) {
+    cancel_pending_evidence();
+    m_status = "Context changed; prepare again";
+    set_text(m_status);
+  }
   if (m_review &&
       (m_review_draft != m_draft() || m_review_model != m_session.model_id() ||
        m_review_sequence != m_session.event_log().last_sequence())) {
@@ -689,6 +870,7 @@ auto ConversationContextDialog::on_event(const termforge::Event& event)
   return Dialog::on_event(event);
 }
 auto ConversationContextDialog::on_escape() -> void {
+  cancel_pending_evidence();
   invalidate_review();
   m_picking = false;
   m_editing = false;
