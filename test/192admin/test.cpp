@@ -136,6 +136,14 @@ class Dependencies final : public adapters::admin_detail::Dependencies {
   Dependencies() {
     if (!std::filesystem::create_directory(directory))
       throw std::runtime_error("test directory was not exclusively created");
+    std::error_code error;
+    std::filesystem::permissions(directory, std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::replace, error);
+    if (error) {
+      std::error_code ignored;
+      std::filesystem::remove(directory, ignored);
+      throw std::runtime_error("test directory permissions could not be set");
+    }
   }
   ~Dependencies() override {
     std::error_code ignored;
