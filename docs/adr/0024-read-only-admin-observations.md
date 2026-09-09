@@ -813,3 +813,41 @@ references remain visible metadata but return unsupported until their private
 preparation integration exists; no referenced file is opened by this catalog.
 The strict loader introduces no model lookup, policy changes, worker, broker or
 session writer. Chat ownership and event routing remain a subsequent milestone.
+
+### Private Kubernetes HTTPS source milestone
+
+The private source owns the immutable static Kubernetes configuration and exact
+public binding. Creating that owner validates metadata only: it does not create
+an SSL context, decode X.509, consult crypto configuration, resolve DNS or open a
+socket. TLS preparation and observation run only in the existing retained source
+worker slot. This milestone adds no configuration-file loader or surface wiring.
+
+The coordinated Venice/canonical cpp-httplib OpenSSL transport performs three
+closed core/v1 reads: namespace Pod inventory, exact Pod health, and namespace or
+exact-Pod events. Names and exact UID selectors are encoded internally. No proxy,
+redirect, decompression, ambient CA, keep-alive, discovery, pagination, log or
+mutation path is enabled. Checked memory-decoded CA and full client certificate
+chain/key material establish TLS; returned JSON passes the existing bounded pure
+projection and known-credential exclusion before neutral publication. Core/v1
+events attest Pod namespace/name/UID. An optional container in the requested Pod
+identity remains selection context and carries no container runtime attestation.
+Broker authority and owner receipt validation remain required independently.
+
+One original deadline and capture allowance span TLS setup, response collection,
+projection and credential exclusion. The captured normalized status, headers,
+body and retained trailers count cumulatively. The pinned parser can discard
+undeclared/prohibited trailers and accepts its documented missing-final-CRLF
+case: no stricter framing or total-wire guarantee is claimed. Native allocation,
+TLS framing and discarded bytes are outside that capture accounting. Native
+wait durations round upward to millisecond precision; the original absolute
+deadline continues to govern result delivery, including after native cleanup.
+
+A joined private watcher interrupts the client and signals stop-aware projection.
+The requesting thread only notifies; it does not join or call client.stop. A
+Linux thread-local SIGPIPE guard preserves caller masks/disposition and pending
+signals through watcher/client cleanup. Synchronous DNS, OpenSSL initialization,
+provider configuration and other stalled OS operations may retain the bounded
+physical slot after logical cancellation. No new resolver owner, process-wide
+crypto/log/environment mutation or hard cleanup promise is introduced. Other
+platforms remain unsupported pending equivalent native teardown proof. Real
+loopback TLS failure fixtures use synthetic credentials and never a cluster.

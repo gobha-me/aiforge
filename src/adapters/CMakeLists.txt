@@ -16,6 +16,11 @@ add_library(${PROJECT_NAME}_adapters STATIC
   filesystem_user_global_instruction_source.cpp
   git_repository_snapshot_source.cpp
   json_model_catalog_cache.cpp
+  kubernetes_credential_exclusion.cpp
+  kubernetes_https_control.cpp
+  kubernetes_https_read.cpp
+  kubernetes_ops_observation_source.cpp
+  kubernetes_tls_context.cpp
   kubernetes_observation_projection.cpp
   kubernetes_observation_projection_sax.cpp
   linux_process_launcher.cpp
