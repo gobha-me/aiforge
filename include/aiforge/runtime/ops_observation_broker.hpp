@@ -106,6 +106,13 @@ class OpsObservationBroker final {
   [[nodiscard]] auto select(domain::OpsObservationAuthority authority,
                             std::shared_ptr<OpsObservationSource> source)
       -> std::expected<void, OpsBrokerFailure>;
+  // Pure preparation gate for an owner-thread selection transaction. It also
+  // verifies that the endpoint belongs to this exact active session issuer.
+  [[nodiscard]] auto preflight_selection(
+      const OpsObservationEndpoint& endpoint,
+      const domain::OpsObservationAuthority& authority,
+      const std::shared_ptr<OpsObservationSource>& source) const
+      -> std::expected<void, OpsBrokerFailure>;
   [[nodiscard]] auto service(std::chrono::steady_clock::time_point now =
                                  std::chrono::steady_clock::now())
       -> std::expected<void, OpsBrokerFailure>;

@@ -360,6 +360,11 @@ struct ObservationControlStart {
   OpsObservationIntent intent;
 };
 
+struct OpsObservationBinding {
+  ToolRegistrySnapshot available_tools;
+  std::shared_ptr<ToolPolicy> policy;
+};
+
 class RunKernel final {
  public:
   RunKernel(domain::SessionId session_id, backend::Backend& backend,
@@ -386,6 +391,15 @@ class RunKernel final {
   // it never closes or deactivates a potentially replaced broker session.
   [[nodiscard]] auto start_observation_control(ObservationControlStart start)
       -> std::expected<void, RunKernelError>;
+  // Owner-only, idle operation over independently configured source authority.
+  // Prepares native registry/policy copies before changing broker selection;
+  // all unrelated registrations and actual launch settings remain unchanged.
+  // The caller moves returned copies into its own state without yielding.
+  [[nodiscard]] auto bind_ops_observation(
+      domain::OpsObservationAuthority authority,
+      std::shared_ptr<OpsObservationSource> source,
+      std::shared_ptr<OpsObservationEndpoint> endpoint)
+      -> std::expected<OpsObservationBinding, RunKernelError>;
 
   RunKernel(const RunKernel&) = delete;
   auto operator=(const RunKernel&) -> RunKernel& = delete;

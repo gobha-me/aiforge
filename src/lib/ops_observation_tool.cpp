@@ -1,5 +1,7 @@
 #include <aiforge/runtime/ops_observation_tool.hpp>
 
+#include "ops_tool_binding.hpp"
+
 #include <aiforge/detail/utf8_text.hpp>
 #include <aiforge/runtime/tool_policy.hpp>
 #include <algorithm>
@@ -489,6 +491,73 @@ auto OpsObservationTool::start(ToolInvocation invocation, std::stop_token stop)
   } catch (...) {
     return error(Code::internal_failure,
                  "observation execution failed internally");
+  }
+}
+
+auto OpsObservationTool::matches_registration(
+    const RegisteredTool& value) const noexcept -> bool {
+  try {
+    return value.executor.get() == this &&
+           value.declaration == declaration(m_authority.specification()) &&
+           value.limits ==
+               ToolExecutionLimits{
+                   maximum_result_bytes, 1,
+                   m_authority.specification().limits.timeout} &&
+           value.executor_contract ==
+               ToolExecutorContract{"aiforge.ops-observation", "1"} &&
+           value.category == ToolCategory::other;
+  } catch (...) {
+    return false;
+  }
+}
+
+auto ops_binding_detail::replace_ops_registration(
+    const ToolRegistrySnapshot& current, const RegisteredTool& replacement)
+    -> std::expected<ToolRegistrySnapshot, ToolRegistryError> {
+  const auto invalid = [] {
+    return std::unexpected(ToolRegistryError{
+        ToolRegistryErrorCode::invalid_declaration,
+        "observation binding requires an exact native registration"});
+  };
+  try {
+    const auto* native =
+        dynamic_cast<const OpsObservationTool*>(replacement.executor.get());
+    if (native == nullptr || !native->matches_registration(replacement))
+      return invalid();
+    if (const auto* previous = current.find("observe_target");
+        previous != nullptr) {
+      const auto* old_native =
+          dynamic_cast<const OpsObservationTool*>(previous->executor.get());
+      if (old_native == nullptr || !old_native->matches_registration(*previous))
+        return invalid();
+      return current.replace(replacement);
+    }
+    ToolRegistry registry;
+    for (const auto& declared : current.declarations()) {
+      if (declared.name == "observe_target") continue;
+      const auto* value = current.find(declared.name);
+      if (value == nullptr) return invalid();
+      if (auto added = registry.register_tool(
+              value->declaration, value->executor, value->limits,
+              value->executor_contract, value->category);
+          !added)
+        return std::unexpected(std::move(added.error()));
+    }
+    for (const auto& value : current.unavailable_tools()) {
+      if (value.name == "observe_target") continue;
+      if (auto added = registry.declare_unavailable_tool(
+              value.name, value.unavailability, value.category);
+          !added)
+        return std::unexpected(std::move(added.error()));
+    }
+    if (auto added = registry.register_tool(
+            replacement.declaration, replacement.executor, replacement.limits,
+            replacement.executor_contract, replacement.category);
+        !added)
+      return std::unexpected(std::move(added.error()));
+    return registry.snapshot();
+  } catch (...) {
+    return invalid();
   }
 }
 

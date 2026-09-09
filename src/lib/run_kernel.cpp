@@ -16,6 +16,8 @@
 #include <aiforge/runtime/ops_observation_tool.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 
+#include "ops_tool_binding.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -36,6 +38,7 @@
 #include <stop_token>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <variant>
 
@@ -5563,6 +5566,65 @@ auto RunKernel::start_observation_control(ObservationControlStart start)
     return std::unexpected(
         kernel_error(RunKernelErrorCode::internal_failure,
                      "manual observation admission failed internally"));
+  }
+}
+
+auto RunKernel::bind_ops_observation(
+    domain::OpsObservationAuthority authority,
+    std::shared_ptr<OpsObservationSource> source,
+    std::shared_ptr<OpsObservationEndpoint> endpoint)
+    -> std::expected<OpsObservationBinding, RunKernelError> {
+  const auto invalid = [] {
+    return std::unexpected(kernel_error(
+        RunKernelErrorCode::invalid_tool_state,
+        "observation binding is unavailable or no longer current"));
+  };
+  try {
+    if (m_impl->unusable)
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    if (m_impl->active || !m_impl->active_children.empty())
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::run_already_active,
+                       "observation binding requires an idle session"));
+    if (!m_impl->observation_broker || !endpoint ||
+        authority.specification().session_id !=
+            m_impl->event_log.session_id() ||
+        !m_impl->observation_broker->preflight_selection(*endpoint, authority,
+                                                         source))
+      return invalid();
+    ToolRegistry native_registry;
+    if (!register_ops_observation_tool(native_registry, authority, endpoint))
+      return invalid();
+    auto native_tools = native_registry.snapshot();
+    if (!native_tools) return invalid();
+    const auto* native = native_tools->find("observe_target");
+    if (native == nullptr) return invalid();
+    auto tools =
+        ops_binding_detail::replace_ops_registration(m_impl->tools, *native);
+    if (!tools) return invalid();
+    auto policy =
+        ops_binding_detail::rebind_ops_launch_policy(*m_impl->policy, *native);
+    if (!policy) return invalid();
+    // Any allocation for the surface's parallel references happens before the
+    // broker changes authority. Only proven no-throw transfers follow
+    // selection.
+    OpsObservationBinding owner_binding{*tools, *policy};
+    static_assert(std::is_nothrow_move_assignable_v<ToolRegistrySnapshot>);
+    static_assert(
+        std::is_nothrow_move_assignable_v<std::shared_ptr<ToolPolicy>>);
+    static_assert(std::is_nothrow_move_constructible_v<OpsObservationBinding>);
+    if (!m_impl->observation_broker->select(std::move(authority),
+                                            std::move(source)))
+      return invalid();
+    m_impl->tools = std::move(*tools);
+    m_impl->policy = std::move(*policy);
+    return owner_binding;
+  } catch (...) {
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::internal_failure,
+                     "observation binding failed internally"));
   }
 }
 

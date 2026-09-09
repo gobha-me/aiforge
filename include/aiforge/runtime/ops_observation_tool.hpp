@@ -39,6 +39,9 @@ class OpsObservationTool final : public ToolExecutor {
   [[nodiscard]] auto start(ToolInvocation invocation, std::stop_token stop)
       -> std::expected<std::unique_ptr<ToolExecutionStream>,
                        ToolExecutionError> override;
+  // Pure metadata check used when replacing the reserved native registration.
+  [[nodiscard]] auto matches_registration(
+      const RegisteredTool& value) const noexcept -> bool;
 
  private:
   friend auto register_ops_observation_tool(
