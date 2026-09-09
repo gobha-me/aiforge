@@ -524,3 +524,15 @@ store permits; failure is reported. Destructor cleanup is best effort and stops
 only its captured kernel operation, never a replacement broker issuer. A terminal
 run can remain busy until ToolEnded, and retired source work retains bounded shared
 physical capacity. No second pool or hard syscall/destructor cleanup bound is added.
+
+## Shared Chat manual observation session milestone
+
+Chat implements the borrowed manual observation port over its existing kernel,
+using application-frozen surface/workspace and actual permission identity. Its
+optional broker dependency does not activate or replace application selection.
+Idle binding preserves distinct current registries and original policy ceilings;
+manual availability does not widen model profiles or maxima. Only the exact
+human-origin observation proof bypasses model context preparation, and its
+committed events remain available for ordinary surface delivery exactly once.
+Manual pumping services the existing broker independently of inference polling.
+Control results remain historical until explicit bounded model admission.

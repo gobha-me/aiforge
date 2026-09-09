@@ -14,6 +14,7 @@
 #include <aiforge/storage/session_store.hpp>
 #include <aiforge/surfaces/chat_evidence_work.hpp>
 #include <aiforge/surfaces/chat_repository_context.hpp>
+#include <aiforge/surfaces/manual_ops_session.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -100,6 +101,11 @@ using ChatIdentitySuffixSource = std::function<std::uint64_t()>;
 
 enum class ChatSurfaceKind { interactive, agent };
 
+struct ChatObservationContext {
+  domain::SurfaceId surface_id;
+  domain::WorkspaceId workspace_id;
+};
+
 struct ChatSessionDependencies {
   ChatIdentitySuffixSource identity_suffix_source;
   runtime::TimestampSource timestamp_source;
@@ -131,6 +137,10 @@ struct ChatSessionDependencies {
   // Borrowed on the session owner thread only. The application keeps the
   // browser alive until this session is destroyed; workers never borrow it.
   LocalSourceBrowser* local_sources{};
+  // Application ownership extends beyond this session. Opening a candidate
+  // never activates or replaces the broker's selected session.
+  std::shared_ptr<runtime::OpsObservationBroker> observation_broker{};
+  std::optional<ChatObservationContext> observation_context{};
 };
 
 class PreparedChatGenerationOptions final {
@@ -255,7 +265,7 @@ struct ChatEvidenceOutcome {
   ChatEvidenceResult result;
 };
 
-class ChatSession final {
+class ChatSession final : public ManualOpsSession {
  public:
   [[nodiscard]] static auto open(ChatSessionOpen request,
                                  backend::Backend& backend,
@@ -267,7 +277,7 @@ class ChatSession final {
                                  ChatSessionDependencies dependencies = {})
       -> std::expected<std::unique_ptr<ChatSession>, ChatSessionError>;
 
-  ~ChatSession();
+  ~ChatSession() override;
 
   ChatSession(const ChatSession&) = delete;
   auto operator=(const ChatSession&) -> ChatSession& = delete;
@@ -276,6 +286,24 @@ class ChatSession final {
 
   [[nodiscard]] auto submit(std::string prompt)
       -> std::expected<ChatSubmission, ChatSessionError>;
+  // Application owner operation; absent from the borrowed widget port.
+  [[nodiscard]] auto bind_observation(
+      domain::OpsObservationAuthority authority,
+      std::shared_ptr<runtime::OpsObservationSource> source,
+      std::shared_ptr<runtime::OpsObservationEndpoint> endpoint)
+      -> std::expected<void, ManualOpsFailure>;
+  [[nodiscard]] auto submit_observation(runtime::OpsObservationIntent intent)
+      -> std::expected<ObservationSubmission, ManualOpsFailure> override;
+  [[nodiscard]] auto cancel_observation(const domain::RunId& run_id)
+      -> std::expected<void, ManualOpsFailure> override;
+  [[nodiscard]] auto decide_observation_approval(
+      const domain::RunId& run_id, const domain::InvocationId& invocation_id,
+      runtime::ToolApprovalResolution decision)
+      -> std::expected<void, ManualOpsFailure> override;
+  [[nodiscard]] auto pump_observations()
+      -> std::expected<void, ManualOpsFailure> override;
+  [[nodiscard]] auto inspect_observations() const noexcept
+      -> const ManualOpsInspection& override;
   [[nodiscard]] auto request_repository_change(ChatRepositoryChange change)
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto request_repository_submit(std::string prompt)
