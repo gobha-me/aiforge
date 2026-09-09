@@ -1,3 +1,4 @@
+#include <aiforge/surfaces/admin_commands.hpp>
 #include <aiforge/surfaces/conversation_commands.hpp>
 #include <aiforge/surfaces/slash_commands.hpp>
 
@@ -432,6 +433,19 @@ using ToolTargetValidator = auto (*)(std::string_view) -> bool;
       arguments.empty() ? std::nullopt : std::optional<std::string>{arguments}};
 }
 
+[[nodiscard]] auto admin_handler(std::string_view arguments,
+                                 const SlashCommandContext&)
+    -> std::expected<SlashCommandResult, SlashCommandError> {
+  arguments = trim_arguments(arguments);
+  const auto parsed = parse_admin_command("/admin " + std::string{arguments});
+  if (!parsed || !*parsed)
+    return command_error(SlashCommandErrorCode::invalid_arguments,
+                         "Invalid Admin command");
+  return SlashCommandResult{
+      SlashCommandAction::manage_admin,
+      arguments.empty() ? std::nullopt : std::optional<std::string>{arguments}};
+}
+
 [[nodiscard]] auto local_files_handler(std::string_view arguments,
                                        const SlashCommandContext&)
     -> std::expected<SlashCommandResult, SlashCommandError> {
@@ -565,6 +579,12 @@ using ToolTargetValidator = auto (*)(std::string_view) -> bool;
        "accept|edit|reject|expire|accept-all|reject-all ...]",
        "Inspect and manage proposed, saved, and historical memory.",
        idle_available, memory_handler},
+      {"admin", "admin",
+       "[targets | select <target> | health | services | service <unit> | "
+       "cancel | close | toolbar show/hide]",
+       "Inspect configured Admin targets and explicitly read selected "
+       "evidence.",
+       inspection_available, admin_handler},
       {"files", "files",
        "[folders | add-folder <absolute-path> | remove-folder <number> | open "
        "<number> [directory] [filter] | preview/add/remove <number> <path> | "
