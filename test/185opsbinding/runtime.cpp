@@ -121,6 +121,10 @@ auto start_child(runtime::RunKernel& kernel) -> void {
                               {}},
                              {snapshot, revision.evidence}) ==
           runtime::PlanDecisionOutcome::recorded);
+  // The planning primary is complete before a standalone child is dispatched.
+  REQUIRE_FALSE(kernel.active_run_id());
+  REQUIRE(kernel.projection(parent));
+  REQUIRE(kernel.projection(parent)->status() == RunStatus::completed);
   ContextParcel parcel{id<ContextParcelId>("parcel"),
                        "Execute the accepted task",
                        TaskPhase::editing,
@@ -274,9 +278,16 @@ TEST_CASE("Kernel Ops binding preserves active work and pending approval",
     f.open_binding(runtime::ApprovalMode::allow_all, true, {},
                    std::make_shared<WaitingChildren>());
     start_child(*f.kernel);
-    REQUIRE_FALSE(f.kernel->active_run_id());
+    // This accessor intentionally reports the sole child when no primary
+    // exists.
+    REQUIRE(f.kernel->active_run_id() == id<RunId>("child-run"));
+    REQUIRE(f.kernel->active_child_run_ids() ==
+            std::vector<RunId>{id<RunId>("child-run")});
     REQUIRE_FALSE(f.kernel->active_session_tasks().empty());
   }
+  // A failed section can cause a final Catch pass with no setup section
+  // entered.
+  REQUIRE(f.kernel);
   const auto tasks = f.kernel->active_session_tasks();
   const auto active = f.kernel->active_run_id();
   const auto pending = f.kernel->pending_tool_approval();
