@@ -218,7 +218,7 @@ auto proc_file(int root, const char* path, std::size_t limit,
   // Fixed adapter-owned procfs paths; O_NONBLOCK avoids waiting on a replaced
   // non-proc FIFO before descriptor identity is checked.
   constexpr auto flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Linux ABI.
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Linux syscall API.
   const auto opened = ::openat(root, path, flags);
   const Descriptor file{opened};
   if (file.get() < 0) {
@@ -247,7 +247,7 @@ auto open_namespace(int root, const char* path, int type,
   if (auto ready = budget.check(); !ready)
     return std::unexpected(ready.error());
   // Follow only the fixed kernel namespace magic link beneath real procfs.
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Linux ABI.
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Linux syscall API.
   const auto opened = ::openat(root, path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
   Descriptor descriptor{opened};
   if (descriptor.get() < 0) return fail(open_error());
@@ -257,7 +257,7 @@ auto open_namespace(int root, const char* path, int type,
       ::fstatfs(descriptor.get(), &filesystem) != 0 ||
       filesystem.f_type != NSFS_MAGIC || metadata.st_ino == 0)
     return fail(Error::unavailable);
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Linux ABI.
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Linux syscall API.
   const auto namespace_type = ::ioctl(descriptor.get(), NS_GET_NSTYPE);
   if (namespace_type != type) return fail(Error::unavailable);
   return NamespaceDescriptor{std::move(descriptor),
@@ -299,7 +299,7 @@ class ProcProbe final : public LinuxOpsProbe {
     LinuxOpsReadBudget budget{
         maximum_input, Clock::now() + std::chrono::seconds{5}, {}};
     constexpr auto flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Linux ABI.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Linux syscall API.
     const auto opened = ::open("/proc", flags);
     Descriptor root{opened};
     if (root.get() < 0) return fail(open_error());
@@ -313,7 +313,7 @@ class ProcProbe final : public LinuxOpsProbe {
     auto mount =
         open_namespace(root.get(), "thread-self/ns/mnt", CLONE_NEWNS, budget);
     if (!mount) return std::unexpected(mount.error());
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Linux ABI.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Linux syscall API.
     const auto parent_fd = ::ioctl(pid->descriptor.get(), NS_GET_PARENT);
     const Descriptor parent{parent_fd};
     const auto scope = parent.get() >= 0
