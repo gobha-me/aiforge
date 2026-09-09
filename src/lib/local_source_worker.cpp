@@ -18,24 +18,28 @@ using Code = LocalSourceWorkerErrorCode;
 using SourceCode = domain::LocalSourceErrorCode;
 using Token = std::variant<LocalSourceRequestToken, LocalFolderGrantToken,
                            LocalContextWorkToken, RepositoryContextWorkToken,
-                           OpsObservationWorkToken>;
+                           OpsObservationWorkToken, OpsSourcePreparationToken>;
 using Request =
     std::variant<LocalSourceWorkRequest, LocalFolderGrantRequest,
                  LocalContextWorkRequest, RepositoryContextWorkRequest,
-                 OpsObservationWorkRequest>;
+                 OpsObservationWorkRequest, OpsSourcePreparationRequest>;
 using Port = std::variant<std::monostate, std::shared_ptr<LocalSourceReader>,
                           std::shared_ptr<LocalSourceGrantFactory>,
                           std::shared_ptr<LocalContextController>,
                           std::shared_ptr<RepositoryContextController>,
-                          std::shared_ptr<OpsObservationSource>>;
+                          std::shared_ptr<OpsObservationSource>,
+                          std::shared_ptr<OpsSourcePreparationFactory>>;
 using ContextOutcome =
     std::expected<PreparedLocalContext, domain::LocalContextError>;
 using RepositoryOutcome =
     std::expected<PreparedRepositoryContext, domain::RepositoryContextError>;
 using OpsOutcome =
     std::expected<domain::OpsObservation, OpsObservationSourceError>;
-using Result = std::variant<LocalSourceWorkResult, LocalFolderGrantResult,
-                            ContextOutcome, RepositoryOutcome, OpsOutcome>;
+using PreparationOutcome =
+    std::expected<PreparedOpsSource, OpsObservationSourceError>;
+using Result =
+    std::variant<LocalSourceWorkResult, LocalFolderGrantResult, ContextOutcome,
+                 RepositoryOutcome, OpsOutcome, PreparationOutcome>;
 using Outcome = std::expected<Result, domain::LocalSourceError>;
 
 auto failure(Code code, std::string message)
@@ -345,6 +349,37 @@ auto invoke_ops(OpsObservationSource& source,
     result = std::unexpected(OpsObservationSourceError::invalid_result);
   return Result{std::move(result)};
 }
+auto preparation_budget(const OpsSourcePreparationRequest& request,
+                        std::stop_token stop)
+    -> std::expected<void, OpsObservationSourceError> {
+  if (stop.stop_requested())
+    return std::unexpected(OpsObservationSourceError::cancelled);
+  if (std::chrono::steady_clock::now() >= request.deadline)
+    return std::unexpected(OpsObservationSourceError::timed_out);
+  return {};
+}
+auto invoke_preparation(OpsSourcePreparationFactory& factory,
+                        const OpsSourcePreparationRequest& request,
+                        std::stop_token stop) -> Outcome {
+  if (auto ready = preparation_budget(request, stop); !ready)
+    return Result{PreparationOutcome{std::unexpected(ready.error())}};
+  auto result = factory.prepare(request, stop);
+  if (!result)
+    result = std::unexpected(ops_error(result.error()));
+  else if (auto valid =
+               validate_ops_source_preparation_result(request, *result);
+           !valid)
+    result = std::unexpected(valid.error());
+  // Invalid/late resources are released here, on the producer. Physical cleanup
+  // may block, so the slot cannot retire merely because delivery is refused.
+  if (auto ready = preparation_budget(request, stop); !ready)
+    result = std::unexpected(ready.error());
+  return Result{std::move(result)};
+}
+auto producer_holds_result(const Token& token) -> bool {
+  return std::holds_alternative<LocalFolderGrantToken>(token) ||
+         std::holds_alternative<OpsSourcePreparationToken>(token);
+}
 template <typename Value>
 auto completion_error(domain::LocalSourceError error) {
   if constexpr (std::same_as<Value, ContextOutcome>) {
@@ -358,7 +393,8 @@ auto completion_error(domain::LocalSourceError error) {
             ? domain::RepositoryContextErrorCode::cancelled
             : domain::RepositoryContextErrorCode::internal_failure;
     return std::unexpected(repository_error({code, {}}));
-  } else if constexpr (std::same_as<Value, OpsOutcome>) {
+  } else if constexpr (std::same_as<Value, OpsOutcome> ||
+                       std::same_as<Value, PreparationOutcome>) {
     return std::unexpected(error.code == SourceCode::cancelled
                                ? OpsObservationSourceError::cancelled
                                : OpsObservationSourceError::internal_failure);
@@ -419,6 +455,11 @@ auto invoke_job(const std::shared_ptr<Job>& job) -> Outcome {
       return source_failure(SourceCode::cancelled, "local work cancelled");
   }
   if (const auto* request =
+          std::get_if<OpsSourcePreparationRequest>(&job->request))
+    return invoke_preparation(
+        *std::get<std::shared_ptr<OpsSourcePreparationFactory>>(job->port),
+        *request, job->stop.get_token());
+  if (const auto* request =
           std::get_if<OpsObservationWorkRequest>(&job->request))
     return invoke_ops(
         *std::get<std::shared_ptr<OpsObservationSource>>(job->port), *request,
@@ -453,7 +494,7 @@ auto read_source(const std::shared_ptr<Job>& job) -> void {
   }
   // All potentially blocking port/lease destruction stays on this producer.
   job->port.emplace<std::monostate>();
-  const bool grant = std::holds_alternative<LocalFolderGrantToken>(job->token);
+  const bool resource_result = producer_holds_result(job->token);
   {
     const std::lock_guard lock{job->mutex};
     if (!job->discarded) job->result = std::move(result);
@@ -461,7 +502,7 @@ auto read_source(const std::shared_ptr<Job>& job) -> void {
   }
   result.reset();
   job->changed.notify_all();
-  if (grant) {
+  if (resource_result) {
     {
       std::unique_lock lock{job->mutex};
       job->changed.wait(lock, [&] { return job->discarded || job->consumed; });
@@ -559,18 +600,28 @@ struct LocalSourceWorker::Impl {
         return failure(Code::stale_request,
                        "local work was cancelled or consumed");
       if (!job->ready || !job->relay_done ||
-          (!std::same_as<Value, LocalFolderGrantResult> && !job->reader_done))
+          (!producer_holds_result(job->token) && !job->reader_done))
         return std::nullopt;
       if (!job->result)
         return failure(Code::internal_failure,
                        "local completion is unavailable");
       auto& result = *job->result;
-      if (result)
-        completion.emplace(
-            Completion{token, std::move(std::get<Value>(*result))});
-      else
-        completion.emplace(Completion{
-            token, completion_error<Value>(std::move(result.error()))});
+      if constexpr (std::same_as<Value, PreparationOutcome>) {
+        if (result && std::get<Value>(*result) &&
+            std::chrono::steady_clock::now() >=
+                std::get<OpsSourcePreparationRequest>(job->request).deadline)
+          // Leave the physical source in the job for producer-side disposal.
+          completion.emplace(Completion{
+              token, std::unexpected(OpsObservationSourceError::timed_out)});
+      }
+      if (!completion) {
+        if (result)
+          completion.emplace(
+              Completion{token, std::move(std::get<Value>(*result))});
+        else
+          completion.emplace(Completion{
+              token, completion_error<Value>(std::move(result.error()))});
+      }
       job->consumed = true;
     }
     job->changed.notify_all();
@@ -716,6 +767,40 @@ auto LocalSourceWorker::submit(
     return failure(Code::internal_failure, "Ops observation submission failed");
   }
 }
+auto LocalSourceWorker::submit(
+    const std::shared_ptr<OpsSourcePreparationFactory>& factory,
+    OpsSourcePreparationRequest request)
+    -> std::expected<void, LocalSourceWorkerError> {
+  try {
+    if (!factory || !factory->guarantees_owned_read_only_preparation() ||
+        !validate_ops_source_preparation_request(request) ||
+        factory->preparation_identity() != request.token.selection)
+      return failure(Code::invalid_request,
+                     "owned Ops source preparation is invalid");
+    Token token = request.token;
+    return m_impl->submit(factory, std::move(token), std::move(request));
+  } catch (...) {
+    return std::unexpected(LocalSourceWorkerError{Code::internal_failure, {}});
+  }
+}
+auto LocalSourceWorker::poll(const OpsSourcePreparationToken& token)
+    -> std::expected<std::optional<OpsSourcePreparationCompletion>,
+                     LocalSourceWorkerError> {
+  try {
+    return m_impl->poll<OpsSourcePreparationCompletion, PreparationOutcome>(
+        token);
+  } catch (...) {
+    return std::unexpected(LocalSourceWorkerError{Code::internal_failure, {}});
+  }
+}
+auto LocalSourceWorker::cancel(const OpsSourcePreparationToken& token)
+    -> std::expected<void, LocalSourceWorkerError> {
+  try {
+    return m_impl->cancel(token);
+  } catch (...) {
+    return std::unexpected(LocalSourceWorkerError{Code::internal_failure, {}});
+  }
+}
 auto LocalSourceWorker::poll(const OpsObservationWorkToken& token)
     -> std::expected<std::optional<OpsObservationWorkCompletion>,
                      LocalSourceWorkerError> {
@@ -818,9 +903,7 @@ auto LocalSourceWorker::ready_results() const -> std::size_t {
       std::ranges::count_if(m_impl->jobs, [](const auto& job) {
         const std::lock_guard lock{job->mutex};
         const bool producer_ready =
-            std::holds_alternative<LocalFolderGrantToken>(job->token)
-                ? job->ready
-                : job->reader_done;
+            producer_holds_result(job->token) ? job->ready : job->reader_done;
         return !job->discarded && !job->consumed && producer_ready &&
                job->relay_done && job->result.has_value();
       }));

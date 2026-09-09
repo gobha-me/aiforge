@@ -61,6 +61,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   manual_ops_session.cpp
   ops_session.cpp
   ops_target.cpp
+  ops_source_preparation.cpp
   ops_observation.cpp
   ops_observation_broker.cpp
   ops_observation_json.cpp

@@ -9,6 +9,7 @@
 #include <aiforge/runtime/local_context_controller.hpp>
 #include <aiforge/runtime/local_source_grant.hpp>
 #include <aiforge/runtime/ops_observation_source.hpp>
+#include <aiforge/runtime/ops_source_preparation.hpp>
 #include <aiforge/runtime/repository_context_controller.hpp>
 
 namespace aiforge::runtime {
@@ -129,6 +130,18 @@ class LocalSourceWorker final {
   [[nodiscard]] auto submit(const std::shared_ptr<OpsObservationSource>& source,
                             OpsObservationWorkRequest request)
       -> std::expected<void, LocalSourceWorkerError>;
+  // Source construction shares this worker and its producer-held grant
+  // lifetime. No configuration/identity IO is performed by submission metadata
+  // checks.
+  [[nodiscard]] auto submit(
+      const std::shared_ptr<OpsSourcePreparationFactory>& factory,
+      OpsSourcePreparationRequest request)
+      -> std::expected<void, LocalSourceWorkerError>;
+  [[nodiscard]] auto poll(const OpsSourcePreparationToken& token)
+      -> std::expected<std::optional<OpsSourcePreparationCompletion>,
+                       LocalSourceWorkerError>;
+  [[nodiscard]] auto cancel(const OpsSourcePreparationToken& token)
+      -> std::expected<void, LocalSourceWorkerError>;
   [[nodiscard]] auto poll(const OpsObservationWorkToken& token)
       -> std::expected<std::optional<OpsObservationWorkCompletion>,
                        LocalSourceWorkerError>;
@@ -178,12 +191,13 @@ class LocalSourceWorker final {
 // stalled OS call or arbitrary stop callback. Teardown releases controller
 // state; detached activities retain only their bounded owning job state until
 // finished.
-// Grant results remain producer-owned until claimed or discarded. Discarded
-// leases are destroyed on that producer, outside the job mutex, before slot
-// retirement. Successful polling transfers lease cleanup to the caller's live
-// registry; it is not managed by this worker. A consumed grant slot can remain
-// briefly occupied until its producer exits. Submission borrows the caller's
-// shared pointer until both activities start, then retains its own copy. The
-// caller remains responsible for destruction of its own port/temporary owners.
+// Grant and prepared Ops source results remain producer-owned until claimed or
+// discarded. Discarded leases are destroyed on that producer, outside the job
+// mutex, before slot retirement. Successful polling transfers lease cleanup to
+// the caller's live registry; it is not managed by this worker. A consumed
+// grant slot can remain briefly occupied until its producer exits. Submission
+// borrows the caller's shared pointer until both activities start, then retains
+// its own copy. The caller remains responsible for destruction of its own
+// port/temporary owners.
 
 } // namespace aiforge::runtime

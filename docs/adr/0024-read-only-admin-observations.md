@@ -584,3 +584,26 @@ retains its physical slot under the established logical-cancellation contract.
 Implementation and capability advertisement require deterministic admission,
 identity, field, timing, bounds, visibility and dependency-consumer failure evidence.
 No live host log read or successful host compatibility is implied by this milestone.
+
+
+## Bounded source preparation (189 prerequisite)
+
+Metadata listing does not construct a live source. An owned typed preparation
+factory runs on the existing application-wide LocalSourceWorker, with the same
+capacity, numeric request-ID high-water mark and session invalidation. Its token
+binds session/epoch/request, selected target, independently reserved opaque
+configuration revision and kind. No authority, log consent or observation is
+created by preparation. Admission performs bounded metadata checks only.
+
+The one original owner-established deadline is checked around producer work and
+result validation. Existing Linux source creation retains its internal bound;
+it does not inherit this outer deadline. Additional/stalled physical work and
+cleanup can outlast logical expiry while retaining the occupied worker slot.
+
+Prepared sources use the existing producer-held grant-result lifecycle. A ready
+unclaimed/discarded result is destroyed outside the mutex on its producer before
+retirement; owner cancellation and teardown never join it. Successful polling
+transfers source ownership and accepted-resource cleanup responsibility to the
+application. It does not establish an asynchronous retirement service for later
+application-owned shared pointers. Current selection is checked before claim;
+later native binding retains its separate atomic/current-authority gates.
