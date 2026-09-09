@@ -351,6 +351,7 @@ TEST_CASE("manual deadline stops work and leaves a reusable kernel",
   Fixture f;
   f.specification.limits.timeout = std::chrono::milliseconds{100};
   f.source->blocked = true;
+  ++f.specification.selection_generation;
   f.select();
   f.registry();
   f.open();
@@ -361,6 +362,7 @@ TEST_CASE("manual deadline stops work and leaves a reusable kernel",
   REQUIRE(count<OpsObservationRecorded>(f.store.history) == 0);
   REQUIRE(runtime::recorded_ops_observations(f.kernel->event_log()));
   f.specification.limits.timeout = OpsObservationLimits{}.timeout;
+  ++f.specification.selection_generation;
   f.select();
   f.registry();
   REQUIRE(f.kernel->replace_available_tools(f.tools));
