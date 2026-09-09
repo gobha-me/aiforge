@@ -3208,7 +3208,7 @@ auto ChatSession::bind_observation(
     if (m_impl->observation_preparation_busy())
       return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::busy});
     const auto provenance = m_impl->tool_policy->provenance();
-    if (!provenance ||
+    if (provenance == nullptr ||
         provenance->permission_profile_id != *m_impl->permission_profile_id)
       return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::unavailable});
     std::optional<domain::OpsTargetBinding> selected{
@@ -3241,8 +3241,9 @@ auto ChatSession::submit_observation(runtime::OpsObservationIntent intent)
       return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::cancelled});
     if (m_impl->observation_inspection.closed)
       return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::closed});
-    if (!m_impl->observation_inspection.available ||
-        !m_impl->observation_context || !m_impl->permission_profile_id)
+    const auto context = m_impl->observation_context;
+    const auto permission = m_impl->permission_profile_id;
+    if (!m_impl->observation_inspection.available || !context || !permission)
       return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::unavailable});
     if (auto synced = m_impl->synchronize_observations(); !synced)
       return std::unexpected(synced.error());
@@ -3260,9 +3261,9 @@ auto ChatSession::submit_observation(runtime::OpsObservationIntent intent)
     const auto before = m_impl->kernel->event_log().events().size();
     auto started = m_impl->kernel->start_observation_control(
         {*run,
-         {m_impl->observation_context->surface_id,
-          m_impl->observation_context->workspace_id,
-          *m_impl->permission_profile_id,
+         {context->surface_id,
+          context->workspace_id,
+          *permission,
           {},
           {},
           domain::RunPurpose::control},
@@ -3296,8 +3297,8 @@ auto ChatSession::submit_observation(runtime::OpsObservationIntent intent)
 auto ChatSession::cancel_observation(const domain::RunId& run_id)
     -> std::expected<void, ManualOpsFailure> {
   try {
-    if (!m_impl->manual_active() ||
-        m_impl->manual_observation->run_id != run_id)
+    const auto submission = m_impl->manual_observation;
+    if (!submission || !m_impl->manual_active() || submission->run_id != run_id)
       return std::unexpected(
           ManualOpsFailure{ManualOpsErrorCode::wrong_operation});
     const auto before = m_impl->kernel->event_log().events().size();
@@ -3321,9 +3322,10 @@ auto ChatSession::decide_observation_approval(
   try {
     if (m_impl->observation_inspection.closed)
       return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::closed});
-    if (!m_impl->manual_active() ||
-        m_impl->manual_observation->run_id != run_id ||
-        m_impl->manual_observation->invocation_id != invocation_id)
+    const auto submission = m_impl->manual_observation;
+    if (!submission || !m_impl->manual_active() ||
+        submission->run_id != run_id ||
+        submission->invocation_id != invocation_id)
       return std::unexpected(
           ManualOpsFailure{ManualOpsErrorCode::wrong_operation});
     if (auto synced = m_impl->synchronize_observations(); !synced)
@@ -4088,6 +4090,11 @@ auto ChatSession::drain()
     if (!pumped && pumped.error().code == ManualOpsErrorCode::storage_failure)
       return observation_chat_error(pumped.error());
   }
+  return drain_model_events();
+}
+
+auto ChatSession::drain_model_events()
+    -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
   auto observed = m_impl->observe_pending_events();
   if (!observed) return std::unexpected(observed.error());
   auto result = std::move(*observed);
@@ -4151,11 +4158,17 @@ auto ChatSession::drain()
 
 auto ChatSession::cancel_active(std::optional<std::string> reason)
     -> std::expected<void, ChatSessionError> {
-  if (m_impl->manual_active()) {
-    auto cancelled = cancel_observation(m_impl->manual_observation->run_id);
+  const auto& submission = m_impl->manual_observation;
+  if (submission && m_impl->manual_active()) {
+    auto cancelled = cancel_observation(submission->run_id);
     if (!cancelled) return observation_chat_error(cancelled.error());
     return {};
   }
+  return cancel_model_run(std::move(reason));
+}
+
+auto ChatSession::cancel_model_run(std::optional<std::string> reason)
+    -> std::expected<void, ChatSessionError> {
   cancel_repository_work();
   const auto run = m_impl->kernel->active_run_id();
   if (!run) {

@@ -506,6 +506,10 @@ class ChatSession final : public ManualOpsSession {
   [[nodiscard]] auto active() const noexcept -> bool;
 
  private:
+  [[nodiscard]] auto drain_model_events()
+      -> std::expected<std::vector<domain::RunEvent>, ChatSessionError>;
+  [[nodiscard]] auto cancel_model_run(std::optional<std::string> reason)
+      -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto summary_mandatory_context(
       const std::string& draft, std::uint64_t identity,
       const std::optional<runtime::PreparedRepositoryContext>& repository)
