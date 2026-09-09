@@ -3,7 +3,7 @@
 #include <filesystem>
 #include <memory>
 
-#include <aiforge/runtime/local_source.hpp>
+#include <aiforge/runtime/local_source_grant.hpp>
 
 namespace aiforge::adapters {
 
@@ -26,15 +26,19 @@ class LocalFileSource;
 // All operation state and descriptors are owned. Callers retain shared lease
 // ownership for outstanding operations. revoke() is immediate and never joins
 // workers; cancellation is checked between calls, not inside stalled OS calls.
-class LocalFileSource final : public runtime::LocalSourceReader {
+class LocalFileSource final : public runtime::LocalSourceLease {
  public:
   ~LocalFileSource() override;
   LocalFileSource(const LocalFileSource&) = delete;
   auto operator=(const LocalFileSource&) -> LocalFileSource& = delete;
 
   [[nodiscard]] auto root_identity() const noexcept
-      -> const domain::LocalRootIdentity&;
-  auto revoke() noexcept -> void;
+      -> const domain::LocalRootIdentity& override;
+  [[nodiscard]] auto session_id() const noexcept
+      -> const domain::SessionId& override;
+  [[nodiscard]] auto lease_generation() const noexcept
+      -> std::uint64_t override;
+  auto revoke() noexcept -> void override;
   [[nodiscard]] auto guarantees_pinned_read_only_sources() const noexcept
       -> bool override;
   [[nodiscard]] auto list(runtime::LocalListRequest request,
@@ -59,6 +63,18 @@ class LocalFileSource final : public runtime::LocalSourceReader {
                                  std::stop_token)
       -> std::expected<std::shared_ptr<LocalFileSource>,
                        domain::LocalSourceError>;
+};
+
+class LocalFileGrantFactory final : public runtime::LocalSourceGrantFactory {
+ public:
+  [[nodiscard]] auto guarantees_pinned_read_only_sources() const noexcept
+      -> bool override {
+    return true;
+  }
+  [[nodiscard]] auto grant(const runtime::LocalFolderGrantRequest& request,
+                           std::stop_token stop = {})
+      -> std::expected<runtime::LocalFolderGrantResult,
+                       domain::LocalSourceError> override;
 };
 
 } // namespace aiforge::adapters

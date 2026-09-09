@@ -6,7 +6,7 @@
 #include <optional>
 #include <variant>
 
-#include <aiforge/runtime/local_source.hpp>
+#include <aiforge/runtime/local_source_grant.hpp>
 
 namespace aiforge::runtime {
 
@@ -17,6 +17,10 @@ using LocalSourceWorkResult =
 struct LocalSourceWorkCompletion {
   LocalSourceRequestToken token;
   std::expected<LocalSourceWorkResult, domain::LocalSourceError> result;
+};
+struct LocalFolderGrantCompletion {
+  LocalFolderGrantToken token;
+  std::expected<LocalFolderGrantResult, domain::LocalSourceError> result;
 };
 
 enum class LocalSourceWorkerErrorCode {
@@ -52,8 +56,12 @@ class LocalSourceWorker final {
   // an admitted slot consumes it even if thread creation subsequently fails.
   // The reader, not a constructed token, establishes live filesystem authority.
   // The same owning reader may receive concurrent calls up to this capacity.
-  [[nodiscard]] auto submit(std::shared_ptr<LocalSourceReader> reader,
+  [[nodiscard]] auto submit(const std::shared_ptr<LocalSourceReader>& reader,
                             LocalSourceWorkRequest request)
+      -> std::expected<void, LocalSourceWorkerError>;
+  [[nodiscard]] auto submit(
+      const std::shared_ptr<LocalSourceGrantFactory>& factory,
+      LocalFolderGrantRequest request)
       -> std::expected<void, LocalSourceWorkerError>;
   // Null means still working. A completion is moved out exactly once; every
   // lookup compares the entire token, including root/lease/selection revision.
@@ -62,7 +70,12 @@ class LocalSourceWorker final {
                        LocalSourceWorkerError>;
   [[nodiscard]] auto cancel(const LocalSourceRequestToken& token)
       -> std::expected<void, LocalSourceWorkerError>;
-  [[nodiscard]] auto invalidate_session(const domain::SessionId& session)
+  [[nodiscard]] auto poll(const LocalFolderGrantToken& token)
+      -> std::expected<std::optional<LocalFolderGrantCompletion>,
+                       LocalSourceWorkerError>;
+  [[nodiscard]] auto cancel(const LocalFolderGrantToken& token)
+      -> std::expected<void, LocalSourceWorkerError>;
+  [[nodiscard]] auto invalidate_session(const domain::SessionId& session_id)
       -> std::expected<void, LocalSourceWorkerError>;
   [[nodiscard]] auto occupied_slots() const -> std::size_t;
   // Bounded readiness metadata only; leaves every completion owned by its slot.
@@ -82,5 +95,12 @@ class LocalSourceWorker final {
 // stalled OS call or arbitrary stop callback. Teardown releases controller
 // state; detached activities retain only their bounded owning job state until
 // finished.
+// Grant results remain producer-owned until claimed or discarded. Discarded
+// leases are destroyed on that producer, outside the job mutex, before slot
+// retirement. Successful polling transfers lease cleanup to the caller's live
+// registry; it is not managed by this worker. A consumed grant slot can remain
+// briefly occupied until its producer exits. Submission borrows the caller's
+// shared pointer until both activities start, then retains its own copy. The
+// caller remains responsible for destruction of its own port/temporary owners.
 
 } // namespace aiforge::runtime
