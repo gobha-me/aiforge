@@ -246,11 +246,19 @@ TEST_CASE("Manual and ordinary cancellation buffers preserve exact event order",
   const auto manual_count = f.store.history.size();
   f.models.unavailable = false;
   f.backend.unavailable = false;
+  f.backend.held = std::make_shared<StreamState>();
+  const folder_grant_test::Release release{f.backend.held->gate};
   auto ordinary =
       f.chat->submit("An ordinary response after manual observation");
   REQUIRE(ordinary);
+  // Stabilize provider counters before cancellation. The retained stream has
+  // queued its first event and cannot finish until the RAII release below.
+  REQUIRE(f.backend.held->gate->await());
+  REQUIRE(f.backend.held->calls == 2);
   REQUIRE(f.chat->cancel_active());
   const auto before = f.store.history.size();
+  REQUIRE(count<RunCancelRequested>(f.store.history) == 1);
+  const auto committed_cancellations = count<RunCancelled>(f.store.history);
   const auto source_calls = f.source->calls.load();
   const auto backend_calls = f.backend.calls.load();
   const auto model_calls = f.models.calls;
@@ -258,7 +266,10 @@ TEST_CASE("Manual and ordinary cancellation buffers preserve exact event order",
   REQUIRE(events.size() >= manual_count);
   CHECK(count<OpsObservationRecorded>(events) == 1);
   CHECK(count<RunCompleted>(events) == 1);
-  CHECK(count<RunCancelled>(events) == 1);
+  CHECK(count<RunCancelRequested>(events) == 1);
+  // Taking this buffer is pure; it must not drain the asynchronous terminal
+  // cancellation just to make the returned event set look complete.
+  CHECK(count<RunCancelled>(events) == committed_cancellations);
   std::set<std::uint64_t> sequences;
   std::uint64_t last{};
   for (const auto& event : events) {
