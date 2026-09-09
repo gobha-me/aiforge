@@ -94,7 +94,7 @@ if [[ "$(uname -s)" == Linux ]]; then
   fi
   cmake -DDBUS_BUILD_DIR="${dbus_build}" -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
     -P "${SNAPSHOT_DIR}/cmake/dependency-probe/install-dbus-client.cmake"
-  configure_probe installed-dbus1 dbus1 \
+  configure_probe installed-dbus1 dbus1 -DPROBE_EXPECT_IMPORTED=ON \
     -DDBus1_DIR="${PREFIX}/lib/cmake/DBus1" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
   build_and_run_probe installed-dbus1
   if configure_probe mismatched-dbus1 dbus1 \
@@ -103,14 +103,29 @@ if [[ "$(uname -s)" == Linux ]]; then
     echo "libdbus accepted a source without its client target" >&2
     exit 1
   fi
+  # A rejected *_DIR hint may legitimately fall through to another compatible
+  # installed package. Prove that behavior, then isolate the negative fixture
+  # so a system DBus1 cannot accidentally turn it into a successful configure.
+  configure_probe alternate-installed-dbus1 dbus1 -DPROBE_EXPECT_IMPORTED=ON \
+    -DDBus1_DIR="${SNAPSHOT_DIR}/cmake/dependency-probe/obsolete/lib/cmake/DBus1" \
+    -DCMAKE_PREFIX_PATH="${PREFIX}" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+  build_and_run_probe alternate-installed-dbus1
   if configure_probe obsolete-dbus1 dbus1 \
     -DDBus1_DIR="${SNAPSHOT_DIR}/cmake/dependency-probe/obsolete/lib/cmake/DBus1" \
+    -DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE \
+    -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE \
+    -DCMAKE_FIND_ROOT_PATH="${SNAPSHOT_DIR}/cmake/dependency-probe/obsolete" \
+    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
     -DFETCHCONTENT_SOURCE_DIR_AIFORGE_DBUS1="${SNAPSHOT_DIR}/cmake/dependency-probe/mismatched"; then
     echo "libdbus accepted an obsolete package" >&2
     exit 1
   fi
   if configure_probe malformed-dbus1 dbus1 \
-    -DDBus1_DIR="${SNAPSHOT_DIR}/cmake/dependency-probe/malformed/lib/cmake/DBus1"; then
+    -DDBus1_DIR="${SNAPSHOT_DIR}/cmake/dependency-probe/malformed/lib/cmake/DBus1" \
+    -DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE \
+    -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE \
+    -DCMAKE_FIND_ROOT_PATH="${SNAPSHOT_DIR}/cmake/dependency-probe/malformed" \
+    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY; then
     echo "libdbus accepted missing client headers" >&2
     exit 1
   fi
