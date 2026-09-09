@@ -92,6 +92,12 @@ class RepositoryContextController final {
 };
 
 [[nodiscard]] auto finalize_repository_context_admission(
+    const domain::RepositoryContextAdmission& prepared,
+    const ContextSelectionResult& selection)
+    -> std::expected<domain::RepositoryContextAdmission,
+                     domain::RepositoryContextError>;
+
+[[nodiscard]] auto finalize_repository_context_admission(
     const PreparedRepositoryContext& prepared,
     const ContextSelectionResult& selection)
     -> std::expected<domain::RepositoryContextAdmission,

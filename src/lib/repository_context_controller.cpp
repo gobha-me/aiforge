@@ -478,11 +478,11 @@ auto RepositoryContextController::revalidate(
 }
 
 auto finalize_repository_context_admission(
-    const PreparedRepositoryContext& prepared,
+    const domain::RepositoryContextAdmission& prepared,
     const ContextSelectionResult& selection)
     -> std::expected<domain::RepositoryContextAdmission, Error> {
   try {
-    auto admission = prepared.admission;
+    auto admission = prepared;
     admission.capacity = selection.context.capacity;
     for (auto& evidence : admission.evidence) {
       const ContextSelectionDecisionRecord* found{};
@@ -517,5 +517,11 @@ auto finalize_repository_context_admission(
     return failure(Code::internal_failure,
                    "repository admission finalization failed internally");
   }
+}
+auto finalize_repository_context_admission(
+    const PreparedRepositoryContext& prepared,
+    const ContextSelectionResult& selection)
+    -> std::expected<domain::RepositoryContextAdmission, Error> {
+  return finalize_repository_context_admission(prepared.admission, selection);
 }
 } // namespace aiforge::runtime
