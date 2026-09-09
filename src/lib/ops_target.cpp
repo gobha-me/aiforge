@@ -375,4 +375,29 @@ auto validate_ops_observation_limits(const OpsObservationLimits& limits)
                 "Ops observation limit validation failed");
   }
 }
+auto validate_recorded_ops_request(const OpsObservationRequest& request)
+    -> Status {
+  try {
+    if (!identifier(request.owner_id) || !identifier(request.session_id) ||
+        !identifier(request.request_id) ||
+        !sequence(request.selection_generation) ||
+        !sequence(request.log_policy_revision))
+      return fail(Code::invalid_request,
+                  "Recorded Ops request identity is invalid");
+    if (auto valid = target(request.target); !valid) return valid;
+    const auto kind = ops_target_kind(request.target);
+    if (!kind || !matches_kind(request.operation, *kind))
+      return fail(Code::invalid_request,
+                  "Recorded Ops operation does not match target");
+    if (!limits_within(request.limits, OpsObservationLimits{}))
+      return fail(Code::resource_exhausted,
+                  "Recorded Ops request exceeds hard limits");
+    if (!operation_resource(request))
+      return fail(Code::resource_mismatch, "Recorded Ops resource is invalid");
+    return {};
+  } catch (...) {
+    return fail(Code::internal_failure,
+                "Recorded Ops request validation failed");
+  }
+}
 } // namespace aiforge::domain

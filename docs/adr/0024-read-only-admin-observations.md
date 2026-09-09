@@ -131,6 +131,20 @@ from durable evidence. Reopening unfinished manual reads reports interruption
 without automatically collecting again. Failed persistence must never claim a
 durable observation or success.
 
+The historical observation codec uses ADR0005's private nlohmann/json boundary
+and a version-1 neutral document. It encodes no source handle or live authority.
+Historical structure validation checks the recorded request, hard limits and
+payload without reconstructing consent; current authority remains a separate
+dispatch/publication requirement. Exact field sets, variant and enum names,
+integer types, decoded mapping-key uniqueness and UTF-8 are validated. The
+encoded document has an independent 512 KiB ceiling, parsing depth 16 and
+32,768 parser-event ceiling; neutral evidence accounting remains 64 KiB.
+Null optional fields retain unknown/absent semantics, zero remains a value,
+and source-ordered log lines retain blank lines. The codec alone does not append
+events or complete replay integration. The later kernel slice must atomically
+pair typed observations with their invocation result, reject mismatched model
+content and recheck current authority before publishing either representation.
+
 ## Required failure evidence
 
 - Wrong/foreign target, namespace, generation, resource or log-policy revision;

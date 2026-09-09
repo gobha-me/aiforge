@@ -210,4 +210,10 @@ struct OpsObservationUsage {
     const OpsObservation& observation)
     -> std::expected<OpsObservationUsage, OpsObservationError>;
 
+// Validates historical structure and hard bounds without reconstructing a
+// live authority. Replay grants no new collection or publication permission.
+[[nodiscard]] auto validate_recorded_ops_observation(
+    const OpsObservation& observation)
+    -> std::expected<OpsObservationUsage, OpsObservationError>;
+
 } // namespace aiforge::domain

@@ -205,5 +205,10 @@ class OpsObservationAuthority final {
     bool require_log_identity = false) -> std::expected<void, OpsTargetError>;
 [[nodiscard]] auto validate_ops_observation_limits(
     const OpsObservationLimits& limits) -> std::expected<void, OpsTargetError>;
+// Structural historical data only. Does not establish current selection,
+// consent, authority, or permission to collect/publish a new observation.
+[[nodiscard]] auto validate_recorded_ops_request(
+    const OpsObservationRequest& request)
+    -> std::expected<void, OpsTargetError>;
 
 } // namespace aiforge::domain
