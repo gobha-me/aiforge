@@ -1267,3 +1267,12 @@ or scripting-runtime types. Future adapters depend inward on the core.
 
 AIForge is available under the BSD 3-Clause License; see
 [`LICENSE.md`](LICENSE.md).
+
+The adapter build consumes the reviewed Venice HTTP transport contract from
+merged source `339729e945d0b3d6584702ecf49f013c1ad6779a`. An installed Venice
+package must be at least 0.29.18 and expose that capability; an older local sibling
+or incompatible preexisting target produces a configure error. All adapters use
+one header-only cpp-httplib 0.51.x target with OpenSSL 3 and synchronous resolution.
+Venice also exports its c-ares dependency; this update introduces no AIForge
+resolver runtime or Kubernetes collector. Installed package versions alone do
+not replace the actual header/API checks.

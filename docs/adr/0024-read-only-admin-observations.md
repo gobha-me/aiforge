@@ -691,3 +691,39 @@ to the remaining allowance. Exact current committed evidence decides command
 success; output failure does not recollect or erase durable evidence. Teardown
 cancels the exact owned work and keeps storage/source graph alive past kernel
 cleanup without claiming hard syscall/destructor interruption.
+
+## Coordinated HTTPS dependency milestone
+
+The private Kubernetes source requires the delivered Venice transport contract,
+so AIForge consumes merged Venice source
+`339729e945d0b3d6584702ecf49f013c1ad6779a` instead of tag 0.29.17. Installed
+packages require at least 0.29.18 plus the exported
+`httplib-0.51-openssl3-header-only-v1` capability marker and actual selected
+header/API verification; version metadata alone is insufficient. Installed,
+preexisting, sibling and fetched targets use the same canonical validation.
+An incompatible existing target is refused rather than silently replaced.
+The configure probe forwards only the exact selected Venice contract guard from
+an isolated build directory. An HTTP header adjacent to an installed Venice
+guard cannot substitute for the canonical HTTP target's selected header. The
+reviewed upstream checker is reused, with an attributed exact copy for callers
+that supply only preexisting exported targets.
+Embedded acquisition temporarily promotes installed dependency targets to global
+scope so the parent gate and adapters share the same canonical target. The
+caller's normal and cached package-search preferences are preserved.
+
+Exactly one header-only `httplib::httplib` target supplies OpenSSL 3, canonical
+header limits and synchronous resolver behavior to Venice and AIForge. No second
+HTTP header, private feature overrides, HTTP library or global resolver owner is added.
+The new public c-ares link dependency is supplied by Venice; AIForge production
+calls no c-ares/downloader API and introduces no initialization/cleanup pair.
+The consumer fixture calls only the initialization-free c-ares version query
+to verify the actual exported link dependency.
+Future resolver use must separately establish Venice's startup-thread ownership
+before all application threads and retain it through their complete shutdown.
+
+This milestone updates dependency recipes/consumer proofs and the existing audio
+multipart fixture. It enables no Kubernetes source, request or log capability.
+Later TLS setup stays on the preparation/observation worker: metadata-only factory
+construction must not initialize OpenSSL or load ambient crypto configuration.
+Transport controls remain bounded rejection mechanisms, not hard process-memory,
+DNS/syscall cancellation or destructor deadlines.
