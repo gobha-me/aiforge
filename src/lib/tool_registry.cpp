@@ -139,13 +139,45 @@ constexpr std::size_t kMaximumContinuationArtifactBytes{std::size_t{32} *
   return content;
 }
 
+// Partial conversation projections may omit RunStarted. A retained explicit
+// non-conversation purpose excludes that run even if a malformed span also
+// retains another start; complete start grammar belongs to kernel replay.
+[[nodiscard]] auto continuation_run_purposes(
+    std::span<const domain::RunEvent> events)
+    -> std::map<domain::RunId, domain::RunPurpose> {
+  std::map<domain::RunId, domain::RunPurpose> purposes;
+  for (const auto& event : events) {
+    if (const auto* started = std::get_if<domain::RunStarted>(&event.payload)) {
+      auto& purpose =
+          purposes.try_emplace(event.metadata.run_id, started->purpose)
+              .first->second;
+      if (started->purpose != domain::RunPurpose::conversation)
+        purpose = started->purpose;
+    }
+  }
+  return purposes;
+}
+
+[[nodiscard]] auto includes_conversation_event(
+    const std::map<domain::RunId, domain::RunPurpose>& purposes,
+    const domain::RunEvent& event) -> bool {
+  const auto purpose = purposes.find(event.metadata.run_id);
+  return purpose == purposes.end() ||
+         purpose->second == domain::RunPurpose::conversation;
+}
+
 [[nodiscard]] auto project_continuation_artifacts(
     std::vector<domain::Message> messages,
-    const std::span<const domain::RunEvent> events)
+    const std::span<const domain::RunEvent> events,
+    const std::map<domain::RunId, domain::RunPurpose>& purposes)
     -> std::expected<std::vector<domain::Message>, ToolExecutionError> {
   std::map<domain::ArtifactId, const domain::RunEvent*> artifacts;
   std::set<domain::ArtifactId> ambiguous_artifacts;
-  for (const auto& event : events) {
+  auto conversation_events =
+      events | std::views::filter([&](const domain::RunEvent& event) {
+        return includes_conversation_event(purposes, event);
+      });
+  for (const auto& event : conversation_events) {
     if (const auto* created =
             std::get_if<domain::ArtifactCreated>(&event.payload)) {
       if (!artifacts.emplace(created->artifact.artifact_id, &event).second) {
@@ -760,6 +792,11 @@ auto tool_result_messages(std::span<const domain::RunEvent> events)
 auto tool_continuation_messages(std::span<const domain::RunEvent> events)
     -> std::expected<std::vector<domain::Message>, ToolExecutionError> {
   try {
+    const auto purposes = continuation_run_purposes(events);
+    auto conversation_events =
+        events | std::views::filter([&](const domain::RunEvent& event) {
+          return includes_conversation_event(purposes, event);
+        });
     std::vector<domain::Message> result;
     std::optional<domain::Message> assistant;
     std::optional<domain::InferenceId> assistant_inference;
@@ -808,7 +845,7 @@ auto tool_continuation_messages(std::span<const domain::RunEvent> events)
       return {};
     };
 
-    for (const auto& event : events) {
+    for (const auto& event : conversation_events) {
       if (const auto* started =
               std::get_if<domain::AssistantContentStarted>(&event.payload)) {
         if (assistant) {
@@ -903,7 +940,7 @@ auto tool_continuation_messages(std::span<const domain::RunEvent> events)
           ToolExecutionErrorCode::protocol_failure,
           "tool continuation history ends inside an inference", false});
     }
-    return project_continuation_artifacts(std::move(result), events);
+    return project_continuation_artifacts(std::move(result), events, purposes);
   } catch (...) {
     return std::unexpected(ToolExecutionError{
         ToolExecutionErrorCode::internal_failure,
