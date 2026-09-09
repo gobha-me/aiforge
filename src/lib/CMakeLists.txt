@@ -60,6 +60,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   one_shot.cpp
   ops_target.cpp
   ops_observation.cpp
+  ops_observation_broker.cpp
   ops_observation_json.cpp
   plan.cpp
   plan_task_controller.cpp
