@@ -35,6 +35,8 @@ context.
 - GCC 13+ or Clang 17+ with a C++23 standard library
 - Git when CMake must fetch dependencies
 - ALSA development headers on Linux for the default local-audio build
+- Expat development headers and pkg-config when fetching the private Linux
+  libdbus client dependency
 
 AIForge uses CMake only for dependencies. A configured package is preferred,
 then a sibling checkout, with `FetchContent` as the fallback. Adapter builds use
@@ -52,6 +54,17 @@ Top-level Linux builds also enable the private RtAudio 6.0.1 ALSA playback and
 capture adapters by default. Set `aiforge_AUDIO_PLAYBACK=OFF` and
 `aiforge_AUDIO_CAPTURE=OFF` for a device-free build; core and consumed
 subdirectory builds remain device-dependency free by default.
+
+Linux adapter builds also consume the private libdbus client for the upcoming
+systemd observation boundary. CMake prefers a DBus1 1.16.2+ package and otherwise
+builds the pinned 1.16.2 shared client; it does not build daemon tools as part of
+the default target. Consumers that deploy this boundary must provide a matching
+`libdbus-1.so.3` (1.16.2 or newer) through their runtime library search path.
+Build-tree CMake consumers use the selected library; copying an executable alone
+does not package that dependency. AIForge currently has no application install
+or library-export rules. The transport checks the loaded library version before
+opening its socket. Service observations remain unavailable until the neutral
+service decoder and source integration are complete.
 
 Durable session storage uses SQLite 3 behind a neutral storage port. CMake
 prefers an installed SQLite 3.45.1 or newer and otherwise builds the pinned

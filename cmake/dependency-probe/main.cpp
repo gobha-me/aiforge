@@ -39,6 +39,19 @@ auto main() -> int {
   const auto image = rasterforge::Image::create({1, 1});
   return image && image->size_bytes() == 4 ? 0 : 1;
 }
+#elif defined(PROBE_DBUS1)
+#include <dbus/dbus.h>
+
+auto main() -> int {
+  static_assert(DBUS_VERSION >= ((1 << 16) | (16 << 8) | 2));
+  int major{}, minor{}, micro{};
+  dbus_get_version(&major, &minor, &micro);
+  // Pure linked-library check: never connect to a bus or query a service.
+  return major > 1 ||
+                 (major == 1 && (minor > 16 || (minor == 16 && micro >= 2)))
+             ? 0
+             : 1;
+}
 #elif defined(PROBE_SQLITE3)
 #include <sqlite3.h>
 

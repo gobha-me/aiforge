@@ -1,0 +1,16 @@
+# Exact, idempotent correction for the verified 1.16.2 release source. Never
+# substitute the parent project's path into a dependency's configure check.
+set(source "${DBUS_SOURCE_DIR}/CMakeLists.txt")
+file(READ "${source}" contents)
+set(before [=[COMMAND "${CMAKE_SOURCE_DIR}/tools/check-runstatedir.sh"]=])
+set(after [=[COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/tools/check-runstatedir.sh"]=])
+string(FIND "${contents}" "${before}" found)
+if (found EQUAL -1)
+  string(FIND "${contents}" "${after}" already_fixed)
+  if (already_fixed EQUAL -1)
+    message(FATAL_ERROR "Unexpected libdbus subproject check; review upstream source")
+  endif ()
+else ()
+  string(REPLACE "${before}" "${after}" contents "${contents}")
+  file(WRITE "${source}" "${contents}")
+endif ()
