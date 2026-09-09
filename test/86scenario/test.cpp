@@ -4085,9 +4085,11 @@ TEST_CASE("interactive composer cursor survives fallback lifecycle boundaries",
     return frame.find("Slash command help") != std::string::npos &&
            frame.find("@reverse=0,4") != std::string::npos;
   }));
+  // Draft editing remains available during a run so manual Admin commands can
+  // be entered without cancelling ordinary inference.
   REQUIRE(has_frame([](const std::string& frame) {
     return frame.find("Running") != std::string::npos &&
-           frame.find("@reverse=") == std::string::npos;
+           frame.find("@reverse=") != std::string::npos;
   }));
   REQUIRE(has_frame([](const std::string& frame) {
     return frame.find("prompt") != std::string::npos &&
