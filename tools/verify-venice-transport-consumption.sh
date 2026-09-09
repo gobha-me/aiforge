@@ -19,7 +19,7 @@ configure() {
     -DFETCHCONTENT_SOURCE_DIR_VENICE-CPP="${SOURCE_DIR}/cmake/dependency-probe/mismatched" \
     "$@"
 }
-mapfile -t exports < <(rg --files "${PREFIX}" | rg '/venice-cppTargets\.cmake$')
+mapfile -t exports < <(find "${PREFIX}" -type f -name venice-cppTargets.cmake)
 if [[ ${#exports[@]} != 1 ]]; then
   echo "Expected one actual Venice target export in task-owned prefix" >&2
   exit 1
@@ -33,7 +33,7 @@ if configure compiled -DPROBE_VENICE_DIRECT_TARGET=ON \
   echo "Compiled HTTP target unexpectedly passed" >&2
   exit 1
 fi
-if ! rg -q 'Venice transport contract failure' "${WORK_DIR}/compiled.log"; then
+if ! grep -Eq 'Venice transport contract failure' "${WORK_DIR}/compiled.log"; then
   cat "${WORK_DIR}/compiled.log" >&2
   exit 1
 fi
@@ -67,7 +67,7 @@ for kind in obsolete missing-target; do
     echo "Invalid installed Venice package unexpectedly passed: ${kind}" >&2
     exit 1
   fi
-  if ! rg -q 'canonical venice-cpp::lib target' "${WORK_DIR}/package-${kind}.log"; then
+  if ! grep -Eq 'canonical venice-cpp::lib target' "${WORK_DIR}/package-${kind}.log"; then
     cat "${WORK_DIR}/package-${kind}.log" >&2
     exit 1
   fi
@@ -90,12 +90,12 @@ for kind in marker headers header_length line_length resolver exceptions tls tls
     echo "Incompatible selected Venice/HTTP target unexpectedly passed: ${kind}" >&2
     exit 1
   fi
-  if ! rg -q 'Venice transport contract failure' "${WORK_DIR}/bad-${kind}.log"; then
+  if ! grep -Eq 'Venice transport contract failure' "${WORK_DIR}/bad-${kind}.log"; then
     cat "${WORK_DIR}/bad-${kind}.log" >&2
     exit 1
   fi
 done
-mapfile -t headers < <(rg --files "${PREFIX}" | rg '/httplib\.h$')
+mapfile -t headers < <(find "${PREFIX}" -type f -name httplib.h)
 if [[ ${#headers[@]} != 1 ]]; then
   echo "Expected one canonical HTTP header in installed fixture" >&2
   exit 1
@@ -115,7 +115,7 @@ for kind in old_header missing_api; do
     echo "Claimed-compatible HTTP target accepted ${kind}" >&2
     exit 1
   fi
-  if ! rg -q 'Venice transport contract failure' "${WORK_DIR}/${kind}.log"; then
+  if ! grep -Eq 'Venice transport contract failure' "${WORK_DIR}/${kind}.log"; then
     cat "${WORK_DIR}/${kind}.log" >&2
     exit 1
   fi
@@ -129,7 +129,7 @@ for kind in headers include; do
     echo "Changed HTTP target reused stale successful proof: ${kind}" >&2
     exit 1
   fi
-  if ! rg -q 'Venice transport contract failure' "${WORK_DIR}/reconfigure-${kind}.log"; then
+  if ! grep -Eq 'Venice transport contract failure' "${WORK_DIR}/reconfigure-${kind}.log"; then
     cat "${WORK_DIR}/reconfigure-${kind}.log" >&2
     exit 1
   fi

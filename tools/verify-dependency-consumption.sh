@@ -318,7 +318,7 @@ if configure_probe "stale-sibling-venice" venice_cpp \
   echo "Incompatible canonical sibling unexpectedly passed" >&2
   exit 1
 fi
-if ! rg -q 'Venice transport contract failure' "${WORK_DIR}/stale-sibling-venice.log"; then
+if ! grep -Eq 'Venice transport contract failure' "${WORK_DIR}/stale-sibling-venice.log"; then
   cat "${WORK_DIR}/stale-sibling-venice.log" >&2
   exit 1
 fi
