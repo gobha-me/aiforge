@@ -1,5 +1,7 @@
 add_library(${PROJECT_NAME}_adapters STATIC
   agent_transport.cpp
+  process_admin.cpp
+  process_admin_execution.cpp
   process_agent.cpp
   context_jsonl.cpp
   conversation_context_dialog.cpp

@@ -1203,22 +1203,30 @@ cmake -B build-asan -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain/address.cmake
 cmake -B build-tsan -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain/thread.cmake
 ```
 
-## Development layout
+## Read-only Admin commands
 
-- `include/aiforge/` contains the provider-independent public API.
-- `src/lib/` implements the run domain and backend ports.
-- `src/adapters/` maps the neutral ports to TermForge and Venice.
-- `src/bin/` is the application entry point.
-- `test/<name>/test.cpp` is auto-discovered after re-running `cmake -B`.
-- `docs/adr/` records decisions that narrow the north-star guardrails.
+Inspect the current execution environment without starting a model:
 
-The core library must not expose TermForge, venice-cpp, JSON-library, database,
-or scripting-runtime types. Future adapters depend inward on the core.
+```bash
+aiforge admin targets
+aiforge admin health
+aiforge admin services --target local
+aiforge admin service systemd-journald.service --json
+```
 
-## License
+Each read creates a fresh durable session and prints only its committed result.
+Text output includes target scope, timestamps in UTC epoch milliseconds,
+completeness and typed values. `--json` provides a versioned command envelope.
+Partial evidence remains partial; a failed read exits unsuccessfully. Target
+listing reads configuration metadata without preparing a source or opening the
+session store. The Observe preset allows only bounded native reads; logs are
+disabled. These commands do not invoke inference, shell commands or mutations.
 
-AIForge is available under the BSD 3-Clause License; see
-[`LICENSE.md`](LICENSE.md).
+The selected Linux source must prove its execution identity. A container is not
+reported as its host, and systemd reads refuse when the current account cannot
+verify the manager's namespace identity. A five-second logical deadline covers
+source preparation and observation; stalled OS calls or cleanup can outlast it.
+Optional TUI controls and explicit model explanation remain follow-on work.
 
 Owner-configured Admin target metadata uses `ops.targets` in the configuration
 file. For example:
@@ -1240,7 +1248,22 @@ file. For example:
 
 The reserved `local` target identifies the current execution environment.
 Catalog entries only describe selections: they do not open the referenced file,
-connect to a cluster, prove host scope or grant log access. This configuration
-foundation does not yet enable the Admin CLI/TUI collector. Kubernetes references
-require an absolute path and explicit context and namespace; credentials belong
+connect to a cluster, prove host scope or grant log access. Kubernetes collection is not yet available. Kubernetes references require an absolute path and explicit context and namespace; credentials belong
 in the separately validated kubeconfig, never inline in `ops.targets`.
+
+## Development layout
+
+- `include/aiforge/` contains the provider-independent public API.
+- `src/lib/` implements the run domain and backend ports.
+- `src/adapters/` maps the neutral ports to TermForge and Venice.
+- `src/bin/` is the application entry point.
+- `test/<name>/test.cpp` is auto-discovered after re-running `cmake -B`.
+- `docs/adr/` records decisions that narrow the north-star guardrails.
+
+The core library must not expose TermForge, venice-cpp, JSON-library, database,
+or scripting-runtime types. Future adapters depend inward on the core.
+
+## License
+
+AIForge is available under the BSD 3-Clause License; see
+[`LICENSE.md`](LICENSE.md).
