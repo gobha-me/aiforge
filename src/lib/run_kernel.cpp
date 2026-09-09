@@ -1019,6 +1019,27 @@ auto repository_continuation_matches(
                                                               context);
 }
 
+auto context_admission_history_is_intact(
+    const domain::SessionEventLog& event_log, const domain::RunId& run_id)
+    -> bool {
+  return recorded_local_context_admission(event_log, run_id).has_value() &&
+         recorded_repository_context_admission(event_log, run_id).has_value();
+}
+
+auto local_continuation_matches(
+    const domain::SessionEventLog& event_log, const domain::RunId& run_id,
+    const domain::ConstructedContext& context,
+    const std::optional<domain::LocalContextAdmission>& admission) -> bool {
+  const auto previous = recorded_local_context_admission(event_log, run_id);
+  if (!previous) return false;
+  if (!*previous)
+    return !admission &&
+           domain::local_context_admission_matches_context(admission, context);
+  return admission && admission->session_id == event_log.session_id() &&
+         domain::local_context_admission_successor(**previous, *admission) &&
+         domain::local_context_admission_matches_context(admission, context);
+}
+
 class ConversationRequestMatch final {
  public:
   ConversationRequestMatch(const domain::Message& user,
@@ -1214,7 +1235,8 @@ auto validate_summary_start(const domain::SessionEventLog& log,
   const auto& intent = *start.summary_intent;
   if (start.attributes.memory_selection ||
       start.attributes.conversation_admission || start.repository_admission ||
-      !start.imported_artifacts.empty() || !start.request.tools.empty() ||
+      start.local_admission || !start.imported_artifacts.empty() ||
+      !start.request.tools.empty() ||
       !start.request.assistant_continuation_state.empty() ||
       intent.producing_run_id != start.run_id ||
       intent.producing_inference_id != start.request.inference_id ||
@@ -1245,6 +1267,7 @@ auto validate_summary_start(const domain::SessionEventLog& log,
 auto event_schema_version(const domain::RunEventPayload& payload)
     -> std::uint32_t {
   if (const auto* started = std::get_if<domain::RunStarted>(&payload)) {
+    if (started->local_context_admission_required) return 5;
     if (started->conversation_admission &&
         started->conversation_admission->version == 2)
       return 4;
@@ -2204,6 +2227,31 @@ struct RunKernel::Impl {
                                              std::move(projection_candidate));
     transaction.events.push_back(std::move(*event));
     return {};
+  }
+
+  [[nodiscard]] auto record_inference_start(
+      const domain::RunId& run_id, domain::InferenceStarted inference,
+      std::optional<domain::LocalContextAdmission> local,
+      std::optional<domain::RepositoryContextAdmission> repository,
+      Transaction& transaction) -> std::expected<void, RunKernelError> {
+    if (local) {
+      if (auto result = record(run_id,
+                               domain::LocalContextAdmitted{
+                                   inference.inference_id, std::move(*local)},
+                               transaction);
+          !result)
+        return result;
+    }
+    if (repository) {
+      if (auto result =
+              record(run_id,
+                     domain::RepositoryContextAdmitted{inference.inference_id,
+                                                       std::move(*repository)},
+                     transaction);
+          !result)
+        return result;
+    }
+    return record(run_id, std::move(inference), transaction);
   }
 
   [[nodiscard]] auto fail_live_run(Transaction& transaction,
@@ -5063,6 +5111,20 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
           RunKernelErrorCode::invalid_start,
           "repository context admission does not match constructed context"));
     }
+    if ((start.attributes.local_context_admission_required &&
+         !start.local_admission) ||
+        (start.local_admission &&
+         (start.attributes.purpose != domain::RunPurpose::conversation ||
+          start.local_admission->session_id !=
+              m_impl->event_log.session_id())) ||
+        !domain::local_context_admission_matches_context(
+            start.local_admission, start.request.context)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "local context admission does not match constructed context"));
+    }
+    start.attributes.local_context_admission_required =
+        start.local_admission.has_value();
     if (auto admitted = validate_summary_start(m_impl->event_log, start);
         !admitted)
       return admitted;
@@ -5191,24 +5253,12 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
         !result) {
       return result;
     }
-    if (start.repository_admission) {
-      if (auto result =
-              m_impl->record(start.run_id,
-                             domain::RepositoryContextAdmitted{
-                                 start.request.inference_id,
-                                 std::move(*start.repository_admission)},
-                             transaction);
-          !result)
-        return result;
-    }
-    if (auto result =
-            m_impl->record(start.run_id,
-                           domain::InferenceStarted{start.request.inference_id,
-                                                    start.request.model_id},
-                           transaction);
-        !result) {
+    if (auto result = m_impl->record_inference_start(
+            start.run_id, {start.request.inference_id, start.request.model_id},
+            std::move(start.local_admission),
+            std::move(start.repository_admission), transaction);
+        !result)
       return result;
-    }
     if (start.pricing_observation) {
       if (auto result =
               m_impl->record(start.run_id,
@@ -6488,10 +6538,10 @@ auto RunKernel::decide_approval(const domain::RunId& run_id,
                                       : RunKernelErrorCode::no_active_run,
                        "approval decision targets no active run"));
     }
-    if (!recorded_repository_context_admission(m_impl->event_log, run_id)) {
-      return std::unexpected(kernel_error(
-          RunKernelErrorCode::invalid_tool_state,
-          "approval requires intact repository context admission history"));
+    if (!context_admission_history_is_intact(m_impl->event_log, run_id)) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state,
+                       "approval requires intact context admission history"));
     }
     const auto found = m_impl->active->invocations.find(invocation_id);
     if (found == m_impl->active->invocations.end()) {
@@ -6571,6 +6621,11 @@ auto RunKernel::answer_questions(const domain::RunId& run_id,
                                       : RunKernelErrorCode::no_active_run,
                        "question answer targets no active run"));
     }
+    if (!recorded_local_context_admission(m_impl->event_log, run_id)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_tool_state,
+          "decision requires intact local context admission history"));
+    }
     if (!recorded_repository_context_admission(m_impl->event_log, run_id)) {
       return std::unexpected(kernel_error(
           RunKernelErrorCode::invalid_tool_state,
@@ -6647,6 +6702,11 @@ auto RunKernel::cancel_questions(const domain::RunId& run_id,
                                       : RunKernelErrorCode::no_active_run,
                        "question cancellation targets no active run"));
     }
+    if (!recorded_local_context_admission(m_impl->event_log, run_id)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_tool_state,
+          "decision requires intact local context admission history"));
+    }
     if (!recorded_repository_context_admission(m_impl->event_log, run_id)) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_tool_state,
@@ -6707,7 +6767,8 @@ auto RunKernel::cancel_questions(const domain::RunId& run_id,
 auto RunKernel::continue_run(
     const domain::RunId& run_id, backend::BackendRequest request,
     std::optional<domain::PricingObservation> pricing_observation,
-    std::optional<domain::RepositoryContextAdmission> repository_admission)
+    std::optional<domain::RepositoryContextAdmission> repository_admission,
+    std::optional<domain::LocalContextAdmission> local_admission)
     -> std::expected<void, RunKernelError> {
   try {
     if (!m_impl->active || m_impl->active->run_id != run_id) {
@@ -6721,6 +6782,12 @@ auto RunKernel::continue_run(
       return std::unexpected(kernel_error(
           RunKernelErrorCode::continuation_not_ready,
           "continuation repository context admission changed or is invalid"));
+    }
+    if (!local_continuation_matches(m_impl->event_log, run_id, request.context,
+                                    local_admission)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::continuation_not_ready,
+          "continuation local context admission changed or is invalid"));
     }
     const auto& active = *m_impl->active;
     if (active.inference_id || active.active_tool_id ||
@@ -6755,22 +6822,12 @@ auto RunKernel::continue_run(
     transaction_active.cancel_requested = false;
     transaction_active.cancel_reason.reset();
     transaction_active.reasoning_text_bytes = 0;
-    if (repository_admission) {
-      if (auto result = m_impl->record(
-              run_id,
-              domain::RepositoryContextAdmitted{
-                  request.inference_id, std::move(*repository_admission)},
-              transaction);
-          !result)
-        return result;
-    }
-    if (auto result = m_impl->record(
-            run_id,
-            domain::InferenceStarted{request.inference_id, request.model_id},
+    if (auto result = m_impl->record_inference_start(
+            run_id, {request.inference_id, request.model_id},
+            std::move(local_admission), std::move(repository_admission),
             transaction);
-        !result) {
+        !result)
       return result;
-    }
     if (pricing_observation) {
       if (auto result = m_impl->record(
               run_id,
@@ -6814,6 +6871,13 @@ auto RunKernel::drain()
     }
     std::vector<domain::RunEvent> committed;
     if (m_impl->active && m_impl->active->recovered_tool_launch_pending) {
+      if (!recorded_local_context_admission(m_impl->event_log,
+                                            m_impl->active->run_id)) {
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::invalid_tool_state,
+                         "recovered tool dispatch requires intact local "
+                         "context admission history"));
+      }
       if (!recorded_repository_context_admission(m_impl->event_log,
                                                  m_impl->active->run_id)) {
         return std::unexpected(

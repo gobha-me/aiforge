@@ -364,6 +364,53 @@ auto payload_json(const domain::RepositoryContextAdmitted& value,
           {"admission_digest", record.digest(*admission.admission_digest)}};
 }
 
+auto local_decision_name(const domain::LocalContextDecision decision)
+    -> std::string_view {
+  switch (decision) {
+    case domain::LocalContextDecision::admitted: return "admitted";
+    case domain::LocalContextDecision::omitted_budget: return "omitted_budget";
+    case domain::LocalContextDecision::omitted_class_budget:
+      return "omitted_class_budget";
+  }
+  throw RecordLimit{};
+}
+
+auto payload_json(const domain::LocalContextAdmitted& value, Record& record)
+    -> Json {
+  const auto& admission = value.admission;
+  if (!domain::validate_local_context_admission(admission) ||
+      !admission.admission_digest)
+    throw RecordLimit{};
+  record.count(admission.evidence.size(), 64);
+  auto evidence = Json::array();
+  for (const auto& item : admission.evidence) {
+    evidence.push_back(
+        {{"evidence_id", record.text(item.evidence_id.value())},
+         {"entry_id", record.text(item.entry_id.value())},
+         {"message_id", record.text(item.message_id.value())},
+         {"source_id", record.text(item.source_id.value())},
+         {"source",
+          {{"root",
+            {{"version", item.source.root.version},
+             {"binding", record.text(item.source.root.binding)}}},
+           {"relative_path", record.text(item.source.relative_path)},
+           {"content_digest", record.digest(item.source.content_digest)}}},
+         {"order", item.order},
+         {"estimated_tokens", item.estimated_tokens},
+         {"decision", local_decision_name(item.decision)}});
+  }
+  return {{"kind", "local_context_admitted"},
+          {"inference_id", record.text(value.inference_id.value())},
+          {"version", admission.version},
+          {"session_id", record.text(admission.session_id.value())},
+          {"selection_revision", admission.selection_revision},
+          {"context_window_tokens", admission.capacity.context_window_tokens},
+          {"reserved_output_tokens", admission.capacity.reserved_output_tokens},
+          {"reserved_input_tokens", admission.capacity.reserved_input_tokens},
+          {"evidence", std::move(evidence)},
+          {"admission_digest", record.digest(*admission.admission_digest)}};
+}
+
 auto payload_json(const domain::InferenceFinished& value, Record& record)
     -> Json {
   return {{"kind", "inference_finished"},

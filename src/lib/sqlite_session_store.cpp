@@ -3147,6 +3147,9 @@ auto parse_v2_tool_policy_fields(const Json& value,
           [](const domain::RepositoryContextAdmitted&) {
             return std::string{"run.repository_context_admitted"};
           },
+          [](const domain::LocalContextAdmitted&) {
+            return std::string{"run.local_context_admitted"};
+          },
           [](const domain::RunProvenanceRecorded&) {
             return std::string{"run.provenance_recorded"};
           },
@@ -3397,12 +3400,13 @@ auto parse_v2_tool_policy_fields(const Json& value,
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 85,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 86,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started",
       "run.provenance_recorded",
       "run.repository_context_admitted",
+      "run.local_context_admitted",
       "persona.selection_recorded",
       "session.spend_ceiling_set",
       "session.conversation_policy_set",
@@ -3486,6 +3490,169 @@ auto parse_v2_tool_policy_fields(const Json& value,
       "memory.expired",
       "run.inter_message_sent"};
   return types.contains(type);
+}
+
+// Local admission v1 never changes an older repository/conversation encoding.
+// An incompatible nested version requires a new event envelope schema; only
+// unknown envelope schemas are preserved as opaque events by the store.
+auto require_local_fields(const Json& value,
+                          std::initializer_list<std::string_view> fields)
+    -> void {
+  if (!value.is_object() || value.size() != fields.size())
+    throw CodecFailure{"invalid local admission fields"};
+  for (const auto field : fields)
+    if (!value.contains(field))
+      throw CodecFailure{"missing local admission field"};
+}
+auto local_unsigned(const Json& value) -> std::uint64_t {
+  if (!value.is_number_unsigned())
+    throw CodecFailure{"local admission integer has an invalid type"};
+  return value.get<std::uint64_t>();
+}
+auto local_version(const Json& value) -> std::uint32_t {
+  if (local_unsigned(value) != 1)
+    throw CodecFailure{"unsupported local admission metadata version"};
+  return 1;
+}
+auto charge_local_metadata(std::size_t count, std::size_t& bytes) -> void {
+  if (count > bytes)
+    throw CodecFailure{"local admission metadata exceeds byte bounds"};
+  bytes -= count;
+}
+auto check_local_admission_node(const Json& value, unsigned depth,
+                                std::size_t& nodes, std::size_t& bytes)
+    -> void {
+  if (nodes == 0 || depth > 8 ||
+      (value.is_number() && !value.is_number_unsigned()))
+    throw CodecFailure{"local admission metadata exceeds shape bounds"};
+  --nodes;
+  if (!value.is_string()) return;
+  const auto& text = value.get_ref<const std::string&>();
+  if (text.size() > domain::LocalSourceLimits{}.maximum_path_bytes)
+    throw CodecFailure{"local admission string exceeds bounds"};
+  charge_local_metadata(text.size(), bytes);
+}
+auto check_local_admission_shape(const Json& value) -> void {
+  std::size_t nodes = 4096;
+  auto bytes = domain::local_context_maximum_admission_bytes;
+  std::vector<std::pair<const Json*, unsigned>> pending{{&value, 0}};
+  while (!pending.empty()) {
+    const auto [item, depth] = pending.back();
+    pending.pop_back();
+    check_local_admission_node(*item, depth, nodes, bytes);
+    if (!item->is_object() && !item->is_array()) continue;
+    if (pending.size() > nodes || item->size() > nodes - pending.size())
+      throw CodecFailure{"local admission metadata exceeds shape bounds"};
+    for (auto child = item->begin(); child != item->end(); ++child) {
+      if (item->is_object()) charge_local_metadata(child.key().size(), bytes);
+      pending.emplace_back(&*child, depth + 1);
+    }
+  }
+}
+auto local_digest(const Json& value) -> domain::ContentDigest {
+  require_local_fields(value, {"algorithm", "value", "byte_size"});
+  static_cast<void>(local_unsigned(value.at("byte_size")));
+  return parse_digest(value);
+}
+auto local_source_json(const domain::LocalSourceIdentity& source) -> Json {
+  return {
+      {"root",
+       {{"version", source.root.version}, {"binding", source.root.binding}}},
+      {"relative_path", source.relative_path},
+      {"content_digest", digest_json(source.content_digest)}};
+}
+auto parse_local_source(const Json& value) -> domain::LocalSourceIdentity {
+  require_local_fields(value, {"root", "relative_path", "content_digest"});
+  const auto& root = value.at("root");
+  require_local_fields(root, {"version", "binding"});
+  return {{local_version(root.at("version")),
+           root.at("binding").get<std::string>()},
+          value.at("relative_path").get<std::string>(),
+          local_digest(value.at("content_digest"))};
+}
+auto local_decision_name(domain::LocalContextDecision decision)
+    -> std::string_view {
+  switch (decision) {
+    case domain::LocalContextDecision::admitted: return "admitted";
+    case domain::LocalContextDecision::omitted_budget: return "omitted_budget";
+    case domain::LocalContextDecision::omitted_class_budget:
+      return "omitted_class_budget";
+  }
+  throw CodecFailure{"invalid local admission decision"};
+}
+auto parse_local_decision(const Json& value) -> domain::LocalContextDecision {
+  if (value == "admitted") return domain::LocalContextDecision::admitted;
+  if (value == "omitted_budget")
+    return domain::LocalContextDecision::omitted_budget;
+  if (value == "omitted_class_budget")
+    return domain::LocalContextDecision::omitted_class_budget;
+  throw CodecFailure{"invalid local admission decision"};
+}
+auto local_admission_json(const domain::LocalContextAdmission& admission)
+    -> Json {
+  if (!domain::validate_local_context_admission(admission) ||
+      !admission.admission_digest)
+    throw CodecFailure{"invalid local context admission"};
+  auto evidence = Json::array();
+  for (const auto& item : admission.evidence)
+    evidence.push_back({{"evidence_id", id_text(item.evidence_id)},
+                        {"entry_id", id_text(item.entry_id)},
+                        {"message_id", id_text(item.message_id)},
+                        {"source_id", id_text(item.source_id)},
+                        {"source", local_source_json(item.source)},
+                        {"order", item.order},
+                        {"estimated_tokens", item.estimated_tokens},
+                        {"decision", local_decision_name(item.decision)}});
+  return {
+      {"version", admission.version},
+      {"session_id", id_text(admission.session_id)},
+      {"selection_revision", admission.selection_revision},
+      {"capacity",
+       {{"context_window_tokens", admission.capacity.context_window_tokens},
+        {"reserved_output_tokens", admission.capacity.reserved_output_tokens},
+        {"reserved_input_tokens", admission.capacity.reserved_input_tokens}}},
+      {"evidence", std::move(evidence)},
+      {"admission_digest", digest_json(*admission.admission_digest)}};
+}
+auto parse_local_evidence(const Json& value) -> domain::LocalContextEvidence {
+  require_local_fields(value,
+                       {"evidence_id", "entry_id", "message_id", "source_id",
+                        "source", "order", "estimated_tokens", "decision"});
+  return {parse_id<domain::EvidenceId>(value.at("evidence_id")),
+          parse_id<domain::ContextEntryId>(value.at("entry_id")),
+          parse_id<domain::MessageId>(value.at("message_id")),
+          parse_id<domain::ContextSourceId>(value.at("source_id")),
+          parse_local_source(value.at("source")),
+          local_unsigned(value.at("order")),
+          local_unsigned(value.at("estimated_tokens")),
+          parse_local_decision(value.at("decision"))};
+}
+auto parse_local_admission(const Json& value) -> domain::LocalContextAdmission {
+  require_local_fields(value, {"version", "session_id", "selection_revision",
+                               "capacity", "evidence", "admission_digest"});
+  const auto& evidence = value.at("evidence");
+  if (!evidence.is_array() ||
+      evidence.size() > domain::LocalSourceLimits{}.maximum_selected_files)
+    throw CodecFailure{"local admission evidence count exceeds bounds"};
+  const auto& capacity = value.at("capacity");
+  require_local_fields(capacity,
+                       {"context_window_tokens", "reserved_output_tokens",
+                        "reserved_input_tokens"});
+  domain::LocalContextAdmission result{
+      local_version(value.at("version")),
+      parse_id<domain::SessionId>(value.at("session_id")),
+      local_unsigned(value.at("selection_revision")),
+      {local_unsigned(capacity.at("context_window_tokens")),
+       local_unsigned(capacity.at("reserved_output_tokens")),
+       local_unsigned(capacity.at("reserved_input_tokens"))},
+      {},
+      local_digest(value.at("admission_digest"))};
+  result.evidence.reserve(evidence.size());
+  for (const auto& item : evidence)
+    result.evidence.push_back(parse_local_evidence(item));
+  if (local_admission_json(result) != value)
+    throw CodecFailure{"noncanonical local context admission"};
+  return result;
 }
 
 [[nodiscard]] auto memory_selection_json(
@@ -4476,7 +4643,7 @@ auto check_summary_policy_revision(std::uint64_t revision) -> void {
            type == "run.child_created" || type == "tool.proposed" ||
            type == "tool.policy_decided" ||
            (type.starts_with("memory.") && known_payload_type(type)))) ||
-         ((schema_version == 3 || schema_version == 4) &&
+         ((schema_version == 3 || schema_version == 4 || schema_version == 5) &&
           type == "run.started") ||
          ((schema_version == 3 || schema_version == 4) &&
           type == "run.child_created");
@@ -4485,6 +4652,10 @@ auto check_summary_policy_revision(std::uint64_t revision) -> void {
 auto check_run_started_admission_schema(const domain::RunStarted& value,
                                         std::uint32_t schema) -> void {
   const auto& admission = value.conversation_admission;
+  if ((schema == 5) != value.local_context_admission_required ||
+      (schema == 5 && value.purpose != domain::RunPurpose::conversation))
+    throw CodecFailure{
+        "run start local proof marker does not match its schema"};
   if (schema == 3 && admission && admission->version != 1)
     throw CodecFailure{"run start schema 3 requires a legacy v1 admission"};
   if (schema == 4 && (value.purpose != domain::RunPurpose::conversation ||
@@ -4506,7 +4677,8 @@ auto check_run_started_admission_schema(const domain::RunStarted& value,
                 {"workspace_id", id_text(value.workspace_id)},
                 {"permission_profile_id", id_text(value.permission_profile_id)},
                 {"persona_id", optional_id_json(value.persona_id)}};
-            if (schema_version == 3 || schema_version == 4) {
+            if (schema_version == 3 || schema_version == 4 ||
+                schema_version == 5) {
               result["purpose"] = run_purpose_name(value.purpose);
               result["memory_selection"] =
                   value.memory_selection
@@ -4527,7 +4699,13 @@ auto check_run_started_admission_schema(const domain::RunStarted& value,
                 result["memory_selection"] =
                     memory_selection_json(*value.memory_selection);
             }
+            if (schema_version == 5)
+              result["local_context_admission_required"] = true;
             return result;
+          },
+          [](const domain::LocalContextAdmitted& value) -> Json {
+            return {{"inference_id", id_text(value.inference_id)},
+                    {"admission", local_admission_json(value.admission)}};
           },
           [](const domain::RepositoryContextAdmitted& value) -> Json {
             return {{"inference_id", id_text(value.inference_id)},
@@ -5000,7 +5178,15 @@ auto check_run_started_admission_schema(const domain::RunStarted& value,
                                  const std::uint32_t schema_version)
     -> domain::RunEventPayload {
   if (type == "run.started") {
-    if (schema_version == 3 || schema_version == 4)
+    const bool modern =
+        schema_version == 3 || schema_version == 4 || schema_version == 5;
+    if (schema_version == 5)
+      require_conversation_fields(value, {"surface_id", "workspace_id",
+                                          "permission_profile_id", "persona_id",
+                                          "memory_selection", "purpose",
+                                          "conversation_admission",
+                                          "local_context_admission_required"});
+    else if (modern)
       require_conversation_fields(value, {"surface_id", "workspace_id",
                                           "permission_profile_id", "persona_id",
                                           "memory_selection", "purpose",
@@ -5019,15 +5205,21 @@ auto check_run_started_admission_schema(const domain::RunStarted& value,
         parse_id<domain::PermissionProfileId>(
             value.at("permission_profile_id")),
         parse_optional_id<domain::PersonaId>(value.at("persona_id"))};
-    if (schema_version == 2 || ((schema_version == 3 || schema_version == 4) &&
-                                !value.at("memory_selection").is_null()))
+    if (schema_version == 2 ||
+        (modern && !value.at("memory_selection").is_null()))
       result.memory_selection =
           parse_memory_selection(value.at("memory_selection"));
-    if (schema_version == 3 || schema_version == 4) {
+    if (modern) {
       result.purpose = parse_run_purpose(value.at("purpose"));
       if (!value.at("conversation_admission").is_null())
         result.conversation_admission =
             parse_conversation_admission(value.at("conversation_admission"));
+    }
+    if (schema_version == 5) {
+      const auto& marker = value.at("local_context_admission_required");
+      if (!marker.is_boolean() || !marker.get<bool>())
+        throw CodecFailure{"run start local proof marker must be true"};
+      result.local_context_admission_required = true;
     }
     check_run_started_admission_schema(result, schema_version);
     return result;
@@ -5073,6 +5265,13 @@ auto check_run_started_admission_schema(const domain::RunStarted& value,
     return domain::ConversationSummaryDisabled{
         revision, parse_summary_reference(value.at("candidate")),
         parse_id<domain::EventId>(value.at("activation_event_id"))};
+  }
+  if (type == "run.local_context_admitted") {
+    check_local_admission_shape(value);
+    require_local_fields(value, {"inference_id", "admission"});
+    return domain::LocalContextAdmitted{
+        parse_id<domain::InferenceId>(value.at("inference_id")),
+        parse_local_admission(value.at("admission"))};
   }
   if (type == "run.repository_context_admitted") {
     if (!value.is_object() || value.size() != 2)

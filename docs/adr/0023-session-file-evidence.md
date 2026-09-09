@@ -106,7 +106,11 @@ verifies local admission and actual request entries in both directions.
 Missing, malformed, unsupported or mismatched local proof blocks new work.
 
 Local admission is an inference-linked versioned event committed atomically
-with inference start. Preserve the existing adjacent
+with inference start. RunStarted schema 5 records an explicit required-local-
+admission marker derived by the kernel from the validated initial proof. This
+distinguishes missing initial proof from legacy runs without local evidence;
+older start schemas default to no local admission. A required marker without
+proof, or local proof under an unmarked start, rejects recovery. Preserve the existing adjacent
 repository-admission/inference pair by placing any local admission before it;
 validate the grammar LocalAdmission -> [RepositoryAdmission] ->
 InferenceStarted with the same run/inference ID. Reject duplicate, orphaned,
