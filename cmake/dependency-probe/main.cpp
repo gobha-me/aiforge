@@ -52,6 +52,40 @@ auto main() -> int {
              ? 0
              : 1;
 }
+#elif defined(PROBE_YAML_CPP)
+#include <sstream>
+#include <yaml-cpp/eventhandler.h>
+#include <yaml-cpp/parser.h>
+
+namespace {
+class ProbeHandler final : public YAML::EventHandler {
+ public:
+  void OnDocumentStart(const YAML::Mark&) override {}
+  void OnDocumentEnd() override {}
+  void OnNull(const YAML::Mark&, YAML::anchor_t) override {}
+  void OnAlias(const YAML::Mark&, YAML::anchor_t) override {}
+  void OnScalar(const YAML::Mark&, const std::string&, YAML::anchor_t,
+                const std::string& value) override {
+    matched = value == "probe";
+  }
+  void OnSequenceStart(const YAML::Mark&, const std::string&, YAML::anchor_t,
+                       YAML::EmitterStyle::value) override {}
+  void OnSequenceEnd() override {}
+  void OnMapStart(const YAML::Mark&, const std::string&, YAML::anchor_t,
+                  YAML::EmitterStyle::value) override {}
+  void OnMapEnd() override {}
+  bool matched{};
+};
+} // namespace
+auto main() -> int {
+  std::istringstream input{"probe"};
+  YAML::Parser parser{input};
+  ProbeHandler handler;
+  return parser.HandleNextDocument(handler) && handler.matched &&
+                 !parser.HandleNextDocument(handler)
+             ? 0
+             : 1;
+}
 #elif defined(PROBE_SQLITE3)
 #include <sqlite3.h>
 

@@ -36,6 +36,9 @@ add_library(${PROJECT_NAME}_adapters STATIC
   process_video.cpp
   process_video_production.cpp
   secure_artifact_export.cpp
+  static_kubernetes_config.cpp
+  static_kubernetes_config_frontends.cpp
+  static_kubernetes_config_parser.cpp
   process_draft_editor.cpp
   process_interactive.cpp
   process_image.cpp
@@ -84,6 +87,7 @@ target_link_libraries(${PROJECT_NAME}_adapters
   PUBLIC ${PROJECT_NAME}::lib
   PUBLIC termforge::lib
   PRIVATE nlohmann_json::nlohmann_json
+  PRIVATE yaml-cpp::yaml-cpp
   PRIVATE rasterforge::lib
   PRIVATE venice-cpp::lib
 )
