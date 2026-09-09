@@ -209,6 +209,28 @@ assign owner/session/request identity internally, and apply current authority
 before dispatch/publication. Ordinary kernel entry points reject the new
 manual-start flag until that explicit admission path exists.
 
+## Native observation tool preparation
+
+The final native `OpsObservationTool` registers `observe_target` from one frozen
+selection and log policy. Human typed intent and model JSON use the same closed
+operation, exact resource identity and narrowing limits. Preparation binds the
+kernel-assigned invocation to an observation request and supplies owner, session,
+binding and consent revisions internally. Pure argument validation creates no
+invocation proof. JSON arguments cannot provide these authority fields.
+
+`ops.target` scopes match opaque configured target IDs exactly and cover only
+the operation's declared read, execute and network effects. They do not cover
+generic filesystem, process, network or infrastructure scopes. The runtime
+rechecks normalized arguments, typed proof, invocation identity and granted
+scopes before an executor can submit to the broker. Its only successful stream
+update is an opaque receipt; it cannot return observation content or artifacts.
+
+This boundary is deliberately unavailable through ordinary kernel dispatch
+until the dedicated durable admission and receipt-publication integration is
+present. An ordinary executor returning a receipt fails the run. Registration
+name, category and version alone never enable the native contract. Replay
+integration remains separate; this preparation API does not authorize retries.
+
 ## Required failure evidence
 
 - Wrong/foreign target, namespace, generation, resource or log-policy revision;

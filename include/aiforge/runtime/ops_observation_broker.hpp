@@ -29,7 +29,7 @@ enum class OpsBrokerError {
   resource_exhausted
 };
 struct OpsBrokerFailure {
-  OpsBrokerError code;
+  OpsBrokerError code{OpsBrokerError::internal_failure};
   std::optional<OpsObservationSourceError> source{};
   auto operator==(const OpsBrokerFailure&) const -> bool = default;
 };
@@ -48,6 +48,12 @@ class OpsObservationReceipt final {
   OpsObservationReceipt(OpsObservationReceipt&&) noexcept = default;
   auto operator=(OpsObservationReceipt&&) noexcept
       -> OpsObservationReceipt& = default;
+  [[nodiscard]] auto operator==(
+      const OpsObservationReceipt& other) const noexcept -> bool {
+    return m_ticket == other.m_ticket &&
+           !m_issuer.owner_before(other.m_issuer) &&
+           !other.m_issuer.owner_before(m_issuer);
+  }
 
  private:
   friend class OpsObservationBroker;

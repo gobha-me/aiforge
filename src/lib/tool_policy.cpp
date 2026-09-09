@@ -49,6 +49,13 @@ template <typename Value>
     return effect == domain::Effect::network;
   }
   if (kind == "process.command") return effect == domain::Effect::execute;
+  if (kind == "ops.target") {
+    // Exact native observation scope. It never covers a generic command,
+    // network host, filesystem root, or infrastructure mutation capability.
+    return effect == domain::Effect::read ||
+           effect == domain::Effect::execute ||
+           effect == domain::Effect::network;
+  }
   if (kind == "cluster.resource") {
     return effect == domain::Effect::read || effect == domain::Effect::write ||
            effect == domain::Effect::remove ||

@@ -15,7 +15,9 @@
 #include <vector>
 
 #include <aiforge/backend/backend.hpp>
+#include <aiforge/domain/ops_target.hpp>
 #include <aiforge/runtime/application_launch_context.hpp>
+#include <aiforge/runtime/ops_observation_broker.hpp>
 
 namespace aiforge::runtime {
 
@@ -69,6 +71,9 @@ struct ValidatedToolArguments {
   // Required exactly when the effective effects include spend. The runtime
   // records this maximum after policy approval and before ToolStarted.
   std::optional<domain::ToolSpendQuote> spend_quote{};
+  // Native Ops preparation binds this to the kernel-assigned invocation. It
+  // is a request proof, never authority supplied by a model or restored run.
+  std::optional<domain::OpsObservationRequest> observation_request{};
   auto operator==(const ValidatedToolArguments&) const -> bool = default;
 };
 
@@ -135,8 +140,13 @@ struct ToolInputRequested {
   auto operator==(const ToolInputRequested&) const -> bool = default;
 };
 
-using ToolExecutionEvent =
-    std::variant<ToolProgress, ToolInputRequested, ToolResult>;
+struct OpsObservationReady {
+  OpsObservationReceipt receipt;
+  auto operator==(const OpsObservationReady&) const -> bool = default;
+};
+
+using ToolExecutionEvent = std::variant<ToolProgress, ToolInputRequested,
+                                        ToolResult, OpsObservationReady>;
 
 class ToolExecutionStream {
  public:
@@ -154,6 +164,15 @@ class ToolExecutor {
   [[nodiscard]] virtual auto validate(
       const domain::StructuredDataBlock& arguments) const
       -> std::expected<ValidatedToolArguments, ToolExecutionError> = 0;
+
+  // Pure preparation before policy/dispatch. The default preserves ordinary
+  // executor validation; native Ops uses the assigned identity to bind proof.
+  [[nodiscard]] virtual auto prepare(
+      const domain::InvocationId&,
+      const domain::StructuredDataBlock& arguments) const
+      -> std::expected<ValidatedToolArguments, ToolExecutionError> {
+    return validate(arguments);
+  }
 
   [[nodiscard]] virtual auto start(ToolInvocation invocation,
                                    std::stop_token stop_token)

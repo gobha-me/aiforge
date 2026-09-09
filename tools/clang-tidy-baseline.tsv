@@ -327,7 +327,6 @@ src/lib/review_receipt.cpp	readability-implicit-bool-conversion	02e852489f01c2ad
 src/lib/review_receipt.cpp	readability-implicit-bool-conversion	931f541ab28b5159d48b	implicit conversion 'const ReviewReceiptId *' (aka 'const Id<ReviewReceiptIdTag> *') -> 'bool'
 src/lib/run_kernel.cpp	bugprone-empty-catch	117003ae82267c76a50e	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-empty-catch	4845d7502acb85565c5e	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
-src/lib/run_kernel.cpp	bugprone-empty-catch	4de7fc5ab4243f6558b4	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-empty-catch	b7793445ee89c997204d	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-empty-catch	b84fc3739cee09bebc71	empty catch statements hide issues; to handle exceptions appropriately, consider re-throwing, handling, or avoiding catch altogether
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	0b5338e47fbcca98791d	unchecked access to optional value

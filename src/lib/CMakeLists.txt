@@ -64,6 +64,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   ops_observation_json.cpp
   ops_observation_content.cpp
   ops_observation_history.cpp
+  ops_observation_tool.cpp
   plan.cpp
   plan_task_controller.cpp
   persona.cpp
