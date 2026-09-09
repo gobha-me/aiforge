@@ -520,6 +520,7 @@ auto session(const Token& token) -> const domain::SessionId& {
 struct LocalSourceWorker::Impl {
   std::size_t capacity;
   std::uint64_t last_request_id{};
+  std::uint64_t last_allocated_request_id{};
   std::vector<std::shared_ptr<Job>> jobs;
   explicit Impl(std::size_t value) : capacity(value) { jobs.reserve(value); }
   auto reap() -> void {
@@ -604,6 +605,21 @@ auto LocalSourceWorker::create(std::size_t capacity)
         new LocalSourceWorker{std::make_unique<Impl>(capacity)}};
   } catch (...) {
     return failure(Code::internal_failure, "local worker allocation failed");
+  }
+}
+auto LocalSourceWorker::allocate_request_id()
+    -> std::expected<std::uint64_t, LocalSourceWorkerError> {
+  try {
+    const auto previous =
+        std::max(m_impl->last_request_id, m_impl->last_allocated_request_id);
+    if (previous == std::numeric_limits<std::uint64_t>::max())
+      return failure(Code::resource_exhausted,
+                     "Source worker request identities are exhausted");
+    m_impl->last_allocated_request_id = previous + 1;
+    return m_impl->last_allocated_request_id;
+  } catch (...) {
+    return failure(Code::internal_failure,
+                   "Source worker request allocation failed");
   }
 }
 auto LocalSourceWorker::submit(const std::shared_ptr<LocalSourceReader>& reader,

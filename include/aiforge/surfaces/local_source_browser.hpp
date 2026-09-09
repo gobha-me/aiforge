@@ -40,6 +40,15 @@ class LocalSourceBrowser final {
       domain::LocalSourceLimits limits = {}, std::size_t worker_capacity = 2)
       -> std::expected<std::unique_ptr<LocalSourceBrowser>,
                        domain::LocalSourceError>;
+  // Share application-owned capacity and request allocation with other source
+  // controllers. Browser lifecycle operations cancel only browser-owned work;
+  // the application owns global session invalidation across controllers.
+  [[nodiscard]] static auto create_with_worker(
+      std::shared_ptr<runtime::LocalSourceGrantFactory> factory,
+      std::shared_ptr<runtime::LocalSourceWorker> worker,
+      domain::LocalSourceLimits limits = {})
+      -> std::expected<std::unique_ptr<LocalSourceBrowser>,
+                       domain::LocalSourceError>;
   ~LocalSourceBrowser();
   LocalSourceBrowser(const LocalSourceBrowser&) = delete;
   auto operator=(const LocalSourceBrowser&) -> LocalSourceBrowser& = delete;

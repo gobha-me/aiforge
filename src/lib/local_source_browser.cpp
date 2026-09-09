@@ -1,5 +1,6 @@
 #include <aiforge/surfaces/local_source_browser.hpp>
 
+#include <aiforge/detail/utf8_text.hpp>
 #include <algorithm>
 #include <limits>
 #include <utility>
@@ -18,6 +19,9 @@ auto worker_error(const runtime::LocalSourceWorkerError& error)
   switch (error.code) {
     case WorkerCode::busy:
       return fail(Code::resource_exhausted, "Local file workers are busy");
+    case WorkerCode::resource_exhausted:
+      return fail(Code::resource_exhausted,
+                  "Source worker request identities are exhausted");
     case WorkerCode::stale_request:
       return fail(Code::stale_lease, "Local file work is no longer current");
     case WorkerCode::invalid_request:
@@ -53,9 +57,8 @@ struct LocalSourceBrowser::Impl {
   std::shared_ptr<runtime::LocalSourceGrantFactory> factory;
   std::shared_ptr<runtime::LocalSourceGrants> grants;
   std::shared_ptr<runtime::LocalContextController> context;
-  std::unique_ptr<runtime::LocalSourceWorker> worker;
+  std::shared_ptr<runtime::LocalSourceWorker> worker;
   LocalBrowserState state;
-  std::uint64_t request_id{};
   std::uint64_t lease_generation{};
   std::optional<GrantWork> granting;
   std::optional<ReadWork> reading;
@@ -63,9 +66,9 @@ struct LocalSourceBrowser::Impl {
   std::optional<runtime::RepositoryContextWorkToken> repository_work;
 
   auto next_request() -> std::expected<std::uint64_t, Error> {
-    if (auto result = increment(request_id); !result)
-      return std::unexpected(result.error());
-    return request_id;
+    auto result = worker->allocate_request_id();
+    if (!result) return worker_error(result.error());
+    return *result;
   }
   auto resolve(const domain::LocalRootIdentity& root)
       -> std::expected<runtime::LocalContextGrant, Error> {
@@ -305,13 +308,27 @@ auto LocalSourceBrowser::create(
     domain::LocalSourceLimits limits, std::size_t worker_capacity)
     -> std::expected<std::unique_ptr<LocalSourceBrowser>, Error> {
   try {
-    if (!factory || !factory->guarantees_pinned_read_only_sources())
-      return fail(Code::invalid_request,
-                  "Pinned local folder access is unavailable");
-    if (auto valid = domain::validate_local_source_limits(limits); !valid)
-      return std::unexpected(valid.error());
     auto worker = runtime::LocalSourceWorker::create(worker_capacity);
     if (!worker) return worker_error(worker.error());
+    return create_with_worker(
+        std::move(factory),
+        std::shared_ptr<runtime::LocalSourceWorker>{std::move(*worker)},
+        limits);
+  } catch (...) {
+    return fail(Code::internal_failure, "Local file browser could not start");
+  }
+}
+auto LocalSourceBrowser::create_with_worker(
+    std::shared_ptr<runtime::LocalSourceGrantFactory> factory,
+    std::shared_ptr<runtime::LocalSourceWorker> worker,
+    domain::LocalSourceLimits limits)
+    -> std::expected<std::unique_ptr<LocalSourceBrowser>, Error> {
+  try {
+    if (!worker || !factory || !factory->guarantees_pinned_read_only_sources())
+      return fail(Code::invalid_request,
+                  "Pinned local folder access or worker is unavailable");
+    if (auto valid = domain::validate_local_source_limits(limits); !valid)
+      return std::unexpected(valid.error());
     auto grants = runtime::LocalSourceGrants::create(limits.maximum_roots);
     if (!grants) return std::unexpected(grants.error());
     auto impl = std::make_unique<Impl>();
@@ -320,7 +337,7 @@ auto LocalSourceBrowser::create(
     impl->grants = *grants;
     impl->context =
         std::make_shared<runtime::LocalContextController>(*grants, limits);
-    impl->worker = std::move(*worker);
+    impl->worker = std::move(worker);
     return std::unique_ptr<LocalSourceBrowser>(
         new LocalSourceBrowser(std::move(impl)));
   } catch (...) {
@@ -330,6 +347,9 @@ auto LocalSourceBrowser::create(
 auto LocalSourceBrowser::activate_session(const domain::SessionId& session)
     -> Status {
   try {
+    if (session.value().empty() || !detail::is_safe_utf8_text(session.value()))
+      return fail(Code::invalid_request,
+                  "Local browser session identity is invalid");
     auto epoch = m_impl->state.session_epoch;
     if (auto changed = increment(epoch); !changed) return changed;
     if (auto activated = m_impl->grants->activate_session(session, epoch);
@@ -338,10 +358,6 @@ auto LocalSourceBrowser::activate_session(const domain::SessionId& session)
     m_impl->cancel_browsing();
     m_impl->cancel_context();
     m_impl->cancel_repository();
-    if (m_impl->state.session_id) {
-      [[maybe_unused]] const auto invalidated =
-          m_impl->worker->invalidate_session(*m_impl->state.session_id);
-    }
     m_impl->state = {};
     m_impl->state.session_id = session;
     m_impl->state.session_epoch = epoch;

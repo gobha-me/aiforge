@@ -1017,6 +1017,11 @@ class ChatAppImpl final : public InteractiveChatApp {
 
   ~ChatAppImpl() override {
     if (m_local_browser) {
+      const auto& session = m_local_browser->state().session_id;
+      if (m_source_worker && session) {
+        [[maybe_unused]] const auto invalidated =
+            m_source_worker->invalidate_session(*session);
+      }
       [[maybe_unused]] const auto ended = m_local_browser->deactivate_session();
     }
     cancel_repository_job();
@@ -1393,24 +1398,53 @@ class ChatAppImpl final : public InteractiveChatApp {
 
   auto setup_local_browser(
       std::shared_ptr<runtime::LocalSourceGrantFactory> factory) -> bool {
-    if (!factory) factory = std::make_shared<LocalFileGrantFactory>();
-    auto browser = surfaces::LocalSourceBrowser::create(std::move(factory));
-    if (!browser) {
-      m_setup_error = cli::CommandFailure{cli::CommandFailureKind::runtime,
-                                          browser.error().message};
+    try {
+      if (!factory) factory = std::make_shared<LocalFileGrantFactory>();
+      auto worker = runtime::LocalSourceWorker::create();
+      if (!worker) {
+        m_setup_error =
+            cli::CommandFailure{cli::CommandFailureKind::runtime,
+                                "Application source worker could not start"};
+        return false;
+      }
+      m_source_worker =
+          std::shared_ptr<runtime::LocalSourceWorker>{std::move(*worker)};
+      auto browser = surfaces::LocalSourceBrowser::create_with_worker(
+          std::move(factory), m_source_worker);
+      if (!browser) {
+        m_setup_error = cli::CommandFailure{cli::CommandFailureKind::runtime,
+                                            browser.error().message};
+        return false;
+      }
+      m_local_browser = std::move(*browser);
+      m_session_dependencies.local_sources = m_local_browser.get();
+      return true;
+    } catch (...) {
+      m_setup_error =
+          cli::CommandFailure{cli::CommandFailureKind::runtime,
+                              "Application source worker could not start"};
       return false;
     }
-    m_local_browser = std::move(*browser);
-    m_session_dependencies.local_sources = m_local_browser.get();
-    return true;
   }
   auto activate_local_browser(const domain::SessionId& session) -> bool {
-    auto activated = m_local_browser->activate_session(session);
-    if (!activated) {
-      m_status = activated.error().message;
+    try {
+      const auto previous = m_local_browser->state().session_id;
+      auto activated = m_local_browser->activate_session(session);
+      if (!activated) {
+        m_status = activated.error().message;
+        return false;
+      }
+      if (previous && !m_source_worker->invalidate_session(*previous)) {
+        fail({cli::CommandFailureKind::runtime,
+              "Application source session invalidation failed"});
+        return false;
+      }
+      return true;
+    } catch (...) {
+      fail({cli::CommandFailureKind::runtime,
+            "Application source session activation failed"});
       return false;
     }
-    return true;
   }
   auto ensure_local_dialog() -> void {
     if (m_local_dialog) return;
@@ -5161,6 +5195,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   domain::ToolSpendLedgerProjection m_tool_spend_ledger;
   termforge::MenuBar m_context_toolbar;
   bool m_context_toolbar_visible{true};
+  std::shared_ptr<runtime::LocalSourceWorker> m_source_worker;
   std::unique_ptr<surfaces::LocalSourceBrowser> m_local_browser;
   std::unique_ptr<LocalSourceBrowserDialog> m_local_dialog;
   bool m_local_dialog_active{};
