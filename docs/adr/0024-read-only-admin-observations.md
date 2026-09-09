@@ -851,3 +851,35 @@ physical slot after logical cancellation. No new resolver owner, process-wide
 crypto/log/environment mutation or hard cleanup promise is introduced. Other
 platforms remain unsupported pending equivalent native teardown proof. Real
 loopback TLS failure fixtures use synthetic credentials and never a cluster.
+
+
+### Interactive Chat Admin attachment
+
+Chat owns the configured catalog, one Admin controller and observation broker
+on its existing shared source worker. Initial session projection validation
+precedes activation. Candidate open/replay refusal leaves the existing selection
+intact; committed replacement detaches borrowed ports before invalidation and
+new attachment. Failure after invalidation closes admission rather than claiming
+an atomic rollback. Shutdown removes borrowed overlays and detaches the controller
+before destroying the session; source owners outlive worker cleanup.
+
+The optional toolbar and closed `/admin` commands dispatch identical typed actions.
+The composer accepts Admin commands while an ordinary run is active; ordinary
+Enter retains the draft until that run finishes. Inspection, drawing and closing
+Admin never cancel an unrelated run or implicitly request model explanation.
+Production obtains the catalog from the strict actual configuration loader;
+rejected configuration cannot silently select a local source.
+
+Manual updates use the manual pump and transfer committed surface events even
+when the pump fails. Tick and wake handling retain entry-time manual identity
+through terminal completion, avoiding an accidental model drain afterward.
+The existing periodic polling option still permits normal live/replayed runtime
+wakes for ordinary runs. Approval may overlay Admin and captures session,
+run/invocation, manual classification and attachment epoch. It validates those
+identities and the actual top overlay before popping or resolving a decision;
+manual completion stays on the manual port. Actual model tool ceilings and launch
+policy remain unchanged by manual availability.
+
+The initial Chat view supports the controller's Linux health, loaded-services and
+exact service-health operations. Kubernetes catalog preparation, explicit log
+consent, model Explain and standalone Admin TUI remain separate integrations.
