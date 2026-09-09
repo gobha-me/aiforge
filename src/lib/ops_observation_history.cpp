@@ -401,8 +401,12 @@ class Validator {
     auto& record = m_snapshot.invocations[state.index];
     static_cast<void>(event);
 
-    require(record.phase == OpsInvocationPhase::proposed && !state.decision &&
-            !state.policy_failed);
+    const bool initial =
+        record.phase == OpsInvocationPhase::proposed && !state.decision;
+    const bool approval =
+        record.phase == OpsInvocationPhase::awaiting_approval &&
+        state.decision == PolicyDecision::require_approval;
+    require((initial || approval) && !state.policy_failed);
     state.policy_failed = true;
     state.must_error = true;
   }

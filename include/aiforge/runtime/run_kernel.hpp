@@ -8,6 +8,7 @@
 #include <aiforge/domain/run_projection.hpp>
 #include <aiforge/domain/task_scheduler.hpp>
 #include <aiforge/runtime/child_runner.hpp>
+#include <aiforge/runtime/ops_observation_tool.hpp>
 #include <aiforge/runtime/tool_policy.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
 #include <aiforge/storage/session_store.hpp>
@@ -352,6 +353,13 @@ using TimestampSource = std::function<domain::EventTimestamp()>;
 
 enum class RunDrainMode { dispatch_ready, observe_only };
 
+struct ObservationControlStart {
+  domain::RunId run_id;
+  domain::RunStarted attributes;
+  domain::InvocationId invocation_id;
+  OpsObservationIntent intent;
+};
+
 class RunKernel final {
  public:
   RunKernel(domain::SessionId session_id, backend::Backend& backend,
@@ -359,16 +367,25 @@ class RunKernel final {
             TimestampSource timestamp_source = {}, RunKernelLimits limits = {},
             ToolRegistrySnapshot tools = {},
             std::shared_ptr<ToolPolicy> policy = {},
-            std::shared_ptr<ChildRunner> child_runner = {});
+            std::shared_ptr<ChildRunner> child_runner = {},
+            std::shared_ptr<OpsObservationBroker> observation_broker = {});
 
   [[nodiscard]] static auto open_durable(
       DurableSessionOpen session, storage::SessionStore& store,
       backend::Backend& backend, RunWakeSink* wake_sink = nullptr,
       TimestampSource timestamp_source = {}, RunKernelLimits limits = {},
       ToolRegistrySnapshot tools = {}, std::shared_ptr<ToolPolicy> policy = {},
-      std::shared_ptr<ChildRunner> child_runner = {})
+      std::shared_ptr<ChildRunner> child_runner = {},
+      std::shared_ptr<OpsObservationBroker> observation_broker = {})
       -> std::expected<std::unique_ptr<RunKernel>, RunKernelError>;
   ~RunKernel();
+
+  // All mutators/drain and broker owner methods share one caller-owned thread.
+  // The application retains the broker past kernels and owns selection, pumping
+  // and shutdown. Kernel destruction stops only its captured operation token;
+  // it never closes or deactivates a potentially replaced broker session.
+  [[nodiscard]] auto start_observation_control(ObservationControlStart start)
+      -> std::expected<void, RunKernelError>;
 
   RunKernel(const RunKernel&) = delete;
   auto operator=(const RunKernel&) -> RunKernel& = delete;

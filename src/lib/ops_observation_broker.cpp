@@ -357,6 +357,24 @@ auto OpsObservationBroker::service(Clock::time_point now)
     return failure(Code::internal_failure);
   }
 }
+auto OpsObservationBroker::preflight(
+    const OpsObservationEndpoint& endpoint,
+    const domain::OpsObservationRequest& request) const
+    -> std::expected<void, OpsBrokerFailure> {
+  try {
+    if (m_impl->closed || !m_impl->state) return failure(Code::closed);
+    if (endpoint.m_state != m_impl->state) return failure(Code::stale_request);
+    const std::lock_guard lock(m_impl->state->mutex);
+    if (request.session_id != m_impl->state->session)
+      return failure(Code::invalid_request);
+    if (!m_impl->source || !m_impl->current(request))
+      return failure(Code::stale_request);
+    return {};
+  } catch (...) {
+    return failure(Code::internal_failure);
+  }
+}
+
 auto OpsObservationBroker::take_for_publication(
     const OpsObservationReceipt& receipt,
     const domain::InvocationId& expected_invocation,

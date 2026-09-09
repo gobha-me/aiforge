@@ -249,6 +249,39 @@ replay before recovery writes or policy/registry restoration. Matching a tool's
 name or version cannot reconstruct missing execution proof. Completed model
 observations remain readable historical evidence.
 
+## Kernel observation admission and publication
+
+The kernel accepts a typed human observation intent through a dedicated control
+entry point. It derives the manual contract flag, invocation-bound request,
+native registration provenance and launch policy provenance. RunStarted,
+HumanObservationRequested and the typed ToolProposed are one durable transaction
+before policy evaluation or source IO. This path needs no backend or model.
+Model proposals use the same native preparation, require actual recorded tool
+and policy provenance, and retain both normalized arguments and typed proof.
+The final native executor type is required; ordinary executors cannot adopt
+the contract by copying its name, version, proof or receipt.
+
+The application supplies an optional shared broker, retains it past its kernels,
+and owns activation, selection, pumping and shutdown. Kernel mutations, draining
+and broker owner methods run on the same owner thread. Pure preflight checks
+the exact endpoint issuer, kernel session, selected source and current request
+authority before policy admission and again before launch. Kernel destruction
+stops its captured operation token; it never closes the application's broker or
+cancels a replacement session by a reused invocation identifier.
+
+Only a validated native receipt can publish an observation. The owner gate
+rechecks current authority before producing canonical model text and recording
+OpsObservationRecorded plus ToolResultRecorded atomically. Manual success adds
+RunCompleted in the same transaction. Native progress, input, arbitrary content,
+artifacts and spend are protocol failures. Manual failure and cancellation
+record complete tool/run terminal pairs while retaining worker state until its
+end event drains. Approval-port failure also terminates a model-origin native
+run so its pending approval cannot become stranded. Every commit validates the
+complete historical grammar; store failure or rejection during live work closes
+the kernel without publishing a fresh observation claim. Recovery remains the
+bounded, non-retrying behavior above, including rejection of unfinished model
+proof; this slice adds no UI or configuration surface.
+
 ## Required failure evidence
 
 - Wrong/foreign target, namespace, generation, resource or log-policy revision;
