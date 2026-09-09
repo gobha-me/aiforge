@@ -8,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <filesystem>
 #include <random>
+#include <source_location>
 #include <stdexcept>
 
 namespace chat_admin_test {
@@ -416,11 +417,33 @@ struct Fixture {
       app->on_tick(1ms);
     static_cast<void>(rendered(*app));
   }
-  template <class Predicate> auto wait(Predicate predicate) -> void {
-    REQUIRE(until([&] {
+  template <class Predicate>
+  auto wait(Predicate predicate, std::string_view label = "condition",
+            std::source_location caller = std::source_location::current())
+      -> void {
+    const bool finished = until([&] {
       step();
       return predicate();
-    }));
+    });
+    INFO("wait " << label << " at " << caller.file_name() << ':'
+                 << caller.line());
+    INFO("status=" << app->status_text() << " modal=" << app->modal());
+    INFO("alpha prepared/observed/destroyed="
+         << catalog->alpha->preparations.load() << '/'
+         << catalog->alpha->observations.load() << '/'
+         << catalog->alpha->destroyed.load());
+    INFO("beta prepared/observed/destroyed="
+         << catalog->beta->preparations.load() << '/'
+         << catalog->beta->observations.load() << '/'
+         << catalog->beta->destroyed.load());
+    INFO("observations/completed/failed="
+         << count<OpsObservationRecorded>(app->events()) << '/'
+         << count<RunCompleted>(app->events()) << '/'
+         << count<RunFailed>(app->events()));
+    INFO("visible busy=" << (rendered(*app).find(
+                                 "Session or source worker is busy") !=
+                             std::string::npos));
+    REQUIRE(finished);
   }
   auto wait_for_gate(const std::shared_ptr<Gate>& gate) -> void {
     wait([&] {
@@ -446,10 +469,12 @@ struct Fixture {
     return std::move(*events);
   }
   auto completed(std::size_t number) -> void {
-    wait([&] {
-      return count<OpsObservationRecorded>(app->events()) == number &&
-             count<RunCompleted>(app->events()) == number;
-    });
+    wait(
+        [&] {
+          return count<OpsObservationRecorded>(app->events()) == number &&
+                 count<RunCompleted>(app->events()) == number;
+        },
+        "completed observations " + std::to_string(number));
   }
   auto no_model() const -> void {
     CHECK(backend.state->starts.load() == 0);
