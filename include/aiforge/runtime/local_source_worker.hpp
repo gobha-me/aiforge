@@ -65,7 +65,8 @@ enum class LocalSourceWorkerErrorCode {
   invalid_request,
   busy,
   stale_request,
-  internal_failure
+  internal_failure,
+  resource_exhausted
 };
 struct LocalSourceWorkerError {
   LocalSourceWorkerErrorCode code{LocalSourceWorkerErrorCode::invalid_request};
@@ -87,6 +88,13 @@ class LocalSourceWorker final {
   auto operator=(const LocalSourceWorker&) -> LocalSourceWorker& = delete;
   LocalSourceWorker(LocalSourceWorker&&) = delete;
   auto operator=(LocalSourceWorker&&) -> LocalSourceWorker& = delete;
+
+  // Owner-thread allocation shares a monotonic high-water mark with explicit
+  // submissions. It consumes an ID, not a slot or authority. IDs are not
+  // reservations: a higher intervening admission can stale an allocated ID.
+  // Abandoned/failed/busy allocations never roll back; exhaustion never wraps.
+  [[nodiscard]] auto allocate_request_id()
+      -> std::expected<std::uint64_t, LocalSourceWorkerError>;
 
   // Successful submissions require strictly increasing request IDs across this
   // controller, including sessions. This bounds stale-token tracking to one
