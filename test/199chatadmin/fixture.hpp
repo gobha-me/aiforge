@@ -379,12 +379,12 @@ struct Fixture {
   }
   auto command(std::string text) -> void {
     REQUIRE_FALSE(app->modal());
-    app->on_event(key(termforge::Key::End));
+    app->dispatch_event(key(termforge::Key::End));
     for (std::size_t i{}; i < previous_command_bytes; ++i)
-      app->on_event(key(termforge::Key::Backspace));
+      app->dispatch_event(key(termforge::Key::Backspace));
     previous_command_bytes = text.size();
-    app->on_event(termforge::PasteEvent{std::move(text)});
-    app->on_event(key(termforge::Key::Enter));
+    app->dispatch_event(termforge::PasteEvent{std::move(text)});
+    app->dispatch_event(key(termforge::Key::Enter));
     static_cast<void>(rendered(*app));
   }
   auto click(std::string_view label) -> bool {
@@ -398,20 +398,20 @@ struct Fixture {
              i < label.size() && col + static_cast<int>(i) < 120; ++i)
           text += screen.text_at(col + static_cast<int>(i), row);
         if (text == label) {
-          app->on_event(termforge::MouseEvent{col, row, 0, true});
+          app->dispatch_event(termforge::MouseEvent{col, row, 0, true});
           return true;
         }
       }
     return false;
   }
   auto press(char32_t character) -> void {
-    app->on_event(key(termforge::Key::Char, character));
+    app->dispatch_event(key(termforge::Key::Char, character));
     static_cast<void>(rendered(*app));
   }
   auto step() -> void {
     if (wake_only)
-      app->on_event(termforge::ErrorEvent{termforge::Severity::Info,
-                                          "aiforge.runtime", "events-ready"});
+      app->dispatch_event(termforge::ErrorEvent{
+          termforge::Severity::Info, "aiforge.runtime", "events-ready"});
     else
       app->on_tick(1ms);
     static_cast<void>(rendered(*app));
@@ -422,9 +422,15 @@ struct Fixture {
       return predicate();
     }));
   }
+  auto wait_for_gate(const std::shared_ptr<Gate>& gate) -> void {
+    wait([&] {
+      const std::lock_guard lock{gate->mutex};
+      return gate->entered;
+    });
+  }
   auto close() -> void {
     for (unsigned i{}; i < 2 && app->modal(); ++i)
-      app->on_event(key(termforge::Key::Escape));
+      app->dispatch_event(key(termforge::Key::Escape));
     REQUIRE_FALSE(app->modal());
   }
   auto select(std::string name = "alpha") -> void {

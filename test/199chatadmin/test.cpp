@@ -1,5 +1,6 @@
 #include "../167chatevidence/fixture.hpp"
 #include "fixture.hpp"
+#include <aiforge/adapters/admin_dialog.hpp>
 #include <aiforge/surfaces/slash_commands.hpp>
 
 namespace {
@@ -98,15 +99,15 @@ TEST_CASE("Chat Admin approval overlays the view and stays on the manual path",
   SECTION("approve once") {
     approved = true;
     decision = ApprovalDecision::approved;
-    f.app->on_event(key(termforge::Key::Down));
-    f.app->on_event(key(termforge::Key::Enter));
+    f.app->dispatch_event(key(termforge::Key::Down));
+    f.app->dispatch_event(key(termforge::Key::Enter));
   }
   SECTION("deny default") {
-    f.app->on_event(key(termforge::Key::Enter));
+    f.app->dispatch_event(key(termforge::Key::Enter));
   }
   SECTION("cancel approval") {
     decision = ApprovalDecision::cancelled;
-    f.app->on_event(key(termforge::Key::Escape));
+    f.app->dispatch_event(key(termforge::Key::Escape));
   }
   f.wait([&] { return count<ToolApprovalDecided>(f.app->events()) == 1; });
   if (approved)
@@ -171,8 +172,8 @@ TEST_CASE(
   f.close();
   CHECK(count<RunCancelled>(f.history()) == 0);
   // Normal runtime wakes keep their preexisting ordinary-drain semantics.
-  f.app->on_event(termforge::ErrorEvent{termforge::Severity::Info,
-                                        "aiforge.runtime", "events-ready"});
+  f.app->dispatch_event(termforge::ErrorEvent{
+      termforge::Severity::Info, "aiforge.runtime", "events-ready"});
   CHECK(f.history().size() > before.size());
   CHECK(f.backend.state->starts.load() == 1);
   CHECK(count<RunCancelled>(f.history()) == 0);
@@ -287,7 +288,7 @@ TEST_CASE(
     f.command("/session resume other");
   }
   // Failed command leaves its draft available; clear it through normal editing.
-  f.app->on_event(key(termforge::Key::Char, U'c', true));
+  f.app->dispatch_event(key(termforge::Key::Char, U'c', true));
   f.command("/admin");
   REQUIRE(f.app->modal());
   CHECK(rendered(*f.app).find("Active target: alpha") != std::string::npos);
@@ -314,6 +315,7 @@ TEST_CASE(
     f.press(U'h');
     f.press(U'r');
   }
+  f.wait_for_gate(gate);
   REQUIRE(gate->await());
   auto retained = f.catalog->alpha;
   f.app.reset();
@@ -333,6 +335,7 @@ TEST_CASE("Chat Admin cancellation discards a late source result without "
   f.select();
   f.press(U'h');
   f.press(U'r');
+  f.wait_for_gate(gate);
   REQUIRE(gate->await());
   f.press(U'c');
   f.wait([&] { return count<RunCancelled>(f.app->events()) == 1; });
@@ -362,8 +365,12 @@ TEST_CASE("Chat Admin successful session switch requires fresh selection",
   f.command("/admin");
   CHECK(rendered(*f.app).find("Active target: none") != std::string::npos);
   f.press(U'h');
-  CHECK(rendered(*f.app).find("observation.request.session_id=\"session\"") !=
-        std::string::npos);
+  const auto* view =
+      dynamic_cast<const adapters::AdminDialog*>(f.app->top_overlay());
+  REQUIRE(view != nullptr);
+  CHECK(view->display_text().find(
+            "observation.request.session_id=\"session\"") != std::string::npos);
+  CHECK(rendered(*f.app).find("Committed evidence") != std::string::npos);
   f.press(U'r');
   CHECK(count<HumanObservationRequested>(f.history("other")) == 0);
   CHECK(f.catalog->alpha->observations.load() == 1);
@@ -402,7 +409,7 @@ TEST_CASE(
          {std::pair{120, 32}, std::pair{24, 8}, std::pair{60, 18}})
       static_cast<void>(rendered(*f.app, size.first, size.second));
   }
-  f.app->on_event(key(termforge::Key::F10));
+  f.app->dispatch_event(key(termforge::Key::F10));
   static_cast<void>(rendered(*f.app));
   f.close();
   CHECK(f.catalog->factories == 0);
@@ -428,8 +435,13 @@ TEST_CASE("Chat Admin toolbar and slash paths share explicit selection and "
   f.close();
   f.command("/admin health");
   f.completed(1);
+  CHECK(rendered(*f.app).find("[ Read ]") != std::string::npos);
+  f.close();
+  f.command("/admin services");
+  f.completed(2);
+  CHECK(rendered(*f.app, 60, 24).find("example.service") != std::string::npos);
   CHECK(f.catalog->factories == 1);
-  CHECK(f.catalog->alpha->observations.load() == 1);
+  CHECK(f.catalog->alpha->observations.load() == 2);
   f.no_model();
 }
 
