@@ -4,6 +4,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <aiforge/adapters/ops_observation_json.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/detail/utf8_text.hpp>
 #include <aiforge/domain/plan_projection.hpp>
@@ -3144,6 +3145,12 @@ auto parse_v2_tool_policy_fields(const Json& value,
   return std::visit(
       Overloaded{
           [](const domain::RunStarted&) { return std::string{"run.started"}; },
+          [](const domain::HumanObservationRequested&) {
+            return std::string{"ops.human_observation_requested"};
+          },
+          [](const domain::OpsObservationRecorded&) {
+            return std::string{"ops.observation_recorded"};
+          },
           [](const domain::RepositoryContextAdmitted&) {
             return std::string{"run.repository_context_admitted"};
           },
@@ -3400,10 +3407,12 @@ auto parse_v2_tool_policy_fields(const Json& value,
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 86,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 88,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started",
+      "ops.human_observation_requested",
+      "ops.observation_recorded",
       "run.provenance_recorded",
       "run.repository_context_admitted",
       "run.local_context_admitted",
@@ -4643,15 +4652,21 @@ auto check_summary_policy_revision(std::uint64_t revision) -> void {
            type == "run.child_created" || type == "tool.proposed" ||
            type == "tool.policy_decided" ||
            (type.starts_with("memory.") && known_payload_type(type)))) ||
-         ((schema_version == 3 || schema_version == 4 || schema_version == 5) &&
+         ((schema_version == 3 || schema_version == 4 || schema_version == 5 ||
+           schema_version == 6) &&
           type == "run.started") ||
          ((schema_version == 3 || schema_version == 4) &&
-          type == "run.child_created");
+          type == "run.child_created") ||
+         (schema_version == 3 && type == "tool.proposed");
 }
 
 auto check_run_started_admission_schema(const domain::RunStarted& value,
                                         std::uint32_t schema) -> void {
   const auto& admission = value.conversation_admission;
+  if ((schema == 6) != value.manual_observation_required ||
+      (schema == 6 && (value.purpose != domain::RunPurpose::control ||
+                       admission || value.local_context_admission_required)))
+    throw CodecFailure{"manual observation marker does not match schema"};
   if ((schema == 5) != value.local_context_admission_required ||
       (schema == 5 && value.purpose != domain::RunPurpose::conversation))
     throw CodecFailure{
@@ -4662,6 +4677,49 @@ auto check_run_started_admission_schema(const domain::RunStarted& value,
                       !admission || admission->version != 2))
     throw CodecFailure{
         "run start schema 4 requires a conversation v2 admission"};
+}
+
+auto ops_request_json(const domain::OpsObservationRequest& request) -> Json {
+  const auto encoded = encode_recorded_ops_request(request);
+  if (!encoded) throw CodecFailure{"invalid recorded Ops request"};
+  return Json::parse(*encoded);
+}
+auto parse_ops_request(const Json& value) -> domain::OpsObservationRequest {
+  const auto decoded = decode_recorded_ops_request(value.dump());
+  if (!decoded) throw CodecFailure{"invalid recorded Ops request"};
+  return *decoded;
+}
+auto ops_observation_json(const domain::OpsObservation& observation) -> Json {
+  const auto encoded = encode_ops_observation(observation);
+  if (!encoded) throw CodecFailure{"invalid recorded Ops observation"};
+  return Json::parse(*encoded);
+}
+auto parse_ops_observation(const Json& value) -> domain::OpsObservation {
+  const auto decoded = decode_ops_observation(value.dump());
+  if (!decoded) throw CodecFailure{"invalid recorded Ops observation"};
+  return *decoded;
+}
+auto ops_tool_json(const domain::ToolProvenanceEntry& tool) -> Json {
+  if (!domain::validate_tool_provenance_entry(tool) ||
+      !tool.registration_digest)
+    throw CodecFailure{"invalid Ops tool provenance"};
+  return {{"tool_name", tool.tool_name},
+          {"declared_effects", effects_json(tool.declared_effects)},
+          {"capability_scopes", scopes_json(tool.capability_scopes)},
+          {"registration_digest", *tool.registration_digest}};
+}
+auto parse_ops_tool(const Json& value) -> domain::ToolProvenanceEntry {
+  require_conversation_fields(value,
+                              {"tool_name", "declared_effects",
+                               "capability_scopes", "registration_digest"});
+  domain::ToolProvenanceEntry tool{
+      value.at("tool_name").get<std::string>(),
+      parse_effects(value.at("declared_effects")),
+      parse_scopes(value.at("capability_scopes")),
+      value.at("registration_digest").get<std::string>()};
+  if (!domain::validate_tool_provenance_entry(tool))
+    throw CodecFailure{"invalid Ops tool provenance"};
+  return tool;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Event encoder.
@@ -4678,7 +4736,7 @@ auto check_run_started_admission_schema(const domain::RunStarted& value,
                 {"permission_profile_id", id_text(value.permission_profile_id)},
                 {"persona_id", optional_id_json(value.persona_id)}};
             if (schema_version == 3 || schema_version == 4 ||
-                schema_version == 5) {
+                schema_version == 5 || schema_version == 6) {
               result["purpose"] = run_purpose_name(value.purpose);
               result["memory_selection"] =
                   value.memory_selection
@@ -4701,7 +4759,21 @@ auto check_run_started_admission_schema(const domain::RunStarted& value,
             }
             if (schema_version == 5)
               result["local_context_admission_required"] = true;
+            if (schema_version == 6)
+              result["manual_observation_required"] = true;
             return result;
+          },
+          [](const domain::HumanObservationRequested& value) -> Json {
+            if (!domain::validate_tool_policy_provenance(value.policy))
+              throw CodecFailure{"invalid Ops policy provenance"};
+            return {{"invocation_id", id_text(value.invocation_id)},
+                    {"request", ops_request_json(value.request)},
+                    {"tool", ops_tool_json(value.tool)},
+                    {"policy", tool_policy_provenance_json(value.policy)}};
+          },
+          [](const domain::OpsObservationRecorded& value) -> Json {
+            return {{"invocation_id", id_text(value.invocation_id)},
+                    {"observation", ops_observation_json(value.observation)}};
           },
           [](const domain::LocalContextAdmitted& value) -> Json {
             return {{"inference_id", id_text(value.inference_id)},
@@ -4823,6 +4895,11 @@ auto check_run_started_admission_schema(const domain::RunStarted& value,
                     {"reason", optional_string_json(value.reason)}};
           },
           [schema_version](const domain::ToolProposed& value) -> Json {
+            if ((schema_version == 3) !=
+                    value.observation_request.has_value() ||
+                (schema_version == 3 &&
+                 (!value.validated_arguments || value.spend_quote)))
+              throw CodecFailure{"Ops proposal proof does not match schema"};
             Json result{
                 {"invocation_id", id_text(value.invocation_id)},
                 {"tool_name", value.tool_name},
@@ -4845,6 +4922,9 @@ auto check_run_started_admission_schema(const domain::RunStarted& value,
                       ? structured_json(*value.validated_arguments)
                       : Json(nullptr);
             }
+            if (schema_version == 3)
+              result["observation_request"] =
+                  ops_request_json(*value.observation_request);
             return result;
           },
           [schema_version](const domain::ToolPolicyDecided& value) -> Json {
@@ -5178,9 +5258,14 @@ auto check_run_started_admission_schema(const domain::RunStarted& value,
                                  const std::uint32_t schema_version)
     -> domain::RunEventPayload {
   if (type == "run.started") {
-    const bool modern =
-        schema_version == 3 || schema_version == 4 || schema_version == 5;
-    if (schema_version == 5)
+    const bool modern = schema_version == 3 || schema_version == 4 ||
+                        schema_version == 5 || schema_version == 6;
+    if (schema_version == 6)
+      require_conversation_fields(
+          value, {"surface_id", "workspace_id", "permission_profile_id",
+                  "persona_id", "memory_selection", "purpose",
+                  "conversation_admission", "manual_observation_required"});
+    else if (schema_version == 5)
       require_conversation_fields(value, {"surface_id", "workspace_id",
                                           "permission_profile_id", "persona_id",
                                           "memory_selection", "purpose",
@@ -5221,8 +5306,31 @@ auto check_run_started_admission_schema(const domain::RunStarted& value,
         throw CodecFailure{"run start local proof marker must be true"};
       result.local_context_admission_required = true;
     }
+    if (schema_version == 6) {
+      const auto& marker = value.at("manual_observation_required");
+      if (!marker.is_boolean() || !marker.get<bool>())
+        throw CodecFailure{"manual observation marker must be true"};
+      result.manual_observation_required = true;
+    }
     check_run_started_admission_schema(result, schema_version);
     return result;
+  }
+  if (type == "ops.human_observation_requested") {
+    require_conversation_fields(value,
+                                {"invocation_id", "request", "tool", "policy"});
+    auto policy = parse_tool_policy_provenance(value.at("policy"));
+    if (!domain::validate_tool_policy_provenance(policy))
+      throw CodecFailure{"invalid Ops policy provenance"};
+    return domain::HumanObservationRequested{
+        parse_id<domain::InvocationId>(value.at("invocation_id")),
+        parse_ops_request(value.at("request")),
+        parse_ops_tool(value.at("tool")), std::move(policy)};
+  }
+  if (type == "ops.observation_recorded") {
+    require_conversation_fields(value, {"invocation_id", "observation"});
+    return domain::OpsObservationRecorded{
+        parse_id<domain::InvocationId>(value.at("invocation_id")),
+        parse_ops_observation(value.at("observation"))};
   }
   if (type == "session.conversation_policy_set") {
     require_conversation_fields(value, {"previous_revision", "policy"});
@@ -5375,6 +5483,19 @@ auto check_run_started_admission_schema(const domain::RunStarted& value,
         parse_optional_string(value.at("reason"))};
   }
   if (type == "tool.proposed") {
+    if (schema_version == 3) {
+      require_conversation_fields(
+          value,
+          {"invocation_id", "tool_name", "arguments", "declared_effects",
+           "parent_invocation_id", "arguments_replayable",
+           "validated_required_scopes", "requested_scopes", "result_message_id",
+           "spend_quote", "validated_arguments", "observation_request"});
+      if (value.at("observation_request").is_null() ||
+          !value.at("spend_quote").is_null())
+        throw CodecFailure{"Ops proposal proof is missing or paid"};
+    } else if (value.contains("observation_request")) {
+      throw CodecFailure{"Ops proposal proof requires schema 3"};
+    }
     if (schema_version >= 2 && (!value.contains("spend_quote") ||
                                 !value.contains("validated_arguments") ||
                                 value.at("validated_arguments").is_null())) {
@@ -5407,6 +5528,10 @@ auto check_run_started_admission_schema(const domain::RunStarted& value,
         schema_version >= 2
             ? std::optional<domain::StructuredDataBlock>{parse_structured(
                   value.at("validated_arguments"))}
+            : std::nullopt,
+        schema_version == 3
+            ? std::optional<domain::OpsObservationRequest>{parse_ops_request(
+                  value.at("observation_request"))}
             : std::nullopt};
   }
   if (type == "tool.policy_decided") {

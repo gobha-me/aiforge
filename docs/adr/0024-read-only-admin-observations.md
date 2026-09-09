@@ -173,6 +173,42 @@ Close wakes waiting executors before the kernel joins its tool thread. Last
 shared-owner destruction of arbitrary source graphs remains a caller cleanup
 responsibility, so this boundary does not promise nonblocking source destructors.
 
+The durable manual admission grammar uses `run.started` schema 6 with a
+mandatory true `manual_observation_required` flag, followed by one
+`ops.human_observation_requested` and one `tool.proposed` schema 3. The flag
+makes a missing human intent a replay error rather than ordinary control work.
+The human marker retains exact request, versioned tool registration and launch
+policy provenance without inventing a backend or model. Proposal schema 3
+requires a non-null typed observation request, normalized arguments and no
+spend quote; legacy proposal schemas reject the new reserved proof field.
+
+`ops.observation_recorded` schema 1 retains the typed historical snapshot.
+A pure runtime history validator checks exact cross-event identity, declared
+scope/effect correspondence, policy/approval/start ordering, cancellation,
+atomic observation/result pairs and manual terminal outcomes. Valid unfinished
+manual admissions are reported without granting retry authority; missing
+atomic admission or result partners are corruption. Its explicit limits are
+one million input events, 4096 Ops invocations and 16 MiB of conservatively
+accounted captured requests. It stores references to evidence events rather
+than copies of their observation payloads.
+
+Version-1 canonical tool content is one TextBlock with fixed-order `key=value`
+lines. Strings are quoted with quote/backslash escaping, numbers are decimal,
+absent values are `unknown`, and row indices preserve source order, including
+blank log lines. All allowlisted typed request/provenance, timestamp,
+completeness and payload fields are included. A separate 256 KiB output ceiling
+fails rather than omitting fields. Typed observation/result equality is checked
+against this pure formatter; runtime formatting does not call a JSON adapter.
+The independent version-1 request JSON document has a 16 KiB ceiling.
+
+This foundation does not enable collection or implement the manual kernel
+entry point. Typed historical proof consistency does not yet establish that
+raw/normalized executor JSON semantically names that request. The future Ops
+argument adapter and kernel preparation hook must establish that binding,
+assign owner/session/request identity internally, and apply current authority
+before dispatch/publication. Ordinary kernel entry points reject the new
+manual-start flag until that explicit admission path exists.
+
 ## Required failure evidence
 
 - Wrong/foreign target, namespace, generation, resource or log-policy revision;
