@@ -1721,7 +1721,7 @@ TEST_CASE("schema-v2 tool proposals persist normalized arguments with optional "
   CHECK(store->replay_events(session)->size() == 1);
 
   auto unsupported = proposal;
-  unsupported.metadata.schema_version = 3;
+  unsupported.metadata.schema_version = 4;
   unsupported.metadata.sequence = 2;
   unsupported.metadata.event_id = make_id<domain::EventId>("unsupported");
   rejected = store->append_events(session, std::array{unsupported});
