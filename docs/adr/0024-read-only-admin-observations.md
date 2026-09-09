@@ -536,3 +536,51 @@ human-origin observation proof bypasses model context preparation, and its
 committed events remain available for ordinary surface delivery exactly once.
 Manual pumping services the existing broker independently of inference polling.
 Control results remain historical until explicit bounded model admission.
+
+## Exact-invocation Linux journal milestone
+
+The next Linux adapter milestone reads an explicitly permitted selected service's
+default local system journal through adapter-private native libsystemd. This
+requires a Linux adapter system development prerequisite, libsystemd >=233, chosen
+for the trusted _SYSTEMD_INVOCATION_ID producer field introduced in that version.
+A named CMake recipe and FindSystemdJournal module use find_package/pkg-config;
+there is no system-manager source build, Meson, runtime dlopen or subprocess/JSON
+fallback. Core-only and non-Linux configurations do not activate this dependency.
+Client version/linkage does not prove producer visibility or current entry fields.
+
+The existing selected boot/namespace/system-manager proof and canonical unit plus
+InvocationID checks bracket collection on one original deadline and capture budget.
+Only _BOOT_ID, _SYSTEMD_UNIT and _SYSTEMD_INVOCATION_ID exact conjunctive matches
+are admitted; every retained entry's trusted identities are rechecked. Native
+field enumeration detects ambiguous identity/message values within fixed bounds.
+Library fields and diagnostics remain private; only bounded validated MESSAGE
+lines with actual timestamps enter neutral evidence, subject to known credential
+exclusions. Exact log consent remains owner-controlled and is rechecked by the
+worker/broker before dispatch and durable publication. No model-provided journal
+path, root, namespace, selector, format or credential source is introduced. Native
+default discovery still uses system journal directories and machine-id filesystem
+state in the proven mount namespace; fixed flags are not a no-ambient-I/O or
+descriptor-pinned-directory guarantee. The adapter does not mutate process
+environment, logging handlers or signal handlers.
+
+This first reader samples the first bounded prefix of the selected recent window;
+it does not claim to return the newest tail. Native order and blank lines are
+preserved. Recognizable authorization schemes, credential assignments and private
+key markers reject the whole sample through a bounded private heuristic; arbitrary
+text is not guaranteed free of credentials. No secret store is consulted. Native
+read paths may emit library diagnostics containing paths/offsets and fixed errors;
+our neutral error conversion does not intercept stderr. Reviewed read paths do not
+log MESSAGE payload bytes. No global logging/environment manipulation is added.
+Malformed returned records are rejected; libsystemd may internally skip corrupt
+items or inaccessible files, which remains part of unknown omissions. Nonempty readable results initially
+remain partial with unknown omissions; observed local output limits are truncated.
+Empty results without full visibility proof are unavailable. Malformed input, lost
+identity, cancellation, capture exhaustion or expiry discards the attempted sample.
+Library thresholds and application byte/iteration caps do not establish a hard
+libsystemd mapping/decompression/RSS bound or interrupt a stalled syscall. Cursor
+ownership/cleanup stays on the existing source worker; a stalled call or destructor
+retains its physical slot under the established logical-cancellation contract.
+
+Implementation and capability advertisement require deterministic admission,
+identity, field, timing, bounds, visibility and dependency-consumer failure evidence.
+No live host log read or successful host compatibility is implied by this milestone.

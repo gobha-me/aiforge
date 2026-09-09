@@ -38,6 +38,8 @@ for dependency_source in \
   fi
 done
 
+"${SNAPSHOT_DIR}/tools/verify-systemd-journal-consumption.sh" "${COMMON_CMAKE_ARGS[@]}"
+
 configure_probe() {
   local name=$1
   local dependency=$2
@@ -333,6 +335,7 @@ done
 cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-core" \
   "${COMMON_CMAKE_ARGS[@]}" \
   -Daiforge_BUILD_ADAPTERS=OFF -Daiforge_BUILD_BIN=OFF -Daiforge_TESTS=OFF \
+  -DCMAKE_DISABLE_FIND_PACKAGE_SystemdJournal=TRUE \
   -DCMAKE_DISABLE_FIND_PACKAGE_termforge=TRUE \
   -DCMAKE_DISABLE_FIND_PACKAGE_venice-cpp=TRUE \
   -DCMAKE_DISABLE_FIND_PACKAGE_rasterforge=TRUE
@@ -373,6 +376,7 @@ cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-audio-device-evaluation" \
   -Daiforge_AUDIO_PLAYBACK=OFF \
   -Daiforge_AUDIO_CAPTURE=OFF \
   -Daiforge_BUILD_ADAPTERS=OFF -Daiforge_BUILD_BIN=OFF -Daiforge_TESTS=OFF \
+  -DCMAKE_DISABLE_FIND_PACKAGE_SystemdJournal=TRUE \
   -DCMAKE_DISABLE_FIND_PACKAGE_miniaudio=TRUE \
   -DCMAKE_DISABLE_FIND_PACKAGE_RtAudio=TRUE
 

@@ -60,8 +60,9 @@ add_library(${PROJECT_NAME}::adapters ALIAS ${PROJECT_NAME}_adapters)
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_sources(${PROJECT_NAME}_adapters PRIVATE
     linux_systemd_bus.cpp linux_systemd_platform.cpp
-    linux_systemd_capture.cpp linux_systemd_services.cpp)
-  target_link_libraries(${PROJECT_NAME}_adapters PRIVATE dbus-1)
+    linux_systemd_capture.cpp linux_systemd_services.cpp
+    linux_journal_reader.cpp linux_journal_native.cpp)
+  target_link_libraries(${PROJECT_NAME}_adapters PRIVATE dbus-1 SystemdJournal::libsystemd)
 endif ()
 
 if (${PROJECT_NAME}_AUDIO_PLAYBACK)

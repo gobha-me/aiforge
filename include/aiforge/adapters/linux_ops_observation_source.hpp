@@ -9,7 +9,8 @@
 namespace aiforge::adapters {
 struct LinuxOpsObservationSourceAccess;
 
-// Fixed local Linux health and read-only systemd service observations. No logs,
+// Fixed local Linux health, read-only systemd service observations and
+// explicitly permitted exact-invocation journal window prefixes. No
 // cgroup-budget, physical-host or Kubernetes observation support.
 class LinuxOpsObservationSource final : public runtime::OpsObservationSource {
  public:
@@ -17,7 +18,8 @@ class LinuxOpsObservationSource final : public runtime::OpsObservationSource {
   static constexpr std::array supported_operations{
       domain::OpsObservationOperation::linux_health,
       domain::OpsObservationOperation::linux_services,
-      domain::OpsObservationOperation::linux_service_health};
+      domain::OpsObservationOperation::linux_service_health,
+      domain::OpsObservationOperation::linux_service_logs};
   [[nodiscard]] static auto create(domain::OpsTargetId target,
                                    domain::OpsConfigurationRevision revision)
       -> std::expected<std::shared_ptr<LinuxOpsObservationSource>,
@@ -49,5 +51,8 @@ class LinuxOpsObservationSource final : public runtime::OpsObservationSource {
 // prove the fixed system bus and selected manager inside the observing worker;
 // unavailable namespace/peer proof fails without affecting procfs health reads.
 // Ordinary private OS authentication/NSS reads and blocked cleanup retain the
-// same logical deadline versus physical source-slot limitation.
+// same logical deadline versus physical source-slot limitation. Journal fields
+// retain the same limitation; native mapping/decompression memory is not hard
+// bounded, visibility remains partial, and heuristic text exclusions do not
+// guarantee arbitrary log text is free of credentials.
 } // namespace aiforge::adapters

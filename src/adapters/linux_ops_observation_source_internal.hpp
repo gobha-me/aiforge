@@ -10,6 +10,7 @@
 
 namespace aiforge::adapters {
 class LinuxSystemdBus;
+class LinuxJournalFactory;
 enum class LinuxOpsInputFile { uptime, memory, time_offsets };
 struct LinuxOpsTimeIdentity {
   std::uint64_t current;
@@ -43,7 +44,8 @@ struct LinuxOpsObservationSourceAccess {
   [[nodiscard]] static auto create(
       domain::OpsTargetId target, domain::OpsConfigurationRevision revision,
       std::shared_ptr<LinuxOpsProbe> probe,
-      std::shared_ptr<LinuxSystemdBus> service_bus = {})
+      std::shared_ptr<LinuxSystemdBus> service_bus = {},
+      std::shared_ptr<LinuxJournalFactory> journal_factory = {})
       -> std::expected<std::shared_ptr<LinuxOpsObservationSource>,
                        runtime::OpsObservationSourceError>;
 };

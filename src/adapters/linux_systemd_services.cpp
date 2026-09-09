@@ -320,6 +320,23 @@ auto inspect(const domain::OpsObservationRequest& request,
       std::move(observed->value)};
 }
 } // namespace
+auto verify_linux_systemd_service_identity(
+    LinuxSystemdConnection& connection,
+    const domain::LinuxServiceIdentity& selected, LinuxSystemdBudget& budget)
+    -> std::expected<void, Error> {
+  try {
+    if (!selected.invocation_id) return fail(Error::invalid_result);
+    if (auto canonical = canonical_unit(connection, selected.unit_name, budget);
+        !canonical)
+      return fail(canonical.error());
+    auto current = invocation(connection, selected.unit_name, budget);
+    if (!current) return fail(current.error());
+    if (*current != selected.invocation_id) return fail(Error::source_changed);
+    return {};
+  } catch (...) {
+    return fail(Error::internal_failure);
+  }
+}
 auto validate_linux_systemd_service_request(
     const domain::OpsObservationRequest& request)
     -> std::expected<void, Error> {

@@ -55,9 +55,9 @@ if (PROBE_PREEXISTING_TARGETS)
   return()
 endif ()
 
-if (NOT PROBE_DEPENDENCY MATCHES "^(termforge|venice_cpp|rasterforge|sqlite3|dbus1|yaml_cpp)$")
+if (NOT PROBE_DEPENDENCY MATCHES "^(termforge|venice_cpp|rasterforge|sqlite3|dbus1|yaml_cpp|systemd_journal)$")
   message(FATAL_ERROR
-    "PROBE_DEPENDENCY must be termforge, venice_cpp, rasterforge, sqlite3, dbus1, or yaml_cpp")
+    "PROBE_DEPENDENCY must be termforge, venice_cpp, rasterforge, sqlite3, dbus1, yaml_cpp, or systemd_journal")
 endif ()
 
 if (PROBE_EXPECT_EMBEDDED)
@@ -87,6 +87,15 @@ if (PROBE_EXPECT_EMBEDDED)
   foreach(option IN ITEMS BUILD_BIN TESTS FUZZERS BENCHMARKS INSTALL)
     set(rasterforge_${option} ON CACHE BOOL "dependency-probe sentinel" FORCE)
   endforeach()
+endif ()
+
+if (PROBE_DEPENDENCY STREQUAL "systemd_journal" AND PROBE_SYSTEMD_PREEXISTING)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(PROBE_SYSTEMD REQUIRED IMPORTED_TARGET "libsystemd>=233")
+  add_library(SystemdJournal::libsystemd INTERFACE IMPORTED)
+  set_target_properties(SystemdJournal::libsystemd PROPERTIES
+    INTERFACE_LINK_LIBRARIES PkgConfig::PROBE_SYSTEMD
+    SystemdJournal_VERSION "${PROBE_SYSTEMD_VERSION}")
 endif ()
 
 set(${PROJECT_NAME}_DEPS "${PROBE_DEPENDENCY}")
@@ -174,6 +183,9 @@ elseif (PROBE_DEPENDENCY STREQUAL "dbus1")
   target_compile_definitions(dependency_probe PRIVATE PROBE_DBUS1)
   target_link_libraries(dependency_probe PRIVATE dbus-1)
 
+elseif (PROBE_DEPENDENCY STREQUAL "systemd_journal")
+  target_compile_definitions(dependency_probe PRIVATE PROBE_SYSTEMD_JOURNAL)
+  target_link_libraries(dependency_probe PRIVATE SystemdJournal::libsystemd)
 elseif (PROBE_DEPENDENCY STREQUAL "yaml_cpp")
   target_compile_definitions(dependency_probe PRIVATE PROBE_YAML_CPP)
   target_link_libraries(dependency_probe PRIVATE yaml-cpp::yaml-cpp)
