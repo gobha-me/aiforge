@@ -58,6 +58,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   money.cpp
   mp4.cpp
   one_shot.cpp
+  ops_target.cpp
   plan.cpp
   plan_task_controller.cpp
   persona.cpp
