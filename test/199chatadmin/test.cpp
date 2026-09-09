@@ -5,7 +5,39 @@
 
 namespace {
 using namespace chat_admin_test;
+// Closing a failed/cancelled preparation is logically immediate, but its
+// physical worker slot may still be retiring. A rejected Read is not queued:
+// the simulated user explicitly retries after owner ticks, then stops at the
+// first committed intent so the test cannot submit duplicate observations.
+auto read_after_preparation(Fixture& f, std::size_t prior_requests) -> void {
+  // events() exposes the session event log immediately, not buffered delivery.
+  REQUIRE(count<HumanObservationRequested>(f.app->events()) == prior_requests);
+  f.press(U'r');
+  if (count<HumanObservationRequested>(f.app->events()) == prior_requests) {
+    REQUIRE(rendered(*f.app).find("Session or source worker is busy") !=
+            std::string::npos);
+    f.wait(
+        [&] {
+          // An owner tick must not auto-admit the previously rejected Read.
+          REQUIRE(count<HumanObservationRequested>(f.app->events()) ==
+                  prior_requests);
+          f.press(U'r');
+          const auto requests =
+              count<HumanObservationRequested>(f.app->events());
+          if (requests == prior_requests) {
+            REQUIRE(rendered(*f.app).find("Session or source worker is busy") !=
+                    std::string::npos);
+            return false;
+          }
+          REQUIRE(requests == prior_requests + 1);
+          return true;
+        },
+        "explicit Read retry after preparation cleanup");
+  }
+  REQUIRE(count<HumanObservationRequested>(f.app->events()) ==
+          prior_requests + 1);
 }
+} // namespace
 
 TEST_CASE("Chat Admin unavailable catalog and invalid input never fall back or "
           "submit",
@@ -199,8 +231,9 @@ TEST_CASE("Chat Admin failed candidate preserves selected target and last good "
   CHECK(rendered(*f.app).find("Active target: alpha") != std::string::npos);
   f.press(U'h');
   CHECK(rendered(*f.app).find("alpha") != std::string::npos);
-  f.press(U'r');
+  read_after_preparation(f, 1);
   f.completed(2);
+  CHECK(count<HumanObservationRequested>(f.app->events()) == 2);
   const auto durable = f.history();
   for (const auto& event : durable)
     if (const auto* observation =
@@ -228,8 +261,9 @@ TEST_CASE(
   f.wait([&] { return f.catalog->beta->destroyed.load() == 1; });
   CHECK(rendered(*f.app).find("Active target: alpha") != std::string::npos);
   f.press(U'h');
-  f.press(U'r');
+  read_after_preparation(f, 0);
   f.completed(1);
+  CHECK(count<HumanObservationRequested>(f.app->events()) == 1);
   CHECK(f.catalog->alpha->observations.load() == 1);
   CHECK(f.catalog->beta->observations.load() == 0);
   f.no_model();
