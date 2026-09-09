@@ -607,3 +607,30 @@ transfers source ownership and accepted-resource cleanup responsibility to the
 application. It does not establish an asynchronous retirement service for later
 application-owned shared pointers. Current selection is checked before claim;
 later native binding retains its separate atomic/current-authority gates.
+
+## Owner target catalog milestone
+
+`ops.targets` is a typed file-only catalog of at most 32 configured records.
+Each record has a stable owner label (`id`), display name and one closed source:
+`linux_local`, or `kubernetes_static` with an absolute `config_file`, explicit
+`context` and `namespace`. Inline authentication, endpoint overrides, helper
+programs, ambient current-context and unknown fields are not catalog options.
+The reserved `local` record (`This environment`) is supplied by metadata
+resolution; it does not assert host scope or system-bus permission.
+
+Configured IDs are lower-case ASCII letters/digits with internal hyphens or
+underscores, up to 64 bytes; display names are safe single-line UTF-8 up to 128
+bytes, paths 4096, contexts 256, and namespaces DNS labels up to 63. Retained
+configured text has a 64 KiB aggregate ceiling. The existing bounded config-file
+reader still owns document framing and decoded duplicate-key rejection. No
+referenced kubeconfig is opened by parsing, validation, formatting or catalog
+resolution. Invalid Ops configuration refuses resolution even if another
+candidate might otherwise provide a fallback.
+
+Catalog IDs and labels are not live bindings, configuration revisions, broker
+issuers, generations or log grants. Preparation reserves an opaque revision;
+only a successful still-current prepared source can publish that revision with
+its proven binding. Log access remains a separate explicit owner choice.
+General config output summarizes record count; the later target-list view owns
+safe metadata presentation. This milestone supplies catalog configuration only;
+CLI/TUI collection and Kubernetes source availability are not implied.

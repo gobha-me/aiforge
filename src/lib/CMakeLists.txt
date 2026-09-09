@@ -29,6 +29,8 @@ add_library(${PROJECT_NAME}_lib STATIC
   conversation_summary_projection.cpp
   conversation_summary_sources.cpp
   config.cpp
+  ops_target_config.cpp
+  json_ops_targets.cpp
   config_provenance.cpp
   credential.cpp
   context_builder.cpp
