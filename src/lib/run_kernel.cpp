@@ -2135,7 +2135,7 @@ struct RunKernel::Impl {
     // This foundation can retain manual observations, but no ordinary kernel
     // entry point may claim the not-yet-implemented manual admission contract.
     if (const auto* started = std::get_if<domain::RunStarted>(&payload);
-        started && started->manual_observation_required)
+        started != nullptr && started->manual_observation_required)
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_start,
                        "manual observation admission is not available"));
