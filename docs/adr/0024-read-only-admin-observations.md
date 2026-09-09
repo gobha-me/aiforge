@@ -145,6 +145,34 @@ events or complete replay integration. The later kernel slice must atomically
 pair typed observations with their invocation result, reject mismatched model
 content and recheck current authority before publishing either representation.
 
+## Owner-thread observation broker
+
+The broker uses the application's shared local-source worker for physical
+execution and a separate bounded mailbox for queued, running and completed but
+unpublished requests. Executor threads retain only an owning mailbox endpoint.
+They do not capture the application, UI, source or worker. Admission binds a
+session-unique invocation and a complete typed request; the kernel remains the
+durable invocation-uniqueness owner. The mailbox detects duplicates among its
+bounded pending entries and does not grow a second replay ledger.
+
+An executor receives an opaque issuer-bound receipt, not observation text or
+an artifact. The owner consumes it once, checking the exact invocation and
+request, current target and log authority, deadline and cancellation. Changing
+selection invalidates pending delivery; replacing a session permanently closes
+its previous endpoint, even when the session ID is reused. Every selection
+advances generation, and changed log policy for the same target advances its
+policy revision. A receipt is runtime identity and grants no durable authority.
+The later kernel integration must render and atomically persist a successful
+observation after consuming the receipt; the broker itself does not append.
+
+Owner pumping performs dispatch and completion checks without joining source
+IO. An expired or cancelled wait does not release a physical worker slot while
+its source still runs or cleans up. Completed receipts retain mailbox capacity
+until consumed or invalidated. A failed attempt is not automatically retried.
+Close wakes waiting executors before the kernel joins its tool thread. Last
+shared-owner destruction of arbitrary source graphs remains a caller cleanup
+responsibility, so this boundary does not promise nonblocking source destructors.
+
 ## Required failure evidence
 
 - Wrong/foreign target, namespace, generation, resource or log-policy revision;
