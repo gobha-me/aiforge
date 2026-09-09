@@ -6,18 +6,22 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <fcntl.h>
 #include <iterator>
+#include <mutex>
 #include <optional>
 #include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -572,6 +576,88 @@ class PinnedRepositoryContextSource final
   GitProjectInstructionSource& m_instructions;
 };
 
+// Construct at its final address before any references are bound. Internal
+// shared owners never alias this envelope, so there is no ownership cycle.
+struct OwnedRepositoryEnvelope {
+  explicit OwnedRepositoryEnvelope(GitRepositorySnapshotSource source)
+      : snapshots(std::move(source)),
+        exact(snapshots, GitExactSourceReadPolicy::tracked_regular_files),
+        instructions(snapshots) {}
+  GitRepositorySnapshotSource snapshots;
+  GitExactSourceEditor exact;
+  GitProjectInstructionSource instructions;
+  std::shared_ptr<const runtime::PinnedRepositoryReadAuthority> authority;
+  std::shared_ptr<runtime::RepositoryContextSource> context;
+};
+// One fixed launch graph per application, bounded across overlapping retiring
+// applications as well. This is not a per-job or unbounded cleanup queue.
+auto repository_graphs() -> std::atomic<unsigned>& {
+  static std::atomic<unsigned> count{};
+  return count;
+}
+constexpr unsigned maximum_repository_graphs = 2;
+auto reserve_repository_graph() -> bool {
+  auto count = repository_graphs().load();
+  while (count < maximum_repository_graphs)
+    if (repository_graphs().compare_exchange_weak(count, count + 1))
+      return true;
+  return false;
+}
+struct GraphReservation {
+  bool active{true};
+  ~GraphReservation() {
+    if (active) --repository_graphs();
+  }
+};
+struct RepositoryRetirement {
+  std::mutex mutex;
+  std::condition_variable changed;
+  bool released{};
+  std::unique_ptr<OwnedRepositoryEnvelope> graph;
+  ~RepositoryRetirement() {
+    graph.reset();
+    --repository_graphs();
+  }
+  auto release() -> void {
+    {
+      const std::lock_guard lock{mutex};
+      released = true;
+    }
+    changed.notify_all();
+  }
+  auto retire() -> void {
+    {
+      std::unique_lock lock{mutex};
+      changed.wait(lock, [&] { return released; });
+    }
+    graph.reset(); // Outside the mutex, and before the reserved slot is
+                   // released.
+  }
+};
+struct RepositoryTicket {
+  std::shared_ptr<RepositoryRetirement> retirement;
+  ~RepositoryTicket() { retirement->release(); }
+};
+auto publish_repository_graph(
+    const std::shared_ptr<RepositoryRetirement>& retirement)
+    -> OwnedPinnedRepositorySources {
+  auto ticket = std::make_shared<RepositoryTicket>(retirement);
+  std::thread cleanup{[retirement] { retirement->retire(); }};
+  try {
+    cleanup.detach();
+  } catch (...) {
+    // Startup failure only: no aliases escaped. Wake before joining a started
+    // thread so std::thread destruction cannot terminate the process.
+    ticket.reset();
+    if (cleanup.joinable()) cleanup.join();
+    throw;
+  }
+  auto& owner = *retirement->graph;
+  return {{ticket, &owner.snapshots},
+          {ticket, &owner.exact},
+          {ticket, owner.authority.get()},
+          {ticket, owner.context.get()}};
+}
 } // namespace
 
 auto open_pinned_repository_root_authority(
@@ -632,6 +718,36 @@ auto make_pinned_repository_context_source(
   } catch (...) {
     return failure(ErrorCode::internal_failure,
                    "repository context source creation failed internally");
+  }
+}
+
+auto open_owned_pinned_repository_sources(
+    std::filesystem::path repository_root, GitRepositorySnapshotSource source,
+    repository::RepositorySnapshotLimits snapshot_limits)
+    -> std::expected<OwnedPinnedRepositorySources, Error> {
+  try {
+    if (!reserve_repository_graph())
+      return failure(ErrorCode::path_unavailable,
+                     "Repository source retirement capacity remains occupied");
+    GraphReservation reservation;
+    auto retirement = std::make_shared<RepositoryRetirement>();
+    reservation.active = false;
+    retirement->graph =
+        std::make_unique<OwnedRepositoryEnvelope>(std::move(source));
+    auto& owner = *retirement->graph;
+    auto authority = open_pinned_repository_root_authority(
+        std::move(repository_root), owner.snapshots, owner.exact,
+        snapshot_limits);
+    if (!authority) return std::unexpected(authority.error());
+    owner.authority = std::move(*authority);
+    auto context = make_pinned_repository_context_source(owner.authority,
+                                                         owner.instructions);
+    if (!context) return std::unexpected(context.error());
+    owner.context = std::move(*context);
+    return publish_repository_graph(retirement);
+  } catch (...) {
+    return failure(ErrorCode::internal_failure,
+                   "Owned repository source creation failed internally");
   }
 }
 
