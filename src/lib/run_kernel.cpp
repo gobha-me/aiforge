@@ -5579,6 +5579,13 @@ auto RunKernel::bind_ops_observation(
         RunKernelErrorCode::invalid_tool_state,
         "observation binding is unavailable or no longer current"));
   };
+  const auto broker_failure = [&](const OpsBrokerFailure& failure) {
+    if (failure.code == OpsBrokerError::internal_failure ||
+        failure.code == OpsBrokerError::closed)
+      return std::unexpected(kernel_error(RunKernelErrorCode::internal_failure,
+                                          "observation broker is unavailable"));
+    return invalid();
+  };
   try {
     if (m_impl->unusable)
       return std::unexpected(kernel_error(
@@ -5589,11 +5596,12 @@ auto RunKernel::bind_ops_observation(
           kernel_error(RunKernelErrorCode::run_already_active,
                        "observation binding requires an idle session"));
     if (!m_impl->observation_broker || !endpoint ||
-        authority.specification().session_id !=
-            m_impl->event_log.session_id() ||
-        !m_impl->observation_broker->preflight_selection(*endpoint, authority,
-                                                         source))
+        authority.specification().session_id != m_impl->event_log.session_id())
       return invalid();
+    if (auto current = m_impl->observation_broker->preflight_selection(
+            *endpoint, authority, source);
+        !current)
+      return broker_failure(current.error());
     ToolRegistry native_registry;
     if (!register_ops_observation_tool(native_registry, authority, endpoint))
       return invalid();
@@ -5615,9 +5623,10 @@ auto RunKernel::bind_ops_observation(
     static_assert(
         std::is_nothrow_move_assignable_v<std::shared_ptr<ToolPolicy>>);
     static_assert(std::is_nothrow_move_constructible_v<OpsObservationBinding>);
-    if (!m_impl->observation_broker->select(std::move(authority),
-                                            std::move(source)))
-      return invalid();
+    if (auto selected = m_impl->observation_broker->select(std::move(authority),
+                                                           std::move(source));
+        !selected)
+      return broker_failure(selected.error());
     m_impl->tools = std::move(*tools);
     m_impl->policy = std::move(*policy);
     return owner_binding;

@@ -318,6 +318,24 @@ TEST_CASE("Kernel Ops binding refuses an unusable durable session",
   CHECK(f.backend.calls == 0);
 }
 
+TEST_CASE("Kernel Ops binding reports a closed broker as unavailable state",
+          "[ops][binding]") {
+  BindingFixture f;
+  f.open_binding();
+  REQUIRE(f.broker->close());
+  auto next = f.next_spec();
+  auto source = source_for(next);
+  const auto attempts = f.store.attempts;
+  const auto result = f.bind(next, source, f.endpoint);
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == runtime::RunKernelErrorCode::internal_failure);
+  CHECK(f.store.attempts == attempts);
+  CHECK(f.store.history.empty());
+  CHECK(f.source->calls == 0);
+  CHECK(source->calls == 0);
+  CHECK(f.backend.calls == 0);
+}
+
 TEST_CASE("Successful idle binding drives the next durable manual observation",
           "[ops][binding]") {
   BindingFixture f;
