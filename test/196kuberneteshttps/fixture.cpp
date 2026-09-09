@@ -58,14 +58,20 @@ struct TlsPause::Impl {
   std::condition_variable ready;
   std::atomic<bool> entered{};
   std::atomic<bool> released{};
-  static std::atomic<std::shared_ptr<Impl>> pending;
+  static std::mutex pending_mutex;
+  static std::shared_ptr<Impl> pending;
 };
-std::atomic<std::shared_ptr<TlsPause::Impl>> TlsPause::Impl::pending;
+std::mutex TlsPause::Impl::pending_mutex;
+std::shared_ptr<TlsPause::Impl> TlsPause::Impl::pending;
 TlsPause::TlsPause() : m_impl(std::make_shared<Impl>()) {
-  Impl::pending.store(m_impl);
+  const std::lock_guard lock{Impl::pending_mutex};
+  Impl::pending = m_impl;
 }
 TlsPause::~TlsPause() {
-  Impl::pending.store(nullptr);
+  {
+    const std::lock_guard lock{Impl::pending_mutex};
+    if (Impl::pending == m_impl) Impl::pending.reset();
+  }
   release();
 }
 auto TlsPause::release() noexcept -> void {
@@ -76,7 +82,10 @@ auto TlsPause::entered() const noexcept -> bool {
   return m_impl->entered.load();
 }
 auto pause_native_tls() -> void {
-  const auto state = TlsPause::Impl::pending.exchange(nullptr);
+  const auto state = [] {
+    const std::lock_guard lock{TlsPause::Impl::pending_mutex};
+    return std::exchange(TlsPause::Impl::pending, nullptr);
+  }();
   if (!state) return;
   state->entered.store(true);
   std::unique_lock lock{state->mutex};
