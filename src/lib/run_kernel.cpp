@@ -12,6 +12,7 @@
 #include <aiforge/runtime/conversation_summary_generation.hpp>
 #include <aiforge/runtime/conversation_summary_projection.hpp>
 #include <aiforge/runtime/inference_spend.hpp>
+#include <aiforge/runtime/ops_observation_tool.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 
 #include <algorithm>
@@ -2676,8 +2677,19 @@ struct RunKernel::Impl {
                         ToolExecutionErrorCode::internal_failure,
                         "tool validation failed internally", false});
                 try {
-                  validated = registration->executor->validate(raw_arguments);
+                  if (dynamic_cast<const OpsObservationTool*>(
+                          registration->executor.get()) != nullptr) {
+                    validated = std::unexpected(ToolExecutionError{
+                        ToolExecutionErrorCode::unavailable,
+                        "durable observation dispatch is not available",
+                        false});
+                  } else {
+                    validated = registration->executor->validate(raw_arguments);
+                  }
                 } catch (...) {
+                  validated = std::unexpected(ToolExecutionError{
+                      ToolExecutionErrorCode::internal_failure,
+                      "tool validation failed internally", false});
                 }
                 if (validated &&
                     (!valid_normalized_tool_arguments(
@@ -2945,7 +2957,14 @@ struct RunKernel::Impl {
         [&](auto&& event) -> std::expected<void, RunKernelError> {
           // clang-format on
           using Event = std::remove_cvref_t<decltype(event)>;
-          if constexpr (std::same_as<Event, ToolInputRequested>) {
+          if constexpr (std::same_as<Event, OpsObservationReady>) {
+            // The native boundary is representable before the durable
+            // publication hook is enabled. Never treat a receipt as content.
+            return fail_live_run(transaction,
+                                 {domain::ErrorCode::invalid_state,
+                                  "observation publication is not available",
+                                  false});
+          } else if constexpr (std::same_as<Event, ToolInputRequested>) {
             if (invocation.state != InvocationState::running ||
                 invocation.declaration.name != "ask_user" ||
                 !valid_question_definitions(event.questions)) {
