@@ -20,7 +20,7 @@ constexpr auto maximum_counter =
 auto text(std::string_view value, std::size_t maximum, bool empty = false)
     -> bool {
   return (empty || !value.empty()) && value.size() <= maximum &&
-         detail::is_safe_utf8_text(value) &&
+         (value.empty() || detail::is_safe_utf8_text(value)) &&
          std::ranges::none_of(
              value, [](unsigned char c) { return c < 32 || c == 127; });
 }
@@ -360,6 +360,20 @@ class Validator {
   OpsObservationUsage m_usage;
 };
 } // namespace
+auto validate_recorded_ops_observation(const OpsObservation& observation)
+    -> std::expected<OpsObservationUsage, OpsObservationError> {
+  try {
+    if (!validate_recorded_ops_request(observation.request))
+      return std::unexpected(OpsObservationError{
+          Code::invalid_request, "Recorded Ops request is invalid"});
+    if (auto valid = envelope(observation.request, observation); !valid)
+      return std::unexpected(valid.error());
+    return Validator{observation.request, observation}.run();
+  } catch (...) {
+    return std::unexpected(OpsObservationError{
+        Code::internal_failure, "Recorded Ops observation validation failed"});
+  }
+}
 auto validate_ops_observation(const OpsObservationAuthority& authority,
                               const OpsObservationRequest& expected_request,
                               const OpsObservation& observation)
