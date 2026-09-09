@@ -333,9 +333,12 @@ auto LinuxSystemdBusAccess::fixture_wire(DBusConnection* connection)
   }
 }
 
-auto LinuxSystemdBus::create(domain::OpsTargetBinding binding)
+auto LinuxSystemdBus::create(domain::OpsTargetBinding binding,
+                             LinuxSystemdBudget& budget)
     -> std::expected<std::shared_ptr<LinuxSystemdBus>, Error> {
   try {
+    if (auto ready = budget.check_dispatch(); !ready)
+      return fail(ready.error());
     if (!domain::validate_ops_target_binding(binding))
       return fail(Error::invalid_result);
     const auto* identity =
@@ -343,8 +346,6 @@ auto LinuxSystemdBus::create(domain::OpsTargetBinding binding)
     if (identity == nullptr ||
         identity->scope == domain::LinuxExecutionScope::host)
       return fail(Error::unsupported);
-    LinuxSystemdBudget budget{
-        std::chrono::steady_clock::now() + std::chrono::seconds{5}, {}};
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) -- Linux syscall API.
     Descriptor root{::open("/proc", O_RDONLY | O_DIRECTORY | O_NOFOLLOW |
                                         O_CLOEXEC | O_NONBLOCK)};

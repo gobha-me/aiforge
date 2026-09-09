@@ -362,6 +362,48 @@ Sources: [published releases](https://dbus.freedesktop.org/releases/dbus/),
 [connection limits](https://dbus.freedesktop.org/doc/api/html/group__DBusConnection.html),
 [owner and credentials protocol](https://dbus.freedesktop.org/doc/dbus-specification.html).
 
+## Linux service payload and source integration
+
+The next Linux source slice implements loaded-service discovery and exact service
+health through the private system-bus transport. Existing kernel memory/uptime
+health remains procfs-only and does not open the bus. Source construction retains
+its health identity even when service access cannot be proved. Each concurrent
+service observation owns its own connection on the existing source worker; no
+cached mutable connection or additional pool is introduced.
+
+Request validation precedes bus creation. Factory pinning, authentication,
+handshake, property reads, decoding and final proof share one original deadline
+and stop token. A separate per-request cumulative captured/decoded budget counts
+accepted D-Bus message envelopes and fields before copies, including handshake
+and unrelated messages. It also counts ignored fields in list replies. This is
+separate from neutral evidence accounting and library message/queue bounds: it
+does not account authentication, OS identity IO or total wire bytes. A received
+message exceeding the remaining capture budget fails before further dispatch;
+its already-received library buffer remains governed by the transport cap.
+
+GetUnit's path and Unit.Id must match the exact canonical service name before
+other properties are read. Returned paths never select arbitrary endpoints.
+Properties use a closed schema and fixed neutral mappings. InvocationID is read
+before and after each retained service's state/details; an explicit selected
+invocation must match, while name-only health retains name-only result identity.
+Restart, disappearance and changed final transport binding return no evidence.
+These checks produce sampled facts, not an atomic freeze of systemd state.
+
+Discovery describes loaded services and independently binds retained rows to
+their observed invocation. It validates the bounded whole list, admits an output
+prefix within entry/evidence/call limits and reserves final verification calls.
+Known omitted rows are reported as truncation; an oversized unpaged reply fails.
+Unknown service states/reasons remain partial neutral evidence. A signal number
+is not an exit code, and active is not application readiness or host health.
+Unsupported getters and transport failures stay terminal without retry.
+
+Only after deterministic decoder/source tests and review pass may the source
+advertise health, service discovery and service health as implemented operations.
+That advertisement does not claim the running environment passed a live access
+probe. Logs, journal custody, Kubernetes observation, surfaces and replay refresh
+remain outside this slice. The broker/kernel retain current-authority and durable
+publication ownership.
+
 ## Static Kubernetes configuration parser milestone
 
 The first Kubernetes source needs a strict original-input boundary before any
