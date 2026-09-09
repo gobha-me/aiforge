@@ -8,8 +8,12 @@ TEST_CASE("Standalone open rejects invalid preparation before durable create",
   ops_session_test::Fixture f;
   auto request = f.request();
   auto dependencies = f.dependencies();
-  SECTION("unsafe identity") {
-    request.surface_id = id<SurfaceId>("bad\nidentity");
+  SECTION("identity with invalid UTF-8") {
+    // Domain IDs admit non-control bytes; open additionally requires safe
+    // UTF-8.
+    auto malformed = SurfaceId::from(std::string(1, static_cast<char>(0xFF)));
+    REQUIRE(malformed);
+    request.surface_id = *malformed;
   }
   SECTION("missing identity generator") {
     dependencies.identity_suffix_source = {};
@@ -276,18 +280,27 @@ TEST_CASE("Fatal cancellation survives broker cleanup and repeated close",
       submitted->run_id, submitted->invocation_id, {});
   REQUIRE_FALSE(approved);
   REQUIRE(approved.error().code == ManualOpsErrorCode::unavailable);
-  REQUIRE(f.broker->close());
-  auto pumped = f.session->pump_observations();
-  REQUIRE_FALSE(pumped);
-  REQUIRE(pumped.error().code == ManualOpsErrorCode::storage_failure);
+  SECTION("close immediately after cancellation refusal") {
+  }
+  SECTION("close after broker cleanup retires the failed run") {
+    REQUIRE(f.broker->close());
+    auto pumped = f.session->pump_observations();
+    REQUIRE_FALSE(pumped);
+    REQUIRE(pumped.error() == cancelled.error());
+    REQUIRE_FALSE(f.session->inspect_observations().busy);
+  }
   auto closed = f.session->close();
   REQUIRE_FALSE(closed);
-  REQUIRE(closed.error().code == ManualOpsErrorCode::storage_failure);
+  REQUIRE(closed.error() == cancelled.error());
+  const auto writes = f.store.delegate.attempts;
   auto repeated = f.session->close();
   REQUIRE_FALSE(repeated);
-  REQUIRE(repeated.error().code == ManualOpsErrorCode::storage_failure);
-  REQUIRE(f.session->inspect_observations().problem->code ==
-          ManualOpsErrorCode::storage_failure);
+  REQUIRE(repeated.error() == cancelled.error());
+  REQUIRE(f.session->inspect_observations().problem == cancelled.error());
+  REQUIRE(f.session->inspect_observations().closed);
+  REQUIRE_FALSE(f.session->inspect_observations().available);
+  REQUIRE(f.store.delegate.attempts == writes);
+  REQUIRE(count<RunCancelled>(f.store.delegate.history) == 0);
   REQUIRE(f.source->calls == 0);
 }
 TEST_CASE(

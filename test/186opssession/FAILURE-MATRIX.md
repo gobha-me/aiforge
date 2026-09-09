@@ -2,7 +2,8 @@
 
 Recorded before implementation from the accepted186 API checkpoint.
 
-- Invalid IDs, absent generator, policy, broker and kernel limits fail before
+- Invalid UTF-8 within an admitted domain ID, absent generator, policy, broker
+  and kernel limits fail before
   durable create. Duplicate create never invokes resume/replay or changes an
   existing selection. Surface allocation precedes the kernel's create call.
   A generator throwing during submit appends/launches nothing.
@@ -19,7 +20,9 @@ Recorded before implementation from the accepted186 API checkpoint.
   Valid mixed conversation/manual history exposes only committed human evidence.
 - Owner pumping advances the real manual kernel independently of inference.
   Cached inspection and unchanged history never perform IO or implicit refresh.
-- Explicit close reports failed cancellation persistence. Destructor stops only
+- First and repeated explicit close preserve the original fatal cancellation
+  persistence error even after broker cleanup retires the run; repeated close
+  makes no additional append attempt. Destructor stops only
   its own captured kernel; a replacement broker issuer remains usable. Physical
   retired source slots and stalled cleanup retain their existing contract.
 - No provider/model/credential port exists in standalone dependencies. Committed

@@ -287,17 +287,18 @@ auto OpsSession::inspect_observations() const noexcept
 }
 auto OpsSession::close() -> std::expected<void, Failure> {
   try {
-    if (m_impl->inspection.closed) {
-      if (m_impl->inspection.problem && is_fatal(*m_impl->inspection.problem))
-        return std::unexpected(*m_impl->inspection.problem);
-      return {};
+    if (!m_impl->inspection.closed) {
+      m_impl->inspection.closed = true;
+      m_impl->inspection.available = false;
+      auto cancelled = m_impl->cancel_current();
+      auto synced = m_impl->synchronize();
+      if (!cancelled) return cancelled;
+      if (!synced) return synced;
     }
-    m_impl->inspection.closed = true;
-    m_impl->inspection.available = false;
-    auto cancelled = m_impl->cancel_current();
-    auto synced = m_impl->synchronize();
-    if (!cancelled) return cancelled;
-    return synced;
+    // Successful cleanup cannot erase a prior failure to persist cancellation.
+    if (m_impl->inspection.problem && is_fatal(*m_impl->inspection.problem))
+      return std::unexpected(*m_impl->inspection.problem);
+    return {};
   } catch (...) {
     return m_impl->report({Code::internal_failure});
   }
