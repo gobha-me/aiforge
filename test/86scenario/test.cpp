@@ -895,14 +895,6 @@ class QuestionBackendState final {
         std::string_view{"continuation-end"},
     };
     std::unique_lock lock{m_mutex};
-    if (description == "interrupt-cancelled") {
-      if (!m_interrupt_wake_baseline || !m_condition.wait_for(lock, 1s, [&] {
-            return m_wakes > *m_interrupt_wake_baseline;
-          })) {
-        return std::unexpected("question cancellation update was not posted");
-      }
-      return {};
-    }
     if (!m_condition.wait_for(lock, 1s,
                               [&] { return m_waiting_calls > m_released; })) {
       return std::unexpected("question backend did not reach its boundary");
@@ -927,8 +919,29 @@ class QuestionBackendState final {
         })) {
       return std::unexpected("question backend update was not posted");
     }
-    if (released == 4U) m_interrupt_wake_baseline = m_wakes;
     return {};
+  }
+
+  // Backend EOF and an arbitrary wake do not prove that the owner has
+  // published the question or retired a cancellation. Pump the real bridge on
+  // the scenario owner thread in both passes, waiting only on producer wakes.
+  template <typename Predicate>
+  auto await_owner_boundary(Predicate ready, const std::string_view boundary)
+      -> std::expected<void, std::string> {
+    const auto deadline = std::chrono::steady_clock::now() + 1s;
+    std::unique_lock lock{m_mutex};
+    for (;;) {
+      const auto previous_wakes = m_wakes;
+      lock.unlock();
+      const bool reached = ready();
+      lock.lock();
+      if (reached) return {};
+      if (!m_condition.wait_until(lock, deadline,
+                                  [&] { return m_wakes > previous_wakes; })) {
+        return std::unexpected("question owner did not reach " +
+                               std::string{boundary});
+      }
+    }
   }
 
   auto observe_wake() -> void {
@@ -952,7 +965,6 @@ class QuestionBackendState final {
   std::size_t m_released{};
   std::size_t m_wakes{};
   std::size_t m_ended_streams{};
-  std::optional<std::size_t> m_interrupt_wake_baseline;
   bool m_valid{true};
 };
 
@@ -2782,8 +2794,36 @@ auto question_factory() -> testing::TuiScenarioTargetFactory {
           static_cast<void>(editor);
           return raw->run();
         },
-        [state, pass](const std::string_view step) {
-          return state->release(step, pass == testing::TuiScenarioPass::record);
+        [raw, state, pass](
+            const std::string_view step) -> std::expected<void, std::string> {
+          if (step != "interrupt-cancelled") {
+            auto released =
+                state->release(step, pass == testing::TuiScenarioPass::record);
+            if (!released) return released;
+          }
+          if (step != "question-end" && step != "interrupt-cancelled" &&
+              step != "continuation-end")
+            return {};
+          return state->await_owner_boundary(
+              [raw, step] {
+                raw->dispatch_event(
+                    termforge::ErrorEvent{termforge::Severity::Info,
+                                          "aiforge.runtime", "events-ready"});
+                return std::ranges::any_of(raw->events(), [raw,
+                                                           step](const auto&
+                                                                     event) {
+                  if (step == "question-end")
+                    return raw->modal() &&
+                           std::holds_alternative<domain::QuestionRequested>(
+                               event.payload);
+                  if (step == "interrupt-cancelled")
+                    return std::holds_alternative<domain::RunCancelled>(
+                        event.payload);
+                  return std::holds_alternative<domain::RunCompleted>(
+                      event.payload);
+                });
+              },
+              step);
         },
         [](std::string_view) -> std::expected<void, std::string> {
           return std::unexpected("question scenario has no tool script");
