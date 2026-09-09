@@ -21,6 +21,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   linux_ops_source_preparation.cpp
   linux_ops_observation_source.cpp
   local_file_source.cpp
+  admin_dialog.cpp
   local_source_browser_dialog.cpp
   model_picker_dialog.cpp
   persona_editor_dialog.cpp
