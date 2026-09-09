@@ -1037,6 +1037,20 @@ auto context_admission_history_is_intact(
          recorded_repository_context_admission(event_log, run_id).has_value();
 }
 
+auto approval_admission_history_is_intact(
+    const domain::SessionEventLog& event_log, const domain::RunId& run_id,
+    const domain::InvocationId& invocation_id, bool manual) -> bool {
+  if (!manual) return context_admission_history_is_intact(event_log, run_id);
+  const auto history = recorded_ops_observations(event_log);
+  return history &&
+         std::ranges::any_of(history->invocations, [&](const auto& invocation) {
+           return invocation.run_id == run_id &&
+                  invocation.invocation_id == invocation_id &&
+                  invocation.human_origin &&
+                  invocation.phase == OpsInvocationPhase::awaiting_approval;
+         });
+}
+
 auto local_continuation_matches(
     const domain::SessionEventLog& event_log, const domain::RunId& run_id,
     const domain::ConstructedContext& context,
@@ -3574,6 +3588,16 @@ struct RunKernel::Impl {
     return fail_live_run(transaction, protocol_domain_error());
   }
 
+  [[nodiscard]] auto fail_observation_approval(Transaction& transaction,
+                                               PendingInvocation& invocation,
+                                               const domain::DomainError& error)
+      -> std::expected<void, RunKernelError> {
+    if (auto failed = record_tool_error(transaction, invocation, error);
+        !failed)
+      return failed;
+    return fail_live_run(transaction, error);
+  }
+
   [[nodiscard]] auto apply_requested_tool_approval(
       const domain::RunId& run_id, PendingInvocation& invocation,
       const ToolApprovalResolution& resolution, Transaction& transaction)
@@ -3583,6 +3607,19 @@ struct RunKernel::Impl {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_tool_state,
                        "approval has no policy request"));
+    }
+    if (!observation_is_current(invocation)) {
+      const domain::DomainError error{
+          domain::ErrorCode::policy,
+          "observation target or session is no longer current", false};
+      if (auto failed =
+              fail_observation_approval(transaction, invocation, error);
+          !failed)
+        return failed;
+      if (auto committed = commit(std::move(transaction)); !committed)
+        return committed;
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state, error.message));
     }
     std::expected<ToolPolicyResolution, ToolPolicyError> approved =
         std::unexpected(
@@ -3607,11 +3644,9 @@ struct RunKernel::Impl {
         return failed;
       }
       if (invocation.arguments.observation_request) {
-        if (auto errored =
-                record_tool_error(transaction, invocation, domain_error);
-            !errored)
-          return errored;
-        if (auto failed = fail_live_run(transaction, domain_error); !failed)
+        if (auto failed = fail_observation_approval(transaction, invocation,
+                                                    domain_error);
+            !failed)
           return failed;
       }
       if (auto committed = commit(std::move(transaction)); !committed) {
@@ -7118,10 +7153,12 @@ auto RunKernel::decide_approval(const domain::RunId& run_id,
                                       : RunKernelErrorCode::no_active_run,
                        "approval decision targets no active run"));
     }
-    if (!context_admission_history_is_intact(m_impl->event_log, run_id)) {
+    if (!approval_admission_history_is_intact(
+            m_impl->event_log, run_id, invocation_id,
+            m_impl->active->manual_observation)) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_tool_state,
-                       "approval requires intact context admission history"));
+                       "approval requires intact admission history"));
     }
     const auto found = m_impl->active->invocations.find(invocation_id);
     if (found == m_impl->active->invocations.end()) {

@@ -141,6 +141,15 @@ TEST_CASE("approval denial and port failure finish the manual run atomically",
   SECTION("cancelled") {
     decision.decision = ApprovalDecision::cancelled;
   }
+  SECTION("denied after target replacement") {
+    ++f.specification.selection_generation;
+    f.select();
+  }
+  SECTION("cancelled after target replacement") {
+    decision.decision = ApprovalDecision::cancelled;
+    ++f.specification.selection_generation;
+    f.select();
+  }
   SECTION("approval port failed") {
     f.policy->fail_approval = true;
     decision.decision = ApprovalDecision::approved;
@@ -154,6 +163,8 @@ TEST_CASE("approval denial and port failure finish the manual run atomically",
   REQUIRE(count<RunFailed>(f.store.history) == 1);
   REQUIRE(runtime::recorded_ops_observations(f.kernel->event_log()));
   REQUIRE(f.source->calls == 0);
+  f.registry();
+  REQUIRE(f.kernel->replace_available_tools(f.tools));
   f.next_starts();
 }
 
@@ -190,9 +201,13 @@ TEST_CASE("stale approval cannot launch against a newer selection",
   REQUIRE(f.kernel->start_observation_control(control));
   ++f.specification.selection_generation;
   f.select();
-  REQUIRE(f.kernel->decide_approval(
+  const auto approved = f.kernel->decide_approval(
       control.run_id, control.invocation_id,
-      {ApprovalDecision::approved, {{Effect::read, "ops.target", "target"}}}));
+      {ApprovalDecision::approved, {{Effect::read, "ops.target", "target"}}});
+  REQUIRE_FALSE(approved);
+  REQUIRE(approved.error().code ==
+          runtime::RunKernelErrorCode::invalid_tool_state);
+  REQUIRE(f.policy->approvals == 0);
   REQUIRE_FALSE(f.kernel->active_run_id());
   REQUIRE(f.source->calls == 0);
   REQUIRE(count<ToolStarted>(f.store.history) == 0);
@@ -203,24 +218,22 @@ TEST_CASE("stale approval cannot launch against a newer selection",
   f.next_starts();
 }
 
-TEST_CASE("live grammar rejection closes the kernel without claiming success",
+TEST_CASE("invalid policy scopes fail the manual run before a policy decision",
           "[ops][kernel]") {
   Fixture f;
   f.policy->invalid_scopes = true;
   f.open();
   auto started = f.kernel->start_observation_control(f.control());
-  REQUIRE_FALSE(started);
-  REQUIRE(started.error().code ==
-          runtime::RunKernelErrorCode::event_log_rejected);
+  REQUIRE(started);
   REQUIRE_FALSE(f.kernel->active_run_id());
   REQUIRE(count<HumanObservationRequested>(f.store.history) == 1);
   REQUIRE(count<ToolPolicyDecided>(f.store.history) == 0);
-  REQUIRE(f.source->calls == 0);
-  REQUIRE_FALSE(f.kernel->start_observation_control(f.control("next")));
-  f.policy->invalid_scopes = false;
-  f.open(runtime::DurableSessionMode::resume);
+  REQUIRE(count<ToolErrored>(f.store.history) == 1);
   REQUIRE(count<RunFailed>(f.store.history) == 1);
+  REQUIRE(runtime::recorded_ops_observations(f.kernel->event_log()));
   REQUIRE(f.source->calls == 0);
+  f.policy->invalid_scopes = false;
+  f.next_starts();
 }
 
 TEST_CASE(
@@ -321,7 +334,7 @@ TEST_CASE("native model calls need real recorded tool and policy provenance",
   REQUIRE(runtime::recorded_ops_observations(f.kernel->event_log()));
 }
 
-TEST_CASE("native model approval port failure clears the pending run",
+TEST_CASE("native model approval failure clears the pending run",
           "[ops][kernel]") {
   Fixture f;
   f.backend.tool = true;
@@ -330,19 +343,30 @@ TEST_CASE("native model approval port failure clears the pending run",
   const auto start = f.ordinary("model");
   REQUIRE(f.kernel->start(start));
   f.pump_until([&] { return f.kernel->pending_tool_approval().has_value(); });
-  f.policy->fail_approval = true;
+  bool stale{};
+  SECTION("approval port failure") {
+    f.policy->fail_approval = true;
+  }
+  SECTION("stale target before granting approval") {
+    stale = true;
+    ++f.specification.selection_generation;
+    f.select();
+  }
   REQUIRE_FALSE(f.kernel->decide_approval(
       start.run_id, id<InvocationId>("model-invocation"),
       {ApprovalDecision::approved, {{Effect::read, "ops.target", "target"}}}));
   f.idle();
   REQUIRE_FALSE(f.kernel->pending_tool_approval());
   REQUIRE(f.kernel->projection(start.run_id)->status() == RunStatus::failed);
-  REQUIRE(count<ToolPolicyFailed>(f.store.history) == 1);
+  REQUIRE(count<ToolPolicyFailed>(f.store.history) == (stale ? 0 : 1));
+  REQUIRE(f.policy->approvals == (stale ? 0 : 1));
   REQUIRE(count<ToolErrored>(f.store.history) == 1);
   REQUIRE(count<RunFailed>(f.store.history) == 1);
   REQUIRE(count<OpsObservationRecorded>(f.store.history) == 0);
   REQUIRE(f.source->calls == 0);
   REQUIRE(runtime::recorded_ops_observations(f.kernel->event_log()));
+  f.registry();
+  REQUIRE(f.kernel->replace_available_tools(f.tools));
   f.next_starts();
 }
 
