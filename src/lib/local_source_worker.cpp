@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <condition_variable>
+#include <limits>
 #include <mutex>
 #include <string_view>
 #include <thread>
@@ -15,11 +16,17 @@ namespace aiforge::runtime {
 namespace {
 using Code = LocalSourceWorkerErrorCode;
 using SourceCode = domain::LocalSourceErrorCode;
-using Token = std::variant<LocalSourceRequestToken, LocalFolderGrantToken>;
-using Request = std::variant<LocalSourceWorkRequest, LocalFolderGrantRequest>;
+using Token = std::variant<LocalSourceRequestToken, LocalFolderGrantToken,
+                           LocalContextWorkToken>;
+using Request = std::variant<LocalSourceWorkRequest, LocalFolderGrantRequest,
+                             LocalContextWorkRequest>;
 using Port = std::variant<std::monostate, std::shared_ptr<LocalSourceReader>,
-                          std::shared_ptr<LocalSourceGrantFactory>>;
-using Result = std::variant<LocalSourceWorkResult, LocalFolderGrantResult>;
+                          std::shared_ptr<LocalSourceGrantFactory>,
+                          std::shared_ptr<LocalContextController>>;
+using ContextOutcome =
+    std::expected<PreparedLocalContext, domain::LocalContextError>;
+using Result =
+    std::variant<LocalSourceWorkResult, LocalFolderGrantResult, ContextOutcome>;
 using Outcome = std::expected<Result, domain::LocalSourceError>;
 
 auto failure(Code code, std::string message)
@@ -113,6 +120,114 @@ auto invoke_factory(LocalSourceGrantFactory& factory,
   return Result{std::move(*result)};
 }
 
+auto valid_context_work(const LocalContextWorkRequest& request) -> bool {
+  const auto& token = request.token;
+  if (token.session_epoch == 0 || token.request_id == 0 ||
+      token.selection_revision == 0)
+    return false;
+  return std::visit(
+      [&](const auto& operation) {
+        if (operation.session_id != token.session_id ||
+            operation.selection_revision != token.selection_revision)
+          return false;
+        using T = std::decay_t<decltype(operation)>;
+        if constexpr (std::same_as<T, LocalContextRequest>) {
+          return operation.first_order != 0 &&
+                 domain::validate_local_source_selection(operation.sources)
+                     .has_value() &&
+                 (operation.sources.empty() ||
+                  operation.sources.size() - 1 <=
+                      std::numeric_limits<std::uint64_t>::max() -
+                          operation.first_order);
+        } else {
+          return domain::validate_local_context_admission(operation)
+              .has_value();
+        }
+      },
+      request.operation);
+}
+auto context_error(domain::LocalContextError error)
+    -> domain::LocalContextError {
+  using ContextCode = domain::LocalContextErrorCode;
+  if (error.code < ContextCode::invalid_request ||
+      error.code > ContextCode::internal_failure)
+    return {ContextCode::internal_failure,
+            "local context returned an invalid error"};
+  static constexpr std::array<std::string_view, 9> messages{
+      "local context request is invalid",
+      "local context admission is invalid",
+      "local context source is unavailable",
+      "local context source changed",
+      "local context lease is stale",
+      "local context exceeds resource bounds",
+      "local context work was cancelled",
+      "local context work timed out",
+      "local context failed internally"};
+  return {error.code,
+          std::string{messages[static_cast<std::size_t>(error.code)]}};
+}
+auto context_result_matches(const LocalContextWorkRequest& request,
+                            const PreparedLocalContext& result) -> bool {
+  const auto& admission = result.admission;
+  if (admission.session_id != request.token.session_id ||
+      admission.selection_revision != request.token.selection_revision ||
+      result.candidates.size() != admission.evidence.size())
+    return false;
+  return std::visit(
+      [&](const auto& operation) {
+        using T = std::decay_t<decltype(operation)>;
+        if constexpr (std::same_as<T, domain::LocalContextAdmission>) {
+          return admission == operation;
+        } else {
+          if (admission.version != 1 || admission.admission_digest ||
+              admission.capacity != domain::ContextCapacity{} ||
+              admission.evidence.size() != operation.sources.size())
+            return false;
+          for (std::size_t index = 0; index < operation.sources.size();
+               ++index) {
+            const auto& ref = admission.evidence[index];
+            if (ref.source != operation.sources[index] ||
+                ref.order != operation.first_order + index ||
+                ref.decision != domain::LocalContextDecision::admitted)
+              return false;
+          }
+          return true;
+        }
+      },
+      request.operation);
+}
+auto invoke_context(LocalContextController& controller,
+                    const LocalContextWorkRequest& request,
+                    std::stop_token stop) -> Outcome {
+  auto result = std::visit(
+      [&](const auto& operation) {
+        using T = std::decay_t<decltype(operation)>;
+        if constexpr (std::same_as<T, LocalContextRequest>)
+          return controller.prepare(operation, stop);
+        else
+          return controller.revalidate(operation, stop);
+      },
+      request.operation);
+  if (!result)
+    result = std::unexpected(context_error(std::move(result.error())));
+  else if (!context_result_matches(request, *result))
+    result = std::unexpected(domain::LocalContextError{
+        domain::LocalContextErrorCode::invalid_admission,
+        "local context result does not match its work request"});
+  return Result{std::move(result)};
+}
+template <typename Value>
+auto completion_error(domain::LocalSourceError error) {
+  if constexpr (std::same_as<Value, ContextOutcome>) {
+    const auto code = error.code == SourceCode::cancelled
+                          ? domain::LocalContextErrorCode::cancelled
+                          : domain::LocalContextErrorCode::internal_failure;
+    return std::unexpected(context_error({code, {}}));
+  } else {
+    return std::unexpected(std::move(error));
+  }
+}
+
 struct Job {
   const Token token;
   Request request;
@@ -168,6 +283,10 @@ auto invoke_job(const std::shared_ptr<Job>& job) -> Outcome {
     return invoke_factory(
         *std::get<std::shared_ptr<LocalSourceGrantFactory>>(job->port),
         *request, job->stop.get_token());
+  if (const auto* request = std::get_if<LocalContextWorkRequest>(&job->request))
+    return invoke_context(
+        *std::get<std::shared_ptr<LocalContextController>>(job->port), *request,
+        job->stop.get_token());
   auto& reader = *std::get<std::shared_ptr<LocalSourceReader>>(job->port);
   return std::visit(
       [&](const auto& request) {
@@ -290,7 +409,7 @@ struct LocalSourceWorker::Impl {
         return failure(Code::stale_request,
                        "local work was cancelled or consumed");
       if (!job->ready || !job->relay_done ||
-          (std::same_as<Value, LocalSourceWorkResult> && !job->reader_done))
+          (!std::same_as<Value, LocalFolderGrantResult> && !job->reader_done))
         return std::nullopt;
       if (!job->result)
         return failure(Code::internal_failure,
@@ -300,8 +419,8 @@ struct LocalSourceWorker::Impl {
         completion.emplace(
             Completion{token, std::move(std::get<Value>(*result))});
       else
-        completion.emplace(
-            Completion{token, std::unexpected(std::move(result.error()))});
+        completion.emplace(Completion{
+            token, completion_error<Value>(std::move(result.error()))});
       job->consumed = true;
     }
     job->changed.notify_all();
@@ -367,6 +486,38 @@ auto LocalSourceWorker::submit(
     return m_impl->submit(factory, std::move(token), std::move(request));
   } catch (...) {
     return failure(Code::internal_failure, "local grant submission failed");
+  }
+}
+auto LocalSourceWorker::submit(
+    const std::shared_ptr<LocalContextController>& controller,
+    LocalContextWorkRequest request)
+    -> std::expected<void, LocalSourceWorkerError> {
+  try {
+    if (!controller || !valid_context_work(request))
+      return failure(Code::invalid_request,
+                     "local context work request is invalid");
+    Token token = request.token;
+    return m_impl->submit(controller, std::move(token), std::move(request));
+  } catch (...) {
+    return failure(Code::internal_failure,
+                   "local context work submission failed");
+  }
+}
+auto LocalSourceWorker::poll(const LocalContextWorkToken& token)
+    -> std::expected<std::optional<LocalContextWorkCompletion>,
+                     LocalSourceWorkerError> {
+  try {
+    return m_impl->poll<LocalContextWorkCompletion, ContextOutcome>(token);
+  } catch (...) {
+    return failure(Code::internal_failure, "local context delivery failed");
+  }
+}
+auto LocalSourceWorker::cancel(const LocalContextWorkToken& token)
+    -> std::expected<void, LocalSourceWorkerError> {
+  try {
+    return m_impl->cancel(token);
+  } catch (...) {
+    return failure(Code::internal_failure, "local context cancellation failed");
   }
 }
 auto LocalSourceWorker::poll(const LocalSourceRequestToken& token)

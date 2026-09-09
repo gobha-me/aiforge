@@ -6,6 +6,7 @@
 #include <optional>
 #include <variant>
 
+#include <aiforge/runtime/local_context_controller.hpp>
 #include <aiforge/runtime/local_source_grant.hpp>
 
 namespace aiforge::runtime {
@@ -21,6 +22,23 @@ struct LocalSourceWorkCompletion {
 struct LocalFolderGrantCompletion {
   LocalFolderGrantToken token;
   std::expected<LocalFolderGrantResult, domain::LocalSourceError> result;
+};
+struct LocalContextWorkToken {
+  domain::SessionId session_id;
+  std::uint64_t session_epoch{};
+  std::uint64_t request_id{};
+  std::uint64_t selection_revision{};
+  auto operator==(const LocalContextWorkToken&) const -> bool = default;
+};
+struct LocalContextWorkRequest {
+  LocalContextWorkToken token;
+  // New preparation stays unsealed. Revalidation restores the original
+  // sealed membership, including omissions, without selecting again.
+  std::variant<LocalContextRequest, domain::LocalContextAdmission> operation;
+};
+struct LocalContextWorkCompletion {
+  LocalContextWorkToken token;
+  std::expected<PreparedLocalContext, domain::LocalContextError> result;
 };
 
 enum class LocalSourceWorkerErrorCode {
@@ -63,6 +81,12 @@ class LocalSourceWorker final {
       const std::shared_ptr<LocalSourceGrantFactory>& factory,
       LocalFolderGrantRequest request)
       -> std::expected<void, LocalSourceWorkerError>;
+  // Concurrent slots may use one controller; its owned resolver must support
+  // concurrent read-only lookups. No lease authority enters the completion.
+  [[nodiscard]] auto submit(
+      const std::shared_ptr<LocalContextController>& controller,
+      LocalContextWorkRequest request)
+      -> std::expected<void, LocalSourceWorkerError>;
   // Null means still working. A completion is moved out exactly once; every
   // lookup compares the entire token, including root/lease/selection revision.
   [[nodiscard]] auto poll(const LocalSourceRequestToken& token)
@@ -74,6 +98,11 @@ class LocalSourceWorker final {
       -> std::expected<std::optional<LocalFolderGrantCompletion>,
                        LocalSourceWorkerError>;
   [[nodiscard]] auto cancel(const LocalFolderGrantToken& token)
+      -> std::expected<void, LocalSourceWorkerError>;
+  [[nodiscard]] auto poll(const LocalContextWorkToken& token)
+      -> std::expected<std::optional<LocalContextWorkCompletion>,
+                       LocalSourceWorkerError>;
+  [[nodiscard]] auto cancel(const LocalContextWorkToken& token)
       -> std::expected<void, LocalSourceWorkerError>;
   [[nodiscard]] auto invalidate_session(const domain::SessionId& session_id)
       -> std::expected<void, LocalSourceWorkerError>;

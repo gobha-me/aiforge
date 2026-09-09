@@ -38,6 +38,11 @@ struct LocalFolderGrantResult {
 };
 class LocalSourceGrantFactory {
  public:
+  // A true guarantee includes ownership handoff: after returning a lease,
+  // neither the factory nor any retained owner may create/reacquire raw
+  // physical shared owners (including weak_ptr::lock). Existing physical
+  // owners may only release; all later borrows use registry-issued aliases.
+  // This lets the bounded registry establish final off-thread destruction.
   virtual ~LocalSourceGrantFactory() = default;
   [[nodiscard]] virtual auto guarantees_pinned_read_only_sources()
       const noexcept -> bool {
