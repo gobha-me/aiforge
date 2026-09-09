@@ -59,6 +59,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   mp4.cpp
   one_shot.cpp
   ops_target.cpp
+  ops_observation.cpp
   plan.cpp
   plan_task_controller.cpp
   persona.cpp

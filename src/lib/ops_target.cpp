@@ -349,6 +349,20 @@ auto validate_ops_target(const OpsTarget& value) -> Status {
     return fail(Code::internal_failure, "Ops target validation failed");
   }
 }
+auto validate_ops_resource_identity(const OpsTargetBinding& binding,
+                                    const OpsResourceIdentity& resource,
+                                    bool require_log_identity) -> Status {
+  try {
+    if (auto valid = target(binding); !valid) return valid;
+    if (!resource_matches(resource, binding, require_log_identity))
+      return fail(Code::resource_mismatch,
+                  "Ops resource identity does not match target");
+    return {};
+  } catch (...) {
+    return fail(Code::internal_failure,
+                "Ops resource identity validation failed");
+  }
+}
 auto validate_ops_observation_limits(const OpsObservationLimits& limits)
     -> Status {
   try {
