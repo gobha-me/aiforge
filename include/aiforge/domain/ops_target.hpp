@@ -198,6 +198,11 @@ class OpsObservationAuthority final {
     -> std::expected<void, OpsTargetError>;
 [[nodiscard]] auto validate_ops_target(const OpsTarget& value)
     -> std::expected<void, OpsTargetError>;
+// Pure resource shape/binding validation; does not grant authority or perform
+// IO.
+[[nodiscard]] auto validate_ops_resource_identity(
+    const OpsTargetBinding& binding, const OpsResourceIdentity& resource,
+    bool require_log_identity = false) -> std::expected<void, OpsTargetError>;
 [[nodiscard]] auto validate_ops_observation_limits(
     const OpsObservationLimits& limits) -> std::expected<void, OpsTargetError>;
 

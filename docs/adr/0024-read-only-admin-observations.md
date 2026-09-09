@@ -91,6 +91,12 @@ ADRs 0004 and 0005 continue to own JSON configuration and session storage; no ne
 parser, storage engine, scripting runtime, plugin ABI or library is selected.
 Any required kubeconfig conversion happens privately, with bounded input/output,
 and must not authenticate or invoke helpers during configuration inspection.
+Conversion is not strict validation: the config-only kubectl v1.34.0 probe
+accepted duplicate YAML and JSON mapping keys and retained the last value.
+Reject ambiguous keys before conversion or authentication; a private structured
+output check alone cannot recover discarded input ambiguity. The adapter
+milestone must record any necessary strict YAML parser choice before adding a
+dependency or enabling this path.
 
 ## Observation evidence and lifecycle
 
