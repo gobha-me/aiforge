@@ -2132,6 +2132,13 @@ struct RunKernel::Impl {
       domain::RunEventPayload payload,
       std::optional<domain::InvocationId> invocation_id = std::nullopt)
       -> std::expected<domain::RunEvent, RunKernelError> {
+    // This foundation can retain manual observations, but no ordinary kernel
+    // entry point may claim the not-yet-implemented manual admission contract.
+    if (const auto* started = std::get_if<domain::RunStarted>(&payload);
+        started && started->manual_observation_required)
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "manual observation admission is not available"));
     if (transaction.event_log.last_sequence() ==
         std::numeric_limits<std::uint64_t>::max()) {
       return std::unexpected(
@@ -3814,7 +3821,8 @@ struct RunKernel::Impl {
           "run kernel is unavailable after a persistence failure"));
     if (projections.contains(run_id) ||
         attributes.purpose != domain::RunPurpose::control ||
-        attributes.memory_selection || attributes.conversation_admission ||
+        attributes.manual_observation_required || attributes.memory_selection ||
+        attributes.conversation_admission ||
         sequence != event_log.last_sequence())
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_start,
@@ -3973,7 +3981,8 @@ struct RunKernel::Impl {
       -> std::expected<domain::ConversationSummaryCandidate, RunKernelError> {
     if (projections.contains(run_id) ||
         attributes.purpose != domain::RunPurpose::control ||
-        attributes.memory_selection || attributes.conversation_admission)
+        attributes.manual_observation_required || attributes.memory_selection ||
+        attributes.conversation_admission)
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_start,
                        "summary publication requires a new control run"));
@@ -5374,6 +5383,7 @@ auto RunKernel::record_conversation_policy(ConversationPolicyChange change)
           "run kernel is unavailable after a persistence failure"));
     if (m_impl->projections.contains(change.run_id) ||
         change.attributes.purpose != domain::RunPurpose::control ||
+        change.attributes.manual_observation_required ||
         change.attributes.memory_selection ||
         change.attributes.conversation_admission)
       return std::unexpected(

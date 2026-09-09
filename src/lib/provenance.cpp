@@ -1,4 +1,6 @@
 #include <aiforge/domain/provenance.hpp>
+#include <new>
+#include <span>
 
 #include <algorithm>
 #include <cstdint>
@@ -162,7 +164,7 @@ namespace {
 
 // clang-format off
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Explicitly validates every durable tool-provenance invariant.
-[[nodiscard]] auto validate_tools(const std::vector<ToolProvenanceEntry>& tools,
+[[nodiscard]] auto validate_tools(std::span<const ToolProvenanceEntry> tools,
                                   const RunProvenanceLimits& limits)
     -> std::expected<void, RunProvenanceError> {
   // clang-format on
@@ -454,11 +456,10 @@ namespace {
           policy.matcher_policy_identity.has_value());
 }
 
-[[nodiscard]] auto validate_tool_policy_impl(
-    const std::optional<ToolPolicyProvenance>& policy,
-    const RunProvenanceLimits& limits)
+[[nodiscard]] auto validate_tool_policy_impl(const ToolPolicyProvenance* policy,
+                                             const RunProvenanceLimits& limits)
     -> std::expected<void, RunProvenanceError> {
-  if (!policy) return {};
+  if (policy == nullptr) return {};
   const bool legacy_v1 = policy->identity == "aiforge.tool-launch-policy.v1";
   const bool current_v2 = policy->identity == "aiforge.tool-launch-policy.v2";
   if ((!legacy_v1 && !current_v2) ||
@@ -677,6 +678,24 @@ namespace {
 
 } // namespace
 
+auto validate_tool_provenance_entry(const ToolProvenanceEntry& entry,
+                                    RunProvenanceLimits limits)
+    -> std::expected<void, RunProvenanceError> {
+  try {
+    if (limits.maximum_tools == 0 || limits.maximum_identity_bytes == 0 ||
+        limits.maximum_value_bytes == 0)
+      return failure(RunProvenanceErrorCode::invalid_limits,
+                     "a tool provenance limit is zero");
+    return validate_tools(std::span{&entry, std::size_t{1}}, limits);
+  } catch (const std::bad_alloc&) {
+    return failure(RunProvenanceErrorCode::resource_exhausted,
+                   "tool provenance resources unavailable");
+  } catch (...) {
+    return failure(RunProvenanceErrorCode::invalid_tool,
+                   "tool provenance validation failed internally");
+  }
+}
+
 auto validate_tool_policy_provenance(const ToolPolicyProvenance& provenance,
                                      const RunProvenanceLimits limits)
     -> std::expected<void, RunProvenanceError> {
@@ -687,8 +706,7 @@ auto validate_tool_policy_provenance(const ToolPolicyProvenance& provenance,
     return failure(RunProvenanceErrorCode::invalid_limits,
                    "a tool policy provenance limit is zero");
   }
-  return validate_tool_policy_impl(
-      std::optional<ToolPolicyProvenance>{provenance}, limits);
+  return validate_tool_policy_impl(&provenance, limits);
 }
 
 // clang-format off
@@ -765,7 +783,8 @@ auto validate_run_provenance(const RunProvenance& provenance,
     return failure(RunProvenanceErrorCode::invalid_tool_profile,
                    "an effective tool is absent from the exact desired subset");
   }
-  if (auto policy = validate_tool_policy_impl(provenance.tool_policy, limits);
+  if (auto policy = validate_tool_policy_impl(
+          provenance.tool_policy ? &*provenance.tool_policy : nullptr, limits);
       !policy) {
     return policy;
   }

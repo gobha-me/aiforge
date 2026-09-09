@@ -9,6 +9,7 @@
 #include <aiforge/domain/local_context.hpp>
 #include <aiforge/domain/memory.hpp>
 #include <aiforge/domain/money.hpp>
+#include <aiforge/domain/ops_observation.hpp>
 #include <aiforge/domain/persona.hpp>
 #include <aiforge/domain/plan.hpp>
 #include <aiforge/domain/pricing.hpp>
@@ -44,6 +45,9 @@ struct RunStarted {
   // Schema 5 records true explicitly, so losing the separate initial local
   // proof cannot masquerade as a legacy run without local evidence.
   bool local_context_admission_required{false};
+  // Schema 6 requires an exact human observation intent and proposal. The
+  // marker survives a missing intent record; replay must reject that gap.
+  bool manual_observation_required{false};
   auto operator==(const RunStarted&) const -> bool = default;
 };
 
@@ -246,7 +250,24 @@ struct ToolProposed {
   // raw provider arguments used to reconstruct assistant history. Paid
   // proposals additionally carry the quote above.
   std::optional<StructuredDataBlock> validated_arguments{};
+  // Schema 3 retains neutral observation admission independently of executor
+  // argument encoding. Historical proof is never a current collection grant.
+  std::optional<OpsObservationRequest> observation_request{};
   auto operator==(const ToolProposed&) const -> bool = default;
+};
+
+struct HumanObservationRequested {
+  InvocationId invocation_id;
+  OpsObservationRequest request;
+  ToolProvenanceEntry tool;
+  ToolPolicyProvenance policy;
+  auto operator==(const HumanObservationRequested&) const -> bool = default;
+};
+
+struct OpsObservationRecorded {
+  InvocationId invocation_id;
+  OpsObservation observation;
+  auto operator==(const OpsObservationRecorded&) const -> bool = default;
 };
 
 enum class PolicyDecision {
@@ -643,11 +664,12 @@ using RunEventPayload = std::variant<
     RepositoryContextAdmitted, LocalContextAdmitted, InferencePricingObserved,
     ReasoningMetadataAdded, UsageRecorded, InferenceCostRecorded,
     InferenceFinished, InferenceFailed, InferenceCancelled, ToolProposed,
-    ToolPolicyDecided, ToolApprovalRequested, ToolApprovalDecided,
-    ToolPolicyFailed, ToolSpendReserved, ToolStarted, ToolProgressed,
-    ToolSpendReleased, ToolSpendFinalized, ToolSpendReconciliationRequired,
-    ToolResultRecorded, ToolErrored, QuestionRequested, QuestionAnswered,
-    QuestionCancelled, ArtifactCreated, ArtifactReferenced, ArtifactDisplayed,
+    HumanObservationRequested, OpsObservationRecorded, ToolPolicyDecided,
+    ToolApprovalRequested, ToolApprovalDecided, ToolPolicyFailed,
+    ToolSpendReserved, ToolStarted, ToolProgressed, ToolSpendReleased,
+    ToolSpendFinalized, ToolSpendReconciliationRequired, ToolResultRecorded,
+    ToolErrored, QuestionRequested, QuestionAnswered, QuestionCancelled,
+    ArtifactCreated, ArtifactReferenced, ArtifactDisplayed,
     ArtifactRemovedFromView, VideoGenerationRequested, VideoQuoteObserved,
     VideoJobQueued, VideoJobStatusObserved, VideoArtifactPublished,
     VideoCleanupPending, VideoCleanupCompleted, VideoCleanupFailed,

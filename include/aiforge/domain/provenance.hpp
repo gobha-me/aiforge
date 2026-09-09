@@ -252,6 +252,10 @@ struct RunProvenanceError {
   auto operator==(const RunProvenanceError&) const -> bool = default;
 };
 
+[[nodiscard]] auto validate_tool_provenance_entry(
+    const ToolProvenanceEntry& entry, RunProvenanceLimits limits = {})
+    -> std::expected<void, RunProvenanceError>;
+
 [[nodiscard]] auto validate_tool_policy_provenance(
     const ToolPolicyProvenance& provenance, RunProvenanceLimits limits = {})
     -> std::expected<void, RunProvenanceError>;
