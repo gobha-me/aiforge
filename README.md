@@ -35,6 +35,8 @@ context.
 - GCC 13+ or Clang 17+ with a C++23 standard library
 - Git when CMake must fetch dependencies
 - ALSA development headers on Linux for the default local-audio build
+- libsystemd development headers/library >=233 and pkg-config for Linux adapters
+  (`libsystemd-dev` on Debian/Ubuntu); this platform prerequisite has no source fallback
 - Expat development headers and pkg-config when fetching the private Linux
   libdbus client dependency
 

@@ -3,6 +3,11 @@
 #include "linux_systemd_bus.hpp"
 
 namespace aiforge::adapters {
+[[nodiscard]] auto verify_linux_systemd_service_identity(
+    LinuxSystemdConnection& connection,
+    const domain::LinuxServiceIdentity& selected, LinuxSystemdBudget& budget)
+    -> std::expected<void, runtime::OpsObservationSourceError>;
+
 // Adapter-private collection for the two closed service operations. The source
 // validates its immutable target before calling; no response-selected paths,
 // transport addresses or raw DBus values cross the neutral source boundary.

@@ -13,6 +13,7 @@
 #include <aiforge/detail/utf8_text.hpp>
 
 #if defined(__linux__)
+#include "linux_journal_reader.hpp"
 #include "linux_systemd_services.hpp"
 #include <cerrno>
 #include <fcntl.h>
@@ -399,11 +400,16 @@ struct LinuxOpsObservationSource::Impl {
   domain::OpsTargetBinding binding;
   std::shared_ptr<LinuxOpsProbe> probe;
   std::shared_ptr<LinuxSystemdBus> service_bus{};
+  std::shared_ptr<LinuxJournalFactory> journal_factory{};
 #if defined(__linux__)
   [[nodiscard]] auto observe_service(
       const domain::OpsObservationRequest& request, std::stop_token stop) const
       -> std::expected<domain::OpsObservation, Error> {
-    if (auto valid = validate_linux_systemd_service_request(request); !valid)
+    const bool logs = request.operation ==
+                      domain::OpsObservationOperation::linux_service_logs;
+    if (auto valid = logs ? validate_linux_journal_request(request)
+                          : validate_linux_systemd_service_request(request);
+        !valid)
       return fail(valid.error());
     if (request.target != binding) return fail(Error::source_changed);
     LinuxSystemdBudget service_budget{Clock::now() + request.limits.timeout,
@@ -416,6 +422,16 @@ struct LinuxOpsObservationSource::Impl {
       auto created = LinuxSystemdBus::create(binding, service_budget);
       if (!created) return fail(created.error());
       bus = std::move(*created);
+    }
+    if (logs) {
+      auto factory = journal_factory;
+      if (!factory) {
+        auto made = make_linux_journal_factory();
+        if (!made) return fail(made.error());
+        factory = std::move(*made);
+      }
+      return observe_linux_service_logs(request, *bus, *factory, service_budget,
+                                        started);
     }
     return observe_linux_systemd_services(request, *bus, service_budget,
                                           started);
@@ -466,7 +482,8 @@ auto LinuxOpsObservationSource::target_binding() const noexcept
 auto LinuxOpsObservationSourceAccess::create(
     domain::OpsTargetId target, domain::OpsConfigurationRevision revision,
     std::shared_ptr<LinuxOpsProbe> probe,
-    std::shared_ptr<LinuxSystemdBus> service_bus)
+    std::shared_ptr<LinuxSystemdBus> service_bus,
+    std::shared_ptr<LinuxJournalFactory> journal_factory)
     -> std::expected<std::shared_ptr<LinuxOpsObservationSource>, Error> {
   try {
     if (!valid_id(target.value()) || !valid_id(revision.value()))
@@ -483,7 +500,8 @@ auto LinuxOpsObservationSourceAccess::create(
     return std::shared_ptr<LinuxOpsObservationSource>{
         new LinuxOpsObservationSource{
             std::make_unique<LinuxOpsObservationSource::Impl>(
-                std::move(binding), std::move(probe), std::move(service_bus))}};
+                std::move(binding), std::move(probe), std::move(service_bus),
+                std::move(journal_factory))}};
   } catch (...) {
     return fail(Error::internal_failure);
   }

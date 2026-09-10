@@ -52,6 +52,23 @@ auto main() -> int {
              ? 0
              : 1;
 }
+#elif defined(PROBE_SYSTEMD_JOURNAL)
+#include <systemd/sd-journal.h>
+
+auto main() -> int {
+  // Force actual client symbol resolution without opening a journal.
+  auto volatile open = &sd_journal_open;
+  auto volatile close = &sd_journal_close;
+  auto volatile match = &sd_journal_add_match;
+  auto volatile seek = &sd_journal_seek_realtime_usec;
+  auto volatile next = &sd_journal_next;
+  auto volatile timestamp = &sd_journal_get_realtime_usec;
+  auto volatile restart = &sd_journal_restart_data;
+  auto volatile field = &sd_journal_enumerate_data;
+  auto volatile threshold = &sd_journal_set_data_threshold;
+  return !(open && close && match && seek && next && timestamp && restart &&
+           field && threshold);
+}
 #elif defined(PROBE_YAML_CPP)
 #include <sstream>
 #include <yaml-cpp/eventhandler.h>

@@ -32,9 +32,8 @@ TEST_CASE("Service source rejects invalid admission without opening a bus",
     std::get<domain::LinuxServiceIdentity>(request.resource).invocation_id =
         id<domain::OpsResourceUid>(std::string(32, '0'));
   }
-  SECTION("logs remain unsupported") {
+  SECTION("logs require a selected invocation") {
     request.operation = domain::OpsObservationOperation::linux_service_logs;
-    expected = Error::unsupported;
   }
   SECTION("cancelled") {
     stop.request_stop();
@@ -393,12 +392,14 @@ TEST_CASE("Service smoke preserves selected identity and known zero values",
   REQUIRE(service.exit_status == 0);
   REQUIRE(service.restart_count == 0);
 }
-TEST_CASE("Only implemented health and service operations are advertised",
-          "[linux-services]") {
+TEST_CASE(
+    "Only implemented health service and exact log operations are advertised",
+    "[linux-services]") {
   const std::array expected{
       domain::OpsObservationOperation::linux_health,
       domain::OpsObservationOperation::linux_services,
-      domain::OpsObservationOperation::linux_service_health};
+      domain::OpsObservationOperation::linux_service_health,
+      domain::OpsObservationOperation::linux_service_logs};
   REQUIRE(adapters::LinuxOpsObservationSource::supported_operations ==
           expected);
 }
