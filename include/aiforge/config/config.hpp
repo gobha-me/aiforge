@@ -24,6 +24,7 @@ enum class ConfigValueKind {
   text_list,
   text_map,
   automatic_approval_rules,
+  ops_targets,
 };
 
 struct ConfigTextMapEntry {
@@ -75,9 +76,30 @@ struct AutomaticApprovalRulesConfig {
   auto operator==(const AutomaticApprovalRulesConfig&) const -> bool = default;
 };
 
-using ConfigValue = std::variant<bool, std::int64_t, std::uint64_t, std::string,
-                                 std::vector<std::string>, ConfigTextMap,
-                                 AutomaticApprovalRulesConfig>;
+struct LinuxLocalTargetConfig {
+  auto operator==(const LinuxLocalTargetConfig&) const -> bool = default;
+};
+struct StaticKubernetesTargetConfig {
+  std::string config_file;
+  std::string context;
+  std::string name_space;
+  auto operator==(const StaticKubernetesTargetConfig&) const -> bool = default;
+};
+struct OpsTargetConfig {
+  std::string id;
+  std::string display_name;
+  std::variant<LinuxLocalTargetConfig, StaticKubernetesTargetConfig> source;
+  auto operator==(const OpsTargetConfig&) const -> bool = default;
+};
+struct OpsTargetsConfig {
+  std::vector<OpsTargetConfig> targets;
+  auto operator==(const OpsTargetsConfig&) const -> bool = default;
+};
+
+using ConfigValue =
+    std::variant<bool, std::int64_t, std::uint64_t, std::string,
+                 std::vector<std::string>, ConfigTextMap,
+                 AutomaticApprovalRulesConfig, OpsTargetsConfig>;
 
 enum class ConfigSource {
   command_line,
@@ -192,6 +214,16 @@ struct ResolvedConfig {
     -> std::expected<ConfigLayer, ConfigDiagnostic>;
 
 [[nodiscard]] auto builtin_config_registry() -> const ConfigRegistry&;
+
+inline constexpr std::string_view ops_targets_key{"ops.targets"};
+// Owner-configured metadata only. References never load credentials or create
+// source authority. The reserved local record is added only by resolution.
+[[nodiscard]] auto validate_ops_targets(const OpsTargetsConfig& configured,
+                                        const ConfigKeySpec& spec,
+                                        ConfigSource source)
+    -> std::expected<void, ConfigDiagnostic>;
+[[nodiscard]] auto resolve_ops_targets(const ResolvedConfig& resolved)
+    -> std::expected<OpsTargetsConfig, ConfigDiagnostic>;
 
 inline constexpr std::string_view model_maximum_tool_profiles_key{
     "tools.models.maximum_profiles"};
