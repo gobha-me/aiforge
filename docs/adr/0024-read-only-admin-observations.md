@@ -444,6 +444,26 @@ fixed enums, never parser diagnostics or input excerpts. This milestone does
 not enable Kubernetes collection or prove later sealed transfer, credential
 custody, launch-time environment isolation or absence of ambient CLI fallback.
 
+## Idle native Ops binding milestone
+
+Target changes use a narrow owner-thread kernel operation that constructs the
+native observation registration internally. It prepares the current kernel
+registry and the genuine launch policy together, validates the endpoint/source
+selection, then selects the broker and commits prepared state with no-throw
+moves. It rejects active runs/children, unavailable kernels, custom policies and
+foreign registrations; it never accepts a replacement approval mode or arbitrary
+policy from a widget or model. Selection performs no collection or durable append.
+
+Kernel and policy preserve their unrelated registries independently. Memory
+capture may narrow the current executor while its original launch-policy ceiling
+must remain available for a later capture change. Only the native observation
+registration is identical across the two new snapshots. Rebinding retains the
+actual launch configuration and shared automatic matcher with its counters; it
+never reconstructs authority from recorded provenance or carries invocation
+approval to another target. Preparation failures preserve the old selection;
+exceptional broker cleanup failure closes admission. Existing registry-only
+memory rebinding remains unchanged. This seam alone adds no Admin surface.
+
 ## Required failure evidence
 
 - Wrong/foreign target, namespace, generation, resource or log-policy revision;

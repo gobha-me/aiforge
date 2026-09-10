@@ -1,5 +1,7 @@
 #include <aiforge/runtime/tool_launch_policy.hpp>
 
+#include "ops_tool_binding.hpp"
+
 #include <algorithm>
 #include <cstddef>
 #include <functional>
@@ -334,6 +336,17 @@ class LaunchPolicy final : public ToolPolicy {
     return m_configuration.launch_context.selected_restriction();
   }
 
+  [[nodiscard]] auto rebind_ops(const RegisteredTool& replacement) const
+      -> std::expected<std::shared_ptr<ToolPolicy>, ToolPolicyError> {
+    auto tools = ops_binding_detail::replace_ops_registration(
+        m_registered_tools, replacement);
+    if (!tools)
+      return std::unexpected(
+          error(ToolPolicyErrorCode::invalid_request,
+                "native observation policy binding is invalid"));
+    return make_tool_launch_policy(*tools, m_configuration);
+  }
+
  private:
   [[nodiscard]] auto check_request(const ToolPolicyRequest& request) const
       -> std::expected<CheckedRequest, ToolPolicyError> {
@@ -417,6 +430,22 @@ class LaunchPolicy final : public ToolPolicy {
 };
 
 } // namespace
+
+auto ops_binding_detail::rebind_ops_launch_policy(
+    const ToolPolicy& current, const RegisteredTool& replacement)
+    -> std::expected<std::shared_ptr<ToolPolicy>, ToolPolicyError> {
+  try {
+    const auto* launch = dynamic_cast<const LaunchPolicy*>(&current);
+    if (launch == nullptr)
+      return std::unexpected(
+          error(ToolPolicyErrorCode::invalid_profile,
+                "native observation binding requires a launch policy"));
+    return launch->rebind_ops(replacement);
+  } catch (...) {
+    return std::unexpected(error(ToolPolicyErrorCode::internal_failure,
+                                 "native observation policy binding failed"));
+  }
+}
 
 auto make_tool_launch_policy(const ToolRegistrySnapshot& registered_tools,
                              ToolLaunchPolicyConfiguration configuration)

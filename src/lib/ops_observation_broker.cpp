@@ -148,6 +148,31 @@ struct OpsObservationBroker::Impl {
   std::uint64_t epoch{};
   bool closed{};
 
+  [[nodiscard]] auto validate_selection(
+      const domain::OpsObservationAuthority& next_authority,
+      const std::shared_ptr<OpsObservationSource>& next_source) const
+      -> std::expected<void, OpsBrokerFailure> {
+    if (closed || !state || state->closed) return failure(Code::closed);
+    if (state->failed.load()) return failure(Code::internal_failure);
+    const auto& next = next_authority.specification();
+    if (next.session_id != state->session || !next_source ||
+        !next_source->guarantees_bound_read_only_observations() ||
+        next_source->target_binding() != next.target)
+      return failure(Code::invalid_request);
+    if (authority) {
+      const auto& previous = authority->specification();
+      if (next.owner_id != previous.owner_id ||
+          next.selection_generation <= previous.selection_generation)
+        return failure(Code::stale_request);
+      if (next.target.target_id == previous.target.target_id &&
+          (next.logs.revision < previous.logs.revision ||
+           (next.logs != previous.logs &&
+            next.logs.revision == previous.logs.revision)))
+        return failure(Code::stale_request);
+    }
+    return {};
+  }
+
   auto discard(const std::shared_ptr<Entry>& entry, OpsBrokerFailure error)
       -> void {
     {
@@ -302,29 +327,25 @@ auto OpsObservationBroker::select(domain::OpsObservationAuthority authority,
                                   std::shared_ptr<OpsObservationSource> source)
     -> std::expected<void, OpsBrokerFailure> {
   try {
-    if (m_impl->closed || !m_impl->state || m_impl->state->closed)
-      return failure(Code::closed);
-    if (m_impl->state->failed.load()) return failure(Code::internal_failure);
-    const auto& next = authority.specification();
-    if (next.session_id != m_impl->state->session || !source ||
-        !source->guarantees_bound_read_only_observations() ||
-        source->target_binding() != next.target)
-      return failure(Code::invalid_request);
-    if (m_impl->authority) {
-      const auto& previous = m_impl->authority->specification();
-      if (next.owner_id != previous.owner_id ||
-          next.selection_generation <= previous.selection_generation)
-        return failure(Code::stale_request);
-      if (next.target.target_id == previous.target.target_id &&
-          (next.logs.revision < previous.logs.revision ||
-           (next.logs != previous.logs &&
-            next.logs.revision == previous.logs.revision)))
-        return failure(Code::stale_request);
-    }
+    if (auto valid = m_impl->validate_selection(authority, source); !valid)
+      return valid;
     m_impl->discard_all(Code::stale_request, false);
     m_impl->authority = std::move(authority);
     m_impl->source = std::move(source);
     return {};
+  } catch (...) {
+    fail_closed(m_impl->state);
+    return failure(Code::internal_failure);
+  }
+}
+auto OpsObservationBroker::preflight_selection(
+    const OpsObservationEndpoint& endpoint,
+    const domain::OpsObservationAuthority& authority,
+    const std::shared_ptr<OpsObservationSource>& source) const
+    -> std::expected<void, OpsBrokerFailure> {
+  try {
+    if (endpoint.m_state != m_impl->state) return failure(Code::stale_request);
+    return m_impl->validate_selection(authority, source);
   } catch (...) {
     return failure(Code::internal_failure);
   }
