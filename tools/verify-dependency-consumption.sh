@@ -38,6 +38,10 @@ for dependency_source in \
   fi
 done
 
+if [[ -d "${SEED_BUILD}/_deps/c-ares-src" ]]; then
+  COMMON_CMAKE_ARGS+=("-DFETCHCONTENT_SOURCE_DIR_C-ARES=${SEED_BUILD}/_deps/c-ares-src")
+fi
+
 "${SNAPSHOT_DIR}/tools/verify-systemd-journal-consumption.sh" "${COMMON_CMAKE_ARGS[@]}"
 
 configure_probe() {
@@ -207,20 +211,29 @@ VENICE_SOURCE="${WORK_DIR}/fetched-venice_cpp/_deps/venice-cpp-src"
 VENICE_BUILD="${WORK_DIR}/fetched-venice_cpp"
 VENICE_HTTPLIB_SOURCE="${VENICE_BUILD}/_deps/httplib-src"
 VENICE_NLOHMANN_SOURCE="${VENICE_BUILD}/_deps/nlohmann_json-src"
+VENICE_CARES_SOURCE="${VENICE_BUILD}/_deps/c-ares-src"
 if [[ ! -d "${VENICE_HTTPLIB_SOURCE}" ]]; then
   VENICE_HTTPLIB_SOURCE="${SEED_BUILD}/_deps/httplib-src"
 fi
 if [[ ! -d "${VENICE_NLOHMANN_SOURCE}" ]]; then
   VENICE_NLOHMANN_SOURCE="${SEED_BUILD}/_deps/nlohmann_json-src"
 fi
+VENICE_CARES_ARGS=()
+if [[ -d "${VENICE_CARES_SOURCE}" ]]; then
+  VENICE_CARES_ARGS+=("-DFETCHCONTENT_SOURCE_DIR_C-ARES=${VENICE_CARES_SOURCE}")
+elif [[ -d "${SEED_BUILD}/_deps/c-ares-src" ]]; then
+  VENICE_CARES_ARGS+=("-DFETCHCONTENT_SOURCE_DIR_C-ARES=${SEED_BUILD}/_deps/c-ares-src")
+fi
 cmake -S "${VENICE_SOURCE}" -B "${WORK_DIR}/install-venice-cpp" \
   "${COMMON_CMAKE_ARGS[@]}" \
+  "${VENICE_CARES_ARGS[@]}" \
   -Dvenice-cpp_BUILD_BIN=OFF -Dvenice-cpp_TESTS=OFF -Dvenice-cpp_INSTALL=ON \
   -DFETCHCONTENT_SOURCE_DIR_HTTPLIB="${VENICE_HTTPLIB_SOURCE}" \
   -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON="${VENICE_NLOHMANN_SOURCE}" \
   -DCMAKE_INSTALL_PREFIX="${PREFIX}"
 cmake --build "${WORK_DIR}/install-venice-cpp" --parallel 2
 cmake --install "${WORK_DIR}/install-venice-cpp"
+"${SNAPSHOT_DIR}/tools/verify-venice-transport-consumption.sh" "${PREFIX}" "${COMMON_CMAKE_ARGS[@]}"
 
 cmake -S "${WORK_DIR}/fetched-rasterforge/_deps/rasterforge-src" \
   -B "${WORK_DIR}/install-rasterforge" \
@@ -256,6 +269,7 @@ fi
 for dependency in termforge venice_cpp rasterforge; do
   fetch_name=$(dependency_fetch_name "${dependency}")
   configure_probe "installed-${dependency}" "${dependency}" \
+    -DPROBE_EXPECT_IMPORTED=ON \
     -DCMAKE_PREFIX_PATH="${PREFIX}" \
     -DFETCHCONTENT_FULLY_DISCONNECTED=ON
   build_and_run_probe "installed-${dependency}"
@@ -267,7 +281,9 @@ for dependency in termforge venice_cpp rasterforge; do
     exit 1
   fi
 
-  if configure_probe "obsolete-${dependency}" "${dependency}" \
+  # Venice's isolated negative and valid installed-alternative cases run in
+  # verify-venice-transport-consumption.sh above.
+  if [[ ${dependency} != venice_cpp ]] && configure_probe "obsolete-${dependency}" "${dependency}" \
     -DCMAKE_PREFIX_PATH="${SNAPSHOT_DIR}/cmake/dependency-probe/obsolete" \
     "-DFETCHCONTENT_SOURCE_DIR_${fetch_name^^}=${SNAPSHOT_DIR}/cmake/dependency-probe/mismatched"; then
     echo "${dependency} accepted an obsolete installed package" >&2
@@ -283,12 +299,38 @@ configure_probe "sibling-termforge" termforge \
   -DCMAKE_DISABLE_FIND_PACKAGE_termforge=TRUE
 build_and_run_probe "sibling-termforge"
 
+cmake -E create_symlink "${VENICE_SOURCE}" "${SNAPSHOT_DIR}/cmake/venice-cpp"
+configure_probe "sibling-venice" venice_cpp \
+  -DPROBE_EXPECT_EMBEDDED=ON -DCMAKE_DISABLE_FIND_PACKAGE_venice-cpp=TRUE \
+  -DCMAKE_PREFIX_PATH="${PREFIX}" \
+  -DFETCHCONTENT_SOURCE_DIR_VENICE-CPP="${SNAPSHOT_DIR}/cmake/dependency-probe/mismatched"
+build_and_run_probe "sibling-venice"
+cmake -E rm "${SNAPSHOT_DIR}/cmake/venice-cpp"
+mkdir -p "${SNAPSHOT_DIR}/cmake/venice-cpp"
+cat > "${SNAPSHOT_DIR}/cmake/venice-cpp/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.28)
+project(obsolete_sibling LANGUAGES CXX)
+add_library(venice-cpp::lib INTERFACE IMPORTED GLOBAL)
+EOF
+if configure_probe "stale-sibling-venice" venice_cpp \
+  -DCMAKE_DISABLE_FIND_PACKAGE_venice-cpp=TRUE \
+  > "${WORK_DIR}/stale-sibling-venice.log" 2>&1; then
+  echo "Incompatible canonical sibling unexpectedly passed" >&2
+  exit 1
+fi
+if ! grep -Eq 'Venice transport contract failure' "${WORK_DIR}/stale-sibling-venice.log"; then
+  cat "${WORK_DIR}/stale-sibling-venice.log" >&2
+  exit 1
+fi
+cmake -E remove_directory "${SNAPSHOT_DIR}/cmake/venice-cpp"
+
 cmake -S "${SNAPSHOT_DIR}/cmake/dependency-probe" \
   -B "${WORK_DIR}/preexisting" \
   "${COMMON_CMAKE_ARGS[@]}" \
   -DAIFORGE_SOURCE_DIR="${SNAPSHOT_DIR}" \
   -DPROBE_TERMFORGE_INCLUDE_DIR="${WORK_DIR}/fetched-termforge/_deps/termforge-src/include" \
-  -DPROBE_PREEXISTING_TARGETS=ON
+  -DPROBE_PREEXISTING_TARGETS=ON \
+  -DCMAKE_PREFIX_PATH="${PREFIX}"
 
 cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-fetched" \
   "${COMMON_CMAKE_ARGS[@]}" \

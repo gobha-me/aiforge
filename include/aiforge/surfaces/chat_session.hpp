@@ -340,6 +340,11 @@ class ChatSession final : public ManualOpsSession {
       -> std::expected<void, ChatSessionError>;
   [[nodiscard]] auto repository_context_state() const
       -> ChatRepositoryContextState;
+  // Transfers already-buffered committed manual and ordinary events once.
+  // Does not pump/drain the kernel or model, perform IO, append events, or
+  // clear failure state. Available even after an observation pump fails.
+  [[nodiscard]] auto take_buffered_surface_events() noexcept
+      -> std::vector<domain::RunEvent>;
   [[nodiscard]] auto drain()
       -> std::expected<std::vector<domain::RunEvent>, ChatSessionError>;
   [[nodiscard]] auto cancel_active(

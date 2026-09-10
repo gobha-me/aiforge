@@ -4078,6 +4078,11 @@ auto ChatSession::dispatch_ready_tools()
   return std::optional{std::move(*dispatched)};
 }
 
+auto ChatSession::take_buffered_surface_events() noexcept
+    -> std::vector<domain::RunEvent> {
+  return std::exchange(m_impl->pending_surface_events, {});
+}
+
 auto ChatSession::drain()
     -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
   if (m_impl->manual_active()) {

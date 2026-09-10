@@ -11,10 +11,24 @@ auto main() -> int {
 #include <expected>
 #include <type_traits>
 
+#include <ares.h>
 #include <venice/venice.hpp>
 
 auto main() -> int {
   const venice::Client client{"dependency-probe-key"};
+  // Exercise the actual canonical HTTP and new public header closure without
+  // connecting or creating a c-ares process owner.
+  httplib::Request multipart;
+  (void)multipart.form.files;
+  (void)multipart.form.fields;
+  httplib::UploadFormDataItems uploads;
+  (void)uploads;
+  static_assert(std::is_move_constructible_v<venice::VideoDownloadRuntime>);
+  // This version query needs no resolver initialization and proves that the
+  // selected exported target actually links its new public client dependency.
+  if (ares_version(nullptr) == nullptr) {
+    return 1;
+  }
   venice::CharacterQuery query;
   query.is_adult = false;
   query.limit = 100;

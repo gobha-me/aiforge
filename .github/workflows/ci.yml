@@ -18,7 +18,7 @@ jobs:
     name: Clang Tidy 20
     runs-on: ubuntu-24.04
     # Full-source analysis grows with the runtime and adapter failure coverage.
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -60,8 +60,8 @@ jobs:
     name: ${{ matrix.compiler }}
     runs-on: ubuntu-24.04
     # The expanded suite and full dependency-consumption rebuilds can exceed
-    # one hour with GCC; retain time for exact-SHA evidence and runner cleanup.
-    timeout-minutes: 90
+    # one hour with GCC/Clang; retain time for exact-SHA evidence and runner cleanup.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:

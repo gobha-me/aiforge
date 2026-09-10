@@ -137,6 +137,13 @@ class LocalSourceWorker final {
       const std::shared_ptr<OpsSourcePreparationFactory>& factory,
       OpsSourcePreparationRequest request)
       -> std::expected<void, LocalSourceWorkerError>;
+  // Owner-thread inspection only: no reap, claim, cancellation or source IO.
+  // Ready includes failed/expired completions; poll still checks the original
+  // deadline. Missing/reaped tokens return {false, false}, not proof of prior
+  // admission. Physical retirement does not reserve shared worker capacity.
+  [[nodiscard]] auto preparation_state(
+      const OpsSourcePreparationToken& token) const noexcept
+      -> std::expected<OpsSourcePreparationState, LocalSourceWorkerError>;
   [[nodiscard]] auto poll(const OpsSourcePreparationToken& token)
       -> std::expected<std::optional<OpsSourcePreparationCompletion>,
                        LocalSourceWorkerError>;

@@ -18,6 +18,11 @@ struct OpsSourcePreparationToken {
   OpsSourcePreparationIdentity selection;
   auto operator==(const OpsSourcePreparationToken&) const -> bool = default;
 };
+// Exact-token scheduling metadata, never evidence of authority or admission.
+struct OpsSourcePreparationState {
+  bool ready{};
+  bool physically_outstanding{};
+};
 struct OpsSourcePreparationRequest {
   OpsSourcePreparationToken token;
   // Established once before admission; neither startup nor preparation resets
