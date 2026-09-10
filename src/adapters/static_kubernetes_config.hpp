@@ -5,6 +5,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <variant>
 
 namespace aiforge::adapters {
 
@@ -15,6 +16,19 @@ enum class StaticKubernetesConfigFailure {
   resource_exhausted,
   cancelled,
   internal_failure
+};
+
+struct StaticKubernetesTokenView {
+  std::string_view token;
+};
+struct StaticKubernetesClientCertificateView {
+  std::string_view certificate_chain_pem;
+  std::string_view private_key_pem;
+};
+struct StaticKubernetesTlsView {
+  std::string_view certificate_authorities_pem;
+  std::variant<StaticKubernetesTokenView, StaticKubernetesClientCertificateView>
+      authentication;
 };
 
 // Adapter-private credential custody. Never put configuration_bytes() into
@@ -43,11 +57,22 @@ class StaticKubernetesConfig final {
   [[nodiscard]] auto configuration_bytes() const noexcept -> std::string_view {
     return m_configuration;
   }
+  // Views expire when this owner is moved, replaced or destroyed. These are
+  // structurally admitted bytes, not validated X.509/key material or authority.
+  [[nodiscard]] auto tls_material() const& noexcept -> StaticKubernetesTlsView;
+  [[nodiscard]] auto tls_material() const&& -> StaticKubernetesTlsView = delete;
 
  private:
+  struct Material {
+    std::string ca_pem;
+    std::string token;
+    std::string certificate_chain_pem;
+    std::string private_key_pem;
+  };
   StaticKubernetesConfig(domain::KubernetesOpsIdentity identity,
-                         std::string configuration);
+                         std::string configuration, Material material);
   domain::KubernetesOpsIdentity m_identity;
   std::string m_configuration;
+  Material m_material;
 };
 } // namespace aiforge::adapters

@@ -464,6 +464,43 @@ approval to another target. Preparation failures preserve the old selection;
 exceptional broker cleanup failure closes admission. Existing registry-only
 memory rebinding remains unchanged. This seam alone adds no Admin surface.
 
+## Private Kubernetes TLS material and structured projection milestone
+
+The accepted source direction supersedes the earlier proposed kubectl launch:
+reuse one coordinated private HTTPS transport after its dependency compatibility
+and exact delivery gates pass. This milestone only retains decoded selected TLS
+material in the existing move-owned private configuration and projects bounded
+core/v1 PodList, Pod and EventList JSON. It advertises no production source,
+changes no public launch/kernel/event contract and initiates no IO.
+
+Selected decoded CA plus token or certificate-chain/key payload has a separate
+256 KiB aggregate ceiling, in addition to the existing generated JSON 512 KiB
+ceiling. Borrowed private views are valid only for their immutable config owner.
+PEM envelope checks remain structural; a future TLS client must validate actual
+certificates, chains and key consistency. No secure-erasure guarantee is made.
+
+Projection uses private strict SAX traversal with duplicate decoded keys rejected
+including ignored fields. Input, callbacks, nesting, scalars, active key bytes
+and retained typed values each have explicit rejection budgets; none claims a
+formal parser-allocation or hard cancellation guarantee. Default fields are an
+allowlist, never whole resource documents. Unknown state/count/time remains
+unknown, absent or an explicitly unsupported row. The source must apply known
+credential exclusion before publishing; pure projection has no credentials.
+
+The initial workload operation is presented as Pod inventory. Exact Pod health
+flattens declared regular/init/ephemeral container names without inventing public
+category labels; missing status stays unknown and init/ephemeral exits do not
+infer Pod readiness. Namespace event samples accept the existing closed workload
+kinds; exact Pod events require matching namespace/name/UID. Missing occurrence
+counts cannot become one. Continued lists retain unknown omission totals;
+remainingItemCount is an estimate, not exact evidence. All responses retain their
+own actual list/resource version, and neutral bounds remain authoritative.
+
+Kubernetes log collection still requires the separately reviewed typed evidence
+extension: owner allowance for name-addressed reads with before/after identity
+checks, default exact-only, with policy revision invalidating old grants. No
+atomic log-to-runtime binding or reinterpretation of legacy records is implied.
+
 ## Required failure evidence
 
 - Wrong/foreign target, namespace, generation, resource or log-policy revision;

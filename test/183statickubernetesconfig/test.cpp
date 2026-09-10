@@ -282,34 +282,34 @@ TEST_CASE("static kubeconfig rejects malformed base64 and PEM envelopes "
 TEST_CASE("static kubeconfig YAML rejects alias expansion tags ambiguity and "
           "multiple documents") {
   const auto base = yaml_document();
-  for (const auto token : {"&anchor synthetic",
-                           "*anchor",
-                           "null",
-                           "~",
-                           "true",
-                           "false",
-                           "yes",
-                           "NO",
-                           "on",
-                           "off",
-                           "y",
-                           "n",
-                           "123",
-                           "-2",
-                           ".2",
-                           "0x12",
-                           "2026-09-09",
-                           "1e100",
-                           ".nan",
-                           "!!int 1",
-                           "!custom synthetic",
-                           "!!null synthetic",
-                           "!!bool invalid",
-                           "[synthetic]",
-                           "{synthetic: value}"}) {
+  for (const auto& token : {"&anchor synthetic",
+                            "*anchor",
+                            "null",
+                            "~",
+                            "true",
+                            "false",
+                            "yes",
+                            "NO",
+                            "on",
+                            "off",
+                            "y",
+                            "n",
+                            "123",
+                            "-2",
+                            ".2",
+                            "0x12",
+                            "2026-09-09",
+                            "1e100",
+                            ".nan",
+                            "!!int 1",
+                            "!custom synthetic",
+                            "!!null synthetic",
+                            "!!bool invalid",
+                            "[synthetic]",
+                            "{synthetic: value}"}) {
     CHECK_FALSE(parse(yaml_document(token), Syntax::yaml));
   }
-  for (const auto token :
+  for (const auto& token :
        {"\"true\"", "'123'", "!!str false", "!!str 123", "'2026-09-09'"})
     CHECK(parse(yaml_document(token), Syntax::yaml));
   for (const auto prefix : {"--- &root\n", "--- !custom\n",
@@ -332,7 +332,7 @@ TEST_CASE(
        {"{", "null", "[]", "true", "1", "\"string\"",
         "{\"apiVersion\":\"\\ud800\"}", "{\"apiVersion\":\"\\udc00\"}"})
     CHECK_FALSE(parse(text));
-  for (const auto token :
+  for (const auto& token :
        {std::string{"nul\0secret", 10}, std::string{"line\nsecret"},
         std::string{"tab\tsecret"}, std::string{"escape\x1b"},
         std::string{"bidi\xe2\x80\xae"}, std::string{"bad\xff"}}) {
@@ -510,4 +510,57 @@ TEST_CASE("static kubeconfig selects explicitly and keeps only private "
         R"(synthetic-"\token)");
   CHECK(escaped->identity().trust_identity == json->identity().trust_identity);
   CHECK(parse(escaped->configuration_bytes()));
+}
+
+TEST_CASE("static kubeconfig TLS views preserve selected decoded ownership") {
+  auto value = document();
+  auto other = value["users"][0];
+  other["name"] = "other";
+  other["user"]["token"] = "unselected-secret";
+  value["users"].push_back(other);
+  auto parsed = parse(value.dump());
+  REQUIRE(parsed);
+  const auto identity = parsed->identity();
+  const std::string generated{parsed->configuration_bytes()};
+  auto owned = std::move(*parsed);
+  value.clear();
+  const auto view = owned.tls_material();
+  CHECK(view.certificate_authorities_pem ==
+        "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n");
+  REQUIRE(std::holds_alternative<adapters::StaticKubernetesTokenView>(
+      view.authentication));
+  CHECK(std::get<adapters::StaticKubernetesTokenView>(view.authentication)
+            .token == "synthetic-token");
+  CHECK(owned.identity() == identity);
+  CHECK(owned.configuration_bytes() == generated);
+  CHECK(owned.identity().namespace_name == "selected");
+  value = document();
+  value["users"][0]["user"] = {{"client-certificate-data", ca},
+                               {"client-key-data", key}};
+  auto certificate = parse(value.dump());
+  REQUIRE(certificate);
+  const auto certificate_view = certificate->tls_material();
+  REQUIRE(
+      std::holds_alternative<adapters::StaticKubernetesClientCertificateView>(
+          certificate_view.authentication));
+  const auto material =
+      std::get<adapters::StaticKubernetesClientCertificateView>(
+          certificate_view.authentication);
+  CHECK(material.certificate_chain_pem == view.certificate_authorities_pem);
+  CHECK(material.private_key_pem ==
+        "-----BEGIN PRIVATE KEY-----\nBAUG\n-----END PRIVATE KEY-----\n");
+  // AQID/BAUG are bogus DER: the private parser claims only envelope admission.
+  CHECK(certificate->identity() == identity);
+}
+
+TEST_CASE(
+    "static kubeconfig retained TLS payload has an independent byte guard") {
+  const std::string bytes(cfg::material_limit, 'x');
+  cfg::validate_material_size({bytes, {}, {}, {}});
+  rejects([&] { cfg::validate_material_size({bytes, "x", {}, {}}); },
+          Failure::resource_exhausted);
+  const auto half = std::string_view{bytes}.substr(0, bytes.size() / 2);
+  cfg::validate_material_size({half, {}, half, {}});
+  rejects([&] { cfg::validate_material_size({half, "x", half, {}}); },
+          Failure::resource_exhausted);
 }

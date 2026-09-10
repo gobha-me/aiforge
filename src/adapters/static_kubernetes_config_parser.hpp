@@ -1,6 +1,7 @@
 #pragma once
 
 #include "static_kubernetes_config.hpp"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <utility>
@@ -12,6 +13,7 @@ inline constexpr std::size_t input_limit = std::size_t{256} * 1024U;
 inline constexpr std::size_t scalar_limit = std::size_t{128} * 1024U;
 inline constexpr std::size_t output_limit = std::size_t{512} * 1024U;
 inline constexpr std::size_t token_limit = std::size_t{16} * 1024U;
+inline constexpr std::size_t material_limit = std::size_t{256} * 1024U;
 inline constexpr std::size_t event_limit = 32768;
 inline constexpr std::size_t depth_limit = 16;
 inline constexpr std::size_t entry_limit = 128;
@@ -128,6 +130,7 @@ auto parse_yaml(std::string_view bytes, Sink& sink) -> void;
 auto parse_json(std::string_view bytes, Sink& sink) -> void;
 auto decode_base64(std::string_view value) -> std::string;
 auto validate_pem(std::string_view value, bool private_key) -> void;
+auto validate_material_size(std::array<std::string_view, 4> values) -> void;
 auto parse_endpoint(std::string_view value) -> domain::OpsHttpsEndpoint;
 
 // Two-pass emitter counts all escaping before allocating/emitting output.

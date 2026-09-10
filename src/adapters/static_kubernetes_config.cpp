@@ -74,15 +74,17 @@ auto validate_users(const std::vector<User>& users) -> void {
     }
   }
 }
-auto cluster_identity(const Cluster& cluster, std::string_view context,
-                      std::string_view namespace_name)
-    -> domain::KubernetesOpsIdentity {
-  const auto ca = decode_base64(cluster.ca_data);
+struct Selection {
+  std::string_view context;
+  std::string_view namespace_name;
+};
+auto cluster_identity(const Cluster& cluster, Selection selection,
+                      std::string_view ca) -> domain::KubernetesOpsIdentity {
   validate_pem(ca, false);
   detail::Sha256 hash;
   hash.update(std::as_bytes(std::span{ca.data(), ca.size()}));
   domain::KubernetesOpsIdentity identity{
-      std::string{context}, std::string{namespace_name},
+      std::string{selection.context}, std::string{selection.namespace_name},
       parse_endpoint(cluster.server), "sha256:" + hash.finish()};
   require(domain::validate_kubernetes_ops_identity(identity).has_value());
   return identity;
@@ -97,7 +99,8 @@ auto validate_document(const Document& document,
   for (const auto& cluster : document.clusters) {
     require(!stop.stop_requested(), Failure::cancelled);
     // Actual document/owner values; no fabricated target IDs or grants.
-    (void)cluster_identity(cluster, selected_context, selected_namespace);
+    (void)cluster_identity(cluster, {selected_context, selected_namespace},
+                           decode_base64(cluster.ca_data));
   }
   validate_users(document.users);
   for (const auto& context : document.contexts) {
@@ -108,7 +111,8 @@ auto validate_document(const Document& document,
     if (!context.namespace_name.empty()) {
       const auto& cluster = *std::ranges::find(document.clusters,
                                                context.cluster, &Cluster::name);
-      (void)cluster_identity(cluster, context.name, context.namespace_name);
+      (void)cluster_identity(cluster, {context.name, context.namespace_name},
+                             decode_base64(cluster.ca_data));
     }
   }
 }
@@ -139,6 +143,15 @@ auto emit(Writer& writer, const Cluster& cluster, const User& user,
   writer.raw("}");
 }
 } // namespace
+
+auto validate_material_size(std::array<std::string_view, 4> values) -> void {
+  std::size_t total{};
+  for (const auto value : values) {
+    require(value.size() <= material_limit - total,
+            Failure::resource_exhausted);
+    total += value.size();
+  }
+}
 
 auto decode_base64(std::string_view value) -> std::string {
   require(!value.empty() && value.size() % 4 == 0);
@@ -242,9 +255,19 @@ auto Writer::quoted(std::string_view value) -> void {
 namespace aiforge::adapters {
 namespace cfg = static_kubernetes_detail;
 StaticKubernetesConfig::StaticKubernetesConfig(
-    domain::KubernetesOpsIdentity identity, std::string configuration)
+    domain::KubernetesOpsIdentity identity, std::string configuration,
+    Material material)
     : m_identity(std::move(identity)),
-      m_configuration(std::move(configuration)) {
+      m_configuration(std::move(configuration)),
+      m_material(std::move(material)) {
+}
+auto StaticKubernetesConfig::tls_material() const& noexcept
+    -> StaticKubernetesTlsView {
+  if (!m_material.token.empty())
+    return {m_material.ca_pem, StaticKubernetesTokenView{m_material.token}};
+  return {m_material.ca_pem,
+          StaticKubernetesClientCertificateView{
+              m_material.certificate_chain_pem, m_material.private_key_pem}};
 }
 auto StaticKubernetesConfig::parse(std::string_view bytes,
                                    StaticKubernetesSyntax syntax,
@@ -274,7 +297,15 @@ auto StaticKubernetesConfig::parse(std::string_view bytes,
         document.clusters, selected->cluster, &cfg::Cluster::name);
     const auto& user =
         *std::ranges::find(document.users, selected->user, &cfg::User::name);
-    auto identity = cfg::cluster_identity(cluster, context, namespace_name);
+    auto ca_pem = cfg::decode_base64(cluster.ca_data);
+    auto identity =
+        cfg::cluster_identity(cluster, {context, namespace_name}, ca_pem);
+    auto certificate = user.cert_data.empty()
+                           ? std::string{}
+                           : cfg::decode_base64(user.cert_data);
+    auto key = user.key_data.empty() ? std::string{}
+                                     : cfg::decode_base64(user.key_data);
+    cfg::validate_material_size({ca_pem, user.token, certificate, key});
     cfg::Writer measure;
     cfg::emit(measure, cluster, user, identity);
     std::string output;
@@ -282,7 +313,10 @@ auto StaticKubernetesConfig::parse(std::string_view bytes,
     cfg::Writer writer{&output};
     cfg::emit(writer, cluster, user, identity);
     cfg::require(!stop.stop_requested(), cfg::Failure::cancelled);
-    return StaticKubernetesConfig{std::move(identity), std::move(output)};
+    return StaticKubernetesConfig{std::move(identity), std::move(output),
+                                  Material{std::move(ca_pem), user.token,
+                                           std::move(certificate),
+                                           std::move(key)}};
   } catch (const cfg::Rejected& error) {
     return std::unexpected(error.failure);
   } catch (const std::bad_alloc&) {
