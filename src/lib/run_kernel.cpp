@@ -1037,6 +1037,20 @@ auto context_admission_history_is_intact(
          recorded_repository_context_admission(event_log, run_id).has_value();
 }
 
+auto approval_admission_history_is_intact(
+    const domain::SessionEventLog& event_log, const domain::RunId& run_id,
+    const domain::InvocationId& invocation_id, bool manual) -> bool {
+  if (!manual) return context_admission_history_is_intact(event_log, run_id);
+  const auto history = recorded_ops_observations(event_log);
+  return history &&
+         std::ranges::any_of(history->invocations, [&](const auto& invocation) {
+           return invocation.run_id == run_id &&
+                  invocation.invocation_id == invocation_id &&
+                  invocation.human_origin &&
+                  invocation.phase == OpsInvocationPhase::awaiting_approval;
+         });
+}
+
 auto local_continuation_matches(
     const domain::SessionEventLog& event_log, const domain::RunId& run_id,
     const domain::ConstructedContext& context,
@@ -1275,24 +1289,31 @@ auto validate_summary_start(const domain::SessionEventLog& log,
   return {};
 }
 
+auto run_start_schema_version(const domain::RunStarted& started)
+    -> std::uint32_t {
+  if (started.manual_observation_required) return 6;
+  if (started.local_context_admission_required) return 5;
+  if (started.conversation_admission &&
+      started.conversation_admission->version == 2)
+    return 4;
+  if (started.purpose != domain::RunPurpose::conversation ||
+      started.conversation_admission)
+    return 3;
+  return started.memory_selection ? 2 : 1;
+}
+
 auto event_schema_version(const domain::RunEventPayload& payload)
     -> std::uint32_t {
-  if (const auto* started = std::get_if<domain::RunStarted>(&payload)) {
-    if (started->local_context_admission_required) return 5;
-    if (started->conversation_admission &&
-        started->conversation_admission->version == 2)
-      return 4;
-    if (started->purpose != domain::RunPurpose::conversation ||
-        started->conversation_admission)
-      return 3;
-    return started->memory_selection ? 2 : 1;
-  }
+  if (const auto* started = std::get_if<domain::RunStarted>(&payload))
+    return run_start_schema_version(*started);
   if (const auto* child = std::get_if<domain::ChildRunCreated>(&payload);
       child != nullptr && child->descriptor)
     return child->descriptor->review_receipt_id ? 4 : 3;
   if (const auto* tool = std::get_if<domain::ToolProposed>(&payload);
-      tool != nullptr && tool->validated_arguments)
-    return 2;
+      tool != nullptr) {
+    if (tool->observation_request) return 3;
+    if (tool->validated_arguments) return 2;
+  }
   if (std::holds_alternative<domain::ToolPolicyDecided>(payload) ||
       std::holds_alternative<domain::PlanRevisionProposed>(payload))
     return 2;
@@ -1634,6 +1655,7 @@ struct RunKernel::Impl {
     bool recovered_tool_launch_pending{};
     bool conversation_summaries_resolved{};
     domain::RunPurpose purpose{domain::RunPurpose::conversation};
+    bool manual_observation{};
   };
 
   struct Transaction {
@@ -1656,14 +1678,16 @@ struct RunKernel::Impl {
        RunWakeSink* wake_sink, TimestampSource timestamp_source,
        RunKernelLimits limits, ToolRegistrySnapshot tool_snapshot,
        std::shared_ptr<ToolPolicy> tool_policy,
-       std::shared_ptr<ChildRunner> child_run_port)
+       std::shared_ptr<ChildRunner> child_run_port,
+       std::shared_ptr<OpsObservationBroker> observation_port)
       : event_log(std::move(session_id)), backend_port(backend),
         wake(wake_sink),
         timestamp(timestamp_source ? std::move(timestamp_source)
                                    : TimestampSource{default_timestamp}),
         limits(limits), tools(std::move(tool_snapshot)),
         policy(tool_policy ? std::move(tool_policy) : default_tool_policy()),
-        child_runner(std::move(child_run_port)) {}
+        child_runner(std::move(child_run_port)),
+        observation_broker(std::move(observation_port)) {}
 
   ~Impl() {
     {
@@ -1984,6 +2008,26 @@ struct RunKernel::Impl {
 
   [[nodiscard]] auto commit(Transaction transaction)
       -> std::expected<void, RunKernelError> {
+    if (!recorded_ops_observations(transaction.event_log)) {
+      if (active) {
+        auto failure = persistence_failure(
+            "Ops transaction validation failed; kernel is unavailable", false);
+        failure.error().code = RunKernelErrorCode::event_log_rejected;
+        return failure;
+      }
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::event_log_rejected,
+          "Ops transaction history is incomplete or inconsistent"));
+    }
+    if (transaction.active && transaction.active->run_terminal &&
+        !transaction.active->inference_id &&
+        !transaction.active->active_tool_id &&
+        (transaction.active->manual_observation ||
+         std::ranges::any_of(
+             transaction.active->invocations, [](const auto& entry) {
+               return entry.second.arguments.observation_request.has_value();
+             })))
+      transaction.active.reset();
     if (session_store != nullptr && !transaction.events.empty()) {
       auto appended = session_store->append_events(
           transaction.event_log.session_id(), transaction.events);
@@ -2155,12 +2199,13 @@ struct RunKernel::Impl {
   [[nodiscard]] auto make_event(
       const Transaction& transaction, const domain::RunId& run_id,
       domain::RunEventPayload payload,
-      std::optional<domain::InvocationId> invocation_id = std::nullopt)
+      std::optional<domain::InvocationId> invocation_id = std::nullopt,
+      bool manual_admission = false)
       -> std::expected<domain::RunEvent, RunKernelError> {
-    // This foundation can retain manual observations, but no ordinary kernel
-    // entry point may claim the not-yet-implemented manual admission contract.
+    // Only the dedicated native admission method may set the manual contract.
     if (const auto* started = std::get_if<domain::RunStarted>(&payload);
-        started != nullptr && started->manual_observation_required)
+        started != nullptr && started->manual_observation_required &&
+        !manual_admission)
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_start,
                        "manual observation admission is not available"));
@@ -2211,10 +2256,10 @@ struct RunKernel::Impl {
   [[nodiscard]] auto record(
       const domain::RunId& run_id, domain::RunEventPayload payload,
       Transaction& transaction,
-      std::optional<domain::InvocationId> invocation_id = std::nullopt)
-      -> std::expected<void, RunKernelError> {
+      std::optional<domain::InvocationId> invocation_id = std::nullopt,
+      bool manual_admission = false) -> std::expected<void, RunKernelError> {
     auto event = make_event(transaction, run_id, std::move(payload),
-                            std::move(invocation_id));
+                            std::move(invocation_id), manual_admission);
     if (!event) return std::unexpected(std::move(event.error()));
 
     auto projection_candidate = transaction.projections.contains(run_id)
@@ -2338,15 +2383,181 @@ struct RunKernel::Impl {
     return record(run_id, std::move(inference), transaction);
   }
 
+  [[nodiscard]] auto preparation_scopes_are_declared(
+      const RegisteredTool& registration,
+      const ValidatedToolArguments& validated) const -> bool {
+    const auto& effects = validated.required_effects.empty()
+                              ? registration.declaration.effects
+                              : validated.required_effects;
+    return std::ranges::all_of(
+        validated.required_scopes, [&](const auto& scope) {
+          return std::ranges::find(effects, scope.effect) != effects.end() &&
+                 std::ranges::any_of(registration.declaration.capability_scopes,
+                                     [&](const auto& declared) {
+                                       return capability_scope_covers(declared,
+                                                                      scope);
+                                     });
+        });
+  }
+
+  [[nodiscard]] auto checked_preparation(
+      const RegisteredTool* registration,
+      const domain::InvocationId& invocation_id,
+      std::expected<ValidatedToolArguments, ToolExecutionError> validated,
+      const domain::SessionId& session_id)
+      -> std::expected<ValidatedToolArguments, ToolExecutionError> {
+    if (validated &&
+        (!valid_normalized_tool_arguments(validated->value,
+                                          limits.tool_argument_bytes) ||
+         (!validated->required_effects.empty() &&
+          !effects_are_declared(validated->required_effects,
+                                registration->declaration.effects)) ||
+         !preparation_scopes_are_declared(*registration, *validated))) {
+      validated = std::unexpected(ToolExecutionError{
+          ToolExecutionErrorCode::protocol_failure,
+          "tool validator returned invalid normalized arguments", false});
+    }
+    if (validated) {
+      const auto& effective_effects = validated->required_effects.empty()
+                                          ? registration->declaration.effects
+                                          : validated->required_effects;
+      const bool paid = includes_spend(effective_effects);
+      if (paid != validated->spend_quote.has_value() ||
+          (validated->spend_quote &&
+           !domain::valid_tool_spend_quote(*validated->spend_quote))) {
+        validated = std::unexpected(ToolExecutionError{
+            ToolExecutionErrorCode::protocol_failure,
+            "tool validator returned invalid spend accounting", false});
+      }
+    }
+
+    if (!validated) return validated;
+    const auto* native =
+        dynamic_cast<const OpsObservationTool*>(registration->executor.get());
+    if ((native != nullptr) != validated->observation_request.has_value())
+      return std::unexpected(ToolExecutionError{
+          ToolExecutionErrorCode::protocol_failure,
+          "tool preparation returned an incompatible observation proof",
+          false});
+    if (native != nullptr) {
+      if (!observation_broker || !validated->observation_request ||
+          validated->observation_request->session_id != session_id)
+        return std::unexpected(ToolExecutionError{
+            ToolExecutionErrorCode::unavailable,
+            "observation broker or session is unavailable", false});
+      if (auto current = native->check_current(*observation_broker,
+                                               invocation_id, *validated);
+          !current)
+        return std::unexpected(current.error());
+    }
+    return validated;
+  }
+
+  [[nodiscard]] auto prepare_tool(
+      const RegisteredTool* registration,
+      const domain::InvocationId& invocation_id,
+      const domain::StructuredDataBlock& raw_arguments,
+      const domain::SessionId& session_id)
+      -> std::expected<ValidatedToolArguments, ToolExecutionError> {
+    try {
+      return checked_preparation(
+          registration, invocation_id,
+          registration->executor->prepare(invocation_id, raw_arguments),
+          session_id);
+    } catch (...) {
+      return std::unexpected(
+          ToolExecutionError{ToolExecutionErrorCode::internal_failure,
+                             "tool validation failed internally", false});
+    }
+  }
+
+  [[nodiscard]] auto observation_provenance(
+      const RegisteredTool& registration,
+      const domain::PermissionProfileId& profile)
+      -> std::expected<
+          std::pair<domain::ToolProvenanceEntry, domain::ToolPolicyProvenance>,
+          ToolExecutionError> {
+    const auto* selected = policy->provenance();
+    auto digest = tool_registration_digest(registration);
+    if (selected == nullptr || !digest ||
+        selected->permission_profile_id != profile ||
+        !domain::validate_tool_policy_provenance(*selected))
+      return std::unexpected(ToolExecutionError{
+          ToolExecutionErrorCode::unavailable,
+          "observation requires versioned tool and launch policy provenance",
+          false});
+    domain::ToolProvenanceEntry tool{
+        registration.declaration.name, registration.declaration.effects,
+        registration.declaration.capability_scopes, std::move(digest)};
+    if (!domain::validate_tool_provenance_entry(tool))
+      return std::unexpected(
+          ToolExecutionError{ToolExecutionErrorCode::protocol_failure,
+                             "observation tool provenance is invalid", false});
+    return std::pair{std::move(tool), *selected};
+  }
+
+  [[nodiscard]] auto recorded_observation_provenance(
+      const Transaction& transaction, const ActiveRun& active,
+      const RegisteredTool& registration) -> bool {
+    auto current =
+        observation_provenance(registration, active.permission_profile_id);
+    if (!current) return false;
+    for (const auto& event : transaction.event_log.events()) {
+      if (event.metadata.run_id != active.run_id) continue;
+      const auto* recorded =
+          std::get_if<domain::RunProvenanceRecorded>(&event.payload);
+      if (recorded != nullptr &&
+          recorded->provenance.tool_policy == current->second &&
+          std::ranges::find(recorded->provenance.tools, current->first) !=
+              recorded->provenance.tools.end())
+        return true;
+    }
+    return false;
+  }
+
+  [[nodiscard]] auto record_run_cancelled_once(
+      const domain::RunId& run_id, const std::optional<std::string>& reason,
+      Transaction& transaction) -> std::expected<void, RunKernelError> {
+    if (transaction.active && transaction.active->run_terminal) return {};
+    return record(run_id, domain::RunCancelled{reason}, transaction);
+  }
+
+  [[nodiscard]] auto fail_pending_observations(Transaction& transaction,
+                                               const domain::DomainError& error)
+      -> std::expected<void, RunKernelError> {
+    if (!transaction.active) return {};
+    for (const auto& id : transaction.active->invocation_order) {
+      auto& pending = transaction.active->invocations.at(id);
+      if (pending.arguments.observation_request &&
+          !pending.terminal_event_seen) {
+        if (auto recorded = record_tool_error(transaction, pending, error);
+            !recorded)
+          return recorded;
+      }
+    }
+    return {};
+  }
+
   [[nodiscard]] auto fail_live_run(Transaction& transaction,
                                    domain::DomainError error)
       -> std::expected<void, RunKernelError> {
+    if (transaction.active && transaction.active->manual_observation &&
+        transaction.active->run_terminal)
+      return {};
     if (!transaction.active || transaction.active->run_terminal) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::protocol_failure,
                        "event followed a terminal run event"));
     }
     const auto run_id = transaction.active->run_id;
+    if (auto failed = fail_pending_observations(transaction, error); !failed)
+      return failed;
+    if (transaction.active->manual_observation &&
+        transaction.active->run_terminal) {
+      stop_workers();
+      return {};
+    }
+
     const auto projection =
         transaction.projections.find(transaction.active->run_id);
     if (transaction.active->inference_id &&
@@ -2478,6 +2689,7 @@ struct RunKernel::Impl {
         return reconciled;
       }
     }
+    const auto terminal_error = error;
     if (auto result = record(transaction.active->run_id,
                              domain::ToolErrored{invocation.invocation_id,
                                                  std::move(error),
@@ -2488,6 +2700,20 @@ struct RunKernel::Impl {
     }
     invocation.state = InvocationState::terminal;
     invocation.terminal_event_seen = true;
+    if (transaction.active->manual_observation &&
+        !transaction.active->run_terminal) {
+      domain::RunEventPayload terminal =
+          transaction.active->cancel_requested
+              ? domain::RunEventPayload{domain::RunCancelled{
+                    transaction.active->cancel_reason}}
+              : domain::RunEventPayload{domain::RunFailed{terminal_error}};
+      if (auto recorded = record(transaction.active->run_id,
+                                 std::move(terminal), transaction);
+          !recorded)
+        return recorded;
+      transaction.active->run_terminal = true;
+      if (operation_stop) operation_stop->request_stop();
+    }
     return {};
   }
 
@@ -2748,74 +2974,17 @@ struct RunKernel::Impl {
                 if (!message_id) return std::unexpected(message_id.error());
                 const domain::StructuredDataBlock raw_arguments{
                     "application/json", assembly.arguments};
-                std::expected<ValidatedToolArguments, ToolExecutionError>
-                    validated = std::unexpected(ToolExecutionError{
-                        ToolExecutionErrorCode::internal_failure,
-                        "tool validation failed internally", false});
-                try {
-                  if (dynamic_cast<const OpsObservationTool*>(
-                          registration->executor.get()) != nullptr) {
-                    validated = std::unexpected(ToolExecutionError{
-                        ToolExecutionErrorCode::unavailable,
-                        "durable observation dispatch is not available",
-                        false});
-                  } else {
-                    validated = registration->executor->validate(raw_arguments);
-                  }
-                } catch (...) {
-                  validated = std::unexpected(ToolExecutionError{
-                      ToolExecutionErrorCode::internal_failure,
-                      "tool validation failed internally", false});
-                }
-                if (validated &&
-                    (!valid_normalized_tool_arguments(
-                         validated->value, limits.tool_argument_bytes) ||
-                     (!validated->required_effects.empty() &&
-                      !effects_are_declared(
-                          validated->required_effects,
-                          registration->declaration.effects)) ||
-                     (!validated->required_scopes.empty() &&
-                      std::ranges::any_of(
-                          validated->required_scopes,
-                          [&](const auto& scope) {
-                            return std::ranges::none_of(
-                                registration->declaration.capability_scopes,
-                                [&](const auto& declared) {
-                                  return capability_scope_covers(declared,
-                                                                 scope);
-                                });
-                          })) ||
-                     (!validated->required_scopes.empty() &&
-                      std::ranges::any_of(
-                          validated->required_scopes, [&](const auto& scope) {
-                            const auto& effects =
-                                validated->required_effects.empty()
-                                    ? registration->declaration.effects
-                                    : validated->required_effects;
-                            return std::ranges::find(effects, scope.effect) ==
-                                   effects.end();
-                          })))) {
-                  validated = std::unexpected(ToolExecutionError{
-                      ToolExecutionErrorCode::protocol_failure,
-                      "tool validator returned invalid normalized arguments",
-                      false});
-                }
-                if (validated) {
-                  const auto& effective_effects =
-                      validated->required_effects.empty()
-                          ? registration->declaration.effects
-                          : validated->required_effects;
-                  const bool paid = includes_spend(effective_effects);
-                  if (paid != validated->spend_quote.has_value() ||
-                      (validated->spend_quote &&
-                       !domain::valid_tool_spend_quote(
-                           *validated->spend_quote))) {
-                    validated = std::unexpected(ToolExecutionError{
-                        ToolExecutionErrorCode::protocol_failure,
-                        "tool validator returned invalid spend accounting",
-                        false});
-                  }
-                }
+                auto validated =
+                    prepare_tool(registration, invocation_id, raw_arguments,
+                                 transaction.event_log.session_id());
+                if (validated && validated->observation_request &&
+                    !recorded_observation_provenance(transaction, *active,
+                                                     *registration))
+                  validated = std::unexpected(
+                      ToolExecutionError{ToolExecutionErrorCode::unavailable,
+                                         "model observation lacks exact "
+                                         "recorded tool and policy provenance",
+                                         false});
                 auto required_scopes =
                     validated
                         ? (validated->required_scopes.empty()
@@ -2836,12 +3005,15 @@ struct RunKernel::Impl {
                                       : std::vector<domain::CapabilityScope>{},
                             required_scopes, *message_id,
                             validated ? validated->spend_quote : std::nullopt,
-                            validated && (validated->spend_quote ||
+                            validated && (validated->observation_request ||
+                                          validated->spend_quote ||
                                           validated->value != raw_arguments)
                                 ? std::optional<
                                       domain::StructuredDataBlock>{validated
                                                                        ->value}
-                                : std::nullopt},
+                                : std::nullopt,
+                            validated ? validated->observation_request
+                                      : std::nullopt},
                         invocation_id);
                     !result) {
                   return result;
@@ -3008,6 +3180,73 @@ struct RunKernel::Impl {
     return {};
   }
 
+  [[nodiscard]] auto publish_observation(Transaction& transaction,
+                                         PendingInvocation& invocation,
+                                         const OpsObservationReady& ready)
+      -> std::expected<void, RunKernelError> {
+    const auto* native =
+        dynamic_cast<const OpsObservationTool*>(invocation.executor.get());
+    const auto& request = invocation.arguments.observation_request;
+    if (!transaction.active || native == nullptr || !observation_broker ||
+        !request || request->session_id != transaction.event_log.session_id() ||
+        invocation.state != InvocationState::running)
+      return fail_live_run(
+          transaction, {domain::ErrorCode::invalid_state,
+                        "observation publication contract is invalid", false});
+    if (transaction.active->cancel_requested ||
+        (operation_stop && operation_stop->stop_requested()))
+      return record_tool_error(transaction, invocation,
+                               {domain::ErrorCode::cancelled,
+                                "observation publication was cancelled",
+                                false});
+    if (!native->check_current(*observation_broker, invocation.invocation_id,
+                               invocation.arguments))
+      return record_tool_error(
+          transaction, invocation,
+          {domain::ErrorCode::policy,
+           "observation target or session is no longer current", false});
+    auto observation = observation_broker->take_for_publication(
+        ready.receipt, invocation.invocation_id, *request);
+    if (!observation)
+      return record_tool_error(transaction, invocation,
+                               {domain::ErrorCode::invalid_state,
+                                "observation receipt is unavailable or stale",
+                                false});
+    auto content = format_ops_observation_content(*observation);
+    const auto bytes = content ? content_bytes(*content) : std::nullopt;
+    if (!content || !bytes || *bytes > invocation.limits.output_bytes)
+      return record_tool_error(transaction, invocation,
+                               {domain::ErrorCode::invalid_state,
+                                "observation content exceeds its output budget",
+                                false});
+    const auto run_id = transaction.active->run_id;
+    if (auto recorded =
+            record(run_id,
+                   domain::OpsObservationRecorded{invocation.invocation_id,
+                                                  std::move(*observation)},
+                   transaction, invocation.invocation_id);
+        !recorded)
+      return recorded;
+    if (auto recorded =
+            record(run_id,
+                   domain::ToolResultRecorded{invocation.invocation_id,
+                                              std::move(*content),
+                                              invocation.result_message_id},
+                   transaction, invocation.invocation_id);
+        !recorded)
+      return recorded;
+    invocation.output_bytes = *bytes;
+    invocation.state = InvocationState::terminal;
+    invocation.terminal_event_seen = true;
+    if (transaction.active->manual_observation) {
+      if (auto recorded = record(run_id, domain::RunCompleted{}, transaction);
+          !recorded)
+        return recorded;
+      transaction.active->run_terminal = true;
+    }
+    return {};
+  }
+
   // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Tool reducer.
   [[nodiscard]] auto process_tool_update(ToolUpdate update,
                                          Transaction& transaction)
@@ -3027,6 +3266,15 @@ struct RunKernel::Impl {
                            {domain::ErrorCode::invalid_state,
                             "tool executor protocol failure", false});
     }
+    if (invocation.arguments.observation_request) {
+      const auto* ready = std::get_if<OpsObservationReady>(&update.event);
+      if (ready == nullptr)
+        return fail_live_run(
+            transaction,
+            {domain::ErrorCode::invalid_state,
+             "native observation returned an unsupported update", false});
+      return publish_observation(transaction, invocation, *ready);
+    }
     return std::visit(
         // clang-format off
         // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Tool update variants.
@@ -3034,12 +3282,11 @@ struct RunKernel::Impl {
           // clang-format on
           using Event = std::remove_cvref_t<decltype(event)>;
           if constexpr (std::same_as<Event, OpsObservationReady>) {
-            // The native boundary is representable before the durable
-            // publication hook is enabled. Never treat a receipt as content.
-            return fail_live_run(transaction,
-                                 {domain::ErrorCode::invalid_state,
-                                  "observation publication is not available",
-                                  false});
+            // Ordinary executors never acquire native publication authority.
+            return fail_live_run(
+                transaction,
+                {domain::ErrorCode::invalid_state,
+                 "ordinary executor returned an observation receipt", false});
           } else if constexpr (std::same_as<Event, ToolInputRequested>) {
             if (invocation.state != InvocationState::running ||
                 invocation.declaration.name != "ask_user" ||
@@ -3341,6 +3588,16 @@ struct RunKernel::Impl {
     return fail_live_run(transaction, protocol_domain_error());
   }
 
+  [[nodiscard]] auto fail_observation_approval(Transaction& transaction,
+                                               PendingInvocation& invocation,
+                                               const domain::DomainError& error)
+      -> std::expected<void, RunKernelError> {
+    if (auto failed = record_tool_error(transaction, invocation, error);
+        !failed)
+      return failed;
+    return fail_live_run(transaction, error);
+  }
+
   [[nodiscard]] auto apply_requested_tool_approval(
       const domain::RunId& run_id, PendingInvocation& invocation,
       const ToolApprovalResolution& resolution, Transaction& transaction)
@@ -3350,6 +3607,19 @@ struct RunKernel::Impl {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_tool_state,
                        "approval has no policy request"));
+    }
+    if (!observation_is_current(invocation)) {
+      const domain::DomainError error{
+          domain::ErrorCode::policy,
+          "observation target or session is no longer current", false};
+      if (auto failed =
+              fail_observation_approval(transaction, invocation, error);
+          !failed)
+        return failed;
+      if (auto committed = commit(std::move(transaction)); !committed)
+        return committed;
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_tool_state, error.message));
     }
     std::expected<ToolPolicyResolution, ToolPolicyError> approved =
         std::unexpected(
@@ -3372,6 +3642,12 @@ struct RunKernel::Impl {
               transaction, invocation.invocation_id);
           !failed) {
         return failed;
+      }
+      if (invocation.arguments.observation_request) {
+        if (auto failed = fail_observation_approval(transaction, invocation,
+                                                    domain_error);
+            !failed)
+          return failed;
       }
       if (auto committed = commit(std::move(transaction)); !committed) {
         return committed;
@@ -3404,6 +3680,33 @@ struct RunKernel::Impl {
                                     std::move(resolution));
   }
 
+  [[nodiscard]] auto observation_is_current(
+      const PendingInvocation& invocation) const -> bool {
+    if (!invocation.arguments.observation_request) return true;
+    const auto* native =
+        dynamic_cast<const OpsObservationTool*>(invocation.executor.get());
+    return native != nullptr && observation_broker &&
+           invocation.arguments.observation_request->session_id ==
+               event_log.session_id() &&
+           native
+               ->check_current(*observation_broker, invocation.invocation_id,
+                               invocation.arguments)
+               .has_value();
+  }
+
+  [[nodiscard]] auto preflight_policy_observation(Transaction& transaction,
+                                                  PendingInvocation& invocation)
+      -> std::expected<bool, RunKernelError> {
+    if (observation_is_current(invocation)) return true;
+    if (auto failed = record_tool_error(
+            transaction, invocation,
+            {domain::ErrorCode::policy,
+             "observation target or session is no longer current", false});
+        !failed)
+      return std::unexpected(failed.error());
+    return false;
+  }
+
   [[nodiscard]] auto evaluate_pending_policies(Transaction& transaction)
       -> std::expected<void, RunKernelError> {
     if (!transaction.active || transaction.active->inference_id) return {};
@@ -3414,6 +3717,9 @@ struct RunKernel::Impl {
           invocation.terminal_event_seen) {
         continue;
       }
+      auto current = preflight_policy_observation(transaction, invocation);
+      if (!current) return std::unexpected(current.error());
+      if (!*current) continue;
       auto canonical_arguments = canonical_arguments_or_empty(
           invocation.arguments.value, limits.tool_argument_bytes);
       invocation.policy_request = ToolPolicyRequest{
@@ -3508,6 +3814,23 @@ struct RunKernel::Impl {
                        "tool launch requires an active run"));
     }
     auto& invocation = transaction.active->invocations.at(*ready);
+    if (invocation.arguments.observation_request) {
+      const auto* native =
+          dynamic_cast<const OpsObservationTool*>(invocation.executor.get());
+      if (native == nullptr || !observation_broker ||
+          invocation.arguments.observation_request->session_id !=
+              event_log.session_id() ||
+          !native->check_current(*observation_broker, invocation.invocation_id,
+                                 invocation.arguments)) {
+        if (auto failed = record_tool_error(
+                transaction, invocation,
+                {domain::ErrorCode::policy,
+                 "observation target or session is no longer current", false});
+            !failed)
+          return failed;
+        return commit(std::move(transaction));
+      }
+    }
     auto admitted = reserve_tool_spend(transaction, invocation);
     if (!admitted) return std::unexpected(std::move(admitted.error()));
     if (!*admitted) return commit(std::move(transaction));
@@ -3891,6 +4214,7 @@ struct RunKernel::Impl {
   ToolRegistrySnapshot tools;
   std::shared_ptr<ToolPolicy> policy;
   std::shared_ptr<ChildRunner> child_runner;
+  std::shared_ptr<OpsObservationBroker> observation_broker;
   storage::SessionStore* session_store{};
   std::optional<ActiveRun> active;
   std::map<domain::RunId, ActiveRun> active_children;
@@ -4115,11 +4439,13 @@ RunKernel::RunKernel(domain::SessionId session_id, backend::Backend& backend,
                      RunWakeSink* wake_sink, TimestampSource timestamp_source,
                      RunKernelLimits limits, ToolRegistrySnapshot tools,
                      std::shared_ptr<ToolPolicy> policy,
-                     std::shared_ptr<ChildRunner> child_runner)
+                     std::shared_ptr<ChildRunner> child_runner,
+                     std::shared_ptr<OpsObservationBroker> observation_broker)
     : m_impl(std::make_unique<Impl>(std::move(session_id), backend, wake_sink,
                                     std::move(timestamp_source), limits,
                                     std::move(tools), std::move(policy),
-                                    std::move(child_runner))) {
+                                    std::move(child_runner),
+                                    std::move(observation_broker))) {
 }
 
 // clang-format off
@@ -4130,13 +4456,15 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                              TimestampSource timestamp_source,
                              RunKernelLimits limits, ToolRegistrySnapshot tools,
                              std::shared_ptr<ToolPolicy> policy,
-                             std::shared_ptr<ChildRunner> child_runner)
+                             std::shared_ptr<ChildRunner> child_runner,
+                     std::shared_ptr<OpsObservationBroker> observation_broker)
     -> std::expected<std::unique_ptr<RunKernel>, RunKernelError> {
   // clang-format on
   try {
     auto kernel = std::unique_ptr<RunKernel>{new RunKernel(
         session.session_id, backend, wake_sink, std::move(timestamp_source),
-        limits, std::move(tools), std::move(policy), std::move(child_runner))};
+        limits, std::move(tools), std::move(policy), std::move(child_runner),
+        std::move(observation_broker))};
     if (!kernel->m_impl->valid_limits()) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_limits,
@@ -5100,6 +5428,143 @@ auto RunKernel::open_durable(DurableSessionOpen session,
 }
 
 RunKernel::~RunKernel() = default;
+
+auto RunKernel::start_observation_control(ObservationControlStart start)
+    -> std::expected<void, RunKernelError> {
+  try {
+    if (m_impl->unusable)
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::storage_failure,
+          "run kernel is unavailable after a persistence failure"));
+    if (!m_impl->valid_limits())
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_limits,
+                       "run-kernel limits must be positive"));
+    if (m_impl->active || !m_impl->active_children.empty())
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::run_already_active, "another run is active"));
+    if (m_impl->projections.contains(start.run_id) ||
+        m_impl->used_invocation_ids.contains(start.invocation_id) ||
+        start.attributes.manual_observation_required ||
+        start.attributes.conversation_admission ||
+        start.attributes.local_context_admission_required)
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "manual observation admission identity is invalid"));
+    const auto* registration = m_impl->tools.find("observe_target");
+    const auto* native = registration == nullptr
+                             ? nullptr
+                             : dynamic_cast<const OpsObservationTool*>(
+                                   registration->executor.get());
+    if (native == nullptr)
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::invalid_start,
+                       "native observation registration is unavailable"));
+    auto prepared = m_impl->checked_preparation(
+        registration, start.invocation_id,
+        native->prepare(start.invocation_id, start.intent),
+        m_impl->event_log.session_id());
+    if (!prepared || !prepared->observation_request)
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "manual observation proof or current target is invalid"));
+    auto provenance = m_impl->observation_provenance(
+        *registration, start.attributes.permission_profile_id);
+    if (!provenance)
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "manual observation requires exact versioned provenance"));
+    auto transaction = m_impl->transaction();
+    auto message = m_impl->make_result_message_id(transaction);
+    if (!message) return std::unexpected(message.error());
+    start.attributes.purpose = domain::RunPurpose::control;
+    start.attributes.manual_observation_required = true;
+    Impl::ActiveRun active{start.run_id,
+                           start.attributes.permission_profile_id,
+                           {},
+                           {},
+                           {},
+                           {},
+                           {},
+                           {},
+                           {},
+                           false,
+                           false,
+                           false,
+                           false,
+                           false,
+                           false,
+                           {},
+                           {},
+                           {},
+                           0,
+                           m_impl->tools};
+    active.purpose = domain::RunPurpose::control;
+    active.manual_observation = true;
+    active.conversation_summaries_resolved = true;
+    if (auto recorded = m_impl->record(start.run_id, start.attributes,
+                                       transaction, {}, true);
+        !recorded)
+      return recorded;
+    if (auto recorded = m_impl->record(
+            start.run_id,
+            domain::HumanObservationRequested{
+                start.invocation_id, *prepared->observation_request,
+                std::move(provenance->first), std::move(provenance->second)},
+            transaction, start.invocation_id);
+        !recorded)
+      return recorded;
+    if (auto recorded =
+            m_impl->record(start.run_id,
+                           domain::ToolProposed{start.invocation_id,
+                                                registration->declaration.name,
+                                                prepared->value,
+                                                prepared->required_effects,
+                                                {},
+                                                true,
+                                                prepared->required_scopes,
+                                                prepared->required_scopes,
+                                                *message,
+                                                {},
+                                                prepared->value,
+                                                prepared->observation_request},
+                           transaction, start.invocation_id);
+        !recorded)
+      return recorded;
+    Impl::PendingInvocation pending{start.invocation_id,
+                                    {},
+                                    registration->declaration,
+                                    *prepared,
+                                    registration->limits,
+                                    registration->executor,
+                                    *message,
+                                    prepared->required_effects,
+                                    prepared->required_scopes,
+                                    {},
+                                    {},
+                                    Impl::InvocationState::proposed,
+                                    0,
+                                    0,
+                                    false,
+                                    {}};
+    active.invocation_order.push_back(start.invocation_id);
+    active.invocations.emplace(start.invocation_id, std::move(pending));
+    transaction.active = std::move(active);
+    transaction.used_invocation_ids.insert(start.invocation_id);
+    if (auto committed = m_impl->commit(std::move(transaction)); !committed)
+      return committed;
+    auto policy = m_impl->transaction();
+    if (auto evaluated = m_impl->evaluate_pending_policies(policy); !evaluated)
+      return evaluated;
+    if (auto committed = m_impl->commit(std::move(policy)); !committed)
+      return committed;
+    return m_impl->launch_next_tool();
+  } catch (...) {
+    return std::unexpected(
+        kernel_error(RunKernelErrorCode::internal_failure,
+                     "manual observation admission failed internally"));
+  }
+}
 
 auto RunKernel::replace_available_tools(ToolRegistrySnapshot tools)
     -> std::expected<void, RunKernelError> {
@@ -6658,7 +7123,7 @@ auto RunKernel::cancel_run(const domain::RunId& run_id,
         }
       }
       if (auto result =
-              m_impl->record(run_id, domain::RunCancelled{reason}, transaction);
+              m_impl->record_run_cancelled_once(run_id, reason, transaction);
           !result) {
         return result;
       }
@@ -6688,10 +7153,12 @@ auto RunKernel::decide_approval(const domain::RunId& run_id,
                                       : RunKernelErrorCode::no_active_run,
                        "approval decision targets no active run"));
     }
-    if (!context_admission_history_is_intact(m_impl->event_log, run_id)) {
+    if (!approval_admission_history_is_intact(
+            m_impl->event_log, run_id, invocation_id,
+            m_impl->active->manual_observation)) {
       return std::unexpected(
           kernel_error(RunKernelErrorCode::invalid_tool_state,
-                       "approval requires intact context admission history"));
+                       "approval requires intact admission history"));
     }
     const auto found = m_impl->active->invocations.find(invocation_id);
     if (found == m_impl->active->invocations.end()) {

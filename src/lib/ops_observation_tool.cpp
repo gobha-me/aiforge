@@ -434,6 +434,25 @@ auto OpsObservationTool::prepare(const domain::InvocationId& invocation,
     return error(Code::invalid_arguments, "observation arguments are invalid");
   }
 }
+auto OpsObservationTool::check_current(
+    const OpsObservationBroker& broker, const domain::InvocationId& invocation,
+    const ValidatedToolArguments& arguments) const
+    -> std::expected<void, ToolExecutionError> {
+  try {
+    const auto prepared = prepare(invocation, arguments.value);
+    if (!prepared || *prepared != arguments || !arguments.observation_request)
+      return error(Code::invalid_arguments,
+                   "observation invocation proof is invalid");
+    if (!broker.preflight(*m_endpoint, *arguments.observation_request))
+      return error(Code::unavailable,
+                   "observation target or session is no longer current");
+    return {};
+  } catch (...) {
+    return error(Code::internal_failure,
+                 "observation preflight failed internally");
+  }
+}
+
 auto OpsObservationTool::start(ToolInvocation invocation, std::stop_token stop)
     -> std::expected<std::unique_ptr<ToolExecutionStream>, ToolExecutionError> {
   try {
