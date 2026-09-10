@@ -1,0 +1,6 @@
+add_executable(189opssourcepreparation-test ../main.cpp test.cpp)
+target_link_libraries(189opssourcepreparation-test PRIVATE Catch2::Catch2 ${PROJECT_NAME}::lib)
+if (TARGET ${PROJECT_NAME}::adapters)
+  target_sources(189opssourcepreparation-test PRIVATE adapter.cpp)
+  target_link_libraries(189opssourcepreparation-test PRIVATE ${PROJECT_NAME}::adapters)
+endif ()

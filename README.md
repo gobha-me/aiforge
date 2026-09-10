@@ -1219,3 +1219,28 @@ or scripting-runtime types. Future adapters depend inward on the core.
 
 AIForge is available under the BSD 3-Clause License; see
 [`LICENSE.md`](LICENSE.md).
+
+Owner-configured Admin target metadata uses `ops.targets` in the configuration
+file. For example:
+
+```json
+{
+  "ops": {
+    "targets": [
+      {"id": "cluster1", "display_name": "Cluster one", "source": {
+        "kind": "kubernetes_static",
+        "config_file": "/home/user/.kube/cluster1",
+        "context": "cluster1",
+        "namespace": "default"
+      }}
+    ]
+  }
+}
+```
+
+The reserved `local` target identifies the current execution environment.
+Catalog entries only describe selections: they do not open the referenced file,
+connect to a cluster, prove host scope or grant log access. This configuration
+foundation does not yet enable the Admin CLI/TUI collector. Kubernetes references
+require an absolute path and explicit context and namespace; credentials belong
+in the separately validated kubeconfig, never inline in `ops.targets`.

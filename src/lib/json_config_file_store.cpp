@@ -1,3 +1,4 @@
+#include "json_ops_targets.hpp"
 #include <aiforge/config/file_store.hpp>
 
 #include <atomic>
@@ -529,6 +530,8 @@ class DuplicateJsonKey final : public std::exception {
       case ConfigValueKind::text_map: return json_text_map(value, spec);
       case ConfigValueKind::automatic_approval_rules:
         return json_automatic_approval_rules(value, spec);
+      case ConfigValueKind::ops_targets:
+        return detail::parse_ops_targets_json(value, spec);
     }
   } catch (const Json::exception&) {
     return invalid();
@@ -612,6 +615,8 @@ auto collect_leaf_keys(const Json& value, const std::string& prefix,
         } else if constexpr (std::same_as<Value,
                                           AutomaticApprovalRulesConfig>) {
           return automatic_approval_rules_json(concrete);
+        } else if constexpr (std::same_as<Value, OpsTargetsConfig>) {
+          return detail::ops_targets_json(concrete);
         } else {
           return Json(concrete);
         }
@@ -870,7 +875,15 @@ auto JsonConfigFileStore::load(const ConfigRegistry& registry) const
     std::vector<std::string> leaves;
     collect_leaf_keys(document->value().root, {}, leaves);
     for (auto& leaf : leaves) {
-      if (!known_leaf(registry, leaf)) {
+      // Unsetting the catalog leaves its empty namespace. Only this object
+      // shape is absence; a scalar/null ops namespace remains invalid.
+      if (leaf == "ops" && find_spec(registry, ops_targets_key) != nullptr &&
+          document->value().root.at("ops").is_object() &&
+          document->value().root.at("ops").empty())
+        continue;
+      // Literal dotted root keys are not nested configuration paths.
+      if (!known_leaf(registry, leaf) ||
+          (leaf.starts_with("ops.") && document->value().root.contains(leaf))) {
         layer.diagnostics.push_back(
             {ConfigDiagnosticCode::unknown_key, ConfigSource::file,
              std::move(leaf),
