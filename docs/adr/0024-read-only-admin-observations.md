@@ -671,3 +671,23 @@ its proven binding. Log access remains a separate explicit owner choice.
 General config output summarizes record count; the later target-list view owns
 safe metadata presentation. This milestone supplies catalog configuration only;
 CLI/TUI collection and Kubernetes source availability are not implied.
+
+## Standalone Admin command milestone
+
+A separate closed Admin command port dispatches target listing and Linux health,
+loaded services and exact service health. Product assembly creates a fresh durable
+OpsSession with the genuine Observe launch policy and only the selected native
+read registration. No provider/model, credentials, generic shell, child or memory
+port is assembled. Metadata target listing opens neither sources nor session
+storage. Invalid or incompatible selection never falls back to local collection.
+
+One exclusively owned finite worker performs preparation and collection. Broker
+activation follows successful durable creation. Preparation uses the worker's
+monotonic ID and a single owner deadline; accepted result ownership transfers
+before physical retirement, which is awaited within that original deadline before
+capacity-one observation admission. This global-zero check is specific to the
+standalone worker, not the future shared TUI graph. Observation timeout narrows
+to the remaining allowance. Exact current committed evidence decides command
+success; output failure does not recollect or erase durable evidence. Teardown
+cancels the exact owned work and keeps storage/source graph alive past kernel
+cleanup without claiming hard syscall/destructor interruption.
