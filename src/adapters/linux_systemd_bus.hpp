@@ -1,8 +1,10 @@
 #pragma once
 
 // Private to adapters: no arbitrary bus address, interface, member or FD enters
-// the public observation port. This foundation does not advertise services yet.
+// the public observation port. Service payload decoding lives in the private
+// reader.
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -23,12 +25,19 @@ struct LinuxSystemdBudget {
   std::chrono::steady_clock::time_point deadline;
   std::stop_token stop;
   std::uint32_t remaining_calls{1024};
+  // Conservative application-message accounting, independent of authentication,
+  // OS identity reads, neutral evidence and transport queue/wire accounting.
+  std::uint64_t remaining_captured_bytes{std::uint64_t{1024} * 1024};
+  [[nodiscard]] auto consume_captured(std::size_t bytes)
+      -> std::expected<void, runtime::OpsObservationSourceError>;
+  [[nodiscard]] auto check_dispatch() const
+      -> std::expected<void, runtime::OpsObservationSourceError>;
   [[nodiscard]] auto check() const
       -> std::expected<void, runtime::OpsObservationSourceError>;
 };
 // Exactly the read subset needed by the service decoder. Unit names are
 // grammar-checked .service identities, never paths or arbitrary arguments.
-// The later service decoder must verify GetUnit's object path and canonical Id
+// The service decoder verifies GetUnit's object path and canonical Id
 // before requesting properties by that canonical unit name. Raw DBus replies
 // remain private here; this transport does not validate service payload
 // schemas.
@@ -50,6 +59,11 @@ struct LinuxSystemdPeer {
   std::uint64_t mount_namespace{};
   std::uint64_t user_namespace{};
 };
+[[nodiscard]] auto linux_systemd_unit_path(std::string_view unit)
+    -> std::expected<std::string, runtime::OpsObservationSourceError>;
+[[nodiscard]] auto charge_linux_systemd_message(DBusMessage& message,
+                                                LinuxSystemdBudget& budget)
+    -> std::expected<void, runtime::OpsObservationSourceError>;
 [[nodiscard]] auto validate_linux_systemd_version(int major, int minor,
                                                   int micro)
     -> std::expected<void, runtime::OpsObservationSourceError>;
@@ -102,7 +116,8 @@ class LinuxSystemdConnection {
 };
 class LinuxSystemdBus {
  public:
-  [[nodiscard]] static auto create(domain::OpsTargetBinding binding)
+  [[nodiscard]] static auto create(domain::OpsTargetBinding binding,
+                                   LinuxSystemdBudget& budget)
       -> std::expected<std::shared_ptr<LinuxSystemdBus>,
                        runtime::OpsObservationSourceError>;
   [[nodiscard]] auto open(LinuxSystemdBudget& budget) const

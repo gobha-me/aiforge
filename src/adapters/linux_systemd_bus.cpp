@@ -70,8 +70,12 @@ auto error_reply(DBusMessage& message) -> Error {
   if (value == DBUS_ERROR_DISCONNECTED) return Error::disconnected;
   if (value == DBUS_ERROR_NO_MEMORY || value == DBUS_ERROR_LIMITS_EXCEEDED)
     return Error::resource_exhausted;
+  if (value == DBUS_ERROR_UNKNOWN_METHOD ||
+      value == DBUS_ERROR_UNKNOWN_PROPERTY)
+    return Error::unsupported;
   if (value == DBUS_ERROR_NAME_HAS_NO_OWNER ||
-      value == DBUS_ERROR_SERVICE_UNKNOWN)
+      value == DBUS_ERROR_SERVICE_UNKNOWN ||
+      value == "org.freedesktop.systemd1.NoSuchUnit")
     return Error::unavailable;
   return Error::invalid_result;
 }
@@ -208,6 +212,15 @@ auto validate_reply(DBusMessage& reply, std::uint32_t serial,
   return true;
 }
 } // namespace
+auto linux_systemd_unit_path(std::string_view unit)
+    -> std::expected<std::string, Error> {
+  try {
+    if (!valid_unit(unit)) return fail(Error::invalid_result);
+    return unit_path(unit);
+  } catch (...) {
+    return fail(Error::internal_failure);
+  }
+}
 void LinuxSystemdMessageDeleter::operator()(
     DBusMessage* message) const noexcept {
   if (message != nullptr) dbus_message_unref(message);
@@ -218,7 +231,21 @@ auto LinuxSystemdBudget::check() const -> std::expected<void, Error> {
   if (now >= deadline) return fail(Error::timed_out);
   if (deadline - now > std::chrono::seconds{5} || remaining_calls > 1024)
     return fail(Error::invalid_result);
-  if (remaining_calls == 0) return fail(Error::resource_exhausted);
+  if (remaining_captured_bytes > std::uint64_t{1024} * 1024)
+    return fail(Error::invalid_result);
+  return {};
+}
+auto LinuxSystemdBudget::check_dispatch() const -> std::expected<void, Error> {
+  if (auto ready = check(); !ready) return ready;
+  if (remaining_calls == 0 || remaining_captured_bytes == 0)
+    return fail(Error::resource_exhausted);
+  return {};
+}
+auto LinuxSystemdBudget::consume_captured(std::size_t bytes)
+    -> std::expected<void, Error> {
+  if (auto ready = check(); !ready) return ready;
+  if (bytes > remaining_captured_bytes) return fail(Error::resource_exhausted);
+  remaining_captured_bytes -= bytes;
   return {};
 }
 auto validate_linux_systemd_version(int major, int minor, int micro)
@@ -258,9 +285,11 @@ struct LinuxSystemdConnection::Impl {
           std::chrono::milliseconds{25});
       auto received = wire->receive(wait);
       if (!received) return fail(received.error());
-      if (budget.stop.stop_requested()) return fail(Error::cancelled);
-      if (Clock::now() >= budget.deadline) return fail(Error::timed_out);
+      if (auto ready = budget.check(); !ready) return fail(ready.error());
       if (!*received) continue;
+      if (auto captured = charge_linux_systemd_message(**received, budget);
+          !captured)
+        return fail(captured.error());
       auto accepted = validate_reply(**received, serial, destination);
       if (!accepted) return fail(accepted.error());
       if (*accepted) return std::move(*received);
@@ -273,7 +302,8 @@ struct LinuxSystemdConnection::Impl {
     // Any transport failure permanently retires this connection. Invalid
     // requests are rejected before this point and send nothing.
     failed = true;
-    if (auto ready = budget.check(); !ready) return fail(ready.error());
+    if (auto ready = budget.check_dispatch(); !ready)
+      return fail(ready.error());
     if (!message) return fail(Error::resource_exhausted);
     dbus_message_set_auto_start(message.get(), 0);
     dbus_message_set_allow_interactive_authorization(message.get(), 0);
@@ -330,7 +360,8 @@ auto LinuxSystemdConnection::read(LinuxSystemdRead operation,
     -> std::expected<LinuxSystemdMessage, Error> {
   try {
     if (m_impl->failed) return fail(Error::disconnected);
-    if (auto ready = budget.check(); !ready) return fail(ready.error());
+    if (auto ready = budget.check_dispatch(); !ready)
+      return fail(ready.error());
     auto message = read_message(m_impl->owner, operation, unit);
     if (!message) return fail(message.error());
     if (auto verified = m_impl->platform->verify(budget); !verified) {
@@ -377,7 +408,8 @@ auto LinuxSystemdBusAccess::create(
 auto LinuxSystemdBus::open(LinuxSystemdBudget& budget) const
     -> std::expected<std::unique_ptr<LinuxSystemdConnection>, Error> {
   try {
-    if (auto ready = budget.check(); !ready) return fail(ready.error());
+    if (auto ready = budget.check_dispatch(); !ready)
+      return fail(ready.error());
     if (auto verified = m_platform->verify(budget); !verified)
       return fail(verified.error());
     auto wire = m_platform->open(budget);

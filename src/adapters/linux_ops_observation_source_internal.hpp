@@ -9,6 +9,7 @@
 #include <aiforge/adapters/linux_ops_observation_source.hpp>
 
 namespace aiforge::adapters {
+class LinuxSystemdBus;
 enum class LinuxOpsInputFile { uptime, memory, time_offsets };
 struct LinuxOpsTimeIdentity {
   std::uint64_t current;
@@ -39,9 +40,10 @@ class LinuxOpsProbe {
                        runtime::OpsObservationSourceError> = 0;
 };
 struct LinuxOpsObservationSourceAccess {
-  [[nodiscard]] static auto create(domain::OpsTargetId target,
-                                   domain::OpsConfigurationRevision revision,
-                                   std::shared_ptr<LinuxOpsProbe> probe)
+  [[nodiscard]] static auto create(
+      domain::OpsTargetId target, domain::OpsConfigurationRevision revision,
+      std::shared_ptr<LinuxOpsProbe> probe,
+      std::shared_ptr<LinuxSystemdBus> service_bus = {})
       -> std::expected<std::shared_ptr<LinuxOpsObservationSource>,
                        runtime::OpsObservationSourceError>;
 };

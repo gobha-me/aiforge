@@ -13,6 +13,7 @@
 #include <aiforge/detail/utf8_text.hpp>
 
 #if defined(__linux__)
+#include "linux_systemd_services.hpp"
 #include <cerrno>
 #include <fcntl.h>
 #include <linux/magic.h>
@@ -397,6 +398,29 @@ auto LinuxOpsReadBudget::consume(std::size_t bytes)
 struct LinuxOpsObservationSource::Impl {
   domain::OpsTargetBinding binding;
   std::shared_ptr<LinuxOpsProbe> probe;
+  std::shared_ptr<LinuxSystemdBus> service_bus{};
+#if defined(__linux__)
+  [[nodiscard]] auto observe_service(
+      const domain::OpsObservationRequest& request, std::stop_token stop) const
+      -> std::expected<domain::OpsObservation, Error> {
+    if (auto valid = validate_linux_systemd_service_request(request); !valid)
+      return fail(valid.error());
+    if (request.target != binding) return fail(Error::source_changed);
+    LinuxSystemdBudget service_budget{Clock::now() + request.limits.timeout,
+                                      stop, 1024, request.limits.maximum_bytes};
+    if (auto ready = service_budget.check_dispatch(); !ready)
+      return fail(ready.error());
+    const auto started = timestamp();
+    auto bus = service_bus;
+    if (!bus) {
+      auto created = LinuxSystemdBus::create(binding, service_budget);
+      if (!created) return fail(created.error());
+      bus = std::move(*created);
+    }
+    return observe_linux_systemd_services(request, *bus, service_budget,
+                                          started);
+  }
+#endif
   [[nodiscard]] auto validate_identity(LinuxOpsReadBudget& budget)
       -> std::expected<void, Error> {
     auto current = probe->identity(budget);
@@ -441,7 +465,8 @@ auto LinuxOpsObservationSource::target_binding() const noexcept
 }
 auto LinuxOpsObservationSourceAccess::create(
     domain::OpsTargetId target, domain::OpsConfigurationRevision revision,
-    std::shared_ptr<LinuxOpsProbe> probe)
+    std::shared_ptr<LinuxOpsProbe> probe,
+    std::shared_ptr<LinuxSystemdBus> service_bus)
     -> std::expected<std::shared_ptr<LinuxOpsObservationSource>, Error> {
   try {
     if (!valid_id(target.value()) || !valid_id(revision.value()))
@@ -458,7 +483,7 @@ auto LinuxOpsObservationSourceAccess::create(
     return std::shared_ptr<LinuxOpsObservationSource>{
         new LinuxOpsObservationSource{
             std::make_unique<LinuxOpsObservationSource::Impl>(
-                std::move(binding), std::move(probe))}};
+                std::move(binding), std::move(probe), std::move(service_bus))}};
   } catch (...) {
     return fail(Error::internal_failure);
   }
@@ -487,8 +512,13 @@ auto LinuxOpsObservationSource::observe(
     const domain::OpsObservationRequest& request, std::stop_token stop)
     -> std::expected<domain::OpsObservation, Error> {
   try {
-    if (request.operation != domain::OpsObservationOperation::linux_health)
+    if (request.operation != domain::OpsObservationOperation::linux_health) {
+#if defined(__linux__)
+      return m_impl->observe_service(request, stop);
+#else
       return fail(Error::unsupported);
+#endif
+    }
     if (!domain::validate_recorded_ops_request(request))
       return fail(Error::invalid_result);
     if (request.target != m_impl->binding) return fail(Error::source_changed);
