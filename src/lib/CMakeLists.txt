@@ -1,4 +1,5 @@
 add_library(${PROJECT_NAME}_lib STATIC
+  admin_controller.cpp
   agent.cpp
   agent_protocol.cpp
   agent_records.cpp

@@ -747,3 +747,32 @@ later optional Admin view to deliver explicit manual-pump output after the
 manual run becomes terminal without accidentally advancing an ordinary model
 run. Controller, toolbar, menu, rendering and explanation actions remain later
 integration work; these metadata and delivery APIs enable no collection path.
+
+## Bounded Admin controller milestone
+
+The optional view controller owns only bounded catalog metadata, one exact
+preparation/claimed-source retirement state, a current manual submission and
+three typed historical snapshots. It borrows the application manual session and
+native binding port while attached; detach clears those borrows even when
+cancellation refuses. Configuration factories own their private inputs and run
+preparation on the existing shared worker. Widget actions never carry endpoints,
+credentials, policy replacements, callbacks or arbitrary commands.
+
+A superseding choice cancels the previous exact preparation and may return busy
+until physical retirement. It does not queue or retry the newer choice. A ready
+result stays producer-owned while the session is busy, using its original
+five-second deadline. Claiming and subsequent physical retirement are distinct;
+only then does native binding atomically replace active selection. Pending B
+never relabels active A, and ordinary refusal retains A. Fatal storage/history or
+internal failures latch. Source cleanup after successful claim remains owned by
+the application and does not acquire a new pool or cancellation guarantee.
+
+Reads are limited to Linux health, loaded services and exact service health with
+logs disabled. Explicit unit input remains name-only; inventory actions require
+the original session, observation event, selection generation and row, matching
+the full current binding. The controller caches only exact current committed
+success and preserves original-target last-good evidence after failure. The
+shared private target/unit validators serve CLI, controller and later slash
+input. Manual pumping never drains a model; the application separately delivers
+buffered events through194. This controller alone supplies no dialog, application
+bootstrap, real Chat/SQLite integration proof or completed #226 user journey.
