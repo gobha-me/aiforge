@@ -1,5 +1,6 @@
 #include "process_admin_internal.hpp"
 #include <aiforge/adapters/ops_observation_json.hpp>
+#include <aiforge/detail/admin_input.hpp>
 #include <aiforge/runtime/local_source_worker.hpp>
 #include <aiforge/runtime/ops_observation_history.hpp>
 #include <aiforge/surfaces/ops_session.hpp>
@@ -30,15 +31,6 @@ auto timestamp() -> domain::EventTimestamp {
   return std::chrono::time_point_cast<std::chrono::milliseconds>(
       std::chrono::system_clock::now());
 }
-auto valid_unit(std::string_view value) -> bool {
-  return value.size() > 8 && value.size() <= 255 &&
-         value.ends_with(".service") && value.front() != '-' &&
-         std::ranges::all_of(value, [](char c) {
-           return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                  (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' ||
-                  c == '@' || c == ':';
-         });
-}
 auto operation(const Command::Request& request)
     -> Result<domain::OpsObservationOperation> {
   if (request.format != Command::OutputFormat::text &&
@@ -47,7 +39,7 @@ auto operation(const Command::Request& request)
                    cli::CommandFailureKind::usage);
   if ((request.operation == Command::Operation::service) !=
           request.unit.has_value() ||
-      (request.unit && !valid_unit(*request.unit)))
+      (request.unit && !detail::valid_admin_service(*request.unit)))
     return failure("Admin service requires a canonical .service unit",
                    cli::CommandFailureKind::usage);
   switch (request.operation) {
