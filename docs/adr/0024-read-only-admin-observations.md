@@ -362,6 +362,46 @@ Sources: [published releases](https://dbus.freedesktop.org/releases/dbus/),
 [connection limits](https://dbus.freedesktop.org/doc/api/html/group__DBusConnection.html),
 [owner and credentials protocol](https://dbus.freedesktop.org/doc/dbus-specification.html).
 
+## Static Kubernetes configuration parser milestone
+
+The first Kubernetes source needs a strict original-input boundary before any
+child launch can receive configuration. Select yaml-cpp 0.9.0's event API for
+this private adapter milestone, with installed-package preference and a pinned
+official archive fallback. Its release tag identifies commit
+`56e3bb550c91fd7005566f19c079cb7a503223cf`; the recipe records the archive digest.
+Strict JSON uses a new private nlohmann SAX handler feeding the same closed
+schema sink. Neither parser nor credential types enter public interfaces.
+
+Parsing accepts immutable bytes, explicit syntax, context, namespace and a stop
+token. It reads no files or environment, invokes no helper and makes no network
+request. The move-only result retains minimal generated JSON for exactly one
+cluster, context and user, separately from neutral target identity. Only embedded
+CA with static token or a complete embedded certificate/key pair is supported.
+Unknown fields, file credentials, auth helpers, proxies and extensions reject
+the whole document, including unselected entries. This intentionally excludes
+many otherwise valid shared kubeconfigs. The owner-selected namespace overrides
+the optional context default; neither that default nor current-context supplies
+authority. Non-secret trust identity is SHA-256 over admitted decoded CA PEM
+bytes. Target ID and opaque configuration revision remain owner responsibilities.
+
+Input is limited to 256 KiB, one scalar to 128 KiB, aggregate decoded scalar
+bytes to 256 KiB, nesting to 16, callbacks to 32,768, each named list to 128,
+names to 256 bytes and tokens to 16 KiB. Generated JSON has a 512 KiB ceiling
+checked before emission. A closed typed sink rejects duplicate decoded keys,
+wrong scalar/container types, complex/merge keys, anchors, aliases, nulls,
+unsupported actual-node tags and multiple documents. Ambiguous plain YAML
+boolean/numeric spellings require quoting for string fields. Standard string
+tags explicitly preserve string intent. Strict JSON never retries as YAML.
+
+Callbacks check cancellation and application budgets before deeper traversal.
+The parser may scan scalars or directives before invoking a callback; these
+limits do not prove strict scanner allocation or hard cancellation bounds, nor
+detection of unused directives. Strict base64 and PEM envelope checks do not
+establish certificate validity or matching private keys. Failures contain only
+fixed enums, never parser diagnostics or input excerpts. This milestone does
+not enable Kubernetes collection or prove later sealed transfer, credential
+custody, launch-time environment isolation or absence of ambient CLI fallback.
+
 ## Required failure evidence
 
 - Wrong/foreign target, namespace, generation, resource or log-policy revision;

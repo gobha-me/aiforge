@@ -1,0 +1,6 @@
+if (NOT TARGET ${PROJECT_NAME}::adapters)
+  return()
+endif ()
+add_executable(${TEST_NAME} ../main.cpp test.cpp)
+target_include_directories(${TEST_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/src/adapters)
+target_link_libraries(${TEST_NAME} PRIVATE Catch2::Catch2 ${PROJECT_NAME}::adapters nlohmann_json::nlohmann_json)

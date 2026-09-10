@@ -85,7 +85,7 @@ set(${PROJECT_NAME}_DEPS
 )
 
 if (${PROJECT_NAME}_BUILD_ADAPTERS)
-  list(APPEND ${PROJECT_NAME}_DEPS rasterforge termforge venice_cpp)
+  list(APPEND ${PROJECT_NAME}_DEPS rasterforge termforge venice_cpp yaml_cpp)
   if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND ${PROJECT_NAME}_DEPS dbus1)
   endif ()

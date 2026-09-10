@@ -196,6 +196,9 @@ class OpsObservationAuthority final {
     -> std::optional<OpsTargetKind>;
 [[nodiscard]] auto validate_ops_target_binding(const OpsTargetBinding& value)
     -> std::expected<void, OpsTargetError>;
+// Pure identity shape validation, independent of owner-assigned binding IDs.
+[[nodiscard]] auto validate_kubernetes_ops_identity(
+    const KubernetesOpsIdentity& value) -> std::expected<void, OpsTargetError>;
 [[nodiscard]] auto validate_ops_target(const OpsTarget& value)
     -> std::expected<void, OpsTargetError>;
 // Pure resource shape/binding validation; does not grant authority or perform

@@ -30,7 +30,7 @@ if [[ -n "${TOOLCHAIN}" ]]; then
 fi
 
 for dependency_source in \
-  catch2 cli11 miniaudio nlohmann_json rtaudio sqlite3_amalgamation aiforge_dbus1; do
+  catch2 cli11 miniaudio nlohmann_json rtaudio sqlite3_amalgamation aiforge_dbus1 yaml_cpp; do
   source_path="${SEED_BUILD}/_deps/${dependency_source}-src"
   if [[ -d "${source_path}" ]]; then
     variable_name=$(printf '%s' "${dependency_source}" | tr '[:lower:]-' '[:upper:]_')
@@ -130,6 +130,67 @@ if [[ "$(uname -s)" == Linux ]]; then
     exit 1
   fi
 fi
+
+# Exercise the real upstream install/export path as well as our private
+# fallback. No reconstructed successful package fixture can hide export bugs.
+configure_probe "fetched-yaml_cpp" yaml_cpp \
+  -DPROBE_EXPECT_EMBEDDED=ON -DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=TRUE
+build_and_run_probe "fetched-yaml_cpp"
+YAML_SOURCE="${WORK_DIR}/fetched-yaml_cpp/_deps/yaml_cpp-src"
+if [[ ! -d "${YAML_SOURCE}" ]]; then
+  YAML_SOURCE="${SEED_BUILD}/_deps/yaml_cpp-src"
+fi
+cmake -S "${YAML_SOURCE}" -B "${WORK_DIR}/install-yaml_cpp" \
+  "${COMMON_CMAKE_ARGS[@]}" \
+  -DYAML_CPP_BUILD_TESTS=OFF -DYAML_CPP_BUILD_TOOLS=OFF \
+  -DYAML_CPP_BUILD_CONTRIB=OFF -DYAML_CPP_FORMAT_SOURCE=OFF \
+  -DYAML_CPP_INSTALL=ON -DYAML_CPP_DISABLE_UNINSTALL=ON \
+  -DYAML_BUILD_SHARED_LIBS=OFF -DYAML_ENABLE_PIC=ON \
+  -DCMAKE_INSTALL_PREFIX="${PREFIX}"
+cmake --build "${WORK_DIR}/install-yaml_cpp" --parallel 2
+cmake --install "${WORK_DIR}/install-yaml_cpp"
+configure_probe "installed-yaml_cpp" yaml_cpp \
+  -DCMAKE_PREFIX_PATH="${PREFIX}" -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+  -DPROBE_EXPECT_IMPORTED=ON
+build_and_run_probe "installed-yaml_cpp"
+if [[ -d "${WORK_DIR}/installed-yaml_cpp/_deps/yaml_cpp-src" ]]; then
+  echo "Installed yaml-cpp consumer unexpectedly fetched its dependency" >&2
+  exit 1
+fi
+if configure_probe "mismatched-yaml_cpp" yaml_cpp \
+  -DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=TRUE \
+  -DFETCHCONTENT_SOURCE_DIR_YAML_CPP="${SNAPSHOT_DIR}/cmake/dependency-probe/mismatched"; then
+  echo "yaml-cpp accepted a fallback without its canonical target" >&2
+  exit 1
+fi
+for package_case in obsolete missing-target; do
+  PACKAGE_DIR="${WORK_DIR}/${package_case}-yaml-package/lib/cmake/yaml-cpp"
+  mkdir -p "${PACKAGE_DIR}"
+  if [[ "${package_case}" == obsolete ]]; then
+    cat > "${PACKAGE_DIR}/yaml-cpp-config-version.cmake" <<'EOF'
+set(PACKAGE_VERSION "0.8.0")
+set(PACKAGE_VERSION_COMPATIBLE FALSE)
+EOF
+  else
+    cat > "${PACKAGE_DIR}/yaml-cpp-config-version.cmake" <<'EOF'
+set(PACKAGE_VERSION "0.9.0")
+set(PACKAGE_VERSION_COMPATIBLE TRUE)
+EOF
+  fi
+  cat > "${PACKAGE_DIR}/yaml-cpp-config.cmake" <<'EOF'
+set(yaml-cpp_FOUND TRUE)
+EOF
+  if configure_probe "${package_case}-yaml_cpp" yaml_cpp \
+    -Dyaml-cpp_DIR="${PACKAGE_DIR}" \
+    -DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE \
+    -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE \
+    -DCMAKE_FIND_ROOT_PATH="${WORK_DIR}/${package_case}-yaml-package" \
+    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+    -DFETCHCONTENT_SOURCE_DIR_YAML_CPP="${SNAPSHOT_DIR}/cmake/dependency-probe/mismatched"; then
+    echo "yaml-cpp accepted ${package_case} package evidence" >&2
+    exit 1
+  fi
+done
 
 cmake -S "${WORK_DIR}/fetched-termforge/_deps/termforge-src" \
   -B "${WORK_DIR}/install-termforge" \
@@ -255,7 +316,7 @@ cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-installed" \
   -Daiforge_AUDIO_PLAYBACK=OFF \
   -Daiforge_AUDIO_CAPTURE=OFF
 
-for dependency in termforge venice-cpp rasterforge aiforge_dbus1; do
+for dependency in termforge venice-cpp rasterforge aiforge_dbus1 yaml_cpp; do
   if [[ -d "${WORK_DIR}/aiforge-installed/_deps/${dependency}-src" ]]; then
     echo "Installed AIForge consumer unexpectedly fetched ${dependency}" >&2
     exit 1
@@ -287,7 +348,7 @@ if ! grep -Fxq "aiforge_AUDIO_CAPTURE:BOOL=OFF" \
   exit 1
 fi
 
-for dependency in termforge venice-cpp rasterforge aiforge_dbus1; do
+for dependency in termforge venice-cpp rasterforge aiforge_dbus1 yaml_cpp; do
   if [[ -d "${WORK_DIR}/aiforge-core/_deps/${dependency}-src" ]]; then
     echo "Core-only AIForge unexpectedly activated ${dependency}" >&2
     exit 1
