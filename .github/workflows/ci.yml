@@ -23,10 +23,10 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install Linux audio development headers
+      - name: Install Linux adapter development headers
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends libasound2-dev
+          sudo apt-get install --no-install-recommends libasound2-dev libexpat1-dev pkg-config
 
       - name: Install Clang Tidy 20
         run: |
@@ -83,10 +83,10 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install Linux audio development headers
+      - name: Install Linux adapter development headers
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends libasound2-dev
+          sudo apt-get install --no-install-recommends libasound2-dev libexpat1-dev pkg-config
 
       - name: Install Clang standard library
         if: matrix.compiler == 'Clang'

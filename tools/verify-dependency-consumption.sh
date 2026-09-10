@@ -30,7 +30,7 @@ if [[ -n "${TOOLCHAIN}" ]]; then
 fi
 
 for dependency_source in \
-  catch2 cli11 miniaudio nlohmann_json rtaudio sqlite3_amalgamation; do
+  catch2 cli11 miniaudio nlohmann_json rtaudio sqlite3_amalgamation aiforge_dbus1; do
   source_path="${SEED_BUILD}/_deps/${dependency_source}-src"
   if [[ -d "${source_path}" ]]; then
     variable_name=$(printf '%s' "${dependency_source}" | tr '[:lower:]-' '[:upper:]_')
@@ -82,6 +82,54 @@ configure_probe "fetched-sqlite3" sqlite3 \
 build_and_run_probe "fetched-sqlite3"
 
 PREFIX="${WORK_DIR}/installed"
+
+if [[ "$(uname -s)" == Linux ]]; then
+  configure_probe fetched-dbus1 dbus1 \
+    -DPROBE_EXPECT_EMBEDDED=ON -DCMAKE_DISABLE_FIND_PACKAGE_DBus1=TRUE
+  build_and_run_probe fetched-dbus1
+  dbus_build="${WORK_DIR}/fetched-dbus1/_deps/aiforge_dbus1-build"
+  if [[ -e "${dbus_build}/bin/dbus-daemon" || -e "${dbus_build}/bin/dbus-send" ]]; then
+    echo "Embedded libdbus unexpectedly built daemon tools" >&2
+    exit 1
+  fi
+  cmake -DDBUS_BUILD_DIR="${dbus_build}" -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+    -P "${SNAPSHOT_DIR}/cmake/dependency-probe/install-dbus-client.cmake"
+  configure_probe installed-dbus1 dbus1 -DPROBE_EXPECT_IMPORTED=ON \
+    -DDBus1_DIR="${PREFIX}/lib/cmake/DBus1" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+  build_and_run_probe installed-dbus1
+  if configure_probe mismatched-dbus1 dbus1 \
+    -DCMAKE_DISABLE_FIND_PACKAGE_DBus1=TRUE \
+    -DFETCHCONTENT_SOURCE_DIR_AIFORGE_DBUS1="${SNAPSHOT_DIR}/cmake/dependency-probe/mismatched"; then
+    echo "libdbus accepted a source without its client target" >&2
+    exit 1
+  fi
+  # A rejected *_DIR hint may legitimately fall through to another compatible
+  # installed package. Prove that behavior, then isolate the negative fixture
+  # so a system DBus1 cannot accidentally turn it into a successful configure.
+  configure_probe alternate-installed-dbus1 dbus1 -DPROBE_EXPECT_IMPORTED=ON \
+    -DDBus1_DIR="${SNAPSHOT_DIR}/cmake/dependency-probe/obsolete/lib/cmake/DBus1" \
+    -DCMAKE_PREFIX_PATH="${PREFIX}" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+  build_and_run_probe alternate-installed-dbus1
+  if configure_probe obsolete-dbus1 dbus1 \
+    -DDBus1_DIR="${SNAPSHOT_DIR}/cmake/dependency-probe/obsolete/lib/cmake/DBus1" \
+    -DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE \
+    -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE \
+    -DCMAKE_FIND_ROOT_PATH="${SNAPSHOT_DIR}/cmake/dependency-probe/obsolete" \
+    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+    -DFETCHCONTENT_SOURCE_DIR_AIFORGE_DBUS1="${SNAPSHOT_DIR}/cmake/dependency-probe/mismatched"; then
+    echo "libdbus accepted an obsolete package" >&2
+    exit 1
+  fi
+  if configure_probe malformed-dbus1 dbus1 \
+    -DDBus1_DIR="${SNAPSHOT_DIR}/cmake/dependency-probe/malformed/lib/cmake/DBus1" \
+    -DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE \
+    -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE \
+    -DCMAKE_FIND_ROOT_PATH="${SNAPSHOT_DIR}/cmake/dependency-probe/malformed" \
+    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY; then
+    echo "libdbus accepted missing client headers" >&2
+    exit 1
+  fi
+fi
 
 cmake -S "${WORK_DIR}/fetched-termforge/_deps/termforge-src" \
   -B "${WORK_DIR}/install-termforge" \
@@ -207,7 +255,7 @@ cmake -S "${SNAPSHOT_DIR}" -B "${WORK_DIR}/aiforge-installed" \
   -Daiforge_AUDIO_PLAYBACK=OFF \
   -Daiforge_AUDIO_CAPTURE=OFF
 
-for dependency in termforge venice-cpp rasterforge; do
+for dependency in termforge venice-cpp rasterforge aiforge_dbus1; do
   if [[ -d "${WORK_DIR}/aiforge-installed/_deps/${dependency}-src" ]]; then
     echo "Installed AIForge consumer unexpectedly fetched ${dependency}" >&2
     exit 1
@@ -239,12 +287,17 @@ if ! grep -Fxq "aiforge_AUDIO_CAPTURE:BOOL=OFF" \
   exit 1
 fi
 
-for dependency in termforge venice-cpp rasterforge; do
+for dependency in termforge venice-cpp rasterforge aiforge_dbus1; do
   if [[ -d "${WORK_DIR}/aiforge-core/_deps/${dependency}-src" ]]; then
     echo "Core-only AIForge unexpectedly activated ${dependency}" >&2
     exit 1
   fi
 done
+
+if [[ -d "${WORK_DIR}/aiforge-core/_deps/aiforge_dbus1-build" ]]; then
+  echo "Core-only AIForge unexpectedly configured the libdbus client" >&2
+  exit 1
+fi
 
 for dependency in miniaudio rtaudio; do
   if [[ -d "${WORK_DIR}/aiforge-core/_deps/${dependency}-src" ]]; then

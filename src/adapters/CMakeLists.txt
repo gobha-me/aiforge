@@ -54,6 +54,12 @@ add_library(${PROJECT_NAME}_adapters STATIC
 )
 add_library(${PROJECT_NAME}::adapters ALIAS ${PROJECT_NAME}_adapters)
 
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_sources(${PROJECT_NAME}_adapters PRIVATE
+    linux_systemd_bus.cpp linux_systemd_platform.cpp)
+  target_link_libraries(${PROJECT_NAME}_adapters PRIVATE dbus-1)
+endif ()
+
 if (${PROJECT_NAME}_AUDIO_PLAYBACK)
   target_sources(${PROJECT_NAME}_adapters PRIVATE rtaudio_playback.cpp)
   target_compile_definitions(${PROJECT_NAME}_adapters

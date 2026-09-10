@@ -282,6 +282,86 @@ the kernel without publishing a fresh observation claim. Recovery remains the
 bounded, non-retrying behavior above, including rejection of unfinished model
 proof; this slice adds no UI or configuration surface.
 
+## Linux systemd service-read milestone
+
+The Linux service-read adapter uses libdbus privately, through the fixed Unix
+system-bus address `unix:path=/run/dbus/system_bus_socket`. The released 1.16.2
+maintenance baseline is selected after checking the official release index,
+stable-branch NEWS and maintenance policy on 2026-09-09; 1.16.4 was still marked
+unreleased. CMake prefers a compatible installed DBus1 package, then the official
+1.16.2 archive with its published SHA256. The named recipe is active only for
+Linux adapter builds. No D-Bus type, arbitrary address, path, descriptor or RPC
+method enters public domain/runtime APIs. This is a closed adapter dependency,
+not a generic RPC library or an application shell facility.
+
+An observation creates its own private connection on its existing source worker.
+Factories and admission perform no bus or manager queries. Before polling, the
+adapter sets message/queue/descriptor limits and verifies protected socket-path
+custody, actual peer credentials and the selected PID/mount/user namespaces.
+It then registers with Hello, resolves the unique owner of
+`org.freedesktop.systemd1`, and requires that owner's UID/PID to identify root
+and PID 1 in the same verified execution environment. All manager calls address
+that unique owner. Final owner, boot and namespace checks reject replacement;
+there is no reconnect, private-socket fallback or ambient address selection.
+The bus daemon itself need not have UID zero. Permission or namespace-proof
+failure stays explicit; unprivileged bus access does not imply permission to
+inspect another process's procfs namespaces. Container/unknown scope is retained.
+
+The first slice implements transport identity and a private fixed request table.
+It does not decode service replies or expose them through the observation port.
+The next decoder must verify GetUnit's object path and canonical Id before
+reading properties, reject malformed/oversized results and prove these service
+semantics before availability is advertised.
+
+Only loaded-service discovery, exact unit lookup and allowlisted individual
+property reads are permitted. There is no activation, interactive authorization,
+introspection-driven API expansion, GetAll, mutation or application log read.
+Invocation identity is checked around exact service inspection. Name-only health
+requests retain name-only result identity. A systemd active state does not prove
+application readiness or physical-host health. Unknown states and incomplete
+populations remain visible in neutral evidence. Replay never recollects.
+
+Positive remaining deadlines and cancellation checks apply between finite
+poll/decode steps. Libdbus queue limits are backpressure thresholds with a
+maximum-message/read-buffer overshoot allowance, separate from neutral evidence
+limits; they are not a cumulative wire-byte ceiling. Authentication has its own
+library buffer bound. Unix connect and other stalled syscalls or final cleanup
+can retain the existing physical worker slot after logical cancellation. There
+is no second pool and no promise of hard physical cleanup latency.
+
+After fixed endpoint custody and peer checks, ordinary libdbus authentication
+is permitted. Its client starts with EXTERNAL but may fall back to cookie
+authentication, which can resolve user identity through NSS and read the user's
+home/keyring files. The public client API does not provide an EXTERNAL-only
+selector. Client keyring loading uses `add_new=FALSE`, without server keyring
+writes. Authentication bytes and raw library errors remain private. This is
+not a procfs/socket-only or no-ambient-I/O guarantee, and there is no network
+isolation claim for OS identity resolution. The adapter neither changes the
+environment nor uses private authentication symbols. A zero per-message FD cap
+rejects descriptors; the aggregate FD threshold must be positive (one), because
+zero stops all reads, including messages carrying no descriptors.
+
+The private foundation remains unavailable to product assembly until its
+transport, binding and neutral service tests pass. The existing Linux health
+source continues to advertise only health reads. Journal support requires a
+later, separately tested source/descriptor boundary; the generic public process
+launch request remains unchanged. Installed and forced-fallback dependency
+consumers must both compile/link, without building or installing daemon tools
+as an embedding side effect. The initial fallback needs only narrowly checked
+upstream subproject-path and build-interface corrections, not an alternate
+hand-maintained implementation of libdbus. The fallback is a shared client, not
+a bundled static runtime. Deployment consumers must retain a compatible
+`libdbus-1.so.3`; a pure version check rejects a loaded library older than 1.16.2
+before socket access. Dependency probes execute against both the selected build
+library and a staged upstream client install. This does not invent application
+install/export rules that AIForge does not currently have.
+
+Sources: [published releases](https://dbus.freedesktop.org/releases/dbus/),
+[stable maintenance NEWS](https://gitlab.freedesktop.org/dbus/dbus/-/blob/dbus-1.16/NEWS),
+[upstream CMake client target](https://gitlab.freedesktop.org/dbus/dbus/-/blob/dbus-1.16.2/dbus/CMakeLists.txt),
+[connection limits](https://dbus.freedesktop.org/doc/api/html/group__DBusConnection.html),
+[owner and credentials protocol](https://dbus.freedesktop.org/doc/dbus-specification.html).
+
 ## Required failure evidence
 
 - Wrong/foreign target, namespace, generation, resource or log-policy revision;
