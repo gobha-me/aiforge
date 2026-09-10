@@ -595,6 +595,32 @@ class UniqueDirectory final {
                    "persona identity changed while it was being read",
                    entry.name, true);
   }
+  if (::lseek(descriptor.get(), 0, SEEK_SET) != 0) {
+    return failure(PersonaErrorCode::io_failure,
+                   "persona file could not be re-read", entry.name, true);
+  }
+  std::string replay;
+  replay.reserve(static_cast<std::size_t>(verified_state.st_size));
+  for (;;) {
+    const auto count = ::read(descriptor.get(), buffer.data(), buffer.size());
+    if (count == 0) break;
+    if (count < 0) {
+      if (errno == EINTR) continue;
+      return failure(PersonaErrorCode::io_failure,
+                     "persona file could not be re-read", entry.name, true);
+    }
+    replay.append(buffer.data(), static_cast<std::size_t>(count));
+    if (replay.size() > text.size()) {
+      return failure(PersonaErrorCode::unstable,
+                     "persona file changed while it was being read", entry.name,
+                     true);
+    }
+  }
+  if (replay != text) {
+    return failure(PersonaErrorCode::unstable,
+                   "persona file changed while it was being read", entry.name,
+                   true);
+  }
   return domain::PersonaDocument{
       {std::move(*persona_id),
        entry.name,
