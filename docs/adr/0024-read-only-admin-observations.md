@@ -487,3 +487,52 @@ review, PR CI and exact post-merge verification. Tests must establish absence
 of infrastructure mutation, Kubernetes exec/attach/port-forward and equivalent
 remote effects. The fixed local subprocesses implementing typed reads remain
 explicit adapter mechanics, not a claim that no OS execution occurred.
+
+
+## Provider-independent standalone manual session
+
+The first standalone Ops session creates one fresh durable kernel and exposes a
+small borrowed manual-observation surface port. It never constructs a provider,
+model catalog, credential resolver or fake model identity. A private fail-closed
+no-inference backend satisfies the kernel dependency and outlives kernel work.
+The application supplies identity generation, frozen surface/workspace/launch
+configuration, the existing shared broker and borrowed durable store/wake sink.
+The initial registry marks only observe_target unavailable until owner binding;
+this permits exact automatic rules without an executable or source grant.
+Explicit Observe allow_all, prompt and automatic configurations retain their real
+launch-policy semantics; a profile label alone never changes permission behavior.
+
+Public standalone open is create-only. A duplicate session ID fails storage create
+and never replays or interrupts an existing writer. This is not an exclusive-writer
+lease or a resume/attach protocol. Chat integration borrows its existing kernel;
+historical read-only inspection never invokes resumable durable open. Candidate
+open does not activate the application broker, so failure preserves old selection.
+All practical preparation/allocation precedes durable create; no fallible surface
+initialization follows a successful kernel open.
+
+Owner binding uses the atomic idle native registry/policy transaction. Widgets see
+only typed submit/cancel/approval, owner pumping and cached read-only inspection.
+Pumping services the broker before and after kernel drain without inference work.
+The shared pure projector validates exact human request, observation/result linkage
+and terminal completion using the existing history validator. Accepted submission
+and RunCompleted alone cannot substitute for committed observation success. Current
+operation remains separate from the latest successful timestamped original-target
+snapshot. Redraw and inspection perform no IO or implicit refresh.
+
+Explicit close stops admission and cancels the owned manual run durably where the
+store permits; failure is reported. Destructor cleanup is best effort and stops
+only its captured kernel operation, never a replacement broker issuer. A terminal
+run can remain busy until ToolEnded, and retired source work retains bounded shared
+physical capacity. No second pool or hard syscall/destructor cleanup bound is added.
+
+## Shared Chat manual observation session milestone
+
+Chat implements the borrowed manual observation port over its existing kernel,
+using application-frozen surface/workspace and actual permission identity. Its
+optional broker dependency does not activate or replace application selection.
+Idle binding preserves distinct current registries and original policy ceilings;
+manual availability does not widen model profiles or maxima. Only the exact
+human-origin observation proof bypasses model context preparation, and its
+committed events remain available for ordinary surface delivery exactly once.
+Manual pumping services the existing broker independently of inference polling.
+Control results remain historical until explicit bounded model admission.

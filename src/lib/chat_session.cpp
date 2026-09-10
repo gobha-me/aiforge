@@ -113,6 +113,40 @@ template <typename IdType>
   return {ChatSessionErrorCode::run_failed, value.message, value.retryable};
 }
 
+auto observation_error(const runtime::RunKernelError& value)
+    -> ManualOpsFailure {
+  auto code = ManualOpsErrorCode::operation_failed;
+  switch (value.code) {
+    case runtime::RunKernelErrorCode::storage_failure:
+      code = ManualOpsErrorCode::storage_failure;
+      break;
+    case runtime::RunKernelErrorCode::internal_failure:
+      code = ManualOpsErrorCode::internal_failure;
+      break;
+    case runtime::RunKernelErrorCode::replay_rejected:
+    case runtime::RunKernelErrorCode::event_log_rejected:
+    case runtime::RunKernelErrorCode::projection_rejected:
+      code = ManualOpsErrorCode::invalid_history;
+      break;
+    case runtime::RunKernelErrorCode::event_sequence_overflow:
+      code = ManualOpsErrorCode::resource_exhausted;
+      break;
+    case runtime::RunKernelErrorCode::run_already_active:
+      code = ManualOpsErrorCode::busy;
+      break;
+    default: break;
+  }
+  return {code, value.code, {}};
+}
+
+auto observation_chat_error(const ManualOpsFailure& value)
+    -> std::unexpected<ChatSessionError> {
+  return error(value.code == ManualOpsErrorCode::storage_failure
+                   ? ChatSessionErrorCode::session_failed
+                   : ChatSessionErrorCode::run_failed,
+               "Manual observation is unavailable or could not complete");
+}
+
 [[nodiscard]] auto rebuild_spend_ceiling(const domain::SessionEventLog& log)
     -> std::expected<domain::SessionSpendCeilingProjection, ChatSessionError> {
   domain::SessionSpendCeilingProjection ceiling;
@@ -892,6 +926,67 @@ struct ChatSession::Impl {
   bool repository_recovery_pinned{};
   std::optional<std::vector<domain::ContextContentInput>>
       recovered_summary_context{};
+  std::shared_ptr<runtime::OpsObservationBroker> observation_broker{};
+  std::optional<ChatObservationContext> observation_context{};
+  std::optional<ObservationSubmission> manual_observation{};
+  ManualOpsInspection observation_inspection{};
+
+  [[nodiscard]] auto manual_active() const -> bool {
+    return manual_observation &&
+           kernel->active_run_id() == manual_observation->run_id;
+  }
+  [[nodiscard]] auto observation_preparation_busy() const -> bool {
+    return repository_work || evidence_work || repository_action;
+  }
+  auto remember_observation_events(std::size_t before) -> void {
+    const auto tail = std::span{kernel->event_log().events()}.subspan(before);
+    pending_surface_events.insert(pending_surface_events.end(), tail.begin(),
+                                  tail.end());
+  }
+  auto close_observation_admission(ManualOpsFailure failure)
+      -> std::unexpected<ManualOpsFailure> {
+    if (observation_inspection.problem && observation_inspection.closed &&
+        (observation_inspection.problem->code ==
+             ManualOpsErrorCode::storage_failure ||
+         failure.code != ManualOpsErrorCode::storage_failure))
+      failure = *observation_inspection.problem;
+    observation_inspection.problem = failure;
+    observation_inspection.available = false;
+    observation_inspection.closed = true;
+    observation_inspection.approval.reset();
+    return std::unexpected(failure);
+  }
+  auto report_observation_kernel_failure(const runtime::RunKernelError& value)
+      -> std::unexpected<ManualOpsFailure> {
+    const auto failure = observation_error(value);
+    if (failure.code == ManualOpsErrorCode::storage_failure ||
+        failure.code == ManualOpsErrorCode::internal_failure ||
+        failure.code == ManualOpsErrorCode::invalid_history ||
+        failure.code == ManualOpsErrorCode::resource_exhausted)
+      return close_observation_admission(failure);
+    return std::unexpected(failure);
+  }
+  auto synchronize_observations(bool force = false)
+      -> std::expected<void, ManualOpsFailure> {
+    if (force || observation_inspection.projection.last_sequence !=
+                     kernel->event_log().last_sequence()) {
+      auto projected =
+          project_manual_observations(kernel->event_log(), manual_observation);
+      if (!projected) return close_observation_admission(projected.error());
+      observation_inspection.projection = std::move(*projected);
+    }
+    observation_inspection.busy = kernel->active_run_id().has_value() ||
+                                  !kernel->active_session_tasks().empty() ||
+                                  observation_preparation_busy();
+    auto approval = kernel->pending_tool_approval();
+    if (!manual_observation || !approval ||
+        approval->run_id != manual_observation->run_id ||
+        approval->invocation_id != manual_observation->invocation_id)
+      approval.reset();
+    if (observation_inspection.closed) approval.reset();
+    observation_inspection.approval = std::move(approval);
+    return {};
+  }
 
   auto observe_pending_events()
       -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
@@ -2985,7 +3080,7 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
                std::chrono::system_clock::now())},
           *session_store, backend, wake_sink,
           std::move(dependencies.timestamp_source), dependencies.run_limits,
-          available_tools, tool_policy);
+          available_tools, tool_policy, {}, dependencies.observation_broker);
       if (!opened) {
         return error(ChatSessionErrorCode::session_failed,
                      "durable session could not be opened",
@@ -2996,7 +3091,8 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
       kernel = std::make_unique<runtime::RunKernel>(
           selected, backend, wake_sink,
           std::move(dependencies.timestamp_source), dependencies.run_limits,
-          available_tools, tool_policy);
+          available_tools, tool_policy, nullptr,
+          dependencies.observation_broker);
     }
     auto initial_selection = runtime::ToolProfileSelection{
         *initial_tool_profile, std::nullopt,
@@ -3075,6 +3171,8 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
              0,
              std::nullopt,
              std::move(*recoverable)});
+    impl->observation_broker = std::move(dependencies.observation_broker);
+    impl->observation_context = std::move(dependencies.observation_context);
     impl->is_durable = durable;
     impl->user_global_instructions_enabled =
         dependencies.user_global_instructions_enabled;
@@ -3094,6 +3192,223 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
     return error(ChatSessionErrorCode::internal_failure,
                  "interactive session setup failed internally");
   }
+}
+
+auto ChatSession::bind_observation(
+    domain::OpsObservationAuthority authority,
+    std::shared_ptr<runtime::OpsObservationSource> source,
+    std::shared_ptr<runtime::OpsObservationEndpoint> endpoint)
+    -> std::expected<void, ManualOpsFailure> {
+  try {
+    if (m_impl->observation_inspection.closed)
+      return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::closed});
+    if (!m_impl->observation_broker || !m_impl->observation_context ||
+        !m_impl->permission_profile_id)
+      return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::unavailable});
+    if (m_impl->observation_preparation_busy())
+      return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::busy});
+    const auto provenance = m_impl->tool_policy->provenance();
+    if (provenance == nullptr ||
+        provenance->permission_profile_id != *m_impl->permission_profile_id)
+      return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::unavailable});
+    std::optional<domain::OpsTargetBinding> selected{
+        authority.specification().target};
+    auto bound = m_impl->kernel->bind_ops_observation(
+        std::move(authority), std::move(source), std::move(endpoint));
+    if (!bound) return m_impl->report_observation_kernel_failure(bound.error());
+    static_assert(
+        std::is_nothrow_move_assignable_v<runtime::ToolRegistrySnapshot>);
+    static_assert(std::is_nothrow_move_assignable_v<
+                  std::shared_ptr<runtime::ToolPolicy>>);
+    static_assert(std::is_nothrow_move_assignable_v<decltype(selected)>);
+    m_impl->available_tools = std::move(bound->available_tools);
+    m_impl->tool_policy = std::move(bound->policy);
+    m_impl->observation_inspection.selection = std::move(selected);
+    m_impl->observation_inspection.problem.reset();
+    m_impl->observation_inspection.available = true;
+    m_impl->observation_inspection.busy = false;
+    return {};
+  } catch (...) {
+    return m_impl->close_observation_admission(
+        {ManualOpsErrorCode::internal_failure});
+  }
+}
+
+auto ChatSession::submit_observation(runtime::OpsObservationIntent intent)
+    -> std::expected<ObservationSubmission, ManualOpsFailure> {
+  try {
+    if (m_impl->stop_token.stop_requested())
+      return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::cancelled});
+    if (m_impl->observation_inspection.closed)
+      return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::closed});
+    const auto context = m_impl->observation_context;
+    const auto permission = m_impl->permission_profile_id;
+    if (!m_impl->observation_inspection.available || !context || !permission)
+      return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::unavailable});
+    if (auto synced = m_impl->synchronize_observations(); !synced)
+      return std::unexpected(synced.error());
+    if (m_impl->observation_inspection.busy)
+      return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::busy});
+    const auto suffix = m_impl->identity_suffix_source();
+    auto run = make_id<domain::RunId>("chat-ops", suffix);
+    auto invocation =
+        make_id<domain::InvocationId>("chat-ops-invocation", suffix);
+    if (!run || !invocation)
+      return std::unexpected(
+          ManualOpsFailure{ManualOpsErrorCode::invalid_input});
+    ObservationSubmission submitted{*run, *invocation};
+    std::optional<ObservationSubmission> retained{submitted};
+    const auto before = m_impl->kernel->event_log().events().size();
+    auto started = m_impl->kernel->start_observation_control(
+        {*run,
+         {context->surface_id,
+          context->workspace_id,
+          *permission,
+          {},
+          {},
+          domain::RunPurpose::control},
+         *invocation,
+         std::move(intent)});
+    const auto admitted =
+        std::span{m_impl->kernel->event_log().events()}.subspan(before);
+    const bool recorded = std::ranges::any_of(admitted, [&](const auto& event) {
+      const auto* attributes = std::get_if<domain::RunStarted>(&event.payload);
+      return event.metadata.run_id == *run && attributes != nullptr &&
+             attributes->manual_observation_required;
+    });
+    if (started || recorded) m_impl->manual_observation = std::move(retained);
+    m_impl->remember_observation_events(before);
+    if (!started) {
+      const auto failure = observation_error(started.error());
+      if (recorded || failure.code == ManualOpsErrorCode::storage_failure)
+        return m_impl->close_observation_admission(failure);
+      return m_impl->report_observation_kernel_failure(started.error());
+    }
+    m_impl->observation_inspection.problem.reset();
+    if (auto synced = m_impl->synchronize_observations(true); !synced)
+      return std::unexpected(synced.error());
+    return submitted;
+  } catch (...) {
+    return m_impl->close_observation_admission(
+        {ManualOpsErrorCode::internal_failure});
+  }
+}
+
+auto ChatSession::cancel_observation(const domain::RunId& run_id)
+    -> std::expected<void, ManualOpsFailure> {
+  try {
+    const auto submission = m_impl->manual_observation;
+    if (!submission || !m_impl->manual_active() || submission->run_id != run_id)
+      return std::unexpected(
+          ManualOpsFailure{ManualOpsErrorCode::wrong_operation});
+    const auto before = m_impl->kernel->event_log().events().size();
+    auto cancelled =
+        m_impl->kernel->cancel_run(run_id, "manual observation cancelled");
+    m_impl->remember_observation_events(before);
+    if (!cancelled)
+      return m_impl->close_observation_admission(
+          observation_error(cancelled.error()));
+    return m_impl->synchronize_observations();
+  } catch (...) {
+    return m_impl->close_observation_admission(
+        {ManualOpsErrorCode::internal_failure});
+  }
+}
+
+auto ChatSession::decide_observation_approval(
+    const domain::RunId& run_id, const domain::InvocationId& invocation_id,
+    runtime::ToolApprovalResolution decision)
+    -> std::expected<void, ManualOpsFailure> {
+  try {
+    if (m_impl->observation_inspection.closed)
+      return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::closed});
+    const auto submission = m_impl->manual_observation;
+    if (!submission || !m_impl->manual_active() ||
+        submission->run_id != run_id ||
+        submission->invocation_id != invocation_id)
+      return std::unexpected(
+          ManualOpsFailure{ManualOpsErrorCode::wrong_operation});
+    if (auto synced = m_impl->synchronize_observations(); !synced)
+      return synced;
+    const auto before = m_impl->kernel->event_log().events().size();
+    auto decided = m_impl->kernel->decide_approval(run_id, invocation_id,
+                                                   std::move(decision));
+    m_impl->remember_observation_events(before);
+    if (!decided) {
+      auto failure = m_impl->report_observation_kernel_failure(decided.error());
+      if (auto synced = m_impl->synchronize_observations(); !synced) {
+        if (m_impl->observation_inspection.problem &&
+            m_impl->observation_inspection.problem->code ==
+                ManualOpsErrorCode::storage_failure)
+          return std::unexpected(*m_impl->observation_inspection.problem);
+        return synced;
+      }
+      return failure;
+    }
+    if (auto synced = m_impl->synchronize_observations(); !synced)
+      return synced;
+    return {};
+  } catch (...) {
+    return m_impl->close_observation_admission(
+        {ManualOpsErrorCode::internal_failure});
+  }
+}
+
+auto ChatSession::pump_observations() -> std::expected<void, ManualOpsFailure> {
+  try {
+    if (!m_impl->observation_broker)
+      return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::unavailable});
+    std::optional<ManualOpsFailure> failure;
+    if (m_impl->observation_inspection.closed)
+      failure = m_impl->observation_inspection.problem.value_or(
+          ManualOpsFailure{ManualOpsErrorCode::closed});
+    // Validate exact retained human proof before bypassing model preparation.
+    if (auto synced = m_impl->synchronize_observations(); !synced)
+      failure = synced.error();
+    const auto service = [&] {
+      auto serviced = m_impl->observation_broker->service();
+      if (!serviced && !failure)
+        failure = ManualOpsFailure{
+            ManualOpsErrorCode::unavailable, {}, serviced.error().code};
+    };
+    const auto cancel_failed = [&] {
+      if (!failure || !m_impl->manual_active()) return;
+      const auto before = m_impl->kernel->event_log().events().size();
+      auto cancelled = m_impl->kernel->cancel_run(
+          m_impl->manual_observation->run_id, "observation source unavailable");
+      m_impl->remember_observation_events(before);
+      if (!cancelled) failure = observation_error(cancelled.error());
+    };
+    service();
+    cancel_failed();
+    if (m_impl->manual_active()) {
+      auto events = m_impl->kernel->drain(
+          failure ? runtime::RunDrainMode::observe_only
+                  : runtime::RunDrainMode::dispatch_ready);
+      if (!events) {
+        failure = observation_error(events.error());
+      } else {
+        m_impl->pending_surface_events.insert(
+            m_impl->pending_surface_events.end(),
+            std::make_move_iterator(events->begin()),
+            std::make_move_iterator(events->end()));
+      }
+    }
+    service();
+    cancel_failed();
+    if (auto synced = m_impl->synchronize_observations(); !synced)
+      failure = synced.error();
+    if (failure) return m_impl->close_observation_admission(*failure);
+    return {};
+  } catch (...) {
+    return m_impl->close_observation_admission(
+        {ManualOpsErrorCode::internal_failure});
+  }
+}
+
+auto ChatSession::inspect_observations() const noexcept
+    -> const ManualOpsInspection& {
+  return m_impl->observation_inspection;
 }
 
 auto ChatSession::submit(std::string prompt)
@@ -3765,6 +4080,21 @@ auto ChatSession::dispatch_ready_tools()
 
 auto ChatSession::drain()
     -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
+  if (m_impl->manual_active()) {
+    auto pumped = pump_observations();
+    if (!pumped) return observation_chat_error(pumped.error());
+    return std::exchange(m_impl->pending_surface_events, {});
+  }
+  if (m_impl->observation_broker) {
+    auto pumped = pump_observations();
+    if (!pumped && pumped.error().code == ManualOpsErrorCode::storage_failure)
+      return observation_chat_error(pumped.error());
+  }
+  return drain_model_events();
+}
+
+auto ChatSession::drain_model_events()
+    -> std::expected<std::vector<domain::RunEvent>, ChatSessionError> {
   auto observed = m_impl->observe_pending_events();
   if (!observed) return std::unexpected(observed.error());
   auto result = std::move(*observed);
@@ -3827,6 +4157,17 @@ auto ChatSession::drain()
 }
 
 auto ChatSession::cancel_active(std::optional<std::string> reason)
+    -> std::expected<void, ChatSessionError> {
+  const auto& submission = m_impl->manual_observation;
+  if (submission && m_impl->manual_active()) {
+    auto cancelled = cancel_observation(submission->run_id);
+    if (!cancelled) return observation_chat_error(cancelled.error());
+    return {};
+  }
+  return cancel_model_run(std::move(reason));
+}
+
+auto ChatSession::cancel_model_run(std::optional<std::string> reason)
     -> std::expected<void, ChatSessionError> {
   cancel_repository_work();
   const auto run = m_impl->kernel->active_run_id();
@@ -3893,6 +4234,12 @@ auto ChatSession::decide_tool_approval(
     const domain::RunId& run_id, const domain::InvocationId& invocation_id,
     runtime::ToolApprovalResolution resolution)
     -> std::expected<void, ChatSessionError> {
+  if (m_impl->manual_active()) {
+    auto decided = decide_observation_approval(run_id, invocation_id,
+                                               std::move(resolution));
+    if (!decided) return observation_chat_error(decided.error());
+    return {};
+  }
   if (m_impl->repository_work || m_impl->evidence_work)
     return error(ChatSessionErrorCode::run_failed,
                  "repository source validation is already pending");

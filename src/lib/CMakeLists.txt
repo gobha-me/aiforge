@@ -58,6 +58,8 @@ add_library(${PROJECT_NAME}_lib STATIC
   money.cpp
   mp4.cpp
   one_shot.cpp
+  manual_ops_session.cpp
+  ops_session.cpp
   ops_target.cpp
   ops_observation.cpp
   ops_observation_broker.cpp
