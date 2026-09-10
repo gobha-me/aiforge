@@ -1,0 +1,5 @@
+if (NOT TARGET ${PROJECT_NAME}::adapters)
+  return()
+endif ()
+add_executable(${TEST_NAME} ../main.cpp test.cpp)
+target_link_libraries(${TEST_NAME} PRIVATE Catch2::Catch2 ${PROJECT_NAME}::adapters)
