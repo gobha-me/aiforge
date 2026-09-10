@@ -427,9 +427,13 @@ struct Job {
     }
     changed.notify_all();
   }
+  // Caller holds mutex.
+  [[nodiscard]] auto retired_locked() const noexcept -> bool {
+    return (discarded || consumed) && reader_done && relay_done;
+  }
   auto retired() -> bool {
     const std::lock_guard lock{mutex};
-    return (discarded || consumed) && reader_done && relay_done;
+    return retired_locked();
   }
 };
 
@@ -779,6 +783,25 @@ auto LocalSourceWorker::submit(
                      "owned Ops source preparation is invalid");
     Token token = request.token;
     return m_impl->submit(factory, std::move(token), std::move(request));
+  } catch (...) {
+    return std::unexpected(LocalSourceWorkerError{Code::internal_failure, {}});
+  }
+}
+auto LocalSourceWorker::preparation_state(
+    const OpsSourcePreparationToken& token) const noexcept
+    -> std::expected<OpsSourcePreparationState, LocalSourceWorkerError> {
+  try {
+    for (const auto& job : m_impl->jobs) {
+      const auto* preparation =
+          std::get_if<OpsSourcePreparationToken>(&job->token);
+      if (preparation == nullptr || *preparation != token) continue;
+      const std::lock_guard lock{job->mutex};
+      return OpsSourcePreparationState{!job->discarded && !job->consumed &&
+                                           job->ready && job->relay_done &&
+                                           job->result.has_value(),
+                                       !job->retired_locked()};
+    }
+    return OpsSourcePreparationState{};
   } catch (...) {
     return std::unexpected(LocalSourceWorkerError{Code::internal_failure, {}});
   }

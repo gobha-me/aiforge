@@ -727,3 +727,23 @@ Later TLS setup stays on the preparation/observation worker: metadata-only facto
 construction must not initialize OpenSSL or load ambient crypto configuration.
 Transport controls remain bounded rejection mechanisms, not hard process-memory,
 DNS/syscall cancellation or destructor deadlines.
+
+### Optional Admin view scheduling prerequisites
+
+The shared source worker exposes exact preparation-token readiness and physical
+outstanding metadata. This owner-thread query does not claim, reap, cancel,
+perform IO, mint authority, or reserve capacity. A producer-held completion can
+be ready before physical retirement, including failed or expired completions;
+the explicit poll still checks the original deadline. An absent/reaped token
+reports neither state and does not prove prior admission. Claimed/discarded work
+remains outstanding until both producer and cancellation relay finish, using
+the same retirement predicate as shared capacity accounting. Other jobs may
+still consume capacity after this particular token retires.
+
+Chat exposes an infallible ownership transfer of already-buffered committed
+surface events, including ordinary and manual spans. It does not pump the
+kernel, drain provider events, append history, or clear errors. This permits a
+later optional Admin view to deliver explicit manual-pump output after the
+manual run becomes terminal without accidentally advancing an ordinary model
+run. Controller, toolbar, menu, rendering and explanation actions remain later
+integration work; these metadata and delivery APIs enable no collection path.
