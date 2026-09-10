@@ -231,6 +231,24 @@ present. An ordinary executor returning a receipt fails the run. Registration
 name, category and version alone never enable the native contract. Replay
 integration remains separate; this preparation API does not authorize retries.
 
+## Historical observation recovery
+
+Kernel replay validates the complete typed Ops history before classifying or
+restoring pending tool authority. Every valid unfinished manual observation is
+closed by an atomic ToolErrored/RunFailed interruption pair, retaining its
+invocation and result-message identity. Missing admission or terminal partners
+remain replay errors rather than repairable prefixes. A failed append exposes
+no recovered kernel and grants no retry. Completed manual evidence remains
+historical, with no source call, approval restoration, or backend invocation.
+Known control and summary runs are excluded from both provider tool-turn and
+artifact continuation projections; already projected conversation spans without
+RunStarted retain their existing interpretation. This replay integration does
+not enable manual admission, collection, or normalized-argument proof binding.
+Until that binding exists, unfinished model-origin typed Ops invocations reject
+replay before recovery writes or policy/registry restoration. Matching a tool's
+name or version cannot reconstruct missing execution proof. Completed model
+observations remain readable historical evidence.
+
 ## Required failure evidence
 
 - Wrong/foreign target, namespace, generation, resource or log-policy revision;

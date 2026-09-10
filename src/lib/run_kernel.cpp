@@ -12,6 +12,7 @@
 #include <aiforge/runtime/conversation_summary_generation.hpp>
 #include <aiforge/runtime/conversation_summary_projection.hpp>
 #include <aiforge/runtime/inference_spend.hpp>
+#include <aiforge/runtime/ops_observation_history.hpp>
 #include <aiforge/runtime/ops_observation_tool.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 
@@ -111,6 +112,15 @@ using WorkerUpdate =
                                 const bool retryable = false)
     -> RunKernelError {
   return RunKernelError{code, std::move(message), retryable};
+}
+
+[[nodiscard]] auto has_unrestorable_model_observation(
+    const OpsHistorySnapshot& observations) -> bool {
+  return std::ranges::any_of(observations.invocations, [](const auto& value) {
+    return !value.human_origin &&
+           value.phase != OpsInvocationPhase::succeeded &&
+           value.phase != OpsInvocationPhase::failed;
+  });
 }
 
 [[nodiscard]] auto plan_id_from(const domain::RunEventPayload& payload)
@@ -1440,6 +1450,17 @@ auto classify_recoverable_run(const domain::SessionEventLog& event_log)
     -> std::expected<std::optional<RecoverableRun>, RunKernelError> {
   // clang-format on
   try {
+    auto observations = recorded_ops_observations(event_log);
+    if (!observations) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::replay_rejected,
+          "durable Ops observation history is incomplete or inconsistent"));
+    }
+    if (has_unrestorable_model_observation(*observations)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::replay_rejected,
+          "unfinished model observations cannot restore execution authority"));
+    }
     std::map<domain::RunId, domain::RunProjection> projections;
     std::map<domain::RunId, std::optional<domain::RunId>> parents;
     std::set<domain::RunId> child_created;
@@ -1521,6 +1542,9 @@ auto classify_recoverable_run(const domain::SessionEventLog& event_log)
     std::optional<RecoverableRun> result;
     for (const auto& [run_id, projection] : projections) {
       if (parents.at(run_id)) continue;
+      if (const auto start = starts.find(run_id);
+          start != starts.end() && start->second.manual_observation_required)
+        continue;
       const bool recoverable_authority =
           projection.status() == domain::RunStatus::running &&
           !unstarted_authority[run_id].empty();
@@ -2234,6 +2258,58 @@ struct RunKernel::Impl {
     transaction.projections.insert_or_assign(run_id,
                                              std::move(projection_candidate));
     transaction.events.push_back(std::move(*event));
+    return {};
+  }
+
+  [[nodiscard]] auto record_manual_observation_interruptions(
+      Transaction& transaction, const OpsHistorySnapshot& observations)
+      -> std::expected<void, RunKernelError> {
+    const std::set<domain::RunId> unfinished{
+        observations.unfinished_manual_runs.begin(),
+        observations.unfinished_manual_runs.end()};
+    std::map<domain::InvocationId, domain::MessageId> result_ids;
+    for (const auto& event : transaction.event_log.events()) {
+      if (const auto* proposal =
+              std::get_if<domain::ToolProposed>(&event.payload);
+          proposal != nullptr && proposal->observation_request &&
+          proposal->result_message_id) {
+        result_ids.emplace(proposal->invocation_id,
+                           *proposal->result_message_id);
+      }
+    }
+    for (const auto& invocation : observations.invocations) {
+      if (!invocation.human_origin || !unfinished.contains(invocation.run_id))
+        continue;
+      const auto message = result_ids.find(invocation.invocation_id);
+      if (message == result_ids.end()) {
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::replay_rejected,
+                         "manual observation recovery lacks result identity"));
+      }
+      if (auto recorded = record(
+              invocation.run_id,
+              domain::ToolErrored{
+                  invocation.invocation_id,
+                  {domain::ErrorCode::invalid_state,
+                   "manual observation was interrupted by restart", false},
+                  message->second},
+              transaction, invocation.invocation_id);
+          !recorded)
+        return std::unexpected(std::move(recorded.error()));
+      if (auto recorded = record(
+              invocation.run_id,
+              domain::RunFailed{
+                  {domain::ErrorCode::invalid_state,
+                   "manual observation run was interrupted by restart", false}},
+              transaction);
+          !recorded)
+        return std::unexpected(std::move(recorded.error()));
+    }
+    if (!recorded_ops_observations(transaction.event_log)) {
+      return std::unexpected(
+          kernel_error(RunKernelErrorCode::replay_rejected,
+                       "manual observation interruption history was rejected"));
+    }
     return {};
   }
 
@@ -4148,6 +4224,47 @@ auto RunKernel::open_durable(DurableSessionOpen session,
         return std::unexpected(kernel_error(
             RunKernelErrorCode::replay_rejected,
             "durable session catalog disagrees with replayed history"));
+      }
+
+      auto observations = recorded_ops_observations(event_log);
+      if (!observations) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::replay_rejected,
+            "durable Ops observation history is incomplete or inconsistent"));
+      }
+      if (has_unrestorable_model_observation(*observations)) {
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::replay_rejected,
+                         "unfinished model observations cannot restore "
+                         "execution authority"));
+      }
+      if (!observations->unfinished_manual_runs.empty()) {
+        Impl::Transaction recovery{std::move(event_log),
+                                   std::move(projections),
+                                   std::move(plan_projections),
+                                   std::move(invocation_ids),
+                                   {},
+                                   {},
+                                   {}};
+        if (auto recorded =
+                kernel->m_impl->record_manual_observation_interruptions(
+                    recovery, *observations);
+            !recorded)
+          return std::unexpected(std::move(recorded.error()));
+        auto persisted =
+            store.append_events(session.session_id, recovery.events);
+        if (!persisted) {
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::storage_failure,
+              "manual observation interruption could not be persisted",
+              persisted.error().retryable));
+        }
+        events->insert(events->end(), recovery.events.begin(),
+                       recovery.events.end());
+        event_log = std::move(recovery.event_log);
+        projections = std::move(recovery.projections);
+        plan_projections = std::move(recovery.plan_projections);
+        invocation_ids = std::move(recovery.used_invocation_ids);
       }
 
       std::vector<domain::ToolSpendRecord> interrupted_paid_tools;
