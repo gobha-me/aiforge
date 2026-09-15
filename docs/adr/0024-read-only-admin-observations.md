@@ -797,3 +797,19 @@ This presentation milestone does not attach the dialog to Chat, create a new
 standalone loop or enable log collection, Explain or Kubernetes requests. Those
 application integrations must retain the existing owner-thread session, policy,
 approval and physical worker lifecycle contracts.
+
+## Configured Admin catalog milestone
+
+The process adapter resolves the actual configuration file outcome before
+constructing the Admin catalog. A successfully absent file or ops entry supplies
+the reserved local target. Invalid records, rejected ops diagnostics and file
+load failures refuse with fixed errors; they never silently substitute local.
+The catalog owns immutable validated records and exposes only ID, display name
+and kind. Creating or listing it and obtaining a factory perform no source IO.
+
+Linux entries produce the existing metadata-only native preparation factory
+with the exact owner-reserved configuration revision. Static Kubernetes
+references remain visible metadata but return unsupported until their private
+preparation integration exists; no referenced file is opened by this catalog.
+The strict loader introduces no model lookup, policy changes, worker, broker or
+session writer. Chat ownership and event routing remain a subsequent milestone.

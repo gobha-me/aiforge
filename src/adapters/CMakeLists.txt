@@ -4,6 +4,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   process_admin_execution.cpp
   process_agent.cpp
   context_jsonl.cpp
+  configured_admin_sources.cpp
   conversation_context_dialog.cpp
   process_context.cpp
   audio_device_gate.cpp
