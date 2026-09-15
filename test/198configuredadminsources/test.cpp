@@ -165,10 +165,14 @@ TEST_CASE(
       (*catalog)->factory(id<domain::OpsTargetId>("missing"), revision);
   REQUIRE_FALSE(missing);
   CHECK(missing.error() == SourceError::invalid_result);
-  auto unsupported =
+  auto kubernetes =
       (*catalog)->factory(id<domain::OpsTargetId>("cluster"), revision);
-  REQUIRE_FALSE(unsupported);
-  CHECK(unsupported.error() == SourceError::unsupported);
+  REQUIRE(kubernetes);
+  CHECK((*kubernetes)->guarantees_owned_read_only_preparation());
+  CHECK((*kubernetes)->preparation_identity() ==
+        runtime::OpsSourcePreparationIdentity{
+            id<domain::OpsTargetId>("cluster"), revision,
+            domain::OpsTargetKind::kubernetes});
   const auto invalid_revision = id<domain::OpsConfigurationRevision>(
       std::string(1, static_cast<char>(0xFF)));
   CHECK_FALSE((*catalog)->factory(id<domain::OpsTargetId>("desktop"),
@@ -265,10 +269,11 @@ TEST_CASE(
   REQUIRE((*loaded)->targets().size() == 3);
   CHECK((*loaded)->targets()[2].id.value() == "cluster");
   CHECK((*loaded)->targets()[2].display_name == "Private cluster");
-  auto unsupported =
+  auto kubernetes =
       (*loaded)->factory(id<domain::OpsTargetId>("cluster"),
                          id<domain::OpsConfigurationRevision>("next"));
-  REQUIRE_FALSE(unsupported);
-  CHECK(unsupported.error() == SourceError::unsupported);
+  REQUIRE(kubernetes);
+  CHECK((*kubernetes)->preparation_identity().kind ==
+        domain::OpsTargetKind::kubernetes);
   CHECK(source_creations == 0);
 }

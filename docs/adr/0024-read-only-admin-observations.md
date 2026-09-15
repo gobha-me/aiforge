@@ -809,8 +809,8 @@ and kind. Creating or listing it and obtaining a factory perform no source IO.
 
 Linux entries produce the existing metadata-only native preparation factory
 with the exact owner-reserved configuration revision. Static Kubernetes
-references remain visible metadata but return unsupported until their private
-preparation integration exists; no referenced file is opened by this catalog.
+references produce a metadata-only factory which owns the exact configured
+path, context and namespace; no referenced file is opened by this catalog.
 The strict loader introduces no model lookup, policy changes, worker, broker or
 session writer. Chat ownership and event routing remain a subsequent milestone.
 
@@ -883,3 +883,30 @@ policy remain unchanged by manual availability.
 The initial Chat view supports the controller's Linux health, loaded-services and
 exact service-health operations. Kubernetes catalog preparation, explicit log
 consent, model Explain and standalone Admin TUI remain separate integrations.
+
+### Configured Kubernetes preparation milestone
+
+On Linux, the configured Kubernetes factory loads only its owned absolute source
+path on the existing bounded local-source worker. It traverses each path
+component from the filesystem root without following symlinks, accepts only an
+owner-private regular file of at most 256 KiB, and revalidates the descriptor
+plus the complete visible path after reading, parsing and source construction.
+Replacement or in-place mutation discards the private result. Cancellation and
+the original preparation deadline remain active throughout; a blocked native
+file operation may retain its physical worker slot after logical cancellation.
+Other platforms retain metadata visibility, advertise no owned preparation
+guarantee and return unsupported without source IO.
+
+The already-selected strict parser receives the immutable private byte snapshot
+and exact configured context and namespace. Only embedded static token or client
+certificate/key authentication can construct the existing Kubernetes HTTPS
+source. Ambient kubeconfig, current context, namespace defaults, referenced
+credential files, login/auth helpers, proxy settings and insecure TLS never
+provide fallback. Parser, path and credential diagnostics remain closed enums;
+source paths and credential bytes do not enter neutral bindings or errors.
+
+The resulting binding contains the owner-assigned target and configuration
+revision plus the selected context, explicit namespace, HTTPS endpoint and
+non-secret CA trust identity. Preparation performs no observation or network
+request. Kubernetes controller views/operations, log consent, Explain and the
+standalone Admin TUI remain later milestones.
