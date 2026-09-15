@@ -1,6 +1,7 @@
 #include <aiforge/cli/command_registry.hpp>
 #include <aiforge/config/config.hpp>
 #include <aiforge/config/file_store.hpp>
+#include <aiforge/detail/admin_input.hpp>
 #include <algorithm>
 #include <charconv>
 #include <exception>
@@ -777,26 +778,6 @@ auto video_export_handler(CommandContext& context) -> int {
       context);
 }
 
-auto admin_alphanumeric(char byte) -> bool {
-  return (byte >= 'a' && byte <= 'z') || (byte >= '0' && byte <= '9');
-}
-auto admin_target_label(std::string_view value) -> bool {
-  return !value.empty() && value.size() <= 64 &&
-         admin_alphanumeric(value.front()) &&
-         admin_alphanumeric(value.back()) &&
-         std::ranges::all_of(value, [](char byte) {
-           return admin_alphanumeric(byte) || byte == '-' || byte == '_';
-         });
-}
-auto admin_service_name(std::string_view value) -> bool {
-  return value.size() >= 9 && value.size() <= 255 && value.front() != '-' &&
-         value.ends_with(".service") &&
-         std::ranges::all_of(value, [](char byte) {
-           return admin_alphanumeric(byte) || (byte >= 'A' && byte <= 'Z') ||
-                  byte == '_' || byte == '-' || byte == '.' || byte == '@' ||
-                  byte == ':';
-         });
-}
 auto admin_operation(std::string_view command)
     -> std::optional<AdminCommand::Operation> {
   using Operation = AdminCommand::Operation;
@@ -820,13 +801,14 @@ auto admin_request(const ParsedInvocation& invocation)
   request.operation = *operation;
   const auto target = parsed_text_values(invocation, command + ".target");
   if (target) {
-    if (target->size() != 1 || !admin_target_label(target->front()))
+    if (target->size() != 1 || !detail::valid_admin_target(target->front()))
       return std::unexpected("invalid Admin target");
     request.target = target->front();
   }
   if (*operation == AdminCommand::Operation::service) {
     const auto unit = parsed_text_values(invocation, command + ".unit");
-    if (!unit || unit->size() != 1 || !admin_service_name(unit->front()))
+    if (!unit || unit->size() != 1 ||
+        !detail::valid_admin_service(unit->front()))
       return std::unexpected("invalid Admin service name");
     request.unit = unit->front();
   }

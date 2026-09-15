@@ -1,0 +1,6 @@
+add_executable(197admindialog-test ../main.cpp commands.cpp)
+target_link_libraries(197admindialog-test PRIVATE Catch2::Catch2 ${PROJECT_NAME}::lib)
+if (TARGET ${PROJECT_NAME}::adapters)
+  target_sources(197admindialog-test PRIVATE test.cpp)
+  target_link_libraries(197admindialog-test PRIVATE ${PROJECT_NAME}::adapters)
+endif ()

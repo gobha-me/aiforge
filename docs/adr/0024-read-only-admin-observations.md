@@ -776,3 +776,24 @@ shared private target/unit validators serve CLI, controller and later slash
 input. Manual pumping never drains a model; the application separately delivers
 buffered events through194. This controller alone supplies no dialog, application
 bootstrap, real Chat/SQLite integration proof or completed #226 user journey.
+
+### Admin cached presentation and commands
+
+The first Admin dialog borrows the typed cached controller action port. Widgets
+receive no observation source, provider, worker, store or binding authority.
+Opening, scrolling, drawing, resizing and switching views never collect data.
+Explicit reads and target use dispatch the same typed actions as closed slash
+commands. Toolbar visibility is application presentation state; hiding it does
+not alter grants, selection, cancellation or keyboard access.
+
+The dialog retains bounded formatted committed snapshots with their original
+event and target identity. Service rows carry the displayed session, observation
+event, selection generation and row index into the controller's exact cache
+check. A changed cache cannot silently reinterpret a delayed displayed action.
+Canonical observation formatting retains scope, timestamps, completeness and
+unknown values. Historical presentation does not reconstruct current authority.
+
+This presentation milestone does not attach the dialog to Chat, create a new
+standalone loop or enable log collection, Explain or Kubernetes requests. Those
+application integrations must retain the existing owner-thread session, policy,
+approval and physical worker lifecycle contracts.

@@ -51,6 +51,7 @@ function(_aiforge_validate_termforge_headers target)
     termforge/widgets/dialog.hpp
     termforge/widgets/focus_ring.hpp
     termforge/widgets/list_widget.hpp
+    termforge/widgets/menu_bar.hpp
     termforge/widgets/text_box.hpp
     termforge/widgets/text_input.hpp
   )
