@@ -101,7 +101,7 @@ TEST_CASE("built-in tool profiles have explicit bounded membership",
           "[tool-profile]") {
   const auto profiles = runtime::builtin_tool_profiles();
   REQUIRE(runtime::validate_tool_profiles(profiles));
-  REQUIRE(profiles.size() == 6);
+  REQUIRE(profiles.size() == 7);
   REQUIRE(profiles[0].profile_id == profile_id("essentials"));
   REQUIRE(profiles[0].name == "Essentials");
   REQUIRE(profiles[0].tool_names ==
@@ -130,6 +130,11 @@ TEST_CASE("built-in tool profiles have explicit bounded membership",
   REQUIRE(profiles[4].profile_id == profile_id("off"));
   REQUIRE(profiles[4].name == "Off");
   REQUIRE(profiles[4].tool_names.empty());
+  REQUIRE(profiles[6].profile_id == profile_id("admin"));
+  REQUIRE(profiles[6].name == "Admin");
+  REQUIRE(profiles[6].tool_names == std::vector<std::string>{"ask_user",
+                                                             "propose_memory",
+                                                             "observe_target"});
   REQUIRE(runtime::tool_profile_availability_reason_text(
               runtime::ToolProfileAvailabilityReason::tool_not_registered) ==
           "tool is not registered in this runtime");

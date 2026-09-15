@@ -1,0 +1,6 @@
+add_executable(192admin-test ../main.cpp parser.cpp)
+target_link_libraries(192admin-test PRIVATE Catch2::Catch2 ${PROJECT_NAME}::lib)
+if (TARGET ${PROJECT_NAME}::adapters)
+  target_sources(192admin-test PRIVATE test.cpp failures.cpp)
+  target_link_libraries(192admin-test PRIVATE ${PROJECT_NAME}::adapters)
+endif ()

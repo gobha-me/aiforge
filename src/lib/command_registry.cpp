@@ -777,6 +777,117 @@ auto video_export_handler(CommandContext& context) -> int {
       context);
 }
 
+auto admin_alphanumeric(char byte) -> bool {
+  return (byte >= 'a' && byte <= 'z') || (byte >= '0' && byte <= '9');
+}
+auto admin_target_label(std::string_view value) -> bool {
+  return !value.empty() && value.size() <= 64 &&
+         admin_alphanumeric(value.front()) &&
+         admin_alphanumeric(value.back()) &&
+         std::ranges::all_of(value, [](char byte) {
+           return admin_alphanumeric(byte) || byte == '-' || byte == '_';
+         });
+}
+auto admin_service_name(std::string_view value) -> bool {
+  return value.size() >= 9 && value.size() <= 255 && value.front() != '-' &&
+         value.ends_with(".service") &&
+         std::ranges::all_of(value, [](char byte) {
+           return admin_alphanumeric(byte) || (byte >= 'A' && byte <= 'Z') ||
+                  byte == '_' || byte == '-' || byte == '.' || byte == '@' ||
+                  byte == ':';
+         });
+}
+auto admin_operation(std::string_view command)
+    -> std::optional<AdminCommand::Operation> {
+  using Operation = AdminCommand::Operation;
+  if (command == "admin.targets") return Operation::targets;
+  if (command == "admin.health") return Operation::health;
+  if (command == "admin.services") return Operation::services;
+  if (command == "admin.service") return Operation::service;
+  return std::nullopt;
+}
+auto admin_request(const ParsedInvocation& invocation)
+    -> std::expected<AdminCommand::Request, std::string_view> {
+  if (std::ranges::any_of(invocation.arguments, [](const auto& argument) {
+        return argument.id.starts_with("root.");
+      }))
+    return std::unexpected(
+        "Admin does not accept model or session launch options");
+  const auto& command = invocation.command_path.back();
+  const auto operation = admin_operation(command);
+  if (!operation) return std::unexpected("an Admin subcommand is required");
+  AdminCommand::Request request;
+  request.operation = *operation;
+  const auto target = parsed_text_values(invocation, command + ".target");
+  if (target) {
+    if (target->size() != 1 || !admin_target_label(target->front()))
+      return std::unexpected("invalid Admin target");
+    request.target = target->front();
+  }
+  if (*operation == AdminCommand::Operation::service) {
+    const auto unit = parsed_text_values(invocation, command + ".unit");
+    if (!unit || unit->size() != 1 || !admin_service_name(unit->front()))
+      return std::unexpected("invalid Admin service name");
+    request.unit = unit->front();
+  }
+  if (parsed_argument(invocation, command + ".json") != nullptr)
+    request.format = AdminCommand::OutputFormat::json;
+  return request;
+}
+auto admin_handler(CommandContext& context) -> int {
+  auto request = admin_request(context.invocation);
+  if (!request) {
+    context.error << "aiforge: " << request.error() << '\n';
+    return usage_exit_code;
+  }
+  if (context.environment.admin == nullptr) return unavailable_handler(context);
+  return command_result(context.environment.admin->execute(
+                            std::move(*request), context.environment,
+                            context.output, context.error),
+                        context);
+}
+auto admin_parent_handler(CommandContext& context) -> int {
+  context.error << "aiforge: an Admin subcommand is required\n";
+  return usage_exit_code;
+}
+auto admin_command_spec() -> CommandSpec {
+  const auto leaf = [](std::string id, std::string name, std::string help,
+                       bool target, bool unit) {
+    CommandSpec result{
+        std::move(id), std::move(name), std::move(help), false, {}, {}, {},
+        admin_handler};
+    result.options.push_back(
+        {{result.id + ".json", {"--json"}, ArgumentValueKind::flag, 0, 1},
+         {},
+         "Render a bounded JSON command result."});
+    if (target)
+      result.options.push_back(
+          {{result.id + ".target", {"--target"}, ArgumentValueKind::text, 0, 1},
+           "target-id",
+           "Select a configured target (default: local)."});
+    if (unit)
+      result.positionals.push_back(
+          {{result.id + ".unit", "unit", ArgumentValueKind::text, 1, 1},
+           "Inspect one exact canonical .service unit."});
+    return result;
+  };
+  return {"admin",
+          "admin",
+          "Inspect configured targets without inference.",
+          true,
+          {},
+          {},
+          {leaf("admin.targets", "targets", "List configured target metadata.",
+                false, false),
+           leaf("admin.health", "health", "Observe selected target health.",
+                true, false),
+           leaf("admin.services", "services", "List selected target services.",
+                true, false),
+           leaf("admin.service", "service", "Observe one selected service.",
+                true, true)},
+          admin_parent_handler};
+}
+
 auto agent_handler(CommandContext& context) -> int {
   if (parsed_argument(context.invocation, "agent.jsonl") == nullptr ||
       context.environment.input_is_terminal) {
@@ -1624,6 +1735,7 @@ auto builtin_command_registry() -> const CommandRegistry& {
          {},
          {},
          context_handler},
+        admin_command_spec(),
         {"agent",
          "agent",
          "Run bounded tools noninteractively through JSON Lines.",

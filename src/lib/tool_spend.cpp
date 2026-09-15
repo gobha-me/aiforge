@@ -5,6 +5,7 @@
 #include <string_view>
 #include <utility>
 
+#include <aiforge/detail/utf8_text.hpp>
 #include <aiforge/domain/events.hpp>
 
 namespace aiforge::domain {
@@ -53,6 +54,24 @@ namespace {
     case ToolSpendFinalizationBasis::policy_upper_bound: return true;
   }
   return false;
+}
+
+[[nodiscard]] auto proposal_schema(const ToolProposed& proposal, bool paid)
+    -> std::uint32_t {
+  if (proposal.observation_request) return 3;
+  return paid || proposal.validated_arguments ? 2U : 1U;
+}
+
+[[nodiscard]] auto valid_observation_spend_proposal(
+    const ToolProposed& proposal, bool paid) -> bool {
+  if (!proposal.observation_request) return true;
+  return !paid && !proposal.spend_quote && proposal.validated_arguments &&
+         proposal.validated_arguments->media_type == "application/json" &&
+         !proposal.validated_arguments->data.empty() &&
+         proposal.validated_arguments->data.size() <= 16384 &&
+         detail::is_safe_utf8_text(proposal.validated_arguments->data) &&
+         validate_recorded_ops_request(*proposal.observation_request)
+             .has_value();
 }
 
 } // namespace
@@ -153,10 +172,10 @@ auto ToolSpendLedgerProjection::apply(const RunEvent& event)
       const bool paid =
           std::ranges::find(proposed->declared_effects, Effect::spend) !=
           proposed->declared_effects.end();
-      const auto expected_schema =
-          paid || proposed->validated_arguments ? 2U : 1U;
+      const auto expected_schema = proposal_schema(*proposed, paid);
       if (!event_invocation_matches(event, proposed->invocation_id) ||
           event.metadata.schema_version != expected_schema ||
+          !valid_observation_spend_proposal(*proposed, paid) ||
           paid != proposed->spend_quote.has_value() ||
           (paid && !proposed->validated_arguments) ||
           (proposed->spend_quote &&

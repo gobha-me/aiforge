@@ -30,9 +30,18 @@ class OpsObservationTool final : public ToolExecutor {
   [[nodiscard]] auto prepare(const domain::InvocationId& invocation,
                              const OpsObservationIntent& intent) const
       -> std::expected<ValidatedToolArguments, ToolExecutionError>;
+  // Owner-thread only, no IO. Binds the frozen endpoint to the kernel's broker
+  // and rechecks exact normalized/invocation proof against current authority.
+  [[nodiscard]] auto check_current(const OpsObservationBroker& broker,
+                                   const domain::InvocationId& invocation,
+                                   const ValidatedToolArguments& arguments)
+      const -> std::expected<void, ToolExecutionError>;
   [[nodiscard]] auto start(ToolInvocation invocation, std::stop_token stop)
       -> std::expected<std::unique_ptr<ToolExecutionStream>,
                        ToolExecutionError> override;
+  // Pure metadata check used when replacing the reserved native registration.
+  [[nodiscard]] auto matches_registration(
+      const RegisteredTool& value) const noexcept -> bool;
 
  private:
   friend auto register_ops_observation_tool(

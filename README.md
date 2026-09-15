@@ -35,6 +35,10 @@ context.
 - GCC 13+ or Clang 17+ with a C++23 standard library
 - Git when CMake must fetch dependencies
 - ALSA development headers on Linux for the default local-audio build
+- libsystemd development headers/library >=233 and pkg-config for Linux adapters
+  (`libsystemd-dev` on Debian/Ubuntu); this platform prerequisite has no source fallback
+- Expat development headers and pkg-config when fetching the private Linux
+  libdbus client dependency
 
 AIForge uses CMake only for dependencies. A configured package is preferred,
 then a sibling checkout, with `FetchContent` as the fallback. Adapter builds use
@@ -52,6 +56,17 @@ Top-level Linux builds also enable the private RtAudio 6.0.1 ALSA playback and
 capture adapters by default. Set `aiforge_AUDIO_PLAYBACK=OFF` and
 `aiforge_AUDIO_CAPTURE=OFF` for a device-free build; core and consumed
 subdirectory builds remain device-dependency free by default.
+
+Linux adapter builds also consume the private libdbus client for the upcoming
+systemd observation boundary. CMake prefers a DBus1 1.16.2+ package and otherwise
+builds the pinned 1.16.2 shared client; it does not build daemon tools as part of
+the default target. Consumers that deploy this boundary must provide a matching
+`libdbus-1.so.3` (1.16.2 or newer) through their runtime library search path.
+Build-tree CMake consumers use the selected library; copying an executable alone
+does not package that dependency. AIForge currently has no application install
+or library-export rules. The transport checks the loaded library version before
+opening its socket. Service observations remain unavailable until the neutral
+service decoder and source integration are complete.
 
 Durable session storage uses SQLite 3 behind a neutral storage port. CMake
 prefers an installed SQLite 3.45.1 or newer and otherwise builds the pinned
@@ -1188,6 +1203,54 @@ cmake -B build-asan -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain/address.cmake
 cmake -B build-tsan -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain/thread.cmake
 ```
 
+## Read-only Admin commands
+
+Inspect the current execution environment without starting a model:
+
+```bash
+aiforge admin targets
+aiforge admin health
+aiforge admin services --target local
+aiforge admin service systemd-journald.service --json
+```
+
+Each read creates a fresh durable session and prints only its committed result.
+Text output includes target scope, timestamps in UTC epoch milliseconds,
+completeness and typed values. `--json` provides a versioned command envelope.
+Partial evidence remains partial; a failed read exits unsuccessfully. Target
+listing reads configuration metadata without preparing a source or opening the
+session store. The Observe preset allows only bounded native reads; logs are
+disabled. These commands do not invoke inference, shell commands or mutations.
+
+The selected Linux source must prove its execution identity. A container is not
+reported as its host, and systemd reads refuse when the current account cannot
+verify the manager's namespace identity. A five-second logical deadline covers
+source preparation and observation; stalled OS calls or cleanup can outlast it.
+Optional TUI controls and explicit model explanation remain follow-on work.
+
+Owner-configured Admin target metadata uses `ops.targets` in the configuration
+file. For example:
+
+```json
+{
+  "ops": {
+    "targets": [
+      {"id": "cluster1", "display_name": "Cluster one", "source": {
+        "kind": "kubernetes_static",
+        "config_file": "/home/user/.kube/cluster1",
+        "context": "cluster1",
+        "namespace": "default"
+      }}
+    ]
+  }
+}
+```
+
+The reserved `local` target identifies the current execution environment.
+Catalog entries only describe selections: they do not open the referenced file,
+connect to a cluster, prove host scope or grant log access. Kubernetes collection is not yet available. Kubernetes references require an absolute path and explicit context and namespace; credentials belong
+in the separately validated kubeconfig, never inline in `ops.targets`.
+
 ## Development layout
 
 - `include/aiforge/` contains the provider-independent public API.
@@ -1204,3 +1267,12 @@ or scripting-runtime types. Future adapters depend inward on the core.
 
 AIForge is available under the BSD 3-Clause License; see
 [`LICENSE.md`](LICENSE.md).
+
+The adapter build consumes the reviewed Venice HTTP transport contract from
+merged source `339729e945d0b3d6584702ecf49f013c1ad6779a`. An installed Venice
+package must be at least 0.29.18 and expose that capability; an older local sibling
+or incompatible preexisting target produces a configure error. All adapters use
+one header-only cpp-httplib 0.51.x target with OpenSSL 3 and synchronous resolution.
+Venice also exports its c-ares dependency; this update introduces no AIForge
+resolver runtime or Kubernetes collector. Installed package versions alone do
+not replace the actual header/API checks.

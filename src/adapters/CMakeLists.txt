@@ -1,5 +1,7 @@
 add_library(${PROJECT_NAME}_adapters STATIC
   agent_transport.cpp
+  process_admin.cpp
+  process_admin_execution.cpp
   process_agent.cpp
   context_jsonl.cpp
   conversation_context_dialog.cpp
@@ -13,7 +15,10 @@ add_library(${PROJECT_NAME}_adapters STATIC
   filesystem_user_global_instruction_source.cpp
   git_repository_snapshot_source.cpp
   json_model_catalog_cache.cpp
+  kubernetes_observation_projection.cpp
+  kubernetes_observation_projection_sax.cpp
   linux_process_launcher.cpp
+  linux_ops_source_preparation.cpp
   linux_ops_observation_source.cpp
   local_file_source.cpp
   local_source_browser_dialog.cpp
@@ -36,6 +41,9 @@ add_library(${PROJECT_NAME}_adapters STATIC
   process_video.cpp
   process_video_production.cpp
   secure_artifact_export.cpp
+  static_kubernetes_config.cpp
+  static_kubernetes_config_frontends.cpp
+  static_kubernetes_config_parser.cpp
   process_draft_editor.cpp
   process_interactive.cpp
   process_image.cpp
@@ -53,6 +61,14 @@ add_library(${PROJECT_NAME}_adapters STATIC
   venice_model_catalog_source.cpp
 )
 add_library(${PROJECT_NAME}::adapters ALIAS ${PROJECT_NAME}_adapters)
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_sources(${PROJECT_NAME}_adapters PRIVATE
+    linux_systemd_bus.cpp linux_systemd_platform.cpp
+    linux_systemd_capture.cpp linux_systemd_services.cpp
+    linux_journal_reader.cpp linux_journal_native.cpp)
+  target_link_libraries(${PROJECT_NAME}_adapters PRIVATE dbus-1 SystemdJournal::libsystemd)
+endif ()
 
 if (${PROJECT_NAME}_AUDIO_PLAYBACK)
   target_sources(${PROJECT_NAME}_adapters PRIVATE rtaudio_playback.cpp)
@@ -78,6 +94,7 @@ target_link_libraries(${PROJECT_NAME}_adapters
   PUBLIC ${PROJECT_NAME}::lib
   PUBLIC termforge::lib
   PRIVATE nlohmann_json::nlohmann_json
+  PRIVATE yaml-cpp::yaml-cpp
   PRIVATE rasterforge::lib
   PRIVATE venice-cpp::lib
 )

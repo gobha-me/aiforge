@@ -117,6 +117,27 @@ class ContextCommand {
       -> std::expected<void, CommandFailure> = 0;
 };
 
+// Provider-free manual observations. The adapter validates the closed request
+// again before catalog/source/session work; command parsing grants no
+// authority.
+class AdminCommand {
+ public:
+  virtual ~AdminCommand() = default;
+  enum class Operation { targets, health, services, service };
+  enum class OutputFormat { text, json };
+  struct Request {
+    Operation operation{Operation::targets};
+    std::string target{"local"};
+    std::optional<std::string> unit{};
+    OutputFormat format{OutputFormat::text};
+    auto operator==(const Request&) const -> bool = default;
+  };
+  [[nodiscard]] virtual auto execute(Request request,
+                                     CommandEnvironment& environment,
+                                     std::ostream& output, std::ostream& error)
+      -> std::expected<void, CommandFailure> = 0;
+};
+
 class ModelsCommand {
  public:
   virtual ~ModelsCommand() = default;
@@ -285,6 +306,7 @@ struct CommandEnvironment {
   VideoCommand* video{};
   AgentCommand* agent{};
   ContextCommand* context{};
+  AdminCommand* admin{};
 };
 
 struct CommandContext {

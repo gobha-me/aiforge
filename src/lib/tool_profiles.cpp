@@ -274,6 +274,9 @@ const std::array kBuiltinProfiles{
     ToolProfile{make_id("dev"),
                 "Dev",
                 {"ask_user", "propose_memory", "read_repository_file", "run_process"}},
+    ToolProfile{make_id("admin"),
+                "Admin",
+                {"ask_user", "propose_memory", "observe_target"}},
 };
 // clang-format on
 

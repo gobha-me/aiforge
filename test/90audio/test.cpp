@@ -227,8 +227,8 @@ class AudioServer final {
         [this](const httplib::Request& request, httplib::Response& response) {
           {
             std::lock_guard lock(m_mutex);
-            const auto file = request.files.find("file");
-            if (file != request.files.end()) {
+            const auto file = request.form.files.find("file");
+            if (file != request.form.files.end()) {
               m_transcription_filename = file->second.filename;
               m_transcription_media_type = file->second.content_type;
               m_transcription_content = file->second.content;

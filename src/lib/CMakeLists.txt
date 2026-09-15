@@ -1,4 +1,5 @@
 add_library(${PROJECT_NAME}_lib STATIC
+  admin_controller.cpp
   agent.cpp
   agent_protocol.cpp
   agent_records.cpp
@@ -29,6 +30,8 @@ add_library(${PROJECT_NAME}_lib STATIC
   conversation_summary_projection.cpp
   conversation_summary_sources.cpp
   config.cpp
+  ops_target_config.cpp
+  json_ops_targets.cpp
   config_provenance.cpp
   credential.cpp
   context_builder.cpp
@@ -58,7 +61,10 @@ add_library(${PROJECT_NAME}_lib STATIC
   money.cpp
   mp4.cpp
   one_shot.cpp
+  manual_ops_session.cpp
+  ops_session.cpp
   ops_target.cpp
+  ops_source_preparation.cpp
   ops_observation.cpp
   ops_observation_broker.cpp
   ops_observation_json.cpp

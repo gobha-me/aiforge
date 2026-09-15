@@ -1282,6 +1282,7 @@ TEST_CASE("config CLI keeps content and diagnostics on their streams",
                     "tools.models.maximum_profiles\t<unset>\tunset\n"
                     "tools.personas.maximum_profiles\t<unset>\tunset\n"
                     "tools.image.model\t<unset>\tunset\n"
+                    "ops.targets\t<unset>\tunset\n"
                     "tools.approval.automatic_rules\t<unset>\tunset\n");
   REQUIRE(error.empty());
 
@@ -1352,6 +1353,7 @@ TEST_CASE("malformed files are diagnostic for reads but never overwritten",
                     "tools.models.maximum_profiles\t<unset>\tunset\n"
                     "tools.personas.maximum_profiles\t<unset>\tunset\n"
                     "tools.image.model\t<unset>\tunset\n"
+                    "ops.targets\t<unset>\tunset\n"
                     "tools.approval.automatic_rules\t<unset>\tunset\n");
   REQUIRE(error.find("warning") != std::string::npos);
 
@@ -1404,6 +1406,7 @@ TEST_CASE("read-only resolution survives an unavailable config home",
                     "tools.models.maximum_profiles\t<unset>\tunset\n"
                     "tools.personas.maximum_profiles\t<unset>\tunset\n"
                     "tools.image.model\t<unset>\tunset\n"
+                    "ops.targets\t<unset>\tunset\n"
                     "tools.approval.automatic_rules\t<unset>\tunset\n");
   REQUIRE(error.find("warning") != std::string::npos);
   REQUIRE(error.find("environment-model") == std::string::npos);

@@ -108,7 +108,7 @@ auto obtain_receipt(Fixture& fixture) -> runtime::OpsObservationReceipt {
 } // namespace
 
 TEST_CASE(
-    "native Ops kernel dispatch stays unavailable until durable integration") {
+    "native Ops kernel dispatch without an owning broker performs no IO") {
   Fixture fixture;
   auto request = backend_request(fixture.registry);
   testing::ScriptedBackend backend{

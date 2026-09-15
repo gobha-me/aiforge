@@ -106,9 +106,22 @@ class OpsObservationBroker final {
   [[nodiscard]] auto select(domain::OpsObservationAuthority authority,
                             std::shared_ptr<OpsObservationSource> source)
       -> std::expected<void, OpsBrokerFailure>;
+  // Pure preparation gate for an owner-thread selection transaction. It also
+  // verifies that the endpoint belongs to this exact active session issuer.
+  [[nodiscard]] auto preflight_selection(
+      const OpsObservationEndpoint& endpoint,
+      const domain::OpsObservationAuthority& authority,
+      const std::shared_ptr<OpsObservationSource>& source) const
+      -> std::expected<void, OpsBrokerFailure>;
   [[nodiscard]] auto service(std::chrono::steady_clock::time_point now =
                                  std::chrono::steady_clock::now())
       -> std::expected<void, OpsBrokerFailure>;
+  // Pure owner-thread admission/launch gate. A matching session label alone
+  // cannot authorize an endpoint issued before replacement or by another
+  // broker.
+  [[nodiscard]] auto preflight(const OpsObservationEndpoint& endpoint,
+                               const domain::OpsObservationRequest& request)
+      const -> std::expected<void, OpsBrokerFailure>;
   // Pure owner-thread final publication gate: exact invocation/request and live
   // authority, no IO. Mismatch does not consume another invocation's receipt.
   // The caller records returned evidence atomically; this API does not persist.
@@ -133,8 +146,9 @@ class OpsObservationBroker final {
   std::unique_ptr<Impl> m_impl;
 };
 
-// Close the session endpoint before destroying/joining its kernel. Closing
-// wakes executor waiters and discards physical delivery without joining source
+// The application owns session activation and shutdown. A kernel stops its
+// captured operation token before joining and must not close a replacement
+// session's endpoint. Closing wakes all executor waiters without joining source
 // IO. A source's last shared owner can nevertheless run its destructor here;
 // caller-owned source graphs remain the caller's cleanup responsibility. This
 // API does not promise that arbitrary source destructors are nonblocking.

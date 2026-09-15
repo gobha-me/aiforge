@@ -129,11 +129,11 @@ TEST_CASE("Linux health refuses unsupported or foreign requests before IO",
           "[linux-ops]") {
   Fixture fixture;
   auto value = fixture.request();
-  SECTION("unsupported services") {
-    value.operation = domain::OpsObservationOperation::linux_services;
+  SECTION("logs without exact service identity") {
+    value.operation = domain::OpsObservationOperation::linux_service_logs;
     auto result = fixture.source->observe(value);
     REQUIRE_FALSE(result);
-    REQUIRE(result.error() == Error::unsupported);
+    REQUIRE(result.error() == Error::invalid_result);
   }
   SECTION("foreign target") {
     value.target.configuration_revision =
@@ -365,5 +365,4 @@ TEST_CASE(
   REQUIRE(health(*result).health == domain::OpsHealthState::unknown);
   REQUIRE_FALSE(health(*result).active_services);
   REQUIRE_FALSE(health(*result).failed_services);
-  REQUIRE(fixture.source->supported_operations.size() == 1);
 }

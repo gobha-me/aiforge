@@ -115,6 +115,11 @@ auto linux_identity(const LinuxOpsIdentity& value) -> bool {
   return scope && uuid(value.boot_id) && value.pid_namespace != 0 &&
          value.mount_namespace != 0;
 }
+auto kubernetes_identity(const KubernetesOpsIdentity& value) -> bool {
+  return text(value.context_name, 256) && label(value.namespace_name, 63) &&
+         host(value.endpoint.host) && value.endpoint.port != 0 &&
+         text(value.trust_identity, 256);
+}
 auto target(const OpsTargetBinding& value) -> Status {
   if (!identifier(value.target_id) || !identifier(value.configuration_revision))
     return fail(Code::invalid_target, "Ops target identity is invalid");
@@ -122,10 +127,7 @@ auto target(const OpsTargetBinding& value) -> Status {
     if (linux_identity(*linux)) return {};
   } else if (const auto* kube =
                  std::get_if<KubernetesOpsIdentity>(&value.identity)) {
-    if (text(kube->context_name, 256) && label(kube->namespace_name, 63) &&
-        host(kube->endpoint.host) && kube->endpoint.port != 0 &&
-        text(kube->trust_identity, 256))
-      return {};
+    if (kubernetes_identity(*kube)) return {};
   } else if (const auto* ceph = std::get_if<CephOpsIdentity>(&value.identity)) {
     if (text(ceph->cluster_identity, 128)) return {};
   }
@@ -335,6 +337,15 @@ auto ops_target_kind(const OpsTargetBinding& target) noexcept
 auto validate_ops_target_binding(const OpsTargetBinding& value) -> Status {
   try {
     return target(value);
+  } catch (...) {
+    return fail(Code::internal_failure, "Ops target validation failed");
+  }
+}
+auto validate_kubernetes_ops_identity(const KubernetesOpsIdentity& value)
+    -> Status {
+  try {
+    if (kubernetes_identity(value)) return {};
+    return fail(Code::invalid_target, "Ops Kubernetes identity is invalid");
   } catch (...) {
     return fail(Code::internal_failure, "Ops target validation failed");
   }

@@ -64,6 +64,8 @@ namespace {
       return std::holds_alternative<ConfigTextMap>(value);
     case ConfigValueKind::automatic_approval_rules:
       return std::holds_alternative<AutomaticApprovalRulesConfig>(value);
+    case ConfigValueKind::ops_targets:
+      return std::holds_alternative<OpsTargetsConfig>(value);
   }
   return false;
 }
@@ -245,6 +247,8 @@ namespace {
       }
     }
   }
+  if (const auto* targets = std::get_if<OpsTargetsConfig>(&value))
+    return validate_ops_targets(*targets, spec, source);
   if (const auto* rules = std::get_if<AutomaticApprovalRulesConfig>(&value);
       rules != nullptr && !valid_automatic_approval_rules(*rules, spec)) {
     return std::unexpected(
@@ -428,7 +432,8 @@ auto parse_config_value(const ConfigKeySpec& spec,
   // Structured values have no delimiter-based command-line or environment
   // grammar. They are accepted only as native values by the JSON adapter.
   if (spec.value_kind == ConfigValueKind::text_map ||
-      spec.value_kind == ConfigValueKind::automatic_approval_rules) {
+      spec.value_kind == ConfigValueKind::automatic_approval_rules ||
+      spec.value_kind == ConfigValueKind::ops_targets) {
     return invalid();
   }
   if (spec.value_kind != ConfigValueKind::text_list && values.size() != 1) {
@@ -476,13 +481,27 @@ auto parse_config_value(const ConfigKeySpec& spec,
       break;
     }
     case ConfigValueKind::text_map:
-    case ConfigValueKind::automatic_approval_rules: return invalid();
+    case ConfigValueKind::automatic_approval_rules:
+    case ConfigValueKind::ops_targets: return invalid();
   }
   if (auto valid = validate_value(spec, parsed, source); !valid) {
     return std::unexpected(std::move(valid.error()));
   }
   return parsed;
 }
+
+namespace {
+auto format_text_map(const ConfigTextMap& entries) -> std::string {
+  std::string result;
+  for (const auto& entry : entries) {
+    if (!result.empty()) result.append(",");
+    result.append(entry.key);
+    result.append("=");
+    result.append(entry.value);
+  }
+  return result;
+}
+} // namespace
 
 // clang-format off
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Closed variants retain explicit deterministic text formats.
@@ -502,18 +521,14 @@ auto format_config_value(const ConfigValue& value) -> std::string {
           }
           return result;
         } else if constexpr (std::same_as<Value, ConfigTextMap>) {
-          std::string result;
-          for (const auto& entry : concrete) {
-            if (!result.empty()) result.append(",");
-            result.append(entry.key);
-            result.append("=");
-            result.append(entry.value);
-          }
-          return result;
+          return format_text_map(concrete);
         } else if constexpr (std::same_as<Value,
                                           AutomaticApprovalRulesConfig>) {
           return std::to_string(concrete.rules.size()) +
                  (concrete.rules.size() == 1U ? " rule" : " rules");
+        } else if constexpr (std::same_as<Value, OpsTargetsConfig>) {
+          return std::to_string(concrete.targets.size()) +
+                 " configured targets";
         } else {
           return std::to_string(concrete);
         }
@@ -791,6 +806,8 @@ auto builtin_config_registry() -> const ConfigRegistry& {
       {std::string{image_tool_model_key}, ConfigValueKind::text,
        std::string{"AIFORGE_TOOLS_IMAGE_MODEL"}, std::nullopt, false, true,
        domain::ModelId::max_size, 1},
+      {std::string{ops_targets_key}, ConfigValueKind::ops_targets, std::nullopt,
+       std::nullopt, false, true, std::size_t{64} * 1024U, 32},
       {std::string{automatic_approval_rules_key},
        ConfigValueKind::automatic_approval_rules, std::nullopt, std::nullopt,
        false, true, std::size_t{64U} * 1024U, 256},
