@@ -64,6 +64,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   one_shot.cpp
   manual_ops_session.cpp
   ops_session.cpp
+  ops_log_consent.cpp
   ops_target.cpp
   ops_source_preparation.cpp
   ops_observation.cpp

@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace fixture {
 using Source = aiforge::adapters::KubernetesOpsObservationSource;
@@ -37,6 +38,9 @@ struct PeerOptions {
 class Peer final {
  public:
   explicit Peer(PeerOptions options);
+  [[nodiscard]] static auto sequence(std::vector<std::string> responses,
+                                     unsigned stall_body_connection = 0)
+      -> Peer;
   ~Peer();
   Peer(const Peer&) = delete;
   auto operator=(const Peer&) -> Peer& = delete;
@@ -46,13 +50,17 @@ class Peer final {
   [[nodiscard]] auto authorized() const noexcept -> bool;
   [[nodiscard]] auto standard_headers() const noexcept -> bool;
   [[nodiscard]] auto request_line() const -> std::string;
+  [[nodiscard]] auto request_lines() const -> std::vector<std::string>;
 
  private:
   struct Impl;
+  explicit Peer(std::unique_ptr<Impl> impl);
   std::unique_ptr<Impl> m_impl;
 };
 [[nodiscard]] auto response(std::string body, std::string headers = {},
                             int status = 200) -> std::string;
+[[nodiscard]] auto text_response(std::string body, std::string headers = {},
+                                 int status = 200) -> std::string;
 [[nodiscard]] auto pod() -> std::string;
 [[nodiscard]] auto list(bool events = false) -> std::string;
 [[nodiscard]] auto configuration(std::uint16_t port, bool certificate = false,

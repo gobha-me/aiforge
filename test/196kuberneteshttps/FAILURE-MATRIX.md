@@ -6,8 +6,8 @@
    reader, socket, DNS, thread or provider constructor. Parsed but invalid X.509
    material may create the metadata owner; observe must refuse it before connect.
 2. Admission: pre-cancel, malformed limits/resource, foreign target/revision,
-   namespace/endpoint/trust mismatch and unsupported logs/Linux operations issue
-   zero TLS/network calls. Valid lists require monostate. Exact Pod health
+   namespace/endpoint/trust mismatch and unsupported Linux operations issue zero
+   TLS/network calls. Valid lists require monostate. Exact Pod health
    retains exact UID/container constraints. Events attest the exact
    Pod namespace/name/UID, with no container runtime attestation.
 3. TLS: valid unrelated root, wrong DNS/IP SAN, expired server cert, missing/invalid
@@ -48,7 +48,15 @@
    proves cancelled/deadline work still occupies its LocalSourceWorker slot until
    the retained operation returns. No real hanging DNS or kernel fault is needed;
    real loopback TLS proves the actual streaming/cancellation path separately.
-10. Happy path last: Pod inventory, exact Pod/container health, namespace events
+10. Pod logs: reject an absent exact container before native I/O, then prove Pod
+    UID and selected container runtime before and after one bounded text read
+    under the original deadline. Bounded RFC3339 fractions and numeric zones
+    parse; malformed/out-of-window timestamps, controls, excess bytes/lines,
+    known credentials, replacement, log-specific HTTP metadata/framing/errors/
+    redirects and cancellation at either private or final-attestation reads
+    discard private text without publishing evidence. Exact byte/line bounds
+    succeed.
+11. Happy path last: Pod inventory, exact Pod/container health, namespace events
     and exact-Pod events produce191-validated neutral observations with the exact
     original request and one real list/object resourceVersion. Empty validated
     lists are actual successful empty evidence; missing/failed HTTP is never an

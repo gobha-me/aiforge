@@ -22,6 +22,15 @@ class KubernetesCredentialExclusion final {
       const domain::KubernetesPodIdentity& value) const noexcept -> bool;
   [[nodiscard]] auto contains(
       const domain::KubernetesObservedResource& value) const noexcept -> bool;
+  [[nodiscard]] auto contains(
+      const domain::KubernetesWorkloadsObservation& value) const noexcept
+      -> bool;
+  [[nodiscard]] auto contains(
+      const domain::KubernetesPodObservation& value) const noexcept -> bool;
+  [[nodiscard]] auto contains(
+      const domain::KubernetesEventsObservation& value) const noexcept -> bool;
+  [[nodiscard]] auto contains(
+      const domain::OpsLogObservation& value) const noexcept -> bool;
   StaticKubernetesTlsView m_material;
   std::stop_token m_stop;
 };

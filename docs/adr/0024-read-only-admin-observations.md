@@ -63,6 +63,36 @@ retains its original provenance and is not erased or treated as a permission to
 collect or fetch more text. Limits apply to active, retired and undelivered work
 until physical resources have been released.
 
+The initial consent owner is deliberately process-local and starts only from a
+disabled, empty policy for one exact broker activation. An explicit exact-source
+change must match the current session, complete target binding, selection
+generation and log revision. Each effective enable or disable advances both
+revisions before the new immutable observation authority can be rebound. The
+broker checks the activation-bound current consent before selection, source
+dispatch and publication, so reusing the same session label, changing consent
+during a read or exhausting its revisions cannot revive or retain an enabled
+authority. Every successful broker selection which is not the exact current
+consent snapshot revokes the process-local issuer and clears its sources. A later
+target-selection surface must replace consent with the newer disabled target
+before binding it; a log-free bind cannot leave an old target's consent object
+usable. Deactivation, reactivation and revision exhaustion revoke the issuer too.
+
+The Kubernetes Pod-log source performs three finite HTTPS reads under the
+original request deadline: exact Pod status, bounded timestamped container log,
+then exact Pod status again. Both status responses must prove the requested Pod
+UID and selected container runtime identity. The text response is discarded on
+replacement, cancellation, deadline, malformed/out-of-window timestamps,
+line/byte overflow or recognized configured credential material. The API path
+and query are closed and include the exact namespace, Pod, container, time, line
+and byte bounds; no follow, previous-container, selector or arbitrary option is
+accepted.
+
+This is a runtime and adapter foundation. It does not itself expose a command,
+dialog or controller action that asks the user for log consent. A later surface
+must start the activation-bound consent owner, apply an explicit user decision
+for one exact source and rebind the returned authority; constructing or loading
+a domain authority alone cannot enable broker effects.
+
 ## Source and credential custody
 
 Production sources implement a neutral typed observation port. The initial
