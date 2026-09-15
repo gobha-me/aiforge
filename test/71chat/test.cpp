@@ -1889,12 +1889,8 @@ TEST_CASE("interactive persona memory binds per run and never leaks authority",
   MemoryProposalBackend backend;
   MemoryStore store;
   const auto alpha = persona_document("Persona alpha");
-  const domain::PersonaDocument beta{
-      {make_id<domain::PersonaId>("persona:beta"),
-       "beta",
-       "personas/beta.md",
-       {"sha256", std::string(64, 'b'), std::size_t{12}}},
-      "Persona beta"};
+  const auto beta =
+      named_persona_document("persona:beta", "beta", "Persona beta");
   testing::ScriptedPersonaSource personas{{},
                                           {{"reviewer", alpha},
                                            {"reviewer", alpha},

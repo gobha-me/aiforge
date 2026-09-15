@@ -4,6 +4,7 @@
 #include <expected>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,7 @@ inline constexpr std::size_t maximum_ops_observation_content_bytes =
 enum class OpsHistoryErrorCode {
   invalid_history,
   resource_exhausted,
+  cancelled,
   internal_failure
 };
 struct OpsHistoryError {
@@ -55,7 +57,8 @@ struct OpsHistorySnapshot {
 // that remains the runtime argument adapter's separate admission obligation.
 [[nodiscard]] auto recorded_ops_observations(
     const domain::SessionEventLog& log,
-    std::span<const domain::RunEvent> prospective_suffix = {})
+    std::span<const domain::RunEvent> prospective_suffix = {},
+    std::stop_token stop = {})
     -> std::expected<OpsHistorySnapshot, OpsHistoryError>;
 
 // Version-1 deterministic, bounded, single-TextBlock projection of validated

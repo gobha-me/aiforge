@@ -504,6 +504,8 @@ auto all_payloads() -> std::vector<domain::RunEventPayload> {
       domain::InferenceFinished{inference, domain::FinishReason::tool_call},
       domain::InferenceFailed{inference, error},
       domain::InferenceCancelled{inference, std::string{"cancelled"}},
+      domain::OpsObservationExplanationSelected{
+          make_id<domain::EventId>("observation-event")},
       domain::ToolProposed{invocation,
                            "read",
                            {"application/json", "{}"},
@@ -1212,6 +1214,32 @@ TEST_CASE("all typed payloads and opaque future payloads round trip",
   REQUIRE_FALSE(rejected);
   REQUIRE(rejected.error().code ==
           storage::SessionStoreErrorCode::invalid_argument);
+}
+
+TEST_CASE("Ops Explain selection codec rejects noncanonical fields",
+          "[storage][sqlite][codec][ops][explain][failure]") {
+  TemporaryDirectory temporary;
+  const auto path = temporary.path() / "aiforge" / "sessions.sqlite3";
+  auto store = open_store(path);
+  const auto session = create(*store, "ops-explain-codec", 100);
+  const auto selected =
+      event(1,
+            domain::OpsObservationExplanationSelected{
+                make_id<domain::EventId>("observation-event")},
+            "ops-explain-selection");
+  REQUIRE(store->append_events(session, std::array{selected}));
+  const auto replayed = store->replay_events(session);
+  REQUIRE(replayed);
+  CHECK(*replayed == std::vector<domain::RunEvent>{selected});
+
+  store.reset();
+  execute_sql(path, "UPDATE events SET payload_json=json_set(payload_json,"
+                    "'$.unexpected',true) "
+                    "WHERE event_id='ops-explain-selection'");
+  store = open_store(path);
+  const auto corrupt = store->replay_events(session);
+  REQUIRE_FALSE(corrupt);
+  CHECK(corrupt.error().code == storage::SessionStoreErrorCode::corrupt);
 }
 
 TEST_CASE("schema-v1 memory codecs retain global and project owners",

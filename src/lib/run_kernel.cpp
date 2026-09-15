@@ -12,6 +12,7 @@
 #include <aiforge/runtime/conversation_summary_generation.hpp>
 #include <aiforge/runtime/conversation_summary_projection.hpp>
 #include <aiforge/runtime/inference_spend.hpp>
+#include <aiforge/runtime/ops_explanation.hpp>
 #include <aiforge/runtime/ops_observation_history.hpp>
 #include <aiforge/runtime/ops_observation_tool.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
@@ -833,16 +834,23 @@ using WorkerUpdate =
       !domain::validate_user_global_instruction_reference(*expected)) {
     return false;
   }
+  const auto entry_id =
+      domain::ContextEntryId::from("user-global-instruction-entry");
+  const auto message_id =
+      domain::MessageId::from("user-global-instruction-message");
+  if (!entry_id || !message_id) return false;
   const auto found = std::ranges::find_if(
       context.entries, [](const domain::ContextEntry& entry) {
         return entry.kind == domain::ContextEntryKind::instruction &&
                entry.instruction_layer == domain::InstructionLayer::user_global;
       });
-  if (found == context.entries.end() ||
+  if (found == context.entries.end() || found->entry_id != *entry_id ||
+      found->message.message_id != *message_id ||
       found->provenance.source_id != expected->source_id ||
       found->provenance.source_location != expected->source_location ||
       found->provenance.digest != expected->content_digest.algorithm + ":" +
                                       expected->content_digest.value ||
+      found->specificity != 0 || found->order == 0 ||
       found->message.role != domain::Role::system ||
       found->message.invocation_id || !found->message.tool_calls.empty() ||
       found->message.content.size() != 1) {
@@ -856,8 +864,19 @@ using WorkerUpdate =
   }
   detail::Sha256 digest;
   digest.update(std::as_bytes(std::span{text->text.data(), text->text.size()}));
+  const auto admitted = std::ranges::count_if(
+      context.decisions, [&](const domain::ContextDecisionRecord& decision) {
+        return decision.entry_id == found->entry_id &&
+               decision.decision == domain::ContextDecision::admitted &&
+               !decision.decided_by_entry_id;
+      });
+  const auto decisions = std::ranges::count_if(
+      context.decisions, [&](const domain::ContextDecisionRecord& decision) {
+        return decision.entry_id == found->entry_id;
+      });
   return expected->content_digest.algorithm == "sha256" &&
-         digest.finish() == expected->content_digest.value;
+         digest.finish() == expected->content_digest.value && admitted == 1 &&
+         decisions == 1;
 }
 
 [[nodiscard]] auto recorded_user_global_instruction(
@@ -899,21 +918,27 @@ using WorkerUpdate =
   if (expected->action == domain::PersonaSelectionAction::disabled) {
     return count == 0;
   }
-  if (count != 1) return false;
+  if (count != 1 || !expected->persona) return false;
   const auto& reference = *expected->persona;
+  const auto entry_id = domain::ContextEntryId::from(
+      "entry:" + std::string{reference.persona_id.value()});
+  const auto message_id = domain::MessageId::from(
+      "message:" + std::string{reference.persona_id.value()});
   const auto source_id = domain::ContextSourceId::from(
       "source:" + std::string{reference.persona_id.value()});
-  if (!source_id) return false;
+  if (!entry_id || !message_id || !source_id) return false;
   const auto found = std::ranges::find_if(
       context.entries, [](const domain::ContextEntry& entry) {
         return entry.kind == domain::ContextEntryKind::instruction &&
                entry.instruction_layer == domain::InstructionLayer::persona;
       });
-  if (found == context.entries.end() ||
+  if (found == context.entries.end() || found->entry_id != *entry_id ||
+      found->message.message_id != *message_id ||
       found->provenance.source_id != *source_id ||
       found->provenance.source_location != reference.source_location ||
       found->provenance.digest != reference.content_digest.algorithm + ":" +
                                       reference.content_digest.value ||
+      found->specificity != 0 || found->order == 0 ||
       found->message.role != domain::Role::system ||
       found->message.invocation_id || !found->message.tool_calls.empty() ||
       found->message.content.size() != 1) {
@@ -926,8 +951,20 @@ using WorkerUpdate =
     return false;
   detail::Sha256 digest;
   digest.update(std::as_bytes(std::span{text->text.data(), text->text.size()}));
+  const auto admitted = std::ranges::count_if(
+      context.decisions, [&](const domain::ContextDecisionRecord& decision) {
+        return decision.entry_id == found->entry_id &&
+               decision.decision == domain::ContextDecision::admitted &&
+               !decision.decided_by_entry_id;
+      });
+  const auto decisions = std::ranges::count_if(
+      context.decisions, [&](const domain::ContextDecisionRecord& decision) {
+        return decision.entry_id == found->entry_id;
+      });
   return reference.content_digest.algorithm == "sha256" &&
-         digest.finish() == reference.content_digest.value;
+         digest.finish() == reference.content_digest.value &&
+         found->estimated_tokens == reference.content_digest.byte_size &&
+         admitted == 1 && decisions == 1;
 }
 
 class RepositoryAdmissionHistory final {
@@ -1289,6 +1326,34 @@ auto validate_summary_start(const domain::SessionEventLog& log,
   if (!spend)
     return std::unexpected(
         kernel_error(RunKernelErrorCode::invalid_start, spend.error().message));
+  return {};
+}
+
+auto validate_ops_explanation_start(const domain::SessionEventLog& log,
+                                    const RunStart& start,
+                                    const OpsExplanationLimits& limits)
+    -> std::expected<void, RunKernelError> {
+  if (!start.ops_explanation_selection) return {};
+  const auto reject = [] {
+    return std::unexpected(kernel_error(
+        RunKernelErrorCode::invalid_start,
+        "Ops explanation requires one exact committed observation evidence"));
+  };
+  if (start.attributes.purpose != domain::RunPurpose::conversation ||
+      start.attributes.manual_observation_required ||
+      start.attributes.memory_selection ||
+      start.attributes.conversation_admission ||
+      start.attributes.local_context_admission_required ||
+      !start.request.tools.empty() || !start.imported_artifacts.empty() ||
+      start.repository_admission || start.local_admission ||
+      start.summary_intent ||
+      !start.request.assistant_continuation_state.empty())
+    return reject();
+  auto prepared = prepare_ops_explanation(
+      log, start.ops_explanation_selection->observation_event_id, 1, limits);
+  if (!prepared || !ops_explanation_matches_context(
+                       *prepared, start.user_message, start.request.context))
+    return reject();
   return {};
 }
 
@@ -1726,6 +1791,7 @@ struct RunKernel::Impl {
 
   [[nodiscard]] auto valid_limits() const noexcept -> bool {
     const auto& approval = limits.tool_approval_presentation;
+    const auto& explanation = limits.ops_explanation;
     return limits.pending_updates != 0 && limits.tool_argument_bytes != 0 &&
            approval.maximum_tool_name_bytes != 0 &&
            approval.maximum_effects != 0 && approval.maximum_scopes != 0 &&
@@ -1733,6 +1799,10 @@ struct RunKernel::Impl {
            approval.maximum_scope_value_bytes != 0 &&
            approval.maximum_canonical_argument_bytes != 0 &&
            approval.maximum_total_text_bytes != 0 &&
+           explanation.maximum_events != 0 &&
+           explanation.maximum_selections != 0 &&
+           explanation.maximum_evidence_bytes != 0 &&
+           explanation.maximum_estimated_tokens != 0 &&
            limits.task_scheduling.maximum_concurrency != 0 &&
            limits.task_scheduling.maximum_concurrency <= 16 &&
            limits.task_scheduling.maximum_attempts != 0 &&
@@ -4569,6 +4639,12 @@ auto RunKernel::open_durable(DurableSessionOpen session,
                          "unfinished model observations cannot restore "
                          "execution authority"));
       }
+      if (!recorded_ops_explanations(event_log,
+                                     kernel->m_impl->limits.ops_explanation)) {
+        return std::unexpected(kernel_error(
+            RunKernelErrorCode::replay_rejected,
+            "durable Ops explanation history is incomplete or inconsistent"));
+      }
       if (!observations->unfinished_manual_runs.empty()) {
         Impl::Transaction recovery{std::move(event_log),
                                    std::move(projections),
@@ -5730,11 +5806,6 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
           kernel_error(RunKernelErrorCode::invalid_start,
                        "run ID is already present in the session"));
     }
-    const auto persona_entries = std::ranges::count_if(
-        start.request.context.entries, [](const domain::ContextEntry& entry) {
-          return entry.kind == domain::ContextEntryKind::instruction &&
-                 entry.instruction_layer == domain::InstructionLayer::persona;
-        });
     const auto user_global_reference =
         start.provenance
             ? start.provenance->user_global_instruction
@@ -5746,8 +5817,14 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
           "run user-global instruction provenance does not match constructed "
           "context"));
     }
+    if (!persona_context_matches(start.request.context,
+                                 start.persona_selection)) {
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::invalid_start,
+          "run persona selection does not match constructed context"));
+    }
     if (!start.persona_selection) {
-      if (start.attributes.persona_id || persona_entries != 0) {
+      if (start.attributes.persona_id) {
         return std::unexpected(
             kernel_error(RunKernelErrorCode::invalid_start,
                          "run persona metadata is incomplete"));
@@ -5760,27 +5837,19 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
       }
       if (start.persona_selection->action ==
           domain::PersonaSelectionAction::disabled) {
-        if (start.attributes.persona_id || persona_entries != 0) {
+        if (start.attributes.persona_id) {
           return std::unexpected(kernel_error(
               RunKernelErrorCode::invalid_start,
               "disabled persona selection entered the backend context"));
         }
       } else {
-        const auto& persona = *start.persona_selection->persona;
-        const auto found = std::ranges::find_if(
-            start.request.context.entries,
-            [](const domain::ContextEntry& entry) {
-              return entry.kind == domain::ContextEntryKind::instruction &&
-                     entry.instruction_layer ==
-                         domain::InstructionLayer::persona;
-            });
-        const auto expected_digest = persona.content_digest.algorithm + ":" +
-                                     persona.content_digest.value;
-        if (start.attributes.persona_id != persona.persona_id ||
-            persona_entries != 1 ||
-            found == start.request.context.entries.end() ||
-            found->provenance.source_location != persona.source_location ||
-            found->provenance.digest != expected_digest) {
+        if (!start.persona_selection->persona) {
+          return std::unexpected(kernel_error(
+              RunKernelErrorCode::invalid_start,
+              "selected persona is missing its immutable reference"));
+        }
+        const auto& persona = start.persona_selection->persona.value();
+        if (start.attributes.persona_id != persona.persona_id) {
           return std::unexpected(kernel_error(
               RunKernelErrorCode::invalid_start,
               "run persona selection does not match constructed context"));
@@ -5811,6 +5880,10 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
     start.attributes.local_context_admission_required =
         start.local_admission.has_value();
     if (auto admitted = validate_summary_start(m_impl->event_log, start);
+        !admitted)
+      return admitted;
+    if (auto admitted = validate_ops_explanation_start(
+            m_impl->event_log, start, m_impl->limits.ops_explanation);
         !admitted)
       return admitted;
     if (auto admitted = validate_conversation_start(m_impl->event_log, start);
@@ -5905,6 +5978,15 @@ auto RunKernel::start(RunStart start) -> std::expected<void, RunKernelError> {
               start.run_id,
               domain::ConversationSummaryGenerationIntentRecorded{
                   std::move(*start.summary_intent)},
+              transaction);
+          !result)
+        return result;
+    }
+    if (start.ops_explanation_selection) {
+      if (auto result = m_impl->record(
+              start.run_id,
+              domain::OpsObservationExplanationSelected{
+                  start.ops_explanation_selection->observation_event_id},
               transaction);
           !result)
         return result;

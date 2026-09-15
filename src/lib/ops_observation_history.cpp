@@ -12,6 +12,7 @@ namespace {
 using namespace domain;
 class InvalidHistory final : public std::exception {};
 class HistoryLimit final : public std::exception {};
+class HistoryCancelled final : public std::exception {};
 auto require(bool condition) -> void {
   if (!condition) throw InvalidHistory{};
 }
@@ -488,7 +489,7 @@ class Validator {
 
 auto recorded_ops_observations(
     const domain::SessionEventLog& log,
-    std::span<const domain::RunEvent> prospective_suffix)
+    std::span<const domain::RunEvent> prospective_suffix, std::stop_token stop)
     -> std::expected<OpsHistorySnapshot, OpsHistoryError> {
   try {
     if (log.events().size() > maximum_ops_history_events ||
@@ -496,10 +497,14 @@ auto recorded_ops_observations(
             maximum_ops_history_events - log.events().size())
       throw HistoryLimit{};
     Validator validator{log.session_id()};
-    for (const auto& event : log.events())
+    for (const auto& event : log.events()) {
+      if (stop.stop_requested()) throw HistoryCancelled{};
       validator.apply(event);
-    for (const auto& event : prospective_suffix)
+    }
+    for (const auto& event : prospective_suffix) {
+      if (stop.stop_requested()) throw HistoryCancelled{};
       validator.apply(event);
+    }
     return validator.finish();
   } catch (const HistoryLimit&) {
     return std::unexpected(
@@ -509,6 +514,10 @@ auto recorded_ops_observations(
     return std::unexpected(
         OpsHistoryError{OpsHistoryErrorCode::invalid_history,
                         "Ops history is incomplete or inconsistent"});
+  } catch (const HistoryCancelled&) {
+    return std::unexpected(
+        OpsHistoryError{OpsHistoryErrorCode::cancelled,
+                        "Ops history validation was cancelled"});
   } catch (...) {
     return std::unexpected(
         OpsHistoryError{OpsHistoryErrorCode::internal_failure,

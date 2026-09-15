@@ -270,6 +270,15 @@ struct OpsObservationRecorded {
   auto operator==(const OpsObservationRecorded&) const -> bool = default;
 };
 
+// Records the exact committed observation selected by an explicit Explain
+// action. The referenced event remains untrusted evidence; this fact grants no
+// collection authority and carries no source configuration or credential.
+struct OpsObservationExplanationSelected {
+  EventId observation_event_id;
+  auto operator==(const OpsObservationExplanationSelected&) const
+      -> bool = default;
+};
+
 enum class PolicyDecision {
   allow,
   deny,
@@ -664,20 +673,21 @@ using RunEventPayload = std::variant<
     RepositoryContextAdmitted, LocalContextAdmitted, InferencePricingObserved,
     ReasoningMetadataAdded, UsageRecorded, InferenceCostRecorded,
     InferenceFinished, InferenceFailed, InferenceCancelled, ToolProposed,
-    HumanObservationRequested, OpsObservationRecorded, ToolPolicyDecided,
-    ToolApprovalRequested, ToolApprovalDecided, ToolPolicyFailed,
-    ToolSpendReserved, ToolStarted, ToolProgressed, ToolSpendReleased,
-    ToolSpendFinalized, ToolSpendReconciliationRequired, ToolResultRecorded,
-    ToolErrored, QuestionRequested, QuestionAnswered, QuestionCancelled,
-    ArtifactCreated, ArtifactReferenced, ArtifactDisplayed,
-    ArtifactRemovedFromView, VideoGenerationRequested, VideoQuoteObserved,
-    VideoJobQueued, VideoJobStatusObserved, VideoArtifactPublished,
-    VideoCleanupPending, VideoCleanupCompleted, VideoCleanupFailed,
-    VideoTranscriptionRequested, VideoTranscriptionObserved,
-    VerificationEvidenceRecorded, ReviewReceiptDrafted, ReviewRequested,
-    ReviewFindingOpened, ReviewFindingResolved, ReviewVerdictRecorded,
-    ReviewVerdictRevoked, ReviewOverrideRecorded, ReviewOverrideRevoked,
-    PlanRevisionProposed, PlanRevisionDecisionRecorded, PlanRevisionInvalidated,
+    HumanObservationRequested, OpsObservationRecorded,
+    OpsObservationExplanationSelected, ToolPolicyDecided, ToolApprovalRequested,
+    ToolApprovalDecided, ToolPolicyFailed, ToolSpendReserved, ToolStarted,
+    ToolProgressed, ToolSpendReleased, ToolSpendFinalized,
+    ToolSpendReconciliationRequired, ToolResultRecorded, ToolErrored,
+    QuestionRequested, QuestionAnswered, QuestionCancelled, ArtifactCreated,
+    ArtifactReferenced, ArtifactDisplayed, ArtifactRemovedFromView,
+    VideoGenerationRequested, VideoQuoteObserved, VideoJobQueued,
+    VideoJobStatusObserved, VideoArtifactPublished, VideoCleanupPending,
+    VideoCleanupCompleted, VideoCleanupFailed, VideoTranscriptionRequested,
+    VideoTranscriptionObserved, VerificationEvidenceRecorded,
+    ReviewReceiptDrafted, ReviewRequested, ReviewFindingOpened,
+    ReviewFindingResolved, ReviewVerdictRecorded, ReviewVerdictRevoked,
+    ReviewOverrideRecorded, ReviewOverrideRevoked, PlanRevisionProposed,
+    PlanRevisionDecisionRecorded, PlanRevisionInvalidated,
     SessionTasksMaterialized, ChildRunCreated, SessionTaskResultRecorded,
     ProjectBacklogItemPromoted, ProjectBacklogItemStatusChanged, MemoryProposed,
     MemoryPolicyDecided, MemoryAccepted, MemoryEditedAndAccepted,

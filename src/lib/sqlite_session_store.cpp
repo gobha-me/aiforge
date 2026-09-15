@@ -3151,6 +3151,9 @@ auto parse_v2_tool_policy_fields(const Json& value,
           [](const domain::OpsObservationRecorded&) {
             return std::string{"ops.observation_recorded"};
           },
+          [](const domain::OpsObservationExplanationSelected&) {
+            return std::string{"ops.explanation_selected"};
+          },
           [](const domain::RepositoryContextAdmitted&) {
             return std::string{"run.repository_context_admitted"};
           },
@@ -3407,12 +3410,13 @@ auto parse_v2_tool_policy_fields(const Json& value,
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 88,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 89,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started",
       "ops.human_observation_requested",
       "ops.observation_recorded",
+      "ops.explanation_selected",
       "run.provenance_recorded",
       "run.repository_context_admitted",
       "run.local_context_admitted",
@@ -4775,6 +4779,10 @@ auto parse_ops_tool(const Json& value) -> domain::ToolProvenanceEntry {
             return {{"invocation_id", id_text(value.invocation_id)},
                     {"observation", ops_observation_json(value.observation)}};
           },
+          [](const domain::OpsObservationExplanationSelected& value) -> Json {
+            return {
+                {"observation_event_id", id_text(value.observation_event_id)}};
+          },
           [](const domain::LocalContextAdmitted& value) -> Json {
             return {{"inference_id", id_text(value.inference_id)},
                     {"admission", local_admission_json(value.admission)}};
@@ -5331,6 +5339,11 @@ auto parse_ops_tool(const Json& value) -> domain::ToolProvenanceEntry {
     return domain::OpsObservationRecorded{
         parse_id<domain::InvocationId>(value.at("invocation_id")),
         parse_ops_observation(value.at("observation"))};
+  }
+  if (type == "ops.explanation_selected") {
+    require_conversation_fields(value, {"observation_event_id"});
+    return domain::OpsObservationExplanationSelected{
+        parse_id<domain::EventId>(value.at("observation_event_id"))};
   }
   if (type == "session.conversation_policy_set") {
     require_conversation_fields(value, {"previous_revision", "policy"});

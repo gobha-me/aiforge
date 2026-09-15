@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <stop_token>
 #include <string>
@@ -18,6 +19,7 @@
 #include <variant>
 #include <vector>
 
+#include <aiforge/detail/sha256.hpp>
 #include <aiforge/instructions/editor.hpp>
 #include <aiforge/runtime/memory_tool.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
@@ -320,10 +322,12 @@ class FakeModels final : public backend::ModelContextProvider {
 
 auto persona_document(std::string text = "Review carefully.")
     -> domain::PersonaDocument {
+  detail::Sha256 digest;
+  digest.update(std::as_bytes(std::span{text.data(), text.size()}));
   return {{make_id<domain::PersonaId>("persona:reviewer"),
            "reviewer",
            "personas/reviewer.md",
-           {"sha256", std::string(64, 'a'), text.size()}},
+           {"sha256", digest.finish(), text.size()}},
           std::move(text)};
 }
 
