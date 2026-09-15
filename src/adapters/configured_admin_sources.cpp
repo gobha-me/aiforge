@@ -1,4 +1,5 @@
 #include <aiforge/adapters/configured_admin_sources.hpp>
+#include <aiforge/adapters/kubernetes_ops_source_preparation.hpp>
 #include <aiforge/adapters/linux_ops_source_preparation.hpp>
 #include <aiforge/config/file_store.hpp>
 #include <algorithm>
@@ -36,9 +37,13 @@ class ConfiguredAdminSources final : public surfaces::AdminSourceCatalog {
                                            &config::OpsTargetConfig::id);
       if (found == m_records.targets.end())
         return std::unexpected(SourceError::invalid_result);
-      if (!std::holds_alternative<config::LinuxLocalTargetConfig>(
-              found->source))
-        return std::unexpected(SourceError::unsupported);
+      if (const auto* kube = std::get_if<config::StaticKubernetesTargetConfig>(
+              &found->source)) {
+        auto native = KubernetesOpsSourcePreparationFactory::create(
+            std::move(target), std::move(revision), *kube);
+        if (!native) return std::unexpected(native.error());
+        return std::move(*native);
+      }
       auto native = LinuxOpsSourcePreparationFactory::create(
           std::move(target), std::move(revision));
       if (!native) return std::unexpected(native.error());

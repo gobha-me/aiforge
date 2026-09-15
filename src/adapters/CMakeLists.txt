@@ -20,6 +20,7 @@ add_library(${PROJECT_NAME}_adapters STATIC
   kubernetes_https_control.cpp
   kubernetes_https_read.cpp
   kubernetes_ops_observation_source.cpp
+  kubernetes_ops_source_preparation.cpp
   kubernetes_tls_context.cpp
   kubernetes_observation_projection.cpp
   kubernetes_observation_projection_sax.cpp
