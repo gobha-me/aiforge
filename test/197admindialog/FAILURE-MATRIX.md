@@ -32,3 +32,15 @@
   complete formatter, retaining scope, timestamps and unknown values.
 - Happy-path buttons, menus and parsed commands dispatch identical actions.
   The adapter has no source, worker, kernel, provider or storage dependency.
+
+- Log enable, disable and read controls hydrate only the exact displayed
+  service-invocation or Pod/container-runtime proof. Toolbar, menu, hidden-menu
+  keys and slash commands share those typed actions. After enable advances the
+  policy counters, the same displayed source/evidence uses the retained current
+  proof, while a different candidate remains separate. Compact output keeps
+  consent and selected source visible; drawing and navigation never enable or
+  read logs, and log actions never invoke Explain.
+- `/admin logs enable <container>` resolves exactly one name only from the
+  currently displayed committed Pod-health proof, then dispatches the ordinary
+  hydrated enable action. Unknown, stale, duplicate and missing-runtime
+  container identities fail before source access.

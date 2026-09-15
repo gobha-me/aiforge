@@ -2,6 +2,7 @@
 #include <aiforge/adapters/ops_observation_json.hpp>
 #include <aiforge/detail/admin_input.hpp>
 #include <aiforge/runtime/local_source_worker.hpp>
+#include <aiforge/runtime/ops_log_consent.hpp>
 #include <aiforge/runtime/ops_observation_history.hpp>
 #include <aiforge/surfaces/ops_session.hpp>
 #include <algorithm>
@@ -58,12 +59,14 @@ auto operation(const Command::Request& request)
       request.format != Command::OutputFormat::json)
     return failure("Invalid Admin output format",
                    cli::CommandFailureKind::usage);
-  if ((request.operation == Command::Operation::service) !=
-          request.unit.has_value() ||
+  const bool service = request.operation == Command::Operation::service ||
+                       request.operation == Command::Operation::service_logs;
+  if (service != request.unit.has_value() ||
       (request.unit && !detail::valid_admin_service(*request.unit)))
     return failure("Admin service requires a canonical .service unit",
                    cli::CommandFailureKind::usage);
-  const bool pod_required = request.operation == Command::Operation::pod;
+  const bool pod_required = request.operation == Command::Operation::pod ||
+                            request.operation == Command::Operation::pod_logs;
   const bool pod_allowed =
       pod_required || request.operation == Command::Operation::events;
   if (request.pod.has_value() != request.pod_uid.has_value() ||
@@ -73,6 +76,14 @@ auto operation(const Command::Request& request)
         !detail::valid_admin_resource_uid(request.pod_uid->value()))))
     return failure("Admin Pod requires an exact name and UID",
                    cli::CommandFailureKind::usage);
+  const bool logs = request.operation == Command::Operation::service_logs ||
+                    request.operation == Command::Operation::pod_logs;
+  if (request.allow_log_text != logs ||
+      (request.operation == Command::Operation::pod_logs) !=
+          request.container.has_value() ||
+      (request.container && !detail::valid_admin_container(*request.container)))
+    return failure("Admin log reads require explicit allowed exact source",
+                   cli::CommandFailureKind::usage);
   switch (request.operation) {
     case Command::Operation::targets:
     case Command::Operation::health:
@@ -81,12 +92,16 @@ auto operation(const Command::Request& request)
       return domain::OpsObservationOperation::linux_services;
     case Command::Operation::service:
       return domain::OpsObservationOperation::linux_service_health;
+    case Command::Operation::service_logs:
+      return domain::OpsObservationOperation::linux_service_logs;
     case Command::Operation::workloads:
       return domain::OpsObservationOperation::kubernetes_workloads;
     case Command::Operation::pod:
       return domain::OpsObservationOperation::kubernetes_pod_health;
     case Command::Operation::events:
       return domain::OpsObservationOperation::kubernetes_events;
+    case Command::Operation::pod_logs:
+      return domain::OpsObservationOperation::kubernetes_pod_logs;
   }
   return failure("Invalid Admin operation", cli::CommandFailureKind::usage);
 }
@@ -107,11 +122,13 @@ auto list_targets(const config::OpsTargetsConfig& catalog,
     const bool local =
         std::holds_alternative<config::LinuxLocalTargetConfig>(target.source);
     const std::string_view kind = local ? "linux_local" : "kubernetes_static";
-    const std::string_view capability = local ? "health, services, service"
+    const std::string_view capability =
+        local ? "health, services, service, "
+                "service-logs"
 #if defined(__linux__)
-                                              : "workloads, pod, events";
+              : "workloads, pod, events, pod-logs";
 #else
-                                              : "unavailable";
+              : "unavailable";
 #endif
     if (format == Command::OutputFormat::json)
       rows.push_back({{"id", target.id},
@@ -137,8 +154,10 @@ struct Execution {
   std::unique_ptr<storage::SessionStore> store;
   std::shared_ptr<runtime::OpsObservationSource> source;
   std::unique_ptr<surfaces::OpsSession> session;
+  std::optional<runtime::OpsSessionLogConsent> consent;
   std::optional<runtime::OpsSourcePreparationToken> preparation;
   ~Execution() {
+    if (consent) consent->revoke();
     if (preparation) {
       const auto cancelled = worker->cancel(*preparation);
       static_cast<void>(cancelled);
@@ -263,20 +282,69 @@ auto render(const surfaces::CommittedOpsObservation& value,
     return failure("Admin observation formatting failed");
   const auto* text = std::get_if<domain::TextBlock>(&content->front());
   if (text == nullptr) return failure("Admin observation formatting failed");
-  return write(output,
-               "Target: " + target.display_name + " (" + target.id +
-                   ")\nFreshness: last_success\n"
-                   "Mode: Observe; bounded native reads; logs disabled\n" +
-                   text->text);
+  const auto logs = value.observation.request.operation ==
+                        domain::OpsObservationOperation::linux_service_logs ||
+                    value.observation.request.operation ==
+                        domain::OpsObservationOperation::kubernetes_pod_logs;
+  return write(output, "Target: " + target.display_name + " (" + target.id +
+                           ")\nFreshness: last_success\n"
+                           "Mode: Observe; bounded native reads; logs " +
+                           (logs ? "explicitly allowed\n" : "disabled\n") +
+                           text->text);
 }
-auto observe(const Command::Request& request,
-             const config::OpsTargetConfig& target,
-             domain::OpsObservationOperation selected,
-             Dependencies& dependencies, std::stop_token stop,
-             std::ostream& output) -> Result<void> {
-  auto identity = invocation_identity(dependencies, target);
-  if (!identity) return std::unexpected(identity.error());
-  Execution execution;
+auto exact_log_source(const Command::Request& request,
+                      const domain::OpsObservation& proof)
+    -> Result<domain::OpsResourceIdentity> {
+  if (request.operation == Command::Operation::service_logs) {
+    const auto* service =
+        std::get_if<domain::LinuxServiceObservation>(&proof.payload);
+    const auto* requested =
+        std::get_if<domain::LinuxServiceIdentity>(&proof.request.resource);
+    if (proof.request.operation !=
+            domain::OpsObservationOperation::linux_service_health ||
+        service == nullptr || requested == nullptr || !request.unit ||
+        !service->identity.invocation_id ||
+        requested->unit_name != *request.unit || requested->invocation_id ||
+        service->identity.unit_name != *request.unit)
+      return failure("Admin service invocation identity is unavailable");
+    return service->identity;
+  }
+  const auto* pod =
+      std::get_if<domain::KubernetesPodObservation>(&proof.payload);
+  const auto* requested =
+      std::get_if<domain::KubernetesPodIdentity>(&proof.request.resource);
+  if (proof.request.operation !=
+          domain::OpsObservationOperation::kubernetes_pod_health ||
+      pod == nullptr || requested == nullptr || !request.pod ||
+      !request.pod_uid || requested->container || pod->identity != *requested ||
+      !request.container || pod->identity.name != *request.pod ||
+      pod->identity.uid != *request.pod_uid)
+    return failure("Admin Pod identity is unavailable");
+  const auto found =
+      std::ranges::find(pod->containers, *request.container,
+                        &domain::KubernetesContainerObservation::name);
+  if (found == pod->containers.end() || !found->runtime_identity)
+    return failure("Admin container runtime identity is unavailable");
+  auto source = pod->identity;
+  source.container = domain::KubernetesContainerIdentity{
+      found->name, *found->runtime_identity};
+  return source;
+}
+[[nodiscard]] auto is_log_operation(domain::OpsObservationOperation operation)
+    -> bool {
+  return operation == domain::OpsObservationOperation::linux_service_logs ||
+         operation == domain::OpsObservationOperation::kubernetes_pod_logs;
+}
+[[nodiscard]] auto log_proof_operation(
+    domain::OpsObservationOperation operation)
+    -> domain::OpsObservationOperation {
+  return operation == domain::OpsObservationOperation::linux_service_logs
+             ? domain::OpsObservationOperation::linux_service_health
+             : domain::OpsObservationOperation::kubernetes_pod_health;
+}
+auto start_execution(Execution& execution, const InvocationIdentity& identity,
+                     Dependencies& dependencies)
+    -> Result<std::shared_ptr<runtime::OpsObservationEndpoint>> {
   auto worker = runtime::LocalSourceWorker::create(1);
   if (!worker) return failure("Admin worker is unavailable");
   execution.worker = std::move(*worker);
@@ -292,7 +360,7 @@ auto observe(const Command::Request& request,
   execution.store = std::move(*store);
   if (!execution.store) return failure("Admin storage is unavailable");
   auto session = surfaces::OpsSession::open(
-      {identity->session, timestamp(),
+      {identity.session, timestamp(),
        domain::SurfaceId::from("admin-cli").value(),
        domain::WorkspaceId::from("ops").value()},
       *execution.store,
@@ -301,46 +369,141 @@ auto observe(const Command::Request& request,
        [suffix = std::uint64_t{}]() mutable { return ++suffix; }});
   if (!session) return failure("Admin durable session could not be created");
   execution.session = std::move(*session);
-  auto endpoint = execution.broker->activate_session(identity->session);
+  auto endpoint = execution.broker->activate_session(identity.session);
   if (!endpoint) return failure("Admin session activation failed");
-  const auto deadline = Clock::now() + std::chrono::seconds{5};
+  return *endpoint;
+}
+auto prepare_source(Execution& execution, const InvocationIdentity& identity,
+                    const config::OpsTargetConfig& target,
+                    Dependencies& dependencies, Clock::time_point deadline,
+                    std::stop_token stop) -> Result<void> {
   auto request_id = execution.worker->allocate_request_id();
   if (!request_id) return failure("Admin preparation identity exhausted");
   const auto kind =
       std::holds_alternative<config::LinuxLocalTargetConfig>(target.source)
           ? domain::OpsTargetKind::linux_local
           : domain::OpsTargetKind::kubernetes;
-  runtime::OpsSourcePreparationIdentity selection{identity->target,
-                                                  identity->revision, kind};
-  auto factory = dependencies.factory(target, identity->revision);
+  runtime::OpsSourcePreparationIdentity selection{identity.target,
+                                                  identity.revision, kind};
+  auto factory = dependencies.factory(target, identity.revision);
   if (!factory) return std::unexpected(factory.error());
-  auto prepared =
-      prepare(execution, *factory,
-              {identity->session, 1, *request_id, selection}, deadline, stop);
-  if (!prepared) return prepared;
-  domain::OpsObservationAuthoritySpec spec{identity->owner,
-                                           identity->session,
-                                           execution.source->target_binding(),
-                                           1,
-                                           {selected}};
-  auto authority = domain::OpsObservationAuthority::create(spec);
+  return prepare(execution, *factory,
+                 {identity.session, 1, *request_id, selection}, deadline, stop);
+}
+auto initial_authority_spec(const InvocationIdentity& identity,
+                            const Execution& execution,
+                            domain::OpsObservationOperation selected)
+    -> domain::OpsObservationAuthoritySpec {
+  std::vector<domain::OpsObservationOperation> operations{selected};
+  if (is_log_operation(selected))
+    operations.insert(operations.begin(), log_proof_operation(selected));
+  return {identity.owner,
+          identity.session,
+          execution.source->target_binding(),
+          1,
+          std::move(operations),
+          {},
+          {}};
+}
+auto bind_initial_authority(
+    Execution& execution, const InvocationIdentity& identity,
+    domain::OpsObservationOperation selected,
+    const std::shared_ptr<runtime::OpsObservationEndpoint>& endpoint)
+    -> Result<void> {
+  auto spec = initial_authority_spec(identity, execution, selected);
+  std::expected<domain::OpsObservationAuthority, domain::OpsTargetError>
+      authority = domain::OpsObservationAuthority::create(spec);
+  if (is_log_operation(selected)) {
+    auto consent = runtime::OpsSessionLogConsent::start(*endpoint, spec);
+    if (!consent) return failure("Admin log consent is unavailable");
+    execution.consent.emplace(std::move(*consent));
+    authority = execution.consent->authority();
+  }
   if (!authority) return failure("Admin source authority is unavailable");
   auto bound = execution.session->bind_observation(*authority, execution.source,
-                                                   *endpoint);
+                                                   endpoint);
   if (!bound) return failure("Admin source binding failed");
-  runtime::OpsObservationIntent intent{identity->target, 1, selected};
+  return {};
+}
+auto make_intent(const Command::Request& request, const Execution& execution,
+                 const InvocationIdentity& identity,
+                 domain::OpsObservationOperation operation)
+    -> Result<runtime::OpsObservationIntent> {
+  runtime::OpsObservationIntent intent{identity.target, 1, operation};
   if (request.unit)
     intent.resource = domain::LinuxServiceIdentity{*request.unit};
   if (request.pod) {
-    const auto* identity = std::get_if<domain::KubernetesOpsIdentity>(
+    const auto* source_identity = std::get_if<domain::KubernetesOpsIdentity>(
         &execution.source->target_binding().identity);
-    if (identity == nullptr || !request.pod_uid)
+    if (source_identity == nullptr || !request.pod_uid)
       return failure("Admin Pod identity is unavailable");
     intent.resource = domain::KubernetesPodIdentity{
-        identity->namespace_name, *request.pod, *request.pod_uid, {}};
+        source_identity->namespace_name, *request.pod, *request.pod_uid, {}};
   }
-  auto result = collect(execution, std::move(intent), deadline, stop);
+  return intent;
+}
+auto collect_log(
+    const Command::Request& request, Execution& execution,
+    runtime::OpsSessionLogConsent& consent, const InvocationIdentity& identity,
+    domain::OpsObservationOperation selected,
+    const std::shared_ptr<runtime::OpsObservationEndpoint>& endpoint,
+    const surfaces::CommittedOpsObservation& proof, Clock::time_point deadline,
+    std::stop_token stop) -> Result<surfaces::CommittedOpsObservation> {
+  auto source = exact_log_source(request, proof.observation);
+  if (!source) return std::unexpected(source.error());
+  const auto current = consent.authority();
+  if (!current) return failure("Admin log consent is unavailable");
+  const auto& current_spec = current->specification();
+  auto enabled =
+      consent.apply({identity.session, execution.source->target_binding(),
+                     current_spec.selection_generation,
+                     current_spec.logs.revision, *source, true});
+  if (!enabled) return failure("Admin log consent could not be enabled");
+  auto bound =
+      execution.session->bind_observation(*enabled, execution.source, endpoint);
+  if (!bound) {
+    consent.revoke();
+    return failure("Admin log source binding failed");
+  }
+  runtime::OpsObservationIntent intent{
+      identity.target,
+      enabled->specification().selection_generation,
+      selected,
+      std::move(*source),
+      {}};
+  return collect(execution, std::move(intent), deadline, stop);
+}
+auto observe(const Command::Request& request,
+             const config::OpsTargetConfig& target,
+             domain::OpsObservationOperation selected,
+             Dependencies& dependencies, std::stop_token stop,
+             std::ostream& output) -> Result<void> {
+  auto identity = invocation_identity(dependencies, target);
+  if (!identity) return std::unexpected(identity.error());
+  Execution execution;
+  auto endpoint = start_execution(execution, *identity, dependencies);
+  if (!endpoint) return std::unexpected(endpoint.error());
+  const auto deadline = Clock::now() + std::chrono::seconds{5};
+  auto prepared = prepare_source(execution, *identity, target, dependencies,
+                                 deadline, stop);
+  if (!prepared) return prepared;
+  auto bound =
+      bind_initial_authority(execution, *identity, selected, *endpoint);
+  if (!bound) return bound;
+  const bool logs = is_log_operation(selected);
+  auto intent = make_intent(request, execution, *identity,
+                            logs ? log_proof_operation(selected) : selected);
+  if (!intent) return std::unexpected(intent.error());
+  auto result = collect(execution, std::move(*intent), deadline, stop);
   if (!result) return std::unexpected(result.error());
+  if (logs) {
+    if (!execution.consent.has_value())
+      return failure("Admin log consent is unavailable");
+    result =
+        collect_log(request, execution, execution.consent.value(), *identity,
+                    selected, *endpoint, *result, deadline, stop);
+    if (!result) return std::unexpected(result.error());
+  }
   return render(*result, target, request.format, output);
 }
 } // namespace
@@ -371,7 +534,8 @@ auto execute(const Command::Request& request, Dependencies& dependencies,
     const bool linux_operation =
         request.operation == Command::Operation::health ||
         request.operation == Command::Operation::services ||
-        request.operation == Command::Operation::service;
+        request.operation == Command::Operation::service ||
+        request.operation == Command::Operation::service_logs;
     if (local != linux_operation)
       return failure(local
                          ? "This Admin operation requires a Kubernetes target"

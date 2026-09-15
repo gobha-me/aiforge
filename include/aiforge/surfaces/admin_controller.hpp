@@ -1,6 +1,7 @@
 #pragma once
 
 #include <aiforge/runtime/local_source_worker.hpp>
+#include <aiforge/runtime/ops_log_consent.hpp>
 #include <aiforge/surfaces/manual_ops_session.hpp>
 #include <array>
 #include <span>
@@ -85,10 +86,31 @@ struct AdminRefreshDisplayed {
   domain::SessionId session;
   domain::OpsTargetBinding target;
   std::uint64_t selection_generation{};
+  std::uint64_t log_policy_revision{};
   domain::EventId observation_event;
   domain::OpsObservationOperation operation{
       domain::OpsObservationOperation::linux_health};
   domain::OpsResourceIdentity resource{};
+};
+// Exact immutable evidence proof for one displayed application log source.
+// A surface may leave this empty as a request to bind its currently displayed
+// proof before dispatch; the controller itself accepts only a populated proof.
+struct AdminDisplayedLogSource {
+  domain::SessionId session;
+  domain::OpsTargetBinding target;
+  std::uint64_t selection_generation{};
+  std::uint64_t log_policy_revision{};
+  domain::EventId observation_event;
+  domain::OpsResourceIdentity source;
+};
+struct AdminEnableDisplayedLogs {
+  std::optional<AdminDisplayedLogSource> displayed;
+};
+struct AdminDisableDisplayedLogs {
+  std::optional<AdminDisplayedLogSource> displayed;
+};
+struct AdminReadDisplayedLogs {
+  std::optional<AdminDisplayedLogSource> displayed;
 };
 struct AdminCancel {};
 struct AdminCloseView {};
@@ -98,7 +120,8 @@ using AdminAction =
                  AdminReadCachedService, AdminReadWorkloads, AdminReadEvents,
                  AdminReadNamedPod, AdminReadNamedPodEvents, AdminReadCachedPod,
                  AdminReadCachedPodEvents, AdminRefreshDisplayed, AdminCancel,
-                 AdminCloseView>;
+                 AdminCloseView, AdminEnableDisplayedLogs,
+                 AdminDisableDisplayedLogs, AdminReadDisplayedLogs>;
 enum class AdminPhase {
   detached,
   idle,
@@ -117,6 +140,7 @@ enum class AdminEvidenceFreshness {
   refresh_failed,
   disconnected
 };
+enum class AdminLogConsentState { unavailable, disabled, enabled };
 inline constexpr std::size_t admin_snapshot_count = manual_ops_catalog_slots;
 struct AdminState {
   std::vector<AdminTargetChoice> targets;
@@ -138,6 +162,10 @@ struct AdminState {
   // Per-slot collection state. A failed/disconnected state never erases the
   // last successful snapshot or changes its captured identity/timestamp.
   std::array<AdminEvidenceFreshness, admin_snapshot_count> freshness{};
+  AdminLogConsentState log_consent{AdminLogConsentState::unavailable};
+  std::uint64_t log_policy_revision{};
+  std::optional<domain::OpsResourceIdentity> log_source;
+  std::optional<domain::EventId> log_evidence_event;
   AdminPhase phase{AdminPhase::detached};
   std::optional<ManualOpsFailure> problem;
   std::optional<runtime::OpsObservationSourceError> source_problem;

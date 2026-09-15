@@ -17,4 +17,6 @@
   rebind old target authority.
 - Reactivation and revision exhaustion revoke the live activation, clear its
   sources and make broker-held enabled snapshots unusable.
+- Explicit revocation is immediate, idempotent and permanently invalidates
+  authority, changes and replacement through that activation.
 - A happy-path smoke grants and revokes one exact Pod/container source.

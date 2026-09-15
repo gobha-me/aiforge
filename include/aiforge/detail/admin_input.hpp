@@ -51,4 +51,13 @@ namespace aiforge::detail {
            return byte >= 32 && byte != 127;
          });
 }
+[[nodiscard]] inline auto valid_admin_container(std::string_view value) noexcept
+    -> bool {
+  return !value.empty() && value.size() <= 63 &&
+         admin_alphanumeric(value.front()) &&
+         admin_alphanumeric(value.back()) &&
+         std::ranges::all_of(value, [](char byte) {
+           return admin_alphanumeric(byte) || byte == '-';
+         });
+}
 } // namespace aiforge::detail

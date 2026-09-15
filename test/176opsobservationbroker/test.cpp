@@ -391,6 +391,29 @@ TEST_CASE("Ops disabled and stale log consent stop before source dispatch",
   CHECK(fixture.source->calls == 0);
 }
 
+TEST_CASE("Explicit log consent revocation invalidates broker-held authority",
+          "[ops-broker][logs]") {
+  Fixture fixture;
+  auto consent = runtime::OpsSessionLogConsent::start(*fixture.endpoint,
+                                                      log_specification());
+  REQUIRE(consent);
+  const auto disabled = consent->authority()->specification();
+  auto enabled = consent->apply(
+      {disabled.session_id, disabled.target, disabled.selection_generation,
+       disabled.logs.revision,
+       domain::LinuxServiceIdentity{"application.service",
+                                    id<domain::OpsResourceUid>("invocation")},
+       true});
+  REQUIRE(enabled);
+  REQUIRE(fixture.broker->select(*enabled, fixture.source));
+  consent->revoke();
+  Call call{fixture.endpoint, log_request(enabled->specification())};
+  auto result = fixture.pump(call);
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == Code::stale_request);
+  CHECK(fixture.source->calls == 0);
+}
+
 TEST_CASE("Ops same-ID reactivation rejects stale enabled consent",
           "[ops-broker]") {
   Fixture fixture;

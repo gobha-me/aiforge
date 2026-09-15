@@ -205,7 +205,10 @@ class Validator {
   auto check(const LinuxServiceObservation& value) -> Status {
     const auto* expected =
         std::get_if<LinuxServiceIdentity>(&m_request.resource);
-    if (expected == nullptr || value.identity != *expected)
+    if (expected == nullptr ||
+        value.identity.unit_name != expected->unit_name ||
+        (expected->invocation_id &&
+         value.identity.invocation_id != expected->invocation_id))
       return source_error();
     return service(value);
   }

@@ -137,6 +137,7 @@ class Manual final : public ManualOpsSession {
   std::vector<runtime::OpsObservationIntent> intents;
   unsigned pumps{}, cancels{};
   bool approval{}, hold{}, fail_completion{}, malformed{}, throws_cancel{};
+  std::string service_unit{"fixture.service"};
   std::optional<ManualOpsFailure> pump_failure, cancel_failure, submit_failure;
   auto submit_observation(runtime::OpsObservationIntent intent)
       -> std::expected<ObservationSubmission, ManualOpsFailure> override {
@@ -216,7 +217,7 @@ class Manual final : public ManualOpsSession {
         LinuxHealthObservation{OpsHealthState::healthy, 12, {}, {}, {}};
     if (intent.operation == OpsObservationOperation::linux_services)
       payload = LinuxServicesObservation{{LinuxServiceObservation{
-          {"fixture.service", id<OpsResourceUid>("invocation")},
+          {service_unit, id<OpsResourceUid>("invocation")},
           OpsServiceState::active,
           OpsObservationReason::none,
           {},
@@ -246,13 +247,14 @@ class Manual final : public ManualOpsSession {
       payload = KubernetesPodObservation{
           std::get<KubernetesPodIdentity>(intent.resource),
           OpsPodPhase::failed,
-          {{"app",
-            {},
-            OpsContainerState::terminated,
-            OpsReadiness::not_ready,
-            OpsObservationReason::failed_exit,
-            3,
-            7}}};
+          {{"app", std::optional<std::string>{"containerd://app"},
+            OpsContainerState::terminated, OpsReadiness::not_ready,
+            OpsObservationReason::failed_exit, 3, 7}}};
+    if (intent.operation == OpsObservationOperation::linux_service_logs ||
+        intent.operation == OpsObservationOperation::kubernetes_pod_logs)
+      payload = OpsLogObservation{
+          intent.resource,
+          {{EventTimestamp{std::chrono::milliseconds{1000}}, "fixture log"}}};
     if (intent.operation == OpsObservationOperation::kubernetes_events) {
       const auto regarding =
           std::holds_alternative<KubernetesPodIdentity>(intent.resource)
@@ -303,6 +305,9 @@ class Binding final : public AdminSelectionBinding {
   Manual& manual;
   unsigned calls{};
   std::optional<ManualOpsFailure> failure;
+  bool throws{};
+  std::shared_ptr<runtime::OpsObservationSource> selected_source;
+  std::shared_ptr<runtime::OpsObservationEndpoint> selected_endpoint;
   explicit Binding(std::shared_ptr<runtime::OpsObservationBroker> value,
                    Manual& port)
       : broker(std::move(value)), manual(port) {}
@@ -311,6 +316,7 @@ class Binding final : public AdminSelectionBinding {
             std::shared_ptr<runtime::OpsObservationEndpoint> endpoint)
       -> std::expected<void, ManualOpsFailure> override {
     ++calls;
+    if (throws) throw std::runtime_error("fixture binding failure");
     if (failure) return std::unexpected(*failure);
     const auto& grant = authority.specification();
     if (!broker->preflight_selection(*endpoint, authority, source))
@@ -331,6 +337,8 @@ class Binding final : public AdminSelectionBinding {
         grant.selection_generation;
     manual.inspection.source_connection = ManualOpsSourceConnection::connected;
     manual.inspection.available = true;
+    selected_source = std::move(source);
+    selected_endpoint = std::move(endpoint);
     return {};
   }
 };
