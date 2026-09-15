@@ -147,6 +147,13 @@ auto AdminDialog::execute(const AdminAction& action)
       return result;
     }
     if (!presentation) return presentation;
+    if (std::holds_alternative<AdminReadHealth>(action))
+      show(View::health);
+    else if (std::holds_alternative<AdminReadServices>(action))
+      show(View::services);
+    else if (std::holds_alternative<AdminReadNamedService>(action) ||
+             std::holds_alternative<AdminReadCachedService>(action))
+      show(View::details);
     return {};
   } catch (...) {
     return failure();

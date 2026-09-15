@@ -1,4 +1,6 @@
+#include <aiforge/adapters/admin_dialog.hpp>
 #include <aiforge/adapters/ask_user_dialog.hpp>
+#include <aiforge/adapters/configured_admin_sources.hpp>
 #include <aiforge/adapters/conversation_context_dialog.hpp>
 #include <aiforge/adapters/filesystem_artifact_store.hpp>
 #include <aiforge/adapters/filesystem_persona_source.hpp>
@@ -40,6 +42,7 @@
 #include <aiforge/runtime/tool_launch_policy.hpp>
 #include <aiforge/runtime/tool_profiles.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
+#include <aiforge/surfaces/admin_commands.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
 #include <aiforge/surfaces/slash_commands.hpp>
 #include <algorithm>
@@ -73,6 +76,22 @@
 
 namespace aiforge::adapters {
 namespace {
+
+class ChatAdminBinding final : public surfaces::AdminSelectionBinding {
+ public:
+  surfaces::ChatSession* session{};
+  [[nodiscard]] auto bind(
+      domain::OpsObservationAuthority authority,
+      std::shared_ptr<runtime::OpsObservationSource> source,
+      std::shared_ptr<runtime::OpsObservationEndpoint> endpoint)
+      -> std::expected<void, surfaces::ManualOpsFailure> override {
+    if (session == nullptr)
+      return std::unexpected(
+          surfaces::ManualOpsFailure{surfaces::ManualOpsErrorCode::closed});
+    return session->bind_observation(std::move(authority), std::move(source),
+                                     std::move(endpoint));
+  }
+};
 
 class CredentialUnavailableBackend final : public backend::Backend {
  public:
@@ -933,6 +952,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     if (m_session_dependencies.repository_context_controller != nullptr)
       m_session_dependencies.async_repository_preparation = true;
     if (!setup_local_browser(std::move(options.local_source_factory))) return;
+    if (!setup_admin(std::move(options.admin_sources))) return;
     m_context_toolbar.set_menus(
         {{"Context",
           {{"Conversation (Ctrl+G)",
@@ -951,10 +971,15 @@ class ChatAppImpl final : public InteractiveChatApp {
                   manage_files(surfaces::LocalBrowseInspect{}, true));
             }},
            {"Repository evidence", [this] { show_repository_context(false); }},
-           {"Hide toolbar", [this] {
+           {"Hide toolbar",
+            [this] {
               static_cast<void>(
                   manage_context(surfaces::SetContextToolbar{false}, false));
-            }}}}});
+            }}}},
+         {"Admin", {{"Open Admin", [this] {
+                       static_cast<void>(
+                           manage_admin(surfaces::AdminInspect{}));
+                     }}}}});
     set_frame_ms(33);
     m_composer.set_max_height(8);
     m_focus.add(&m_composer);
@@ -964,11 +989,6 @@ class ChatAppImpl final : public InteractiveChatApp {
       return;
     }
     m_session = std::move(*session);
-    if (!activate_local_browser(m_session->session_id())) {
-      m_setup_error =
-          cli::CommandFailure{cli::CommandFailureKind::runtime, m_status};
-      return;
-    }
     auto rebuilt = rebuild_chat_transcript(
         m_transcript, m_session->event_log().events(), m_summary_runs);
     if (!rebuilt) {
@@ -1006,6 +1026,11 @@ class ChatAppImpl final : public InteractiveChatApp {
       return;
     }
     m_spend_ceiling = std::move(*ceiling);
+    if (!activate_local_browser(m_session->session_id()) || !attach_admin()) {
+      m_setup_error =
+          cli::CommandFailure{cli::CommandFailureKind::runtime, m_status};
+      return;
+    }
     sync_history();
     const auto persona = m_session->persona_state();
     m_status = persona.requires_attention ? persona.message
@@ -1016,6 +1041,12 @@ class ChatAppImpl final : public InteractiveChatApp {
   }
 
   ~ChatAppImpl() override {
+    clear_overlays();
+    detach_admin();
+    m_admin_dialog.reset();
+    if (m_observation_broker) {
+      [[maybe_unused]] const auto closed = m_observation_broker->close();
+    }
     if (m_local_browser) {
       const auto& session = m_local_browser->state().session_id;
       if (m_source_worker && session) {
@@ -1110,15 +1141,22 @@ class ChatAppImpl final : public InteractiveChatApp {
   auto on_start() -> void override {
     if (m_rendered_output != nullptr) driver().set_output(m_rendered_output);
     sync_composer_focus();
-    auto drained = m_session->drain();
-    if (!drained) {
-      fail(session_error(drained.error()));
-      return;
+    const bool manual_delivery = manual_delivery_pending();
+    service_admin();
+    if (!manual_delivery) {
+      auto drained = m_session->drain();
+      if (!drained) {
+        static_cast<void>(
+            apply_events(m_session->take_buffered_surface_events()));
+        fail(session_error(drained.error()));
+        return;
+      }
+      if (!apply_events(*drained)) return;
     }
-    if (!apply_events(*drained)) return;
     service_local_browser();
     service_repository_work();
     service_evidence_work();
+    service_admin();
     show_recovery_block();
     if (ensure_tool_approval_dialog() && !m_tool_approval_dialog_active &&
         ensure_question_dialog() && !m_question_dialog_active) {
@@ -1131,10 +1169,12 @@ class ChatAppImpl final : public InteractiveChatApp {
   auto on_event(const termforge::Event& event) -> void override {
     // clang-format on
     if (!m_session) return;
-    if (cancel_repository_event(event)) return;
+    const bool manual_delivery = manual_delivery_pending();
+    if (!m_admin_dialog_active && cancel_repository_event(event)) return;
     service_local_browser();
     service_repository_work();
     service_evidence_work();
+    service_admin();
     if (m_stop_token.stop_requested()) return;
     if (const auto* key = std::get_if<termforge::KeyEvent>(&event);
         key != nullptr && key->action == termforge::KeyAction::Press &&
@@ -1148,6 +1188,12 @@ class ChatAppImpl final : public InteractiveChatApp {
       if (const auto* key = std::get_if<termforge::KeyEvent>(&event);
           key != nullptr && key->action == termforge::KeyAction::Press &&
           key->ctrl && key->key == termforge::Key::Char && key->ch == U'c') {
+        const auto manual =
+            m_session->inspect_observations().projection.current;
+        const auto pending = m_session->pending_tool_approval();
+        const bool manual_approval =
+            pending && manual && pending->run_id == manual->submission.run_id &&
+            pending->invocation_id == manual->submission.invocation_id;
         pop_modal();
         m_question_dialog_active = false;
         m_tool_approval_dialog_active = false;
@@ -1155,6 +1201,16 @@ class ChatAppImpl final : public InteractiveChatApp {
         m_question_dialog.reset();
         m_tool_approval_controller.reset();
         m_tool_approval_dialog.reset();
+        if (manual_approval && manual) {
+          const auto cancelled =
+              m_session->cancel_observation(manual->submission.run_id);
+          service_admin();
+          if (!cancelled) {
+            m_admin_problem = cancelled.error();
+            m_status = "Admin cancellation failed";
+          }
+          return;
+        }
         auto cancelled = m_session->cancel_active("interrupt");
         if (!cancelled) {
           fail(session_error(cancelled.error()));
@@ -1172,12 +1228,23 @@ class ChatAppImpl final : public InteractiveChatApp {
       termforge::App::on_event(event);
       return;
     }
-    auto bridged = m_bridge.handle(event, *m_session);
-    if (!bridged) {
-      fail(session_error(bridged.error()));
+    if (m_admin_dialog_active &&
+        !std::holds_alternative<termforge::ErrorEvent>(event)) {
+      static_cast<void>(m_admin_dialog->on_event(event));
+      service_admin();
       return;
     }
-    if (!apply_events(*bridged)) return;
+    if (!manual_delivery) {
+      auto bridged = m_bridge.handle(event, *m_session);
+      if (!bridged) {
+        // A failed pump can still have committed surface events.
+        static_cast<void>(
+            apply_events(m_session->take_buffered_surface_events()));
+        fail(session_error(bridged.error()));
+        return;
+      }
+      if (!apply_events(*bridged)) return;
+    }
     if (m_local_dialog_active) {
       static_cast<void>(m_local_dialog->on_event(event));
       return;
@@ -1274,13 +1341,10 @@ class ChatAppImpl final : public InteractiveChatApp {
       }
     }
 
-    if ((!m_session->active() || m_session->blocked_recovery()) &&
-        m_focus.handle_key(event))
-      return;
+    if (m_focus.handle_key(event)) return;
     if (const auto* key = std::get_if<termforge::KeyEvent>(&event);
         key != nullptr && key->action == termforge::KeyAction::Press &&
-        key->key == termforge::Key::Enter &&
-        (!m_session->active() || m_session->blocked_recovery())) {
+        key->key == termforge::Key::Enter) {
       submit();
       return;
     }
@@ -1289,12 +1353,16 @@ class ChatAppImpl final : public InteractiveChatApp {
 
   auto on_tick(std::chrono::duration<double>) -> void override {
     if (!m_session) return;
+    const bool manual_delivery = manual_delivery_pending();
+    service_admin();
     service_local_browser();
     service_repository_work();
     service_evidence_work();
-    if (m_poll_worker_updates) {
+    if (m_poll_worker_updates && !manual_delivery) {
       auto drained = m_session->drain();
       if (!drained) {
+        static_cast<void>(
+            apply_events(m_session->take_buffered_surface_events()));
         fail(session_error(drained.error()));
         return;
       }
@@ -1303,6 +1371,7 @@ class ChatAppImpl final : public InteractiveChatApp {
     service_local_browser();
     service_repository_work();
     service_evidence_work();
+    service_admin();
     show_recovery_block();
     if (!ensure_tool_approval_dialog()) return;
     if (!m_tool_approval_dialog_active && !ensure_question_dialog()) return;
@@ -1388,12 +1457,170 @@ class ChatAppImpl final : public InteractiveChatApp {
  private:
   [[nodiscard]] auto context_draft() const -> std::string {
     const auto& text = m_composer.text();
+    const auto admin = surfaces::parse_admin_command(text);
+    if (!admin || admin->has_value()) return {};
     const auto command =
         m_slash_commands.dispatch(text, {.run_active = m_session->active(),
                                          .editor_available = true,
                                          .stop_token = m_stop_token});
     if (command && command->has_value()) return {};
     return text;
+  }
+
+  auto setup_admin(std::expected<std::shared_ptr<surfaces::AdminSourceCatalog>,
+                                 surfaces::ManualOpsFailure>
+                       catalog) -> bool {
+    // A supplied broker cannot be proven to use this application's worker.
+    if (m_session_dependencies.observation_broker ||
+        m_session_dependencies.observation_context) {
+      m_setup_error = cli::CommandFailure{
+          cli::CommandFailureKind::runtime,
+          "Admin observation ownership does not match the application"};
+      return false;
+    }
+    if (!catalog) {
+      m_admin_problem = catalog.error();
+      return true;
+    }
+    auto owner = domain::OpsOwnerId::from("interactive-admin");
+    auto surface = domain::SurfaceId::from("interactive");
+    auto workspace = domain::WorkspaceId::from("admin");
+    auto broker = runtime::OpsObservationBroker::create(m_source_worker);
+    if (!owner || !surface || !workspace || !broker) {
+      m_setup_error = cli::CommandFailure{cli::CommandFailureKind::runtime,
+                                          "Admin setup failed"};
+      return false;
+    }
+    auto controller = surfaces::AdminController::create(
+        std::move(*owner), std::move(*catalog), m_source_worker);
+    if (!controller) {
+      m_admin_problem = controller.error();
+      return true;
+    }
+    m_observation_broker =
+        std::shared_ptr<runtime::OpsObservationBroker>{std::move(*broker)};
+    m_admin_controller = std::move(*controller);
+    m_session_dependencies.observation_broker = m_observation_broker;
+    m_session_dependencies.observation_context =
+        surfaces::ChatObservationContext{std::move(*surface),
+                                         std::move(*workspace)};
+    return true;
+  }
+
+  auto detach_admin() -> void {
+    if (m_admin_controller) {
+      const auto detached = m_admin_controller->detach();
+      if (!detached) m_admin_problem = detached.error();
+    }
+    m_admin_binding.session = nullptr;
+  }
+
+  auto attach_admin() -> bool {
+    if (!m_admin_controller) return true;
+    auto endpoint =
+        m_observation_broker->activate_session(m_session->session_id());
+    if (!endpoint) {
+      m_status = "Admin session activation failed";
+      return false;
+    }
+    m_admin_binding.session = m_session.get();
+    auto attached =
+        m_admin_controller->attach({m_session->session_id(), *m_session,
+                                    m_admin_binding, std::move(*endpoint)});
+    if (!attached) {
+      m_admin_problem = attached.error();
+      m_admin_binding.session = nullptr;
+      [[maybe_unused]] const auto closed =
+          m_observation_broker->deactivate_session();
+      m_status = "Admin session attachment failed";
+      return false;
+    }
+    m_admin_problem.reset();
+    return true;
+  }
+
+  [[nodiscard]] auto manual_delivery_pending() const -> bool {
+    if (!m_session) return false;
+    const auto& current = m_session->inspect_observations().projection.current;
+    if (!current) return false;
+    const auto status = current->status;
+    return status != domain::RunStatus::not_started &&
+           status != domain::RunStatus::completed &&
+           status != domain::RunStatus::failed &&
+           status != domain::RunStatus::cancelled;
+  }
+
+  auto service_admin() -> void {
+    if (!m_admin_controller || !m_session) return;
+    const auto pumped = m_admin_controller->pump();
+    // The controller owns sticky fatal failures; transient presentation/source
+    // errors follow its current state and may recover after a successful
+    // action.
+    m_admin_problem = m_admin_controller->inspect().problem;
+    // Always deliver committed events, including after a terminal failure.
+    const auto events = m_session->take_buffered_surface_events();
+    if (!apply_events(events)) return;
+    if (m_admin_dialog) {
+      const auto refreshed = m_admin_dialog->refresh();
+      if (!refreshed) m_admin_problem = refreshed.error();
+    }
+    if (!pumped) m_admin_problem = pumped.error();
+    if (m_admin_problem)
+      m_status = "Admin operation unavailable";
+    else if (m_admin_dialog && top_overlay() == m_admin_dialog.get())
+      m_status = m_admin_dialog->status();
+  }
+
+  auto manage_admin(const surfaces::AdminAction& action) -> bool {
+    if (!m_admin_controller) {
+      m_status = "Admin configuration is unavailable";
+      return false;
+    }
+    if (!m_admin_dialog) {
+      m_admin_dialog = std::make_unique<AdminDialog>(*m_admin_controller);
+      m_admin_dialog->on_close([this] {
+        if (!m_admin_dialog_active || top_overlay() != m_admin_dialog.get())
+          return;
+        pop_modal();
+        m_admin_dialog_active = false;
+        m_status = m_admin_dialog->status();
+        sync_composer_focus();
+      });
+    }
+    m_admin_dialog->set_toolbar_visible(m_context_toolbar_visible);
+    const auto executed = m_admin_dialog->execute(action);
+    m_status = m_admin_dialog->status();
+    if (!m_admin_dialog_active &&
+        !std::holds_alternative<surfaces::AdminCloseView>(action)) {
+      m_admin_dialog_active = true;
+      push_modal(*m_admin_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                   .dismiss_on_click_outside = false});
+    }
+    service_admin();
+    return executed.has_value();
+  }
+
+  auto submit_admin(std::string_view draft) -> bool {
+    const auto command = surfaces::parse_admin_command(draft);
+    if (!command) {
+      m_status = "Invalid Admin command";
+      return true;
+    }
+    if (!*command) return false;
+    if (const auto* visibility =
+            std::get_if<surfaces::AdminToolbarVisibility>(&**command)) {
+      m_context_toolbar_visible = visibility->visible;
+      m_context_toolbar.close_dropdown();
+      m_context_toolbar.set_focused(false);
+      if (m_admin_dialog)
+        m_admin_dialog->set_toolbar_visible(visibility->visible);
+      m_status = visibility->visible ? "Toolbar shown" : "Toolbar hidden";
+      m_composer.clear();
+      return true;
+    }
+    if (manage_admin(std::get<surfaces::AdminAction>(**command)))
+      m_composer.clear();
+    return true;
   }
 
   auto setup_local_browser(
@@ -1848,10 +2075,7 @@ class ChatAppImpl final : public InteractiveChatApp {
   }
 
   auto sync_composer_focus() -> void {
-    m_composer.set_focused(
-        m_session != nullptr &&
-        (!m_session->active() || m_session->blocked_recovery()) && !modal() &&
-        !m_pending_edit);
+    m_composer.set_focused(m_session != nullptr && !modal() && !m_pending_edit);
   }
 
   auto push_modal(termforge::Widget& widget, termforge::OverlayOptions options)
@@ -2741,7 +2965,8 @@ class ChatAppImpl final : public InteractiveChatApp {
   // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Session flow.
   auto switch_session(const surfaces::ChatSessionOpen::Mode mode,
                       std::optional<domain::SessionId> session_id) -> bool {
-    if (m_local_dialog_active || m_context_dialog_active) {
+    if (m_local_dialog_active || m_context_dialog_active ||
+        m_admin_dialog_active) {
       m_status = "Close the context dialog before switching sessions";
       return false;
     }
@@ -2830,8 +3055,20 @@ class ChatAppImpl final : public InteractiveChatApp {
     m_local_dialog.reset();
     m_local_dialog_active = false;
     m_local_panel_visible = false;
-    if (!activate_local_browser((*candidate)->session_id())) return false;
+    detach_admin();
+    m_admin_dialog.reset();
+    if (!activate_local_browser((*candidate)->session_id())) {
+      if (m_observation_broker) {
+        [[maybe_unused]] const auto closed =
+            m_observation_broker->deactivate_session();
+      }
+      return false;
+    }
     m_session = std::move(*candidate);
+    if (!attach_admin()) {
+      fail({cli::CommandFailureKind::runtime, m_status});
+      return false;
+    }
     m_request_setting_overrides = {};
     m_usage_ledger = std::move(*candidate_usage);
     m_spend_ceiling = std::move(*candidate_ceiling);
@@ -3178,6 +3415,8 @@ class ChatAppImpl final : public InteractiveChatApp {
         if (!show_tasks()) return false;
         m_composer.clear();
         return true;
+      case surfaces::SlashCommandAction::manage_admin:
+        return submit_admin("/admin " + command.subject.value_or(""));
       case surfaces::SlashCommandAction::manage_local_files: {
         auto action = surfaces::parse_local_browser_command(
             "/files " + command.subject.value_or(""), m_local_browser->state());
@@ -3203,6 +3442,11 @@ class ChatAppImpl final : public InteractiveChatApp {
     const std::string draft = m_composer.text();
     if (draft.empty()) {
       m_status = "Draft is empty";
+      return;
+    }
+    if (submit_admin(draft)) return;
+    if (m_session->active() && !m_session->blocked_recovery()) {
+      m_status = "Run active; draft retained";
       return;
     }
     const auto command =
@@ -4994,13 +5238,76 @@ class ChatAppImpl final : public InteractiveChatApp {
                blocked->reason.message + "; Ctrl+C cancels this run";
   }
 
+  struct ApprovalIdentity {
+    domain::SessionId session;
+    domain::RunId run;
+    domain::InvocationId invocation;
+    bool manual{};
+    std::uint64_t admin_epoch{};
+  };
+
+  [[nodiscard]] auto current_approval(const ApprovalIdentity& identity) const
+      -> bool {
+    if (!m_session || m_session->session_id() != identity.session ||
+        top_overlay() != m_tool_approval_dialog.get())
+      return false;
+    const auto current = m_session->pending_tool_approval();
+    if (!current || current->run_id != identity.run ||
+        current->invocation_id != identity.invocation)
+      return false;
+    return !identity.manual ||
+           (m_admin_controller && m_admin_controller->inspect().session_epoch ==
+                                      identity.admin_epoch);
+  }
+
+  auto resolve_approval(const ApprovalIdentity& identity,
+                        runtime::ToolApprovalResolution resolution) -> void {
+    if (!current_approval(identity)) return;
+    const auto decision = resolution.decision;
+    pop_modal();
+    m_tool_approval_dialog_active = false;
+    if (identity.manual) {
+      const auto decided = m_session->decide_observation_approval(
+          identity.run, identity.invocation, std::move(resolution));
+      service_admin();
+      if (!decided) {
+        m_admin_problem = decided.error();
+        m_status = "Admin approval failed";
+      }
+      return;
+    }
+    auto decided = m_session->decide_tool_approval(
+        identity.run, identity.invocation, std::move(resolution));
+    if (!decided) {
+      fail(session_error(decided.error()));
+      return;
+    }
+    auto events = m_session->drain();
+    if (!events) {
+      fail(session_error(events.error()));
+      return;
+    }
+    if (!apply_events(*events)) return;
+    switch (decision) {
+      case domain::ApprovalDecision::approved:
+        m_status = "Tool approved once; continuing run";
+        break;
+      case domain::ApprovalDecision::denied:
+        m_status = "Tool denied; continuing run";
+        break;
+      case domain::ApprovalDecision::cancelled:
+        m_status = "Tool approval cancelled; continuing run";
+        break;
+    }
+  }
+
   auto ensure_tool_approval_dialog() -> bool {
     if (m_session->pending_repository_work()) return true;
     if (m_session->blocked_recovery()) return true;
     if (m_tool_approval_dialog_active) return true;
     const auto pending = m_session->pending_tool_approval();
     if (!pending) return true;
-    if (modal()) {
+    if (modal() && top_overlay() != m_admin_dialog.get()) {
       m_status = "A tool approval is waiting for the active dialog to close";
       return true;
     }
@@ -5013,39 +5320,22 @@ class ChatAppImpl final : public InteractiveChatApp {
     }
     const auto run_id = pending->run_id;
     const auto invocation_id = pending->invocation_id;
+    const auto session_id = m_session->session_id();
+    const auto& manual = m_session->inspect_observations().projection.current;
+    const bool manual_approval =
+        manual && manual->submission.run_id == run_id &&
+        manual->submission.invocation_id == invocation_id;
+    const auto admin_epoch =
+        m_admin_controller ? m_admin_controller->inspect().session_epoch : 0;
     auto presented = m_tool_approval_controller->present(
         {pending->tool_name, pending->effects, pending->scopes,
          pending->canonical_arguments, pending->selected_restriction,
          pending->achieved_restriction, pending->approval_mode,
          pending->supply_source, pending->executor_limits},
-        [this, run_id,
-         invocation_id](runtime::ToolApprovalResolution resolution) {
-          const auto decision = resolution.decision;
-          pop_modal();
-          m_tool_approval_dialog_active = false;
-          auto decided = m_session->decide_tool_approval(run_id, invocation_id,
-                                                         std::move(resolution));
-          if (!decided) {
-            fail(session_error(decided.error()));
-            return;
-          }
-          auto events = m_session->drain();
-          if (!events) {
-            fail(session_error(events.error()));
-            return;
-          }
-          if (!apply_events(*events)) return;
-          switch (decision) {
-            case domain::ApprovalDecision::approved:
-              m_status = "Tool approved once; continuing run";
-              break;
-            case domain::ApprovalDecision::denied:
-              m_status = "Tool denied; continuing run";
-              break;
-            case domain::ApprovalDecision::cancelled:
-              m_status = "Tool approval cancelled; continuing run";
-              break;
-          }
+        [this, identity = ApprovalIdentity{session_id, run_id, invocation_id,
+                                           manual_approval, admin_epoch}](
+            runtime::ToolApprovalResolution resolution) {
+          resolve_approval(identity, std::move(resolution));
         });
     if (!presented) {
       m_status = presented.error().message;
@@ -5196,6 +5486,12 @@ class ChatAppImpl final : public InteractiveChatApp {
   termforge::MenuBar m_context_toolbar;
   bool m_context_toolbar_visible{true};
   std::shared_ptr<runtime::LocalSourceWorker> m_source_worker;
+  std::shared_ptr<runtime::OpsObservationBroker> m_observation_broker;
+  ChatAdminBinding m_admin_binding;
+  std::unique_ptr<surfaces::AdminController> m_admin_controller;
+  std::unique_ptr<AdminDialog> m_admin_dialog;
+  std::optional<surfaces::ManualOpsFailure> m_admin_problem;
+  bool m_admin_dialog_active{};
   std::unique_ptr<surfaces::LocalSourceBrowser> m_local_browser;
   std::unique_ptr<LocalSourceBrowserDialog> m_local_dialog;
   bool m_local_dialog_active{};
@@ -6037,6 +6333,7 @@ auto execute_process_chat(cli::InteractiveCommand::Request request,
       if (!session) return std::unexpected(session_error(session.error()));
       return headless->run(**session);
     }
+    app_options.admin_sources = load_process_admin_sources();
     auto app = make_interactive_chat_app(
         *backend, (*catalog)->service(), store.get(), std::move(open), editor,
         environment.stop_token, std::move(app_options));

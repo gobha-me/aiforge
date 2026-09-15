@@ -8,6 +8,7 @@
 #include <aiforge/model/catalog.hpp>
 #include <aiforge/runtime/local_source_grant.hpp>
 #include <aiforge/storage/session_store.hpp>
+#include <aiforge/surfaces/admin_controller.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
 #include <aiforge/surfaces/draft_editor.hpp>
 #include <expected>
@@ -80,6 +81,7 @@ struct InteractiveChatAppOptions {
   // event-ready marker has been posted. It must not touch the app or widgets.
   std::function<void()> wake_observer;
   bool live_wake_enabled{true};
+  // Periodic model polling only; explicit runtime wakes remain enabled.
   bool poll_worker_updates{true};
   std::string repository_root_display;
   runtime::RepositoryContextSource* repository_context_source{};
@@ -95,6 +97,12 @@ struct InteractiveChatAppOptions {
   PersistUserGlobalInstructionEnabled persist_user_global_instruction_enabled;
   // Optional injected pinned read-only factory; production uses local folders.
   std::shared_ptr<runtime::LocalSourceGrantFactory> local_source_factory;
+  // Owning metadata-only catalog, or a fixed startup failure. No fallback
+  // source is inferred when this is absent or configuration was rejected.
+  std::expected<std::shared_ptr<surfaces::AdminSourceCatalog>,
+                surfaces::ManualOpsFailure>
+      admin_sources{std::unexpected(surfaces::ManualOpsFailure{
+          surfaces::ManualOpsErrorCode::unavailable})};
   // Required for asynchronous repository work; owns every source dependency.
   std::shared_ptr<runtime::RepositoryContextController>
       owned_repository_context_controller;
