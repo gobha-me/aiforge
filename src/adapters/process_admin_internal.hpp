@@ -14,8 +14,8 @@ class Dependencies {
       -> Result<config::OpsTargetsConfig> = 0;
   [[nodiscard]] virtual auto open_store()
       -> Result<std::unique_ptr<storage::SessionStore>> = 0;
-  [[nodiscard]] virtual auto factory(
-      runtime::OpsSourcePreparationIdentity identity)
+  [[nodiscard]] virtual auto factory(const config::OpsTargetConfig& target,
+                                     domain::OpsConfigurationRevision revision)
       -> Result<std::shared_ptr<runtime::OpsSourcePreparationFactory>> = 0;
   [[nodiscard]] virtual auto instance_identity() -> Result<std::string> = 0;
 };

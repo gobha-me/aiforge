@@ -339,6 +339,40 @@ TEST_CASE("Chat manual source failure preserves earlier evidence and identity",
   CHECK(f.backend.calls.load() == 0);
 }
 
+TEST_CASE("Chat reports asynchronous source disconnection as typed state",
+          "[chat][ops][failure]") {
+  ChatFixture f;
+  f.open();
+  f.bind();
+  f.submit();
+  f.idle();
+  const auto previous =
+      f.chat->inspect_observations().projection.latest_success;
+  REQUIRE(previous);
+  f.source->failure = runtime::OpsObservationSourceError::disconnected;
+  f.submit();
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds{5};
+  bool saw_failure{};
+  while (f.chat->active() && std::chrono::steady_clock::now() < deadline) {
+    auto pumped = f.chat->pump_observations();
+    if (!pumped) saw_failure = true;
+    std::this_thread::yield();
+  }
+  REQUIRE_FALSE(f.chat->active());
+  CHECK(saw_failure);
+  const auto& inspection = f.chat->inspect_observations();
+  CHECK(inspection.source_connection ==
+        surfaces::ManualOpsSourceConnection::disconnected);
+  CHECK_FALSE(inspection.available);
+  REQUIRE(inspection.problem);
+  CHECK(inspection.problem->broker == runtime::OpsBrokerError::source_failure);
+  CHECK(inspection.problem->source ==
+        runtime::OpsObservationSourceError::disconnected);
+  CHECK(inspection.projection.latest_success == previous);
+  CHECK_FALSE(f.chat->submit_observation(f.intent()));
+}
+
 TEST_CASE("Chat manual persistence refusal never returns successful evidence",
           "[chat][ops]") {
   ChatFixture f;

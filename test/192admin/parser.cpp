@@ -47,6 +47,11 @@ TEST_CASE(
       std::vector<std::string_view>{"admin", "service"},
       std::vector<std::string_view>{"admin", "service", "a.service",
                                     "b.service"},
+      std::vector<std::string_view>{"admin", "pod"},
+      std::vector<std::string_view>{"admin", "pod", "broken-pod"},
+      std::vector<std::string_view>{"admin", "pod", "broken-pod", "--uid",
+                                    "uid", "extra"},
+      std::vector<std::string_view>{"admin", "events", "--pod", "broken-pod"},
       std::vector<std::string_view>{"admin", "health", "extra"},
       std::vector<std::string_view>{"admin", "health", "--target"},
       std::vector<std::string_view>{"admin", "health", "--target", "local",
@@ -84,6 +89,17 @@ TEST_CASE(
         std::string(248, 'a') + ".service", std::string{"\x1b.service"},
         std::string{"-a.service"});
     CHECK(f.run({"admin", "service", "--", unit}) == 2);
+  }
+  SECTION("invalid Pods") {
+    const auto pod = GENERATE(std::string{}, std::string{"Broken"},
+                              std::string{"-pod"}, std::string{"pod-"},
+                              std::string{"pod/name"}, std::string(254, 'a'));
+    CHECK(f.run({"admin", "pod", pod, "--uid", "uid"}) == 2);
+  }
+  SECTION("invalid Pod UIDs") {
+    const auto uid = GENERATE(std::string{}, std::string{"uid\nvalue"},
+                              std::string{"\xc3\x28"}, std::string(129, 'u'));
+    CHECK(f.run({"admin", "pod", "pod", "--uid", uid}) == 2);
   }
   CHECK(f.admin.calls == 0);
   CHECK(f.output.str().empty());
@@ -130,7 +146,10 @@ TEST_CASE("Admin schema IDs and help remain valid without service execution",
                std::vector<std::string_view>{"admin", "targets", "--help"},
                std::vector<std::string_view>{"admin", "health", "--help"},
                std::vector<std::string_view>{"admin", "services", "--help"},
-               std::vector<std::string_view>{"admin", "service", "--help"});
+               std::vector<std::string_view>{"admin", "service", "--help"},
+               std::vector<std::string_view>{"admin", "workloads", "--help"},
+               std::vector<std::string_view>{"admin", "pod", "--help"},
+               std::vector<std::string_view>{"admin", "events", "--help"});
   Fixture f;
   CHECK(f.run(arguments) == 0);
   CHECK(f.admin.calls == 0);
@@ -146,11 +165,22 @@ TEST_CASE(
       std::pair{std::string_view{"health"}, AdminCommand::Operation::health},
       std::pair{std::string_view{"services"},
                 AdminCommand::Operation::services},
-      std::pair{std::string_view{"service"}, AdminCommand::Operation::service});
+      std::pair{std::string_view{"service"}, AdminCommand::Operation::service},
+      std::pair{std::string_view{"workloads"},
+                AdminCommand::Operation::workloads},
+      std::pair{std::string_view{"pod"}, AdminCommand::Operation::pod},
+      std::pair{std::string_view{"events"}, AdminCommand::Operation::events});
   const bool json = GENERATE(false, true);
+  INFO(selected.first);
+  INFO(json);
   std::vector<std::string_view> arguments{"admin", selected.first};
   if (selected.second == AdminCommand::Operation::service)
     arguments.push_back("a.service");
+  if (selected.second == AdminCommand::Operation::pod) {
+    arguments.push_back("broken-pod");
+    arguments.push_back("--uid");
+    arguments.push_back("pod-uid");
+  }
   if (json) arguments.push_back("--json");
   REQUIRE(f.run(arguments) == 0);
   REQUIRE(f.admin.seen);
@@ -163,6 +193,15 @@ TEST_CASE(
         (selected.second == AdminCommand::Operation::service
              ? std::optional<std::string>{"a.service"}
              : std::nullopt));
+  CHECK(f.admin.seen->pod == (selected.second == AdminCommand::Operation::pod
+                                  ? std::optional<std::string>{"broken-pod"}
+                                  : std::nullopt));
+  if (selected.second == AdminCommand::Operation::pod) {
+    REQUIRE(f.admin.seen->pod_uid);
+    CHECK(f.admin.seen->pod_uid->value() == "pod-uid");
+  } else {
+    CHECK_FALSE(f.admin.seen->pod_uid);
+  }
   CHECK(f.environment.one_shot == nullptr);
   CHECK(f.environment.interactive == nullptr);
   CHECK(f.environment.models == nullptr);

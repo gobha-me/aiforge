@@ -156,6 +156,8 @@ TEST_CASE("Storage refusal cannot expose uncommitted evidence",
   }
   REQUIRE_FALSE(f.session->inspect_observations().projection.latest_success);
   REQUIRE_FALSE(f.session->inspect_observations().available);
+  CHECK(f.session->inspect_observations().source_connection !=
+        ManualOpsSourceConnection::disconnected);
   REQUIRE(count<OpsObservationRecorded>(f.store.delegate.history) == 0);
 }
 TEST_CASE(
@@ -169,12 +171,63 @@ TEST_CASE(
   REQUIRE(f.session->close());
   REQUIRE(count<RunCancelled>(f.store.delegate.history) == 1);
   REQUIRE(f.session->inspect_observations().closed);
+  CHECK(f.session->inspect_observations().source_connection !=
+        ManualOpsSourceConnection::disconnected);
   REQUIRE_FALSE(f.session->submit_observation(f.intent()));
   auto replacement = f.broker->activate_session(f.specification.session_id);
   REQUIRE(replacement);
   f.session.reset();
   auto next = OpsObservationAuthority::create(f.specification).value();
   REQUIRE(f.broker->preflight_selection(**replacement, next, f.source));
+}
+
+TEST_CASE("Broker disconnection is exposed separately from availability",
+          "[ops-session][failure]") {
+  ops_session_test::Fixture f;
+  f.open();
+  f.bind();
+  REQUIRE(f.broker->close());
+  auto pumped = f.session->pump_observations();
+  REQUIRE_FALSE(pumped);
+  CHECK(f.session->inspect_observations().source_connection ==
+        ManualOpsSourceConnection::disconnected);
+}
+TEST_CASE("Asynchronous source disconnection remains typed at the owner",
+          "[ops-session][failure]") {
+  ops_session_test::Fixture f;
+  f.open();
+  f.bind();
+  REQUIRE(f.session->submit_observation(f.intent()));
+  f.idle();
+  const auto previous =
+      f.session->inspect_observations().projection.latest_success;
+  REQUIRE(previous);
+  f.source->failure = runtime::OpsObservationSourceError::disconnected;
+  REQUIRE(f.session->submit_observation(f.intent()));
+  f.idle(true);
+  const auto& inspection = f.session->inspect_observations();
+  CHECK(inspection.source_connection ==
+        ManualOpsSourceConnection::disconnected);
+  CHECK_FALSE(inspection.available);
+  REQUIRE(inspection.problem);
+  CHECK(inspection.problem->broker == runtime::OpsBrokerError::source_failure);
+  CHECK(inspection.problem->source ==
+        runtime::OpsObservationSourceError::disconnected);
+  CHECK(inspection.projection.latest_success == previous);
+  CHECK_FALSE(f.session->submit_observation(f.intent()));
+}
+
+TEST_CASE("Asynchronous unavailable source is not reported as disconnected",
+          "[ops-session][failure]") {
+  ops_session_test::Fixture f;
+  f.open();
+  f.bind();
+  f.source->failure = runtime::OpsObservationSourceError::unavailable;
+  REQUIRE(f.session->submit_observation(f.intent()));
+  f.idle();
+  const auto& inspection = f.session->inspect_observations();
+  CHECK(inspection.source_connection == ManualOpsSourceConnection::connected);
+  CHECK(inspection.available);
 }
 TEST_CASE("Cancellation append refusal is reported by explicit close",
           "[ops-session]") {

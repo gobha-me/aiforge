@@ -3225,6 +3225,8 @@ auto ChatSession::bind_observation(
     m_impl->tool_policy = std::move(bound->policy);
     m_impl->observation_inspection.selection = std::move(selected);
     m_impl->observation_inspection.problem.reset();
+    m_impl->observation_inspection.source_connection =
+        ManualOpsSourceConnection::connected;
     m_impl->observation_inspection.available = true;
     m_impl->observation_inspection.busy = false;
     return {};
@@ -3354,6 +3356,7 @@ auto ChatSession::decide_observation_approval(
   }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Ordered pump.
 auto ChatSession::pump_observations() -> std::expected<void, ManualOpsFailure> {
   try {
     if (!m_impl->observation_broker)
@@ -3367,9 +3370,19 @@ auto ChatSession::pump_observations() -> std::expected<void, ManualOpsFailure> {
       failure = synced.error();
     const auto service = [&] {
       auto serviced = m_impl->observation_broker->service();
-      if (!serviced && !failure)
-        failure = ManualOpsFailure{
-            ManualOpsErrorCode::unavailable, {}, serviced.error().code};
+      if (!serviced) {
+        if (!failure)
+          failure = ManualOpsFailure{ManualOpsErrorCode::unavailable,
+                                     {},
+                                     serviced.error().code,
+                                     serviced.error().source};
+        if (serviced.error().code == runtime::OpsBrokerError::closed ||
+            (serviced.error().code == runtime::OpsBrokerError::source_failure &&
+             serviced.error().source ==
+                 runtime::OpsObservationSourceError::disconnected))
+          m_impl->observation_inspection.source_connection =
+              ManualOpsSourceConnection::disconnected;
+      }
     };
     const auto cancel_failed = [&] {
       if (!failure || !m_impl->manual_active()) return;

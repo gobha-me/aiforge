@@ -54,6 +54,241 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "Kubernetes selection grants only bounded namespace observation operations",
+    "[admin][controller][kubernetes]") {
+  Fixture f;
+  f.catalog->enable_kubernetes();
+  f.open();
+  f.select("kube");
+  f.ready();
+  REQUIRE(f.manual.authority);
+  CHECK(f.manual.authority->operations ==
+        std::vector{OpsObservationOperation::kubernetes_workloads,
+                    OpsObservationOperation::kubernetes_pod_health,
+                    OpsObservationOperation::kubernetes_events});
+  const auto* identity = std::get_if<KubernetesOpsIdentity>(
+      &f.controller->inspect().active_target->identity);
+  REQUIRE(identity);
+  CHECK(identity->context_name == "fixture-context");
+  CHECK(identity->namespace_name == "fixture-namespace");
+  REQUIRE_FALSE(f.controller->execute(AdminReadHealth{}));
+  CHECK(f.manual.intents.empty());
+  f.capture(AdminReadWorkloads{});
+  CHECK(f.manual.intents.back().operation ==
+        OpsObservationOperation::kubernetes_workloads);
+  CHECK(f.controller->inspect().freshness[3] ==
+        AdminEvidenceFreshness::last_success);
+}
+
+TEST_CASE("Cached Kubernetes Pod reads retain inventory identity and reject "
+          "stale rows",
+          "[admin][controller][kubernetes]") {
+  Fixture f;
+  f.catalog->enable_kubernetes();
+  f.open();
+  f.select("kube");
+  f.ready();
+  f.capture(AdminReadWorkloads{});
+  const auto inventory = *f.controller->inspect().snapshots[3];
+  const AdminReadCachedPod pod{f.session, inventory.observation_event_id, 1, 0};
+  f.capture(pod);
+  REQUIRE(std::holds_alternative<KubernetesPodIdentity>(
+      f.manual.intents.back().resource));
+  const auto identity =
+      std::get<KubernetesPodIdentity>(f.manual.intents.back().resource);
+  CHECK(identity.namespace_name == "fixture-namespace");
+  CHECK(identity.name == "failed-pod");
+  CHECK(identity.uid == id<OpsResourceUid>("pod-uid"));
+  f.capture(AdminReadCachedPodEvents{f.session, inventory.observation_event_id,
+                                     1, 0});
+  CHECK(f.manual.intents.back().operation ==
+        OpsObservationOperation::kubernetes_events);
+  CHECK(f.manual.intents.back().resource == OpsResourceIdentity{identity});
+
+  const auto before = f.manual.intents.size();
+  REQUIRE_FALSE(f.controller->execute(
+      AdminReadCachedPod{f.session, inventory.observation_event_id, 1, 1}));
+  CHECK(f.manual.intents.size() == before);
+  REQUIRE_FALSE(f.controller->execute(
+      AdminReadCachedPod{f.session, inventory.observation_event_id, 2, 0}));
+  CHECK(f.manual.intents.size() == before);
+}
+
+TEST_CASE("Kubernetes namespace and named Pod events preserve exact scope",
+          "[admin][controller][kubernetes]") {
+  Fixture f;
+  f.catalog->enable_kubernetes();
+  f.open();
+  f.select("kube");
+  f.ready();
+  f.capture(AdminReadEvents{});
+  CHECK(
+      std::holds_alternative<std::monostate>(f.manual.intents.back().resource));
+  f.capture(
+      AdminReadNamedPodEvents{"failed-pod", id<OpsResourceUid>("pod-uid")});
+  const auto& pod =
+      std::get<KubernetesPodIdentity>(f.manual.intents.back().resource);
+  CHECK(pod.namespace_name == "fixture-namespace");
+  CHECK(pod.name == "failed-pod");
+  CHECK(pod.uid == id<OpsResourceUid>("pod-uid"));
+}
+
+TEST_CASE("Displayed resource refresh proof rejects every target change",
+          "[admin][controller][authority]") {
+  Fixture f;
+  std::size_t slot{};
+  f.catalog->enable_kubernetes();
+  f.open();
+  SECTION("service details") {
+    f.select();
+    f.ready();
+    f.capture(AdminReadNamedService{"fixture.service"});
+    slot = 2;
+  }
+  SECTION("Pod details") {
+    f.select("kube");
+    f.ready();
+    f.capture(AdminReadNamedPod{"failed-pod", id<OpsResourceUid>("pod-uid")});
+    slot = 4;
+  }
+  SECTION("namespace events") {
+    f.select("kube");
+    f.ready();
+    f.capture(AdminReadEvents{});
+    slot = 5;
+  }
+  SECTION("exact Pod events") {
+    f.select("kube");
+    f.ready();
+    f.capture(
+        AdminReadNamedPodEvents{"failed-pod", id<OpsResourceUid>("pod-uid")});
+    slot = 5;
+  }
+  const auto& snapshot = *f.controller->inspect().snapshots[slot];
+  const auto& request = snapshot.observation.request;
+  AdminRefreshDisplayed displayed{request.session_id,
+                                  request.target,
+                                  request.selection_generation,
+                                  snapshot.observation_event_id,
+                                  request.operation,
+                                  request.resource};
+  const auto original_target = displayed.target;
+  const auto original_resource = displayed.resource;
+  f.capture(displayed);
+  CHECK(f.manual.intents.back().operation == displayed.operation);
+  CHECK(f.manual.intents.back().resource == original_resource);
+  const auto replacement =
+      original_target.target_id == id<OpsTargetId>("beta") ? "alpha" : "beta";
+  f.select(replacement);
+  f.ready();
+  const auto before = f.manual.intents.size();
+  auto refreshed = f.controller->execute(displayed);
+  REQUIRE_FALSE(refreshed);
+  CHECK(refreshed.error().code == ManualOpsErrorCode::wrong_operation);
+  CHECK(f.manual.intents.size() == before);
+  CHECK(displayed.target == original_target);
+  CHECK(displayed.resource == original_resource);
+}
+
+TEST_CASE("Detach preserves truthful freshness without inventing a disconnect",
+          "[admin][controller][kubernetes]") {
+  Fixture f;
+  f.catalog->enable_kubernetes();
+  f.open();
+  f.select("kube");
+  f.ready();
+  f.capture(AdminReadWorkloads{});
+  const auto snapshot = f.controller->inspect().snapshots[3];
+  f.manual.hold = true;
+  REQUIRE(f.controller->execute(AdminReadWorkloads{}));
+  CHECK(f.controller->inspect().freshness[3] ==
+        AdminEvidenceFreshness::refreshing);
+  CHECK(f.controller->inspect().snapshots[3] == snapshot);
+  f.manual.hold = false;
+  f.manual.fail_completion = true;
+  REQUIRE(f.controller->pump());
+  CHECK(f.controller->inspect().freshness[3] ==
+        AdminEvidenceFreshness::refresh_failed);
+  CHECK(f.controller->inspect().snapshots[3] == snapshot);
+  REQUIRE(f.controller->detach());
+  CHECK(f.controller->inspect().freshness[3] ==
+        AdminEvidenceFreshness::refresh_failed);
+  CHECK(f.controller->inspect().snapshots[3] == snapshot);
+  CHECK(f.controller->inspect().phase == AdminPhase::detached);
+}
+
+TEST_CASE("Detach preserves last-success freshness and retained evidence",
+          "[admin][controller][kubernetes]") {
+  Fixture f;
+  f.catalog->enable_kubernetes();
+  f.open();
+  f.select("kube");
+  f.ready();
+  f.capture(AdminReadWorkloads{});
+  const auto snapshot = f.controller->inspect().snapshots[3];
+  REQUIRE(f.controller->inspect().freshness[3] ==
+          AdminEvidenceFreshness::last_success);
+  f.manual.hold = true;
+  REQUIRE(f.controller->execute(AdminReadWorkloads{}));
+  REQUIRE(f.controller->inspect().freshness[3] ==
+          AdminEvidenceFreshness::refreshing);
+  REQUIRE(f.controller->inspect().snapshots[3] == snapshot);
+  REQUIRE(f.controller->detach());
+  CHECK(f.manual.cancels == 1);
+  CHECK(f.controller->inspect().freshness[3] ==
+        AdminEvidenceFreshness::last_success);
+  CHECK(f.controller->inspect().snapshots[3] == snapshot);
+  CHECK(f.controller->inspect().phase == AdminPhase::detached);
+}
+
+TEST_CASE("Source disconnection preserves evidence but marks it disconnected",
+          "[admin][controller][kubernetes][failure]") {
+  Fixture f;
+  f.catalog->enable_kubernetes();
+  f.open();
+  f.select("kube");
+  f.ready();
+  f.capture(AdminReadWorkloads{});
+  const auto snapshot = f.controller->inspect().snapshots[3];
+  REQUIRE(f.broker->close());
+  f.manual.inspection.available = false;
+  f.manual.inspection.source_connection =
+      ManualOpsSourceConnection::disconnected;
+  f.manual.pump_failure = ManualOpsFailure{ManualOpsErrorCode::unavailable};
+  REQUIRE_FALSE(f.controller->pump());
+  CHECK(f.controller->inspect().freshness[3] ==
+        AdminEvidenceFreshness::disconnected);
+  CHECK(f.controller->inspect().snapshots[3] == snapshot);
+  REQUIRE(f.controller->detach());
+  CHECK(f.controller->inspect().freshness[3] ==
+        AdminEvidenceFreshness::disconnected);
+  const auto reads = f.manual.intents.size();
+  REQUIRE_FALSE(f.controller->execute(AdminReadWorkloads{}));
+  CHECK(f.manual.intents.size() == reads);
+}
+
+TEST_CASE("Non-source session failures never relabel retained evidence as "
+          "disconnected",
+          "[admin][controller][kubernetes][failure]") {
+  using Code = ManualOpsErrorCode;
+  for (const auto code : {Code::storage_failure, Code::invalid_history,
+                          Code::internal_failure, Code::closed}) {
+    Fixture f;
+    f.catalog->enable_kubernetes();
+    f.open();
+    f.select("kube");
+    f.ready();
+    f.capture(AdminReadWorkloads{});
+    f.manual.inspection.available = false;
+    f.manual.inspection.problem = ManualOpsFailure{code};
+    f.manual.pump_failure = ManualOpsFailure{code};
+    REQUIRE_FALSE(f.controller->pump());
+    CHECK(f.controller->inspect().freshness[3] ==
+          AdminEvidenceFreshness::last_success);
+  }
+}
+
+TEST_CASE(
     "Admin catalog metadata is copied once within its exact count boundary",
     "[admin][controller]") {
   Fixture f;
@@ -135,6 +370,37 @@ TEST_CASE("A superseding choice retires the exact old preparation without "
   f.ready();
   CHECK(f.controller->inspect().active_target->target_id ==
         id<OpsTargetId>("beta"));
+}
+
+TEST_CASE("Successful target selection preserves retained evidence freshness",
+          "[admin][controller]") {
+  Fixture f;
+  f.open();
+  f.select();
+  f.ready();
+  f.capture(AdminReadHealth{});
+  const auto snapshot = f.controller->inspect().snapshots[0];
+  REQUIRE(f.controller->inspect().freshness[0] ==
+          AdminEvidenceFreshness::last_success);
+
+  std::string expected_target;
+  SECTION("same target reselected") {
+    expected_target = "alpha";
+    f.select();
+  }
+  SECTION("different target selected") {
+    expected_target = "beta";
+    f.select("beta");
+  }
+  f.ready();
+
+  REQUIRE(f.controller->inspect().active_target);
+  CHECK(f.controller->inspect().active_target->target_id ==
+        id<OpsTargetId>(expected_target));
+  CHECK(f.controller->inspect().selection_generation == 2);
+  CHECK(f.controller->inspect().snapshots[0] == snapshot);
+  CHECK(f.controller->inspect().freshness[0] ==
+        AdminEvidenceFreshness::last_success);
 }
 
 TEST_CASE("Ready preparation stays producer-owned while the session is busy",
@@ -316,8 +582,8 @@ TEST_CASE(
   f.capture(AdminReadServices{});
   f.capture(AdminReadNamedService{"fixture.service"});
   const auto snapshots = f.controller->inspect().snapshots;
-  for (const auto& value : snapshots)
-    REQUIRE(value);
+  for (std::size_t slot{}; slot < 3; ++slot)
+    REQUIRE(snapshots[slot]);
   REQUIRE(f.controller->pump());
   CHECK(f.controller->inspect().snapshots == snapshots);
   f.manual.fail_completion = true;
@@ -353,6 +619,7 @@ TEST_CASE("Closing view cancels its own approval and retains active target and "
   f.capture(AdminReadHealth{});
   const auto target = f.controller->inspect().active_target;
   const auto snapshot = f.controller->inspect().snapshots[0];
+  const auto freshness = f.controller->inspect().freshness[0];
   f.manual.approval = true;
   REQUIRE(f.controller->execute(AdminInspect{}));
   REQUIRE(f.controller->execute(AdminReadServices{}));
@@ -363,6 +630,7 @@ TEST_CASE("Closing view cancels its own approval and retains active target and "
   CHECK(f.controller->inspect().current_status == RunStatus::cancelled);
   CHECK(f.controller->inspect().active_target == target);
   CHECK(f.controller->inspect().snapshots[0] == snapshot);
+  CHECK(f.controller->inspect().freshness[0] == freshness);
   REQUIRE(f.controller->execute(AdminCloseView{}));
   CHECK(f.manual.cancels == 1);
 }
@@ -375,6 +643,9 @@ TEST_CASE("Detach clears borrowed ports even if cancellation refuses or throws",
   f.ready();
   f.manual.hold = true;
   REQUIRE(f.controller->execute(AdminReadHealth{}));
+  REQUIRE_FALSE(f.controller->inspect().snapshots[0]);
+  REQUIRE(f.controller->inspect().freshness[0] ==
+          AdminEvidenceFreshness::refreshing);
   SECTION("refuses") {
     f.manual.cancel_failure =
         ManualOpsFailure{ManualOpsErrorCode::storage_failure};
@@ -386,6 +657,9 @@ TEST_CASE("Detach clears borrowed ports even if cancellation refuses or throws",
   CHECK_FALSE(f.controller->inspect().session);
   CHECK_FALSE(f.controller->inspect().current);
   CHECK_FALSE(f.controller->inspect().active_target);
+  CHECK_FALSE(f.controller->inspect().snapshots[0]);
+  CHECK(f.controller->inspect().freshness[0] ==
+        AdminEvidenceFreshness::unavailable);
   const auto calls = f.manual.pumps;
   const auto cancels = f.manual.cancels;
   REQUIRE(f.controller->pump());

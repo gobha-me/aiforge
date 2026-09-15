@@ -1,7 +1,7 @@
 # ADR 0024: Read-only Admin observations
 
-- Status: Proposed for issue #226 implementation review
-- Date: 2026-09-09
+- Status: Accepted
+- Date: 2026-09-15
 
 ## Context and delivery boundary
 
@@ -21,10 +21,10 @@ submission, remote decisions, Kubernetes Dev workers and Ceph inspection remain
 separately tracked follow-ons. This ADR does not authorize deploying or changing
 infrastructure.
 
-This first implementation establishes the neutral target/request contract and
-failure tests. It does not itself complete the Observe product journey. Later
-slices must deliver production sources, durable execution, evidence inspection,
-TUI/command parity and the two diagnostic smoke journeys before #226 closes.
+The accepted implementation grows in bounded milestones from the neutral
+target/request contract. Each milestone below records its delivered boundary;
+remaining log consent, model explanation and diagnostic smoke journeys still
+gate completion of #226.
 
 ## Neutral binding and request authority
 
@@ -674,12 +674,16 @@ CLI/TUI collection and Kubernetes source availability are not implied.
 
 ## Standalone Admin command milestone
 
-A separate closed Admin command port dispatches target listing and Linux health,
-loaded services and exact service health. Product assembly creates a fresh durable
-OpsSession with the genuine Observe launch policy and only the selected native
-read registration. No provider/model, credentials, generic shell, child or memory
-port is assembled. Metadata target listing opens neither sources nor session
-storage. Invalid or incompatible selection never falls back to local collection.
+A separate closed Admin command port dispatches target listing, Linux health,
+loaded services and exact service health, plus Kubernetes namespace workloads,
+exact Pod health, namespace events and exact-Pod events. Product assembly
+creates a fresh durable OpsSession with the genuine Observe launch policy and
+only the selected native read registration. No provider/model, generic shell,
+child or memory port is assembled. Metadata target listing opens neither
+sources nor session storage. Invalid or incompatible selection never falls back
+to local collection. Kubernetes name/UID pairs and the distinction between
+namespace and exact-Pod event scope survive parsing through dispatch; a command
+cannot broaden an exact-Pod read into a namespace read.
 
 One exclusively owned finite worker performs preparation and collection. Broker
 activation follows successful durable creation. Preparation uses the worker's
@@ -752,7 +756,9 @@ integration work; these metadata and delivery APIs enable no collection path.
 
 The optional view controller owns only bounded catalog metadata, one exact
 preparation/claimed-source retirement state, a current manual submission and
-three typed historical snapshots. It borrows the application manual session and
+six operation-specific historical snapshot slots: Linux health, services and
+service details, then Kubernetes workloads, Pod details and events. It borrows
+the application manual session and
 native binding port while attached; detach clears those borrows even when
 cancellation refuses. Configuration factories own their private inputs and run
 preparation on the existing shared worker. Widget actions never carry endpoints,
@@ -767,15 +773,28 @@ never relabels active A, and ordinary refusal retains A. Fatal storage/history o
 internal failures latch. Source cleanup after successful claim remains owned by
 the application and does not acquire a new pool or cancellation guarantee.
 
-Reads are limited to Linux health, loaded services and exact service health with
-logs disabled. Explicit unit input remains name-only; inventory actions require
-the original session, observation event, selection generation and row, matching
-the full current binding. The controller caches only exact current committed
-success and preserves original-target last-good evidence after failure. The
-shared private target/unit validators serve CLI, controller and later slash
-input. Manual pumping never drains a model; the application separately delivers
-buffered events through194. This controller alone supplies no dialog, application
-bootstrap, real Chat/SQLite integration proof or completed #226 user journey.
+Reads are limited to those six operations with logs disabled. Explicit Linux
+unit input remains name-only. Service and Pod inventory actions require the
+original session, observation event, selection generation and row, matching the
+full current binding; Pod actions retain exact namespace, name and UID. Events
+are either namespace-scoped or exact-Pod scoped and never silently change scope.
+The controller caches only exact current committed success and preserves
+original-target last-good evidence after failure. Refreshing, refresh failure,
+last success, unavailable and disconnected are distinct. Only the manual
+session's typed source-connection state may mark retained evidence disconnected.
+Successful same-target or A-to-B selection changes current authority without
+relabeling historical evidence disconnected; retained freshness continues to
+describe the collection result for its original source.
+An asynchronous native-source `disconnected` result remains typed through its
+broker entry and is also reported once by owner service after every copied entry
+has been serviced; other source failures remain request-local. Closed admission
+and unavailable, storage, history or internal failures retain their truthful
+failure and freshness. Detach clears the live binding while preserving retained
+last-success, refresh-failed or typed disconnected evidence; an interrupted
+refresh returns to last-success or unavailable according to retained evidence.
+The detached controller phase remains separately visible. The shared private
+validators serve CLI, controller and slash input. Manual pumping never drains a
+model; the application separately delivers buffered events through 194.
 
 ### Admin cached presentation and commands
 
@@ -787,15 +806,23 @@ commands. Toolbar visibility is application presentation state; hiding it does
 not alter grants, selection, cancellation or keyboard access.
 
 The dialog retains bounded formatted committed snapshots with their original
-event and target identity. Service rows carry the displayed session, observation
-event, selection generation and row index into the controller's exact cache
-check. A changed cache cannot silently reinterpret a delayed displayed action.
-Canonical observation formatting retains scope, timestamps, completeness and
-unknown values. Historical presentation does not reconstruct current authority.
+event and target identity. Service and Pod rows carry the displayed session,
+observation event, selection generation and row index into the controller's
+exact cache check. Every displayed-slot refresh carries the displayed session,
+full target binding, selection generation, observation event, operation and
+resource scope. The controller requires that proof to match both its retained
+snapshot and current selection, so selecting B cannot reinterpret A's service,
+Pod, exact-Pod event or namespace-event refresh. Navigation cannot substitute
+the currently highlighted opposite-kind row or broaden exact-Pod events.
+Toolbar, keyboard and menu paths dispatch typed actions with the scope named by
+their visible label. Canonical observation formatting retains scope, timestamps,
+completeness and unknown values. Historical presentation does not reconstruct
+current authority. The compact dialog keeps active target, Kubernetes
+context/namespace, slot freshness and status/error feedback visible at the
+supported 20-by-5 boundary.
 
-This presentation milestone does not attach the dialog to Chat, create a new
-standalone loop or enable log collection, Explain or Kubernetes requests. Those
-application integrations must retain the existing owner-thread session, policy,
+This presentation milestone enables no log collection or model explanation.
+Application integrations retain the existing owner-thread session, policy,
 approval and physical worker lifecycle contracts.
 
 ## Configured Admin catalog milestone
@@ -880,9 +907,10 @@ identities and the actual top overlay before popping or resolving a decision;
 manual completion stays on the manual port. Actual model tool ceilings and launch
 policy remain unchanged by manual availability.
 
-The initial Chat view supports the controller's Linux health, loaded-services and
-exact service-health operations. Kubernetes catalog preparation, explicit log
-consent, model Explain and standalone Admin TUI remain separate integrations.
+The Chat view supports the controller's Linux health, loaded-services and exact
+service-health operations together with Kubernetes workloads, exact Pod health,
+namespace events and exact-Pod events. Explicit log consent, model Explain and a
+standalone Admin TUI remain separate integrations.
 
 ### Configured Kubernetes preparation milestone
 
@@ -908,5 +936,5 @@ source paths and credential bytes do not enter neutral bindings or errors.
 The resulting binding contains the owner-assigned target and configuration
 revision plus the selected context, explicit namespace, HTTPS endpoint and
 non-secret CA trust identity. Preparation performs no observation or network
-request. Kubernetes controller views/operations, log consent, Explain and the
-standalone Admin TUI remain later milestones.
+request. Log consent, Explain and the standalone Admin TUI remain later
+milestones.

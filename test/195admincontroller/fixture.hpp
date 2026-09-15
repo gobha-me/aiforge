@@ -1,6 +1,7 @@
 #pragma once
 #include "../159foldergrant/fixture.hpp"
 #include <aiforge/surfaces/admin_controller.hpp>
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <stdexcept>
 
@@ -33,9 +34,15 @@ class Source final : public runtime::OpsObservationSource {
          std::shared_ptr<PreparationState> state)
       : m_binding{std::move(identity.target_id),
                   std::move(identity.configuration_revision),
-                  LinuxOpsIdentity{LinuxExecutionScope::container,
-                                   "12345678-1234-1234-1234-123456789abc", 42,
-                                   43}},
+                  identity.kind == OpsTargetKind::kubernetes
+                      ? OpsTargetIdentity{KubernetesOpsIdentity{
+                            "fixture-context",
+                            "fixture-namespace",
+                            {"127.0.0.1", 6443},
+                            "sha256:fixture"}}
+                      : OpsTargetIdentity{LinuxOpsIdentity{
+                            LinuxExecutionScope::container,
+                            "12345678-1234-1234-1234-123456789abc", 42, 43}}},
         m_state(std::move(state)) {}
   ~Source() override { ++m_state->destroyed; }
   auto guarantees_bound_read_only_observations() const noexcept
@@ -97,6 +104,10 @@ class Catalog final : public AdminSourceCatalog {
   bool owned{true};
   unsigned calls{};
   std::optional<runtime::OpsObservationSourceError> failure;
+  auto enable_kubernetes() -> void {
+    choices.push_back(
+        {id<OpsTargetId>("kube"), "Kubernetes", OpsTargetKind::kubernetes});
+  }
   auto guarantees_owned_metadata() const noexcept -> bool override {
     return owned;
   }
@@ -108,9 +119,14 @@ class Catalog final : public AdminSourceCatalog {
                        runtime::OpsObservationSourceError> override {
     ++calls;
     if (failure) return std::unexpected(*failure);
+    const auto found =
+        std::ranges::find(choices, target, &AdminTargetChoice::id);
+    if (found == choices.end())
+      return std::unexpected(
+          runtime::OpsObservationSourceError::invalid_result);
     return std::make_shared<Factory>(
-        runtime::OpsSourcePreparationIdentity{
-            std::move(target), std::move(revision), OpsTargetKind::linux_local},
+        runtime::OpsSourcePreparationIdentity{std::move(target),
+                                              std::move(revision), found->kind},
         state);
   }
 };
@@ -212,6 +228,49 @@ class Manual final : public ManualOpsSession {
           OpsObservationReason::none,
           {},
           {}};
+    if (intent.operation == OpsObservationOperation::kubernetes_workloads)
+      payload = KubernetesWorkloadsObservation{
+          {{{OpsWorkloadKind::pod, "fixture-namespace", "failed-pod",
+             id<OpsResourceUid>("pod-uid")},
+            OpsHealthState::unhealthy,
+            1,
+            0,
+            1},
+           {{OpsWorkloadKind::deployment, "fixture-namespace", "web",
+             id<OpsResourceUid>("deployment-uid")},
+            OpsHealthState::degraded,
+            2,
+            1,
+            2}}};
+    if (intent.operation == OpsObservationOperation::kubernetes_pod_health)
+      payload = KubernetesPodObservation{
+          std::get<KubernetesPodIdentity>(intent.resource),
+          OpsPodPhase::failed,
+          {{"app",
+            {},
+            OpsContainerState::terminated,
+            OpsReadiness::not_ready,
+            OpsObservationReason::failed_exit,
+            3,
+            7}}};
+    if (intent.operation == OpsObservationOperation::kubernetes_events) {
+      const auto regarding =
+          std::holds_alternative<KubernetesPodIdentity>(intent.resource)
+              ? std::get<KubernetesPodIdentity>(intent.resource)
+              : KubernetesPodIdentity{"fixture-namespace",
+                                      "failed-pod",
+                                      id<OpsResourceUid>("pod-uid"),
+                                      {}};
+      payload = KubernetesEventsObservation{
+          {{id<OpsResourceUid>("event-uid"),
+            {OpsWorkloadKind::pod, regarding.namespace_name, regarding.name,
+             regarding.uid},
+            OpsEventSeverity::warning,
+            OpsObservationReason::failed_exit,
+            {},
+            {},
+            1}}};
+    }
     const auto event =
         id<EventId>("observation-" + std::to_string(intents.size()));
     current.observation_event_id = event;
@@ -219,13 +278,12 @@ class Manual final : public ManualOpsSession {
         current.submission,
         event,
         id<EventId>("result-" + std::to_string(intents.size())),
-        {std::move(request),
-         EventTimestamp{std::chrono::milliseconds{1000}},
+        {std::move(request), EventTimestamp{std::chrono::milliseconds{1000}},
          EventTimestamp{std::chrono::milliseconds{1001}},
-         OpsObservationCompleteness::complete,
-         0,
-         0,
-         {},
+         OpsObservationCompleteness::complete, 0, 0,
+         intent.operation >= OpsObservationOperation::kubernetes_workloads
+             ? std::optional<std::string>{"resource-version"}
+             : std::optional<std::string>{},
          std::move(payload)}};
     return {};
   }
@@ -258,6 +316,7 @@ class Binding final : public AdminSelectionBinding {
           ManualOpsFailure{ManualOpsErrorCode::operation_failed});
     manual.authority = grant;
     manual.inspection.selection = grant.target;
+    manual.inspection.source_connection = ManualOpsSourceConnection::connected;
     manual.inspection.available = true;
     return {};
   }

@@ -8,14 +8,29 @@ false; closed/busy/fatal sessions cannot collect. Test actual shared worker with
 unrelated stalled work, producer-ready unclaimed result, claimed physical
 retirement, source errors, expiry, superseded results and exact cancellation.
 PendingB never replaces activeA until native binding succeeds. Ordinary refusal
-preservesA; fatal errors latch. Test old session/target/generation/event/index row
-callbacks versus explicit name-only reads; no implicit retry or log grant.
+preservesA; successful same-target or A-to-B selection preserves truthful
+freshness for retained evidence; fatal errors latch. Test old
+session/target/generation/event/index row callbacks versus explicit name-only
+reads; no implicit retry or log grant.
 Cached evidence comes only from exact committed current success, deduplicated by
-session and event, bounded to3 snapshots, and retains original target on failure.
+session and event, bounded to six operation snapshots, and retains original
+target on failure. Kubernetes selection grants only workloads, Pod health and
+events. Cached Pod callbacks bind session, inventory event, selection generation,
+row, namespace, name and UID; stale/replaced/non-Pod rows fail before submission.
+Namespace events carry no resource, while exact-Pod events reuse the same bound
+identity. Every displayed refresh binds its session, full target, generation,
+event, operation and resource scope to both the retained snapshot and current
+selection; selecting B makes every A refresh stale before submission. Pending,
+failed and disconnected freshness never erase or relabel the last successful
+observation; captured time remains the age source. Only the
+manual session's typed source-disconnection state marks retained evidence
+disconnected; storage, history, internal and closed-session failures do not.
 Session detach clears borrowed pointers before owner destruction, preserving
-logical cancellation with assertion-safe owning source gates. Controller fakes do
-not prove actual Chat/SQLite policy or GUI behavior: those integration tests are
-required before full feature completion.
+logical cancellation with assertion-safe owning source gates. Detach preserves
+last-success, refresh-failed and actual source-disconnected evidence states;
+only an in-flight refreshing slot returns to its retained-evidence or unavailable
+state. Controller fakes do not prove actual Chat/SQLite policy or GUI behavior:
+those integration tests are required before full feature completion.
 
 Specific evidence boundaries: the actual shared-worker request counter is driven
 to UINT64_MAX through normal admission, then controller selection must refuse

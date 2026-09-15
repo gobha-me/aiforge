@@ -44,7 +44,41 @@ auto snapshot_index(domain::OpsObservationOperation operation)
     case domain::OpsObservationOperation::linux_health: return 0;
     case domain::OpsObservationOperation::linux_services: return 1;
     case domain::OpsObservationOperation::linux_service_health: return 2;
+    case domain::OpsObservationOperation::kubernetes_workloads: return 3;
+    case domain::OpsObservationOperation::kubernetes_pod_health: return 4;
+    case domain::OpsObservationOperation::kubernetes_events: return 5;
     default: return {};
+  }
+}
+auto operation_matches(domain::OpsTargetKind kind,
+                       domain::OpsObservationOperation operation) -> bool {
+  switch (kind) {
+    case domain::OpsTargetKind::linux_local:
+      return operation == domain::OpsObservationOperation::linux_health ||
+             operation == domain::OpsObservationOperation::linux_services ||
+             operation == domain::OpsObservationOperation::linux_service_health;
+    case domain::OpsTargetKind::kubernetes:
+      return operation ==
+                 domain::OpsObservationOperation::kubernetes_workloads ||
+             operation ==
+                 domain::OpsObservationOperation::kubernetes_pod_health ||
+             operation == domain::OpsObservationOperation::kubernetes_events;
+    case domain::OpsTargetKind::ceph: return false;
+  }
+  return false;
+}
+auto disconnected(AdminState& state) noexcept -> void {
+  for (std::size_t slot{}; slot < state.snapshots.size(); ++slot)
+    state.freshness[slot] = state.snapshots[slot]
+                                ? AdminEvidenceFreshness::disconnected
+                                : AdminEvidenceFreshness::unavailable;
+}
+auto detached(AdminState& state) noexcept -> void {
+  for (std::size_t slot{}; slot < state.snapshots.size(); ++slot) {
+    if (state.freshness[slot] != AdminEvidenceFreshness::refreshing) continue;
+    state.freshness[slot] = state.snapshots[slot]
+                                ? AdminEvidenceFreshness::last_success
+                                : AdminEvidenceFreshness::unavailable;
   }
 }
 auto validate_catalog(std::span<const AdminTargetChoice> targets) -> bool {
@@ -82,6 +116,7 @@ struct AdminController::Impl {
   AdminSelectionBinding* binding{};
   std::shared_ptr<runtime::OpsObservationEndpoint> endpoint;
   std::optional<Preparation> preparation;
+  std::optional<std::size_t> current_slot;
   AdminState state;
 
   Impl(domain::OpsOwnerId identity, std::shared_ptr<AdminSourceCatalog> sources,
@@ -98,6 +133,8 @@ struct AdminController::Impl {
     state.current.reset();
     state.current_status = domain::RunStatus::not_started;
     state.selection_generation = 0;
+    current_slot.reset();
+    detached(state);
   }
   auto phase() -> void {
     if (state.fatal) {
@@ -196,16 +233,20 @@ struct AdminController::Impl {
     auto& retained = state.snapshots[*index];
     if (retained &&
         retained->observation.request.session_id == request.session_id &&
-        retained->observation_event_id == success->observation_event_id)
+        retained->observation_event_id == success->observation_event_id) {
+      state.freshness[*index] = AdminEvidenceFreshness::last_success;
       return {};
+    }
     // Preserve last-good evidence if any member allocation in the copy fails.
     static_assert(
         std::is_nothrow_move_constructible_v<CommittedOpsObservation>);
     static_assert(std::is_nothrow_move_assignable_v<CommittedOpsObservation>);
     auto replacement = *success;
     retained = std::move(replacement);
+    state.freshness[*index] = AdminEvidenceFreshness::last_success;
     return {};
   }
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- State reducer.
   auto synchronize() -> std::expected<void, Failure> {
     if (manual == nullptr) {
       phase();
@@ -220,9 +261,20 @@ struct AdminController::Impl {
         return report({Code::invalid_history});
       state.current_status = current->status;
       if (auto cached = cache(inspection); !cached) return cached;
-      if (current->status == domain::RunStatus::failed && !state.problem)
-        state.problem = Failure{Code::operation_failed};
+      if (current_slot && current->status == domain::RunStatus::failed) {
+        state.freshness[*current_slot] = AdminEvidenceFreshness::refresh_failed;
+        if (!state.problem) state.problem = Failure{Code::operation_failed};
+      } else if (current_slot &&
+                 current->status == domain::RunStatus::cancelled) {
+        state.freshness[*current_slot] =
+            state.snapshots[*current_slot]
+                ? AdminEvidenceFreshness::last_success
+                : AdminEvidenceFreshness::unavailable;
+      }
     }
+    if (state.active_target &&
+        inspection.source_connection == ManualOpsSourceConnection::disconnected)
+      disconnected(state);
     phase();
     return {};
   }
@@ -274,21 +326,29 @@ struct AdminController::Impl {
     auto valid = runtime::validate_ops_source_preparation_result(
         preparation->request, *preparation->claimed);
     if (!valid) return source_failure(valid.error());
-    if (domain::ops_target_kind(source->target_binding()) !=
-        domain::OpsTargetKind::linux_local)
+    const auto kind = domain::ops_target_kind(source->target_binding());
+    if (!kind || *kind == domain::OpsTargetKind::ceph)
       return source_failure(SourceError::unsupported);
     auto target = source->target_binding();
     const auto generation = state.selection_generation + 1;
-    auto authority = domain::OpsObservationAuthority::create(
-        {owner,
-         *state.session,
-         target,
-         generation,
-         {domain::OpsObservationOperation::linux_health,
-          domain::OpsObservationOperation::linux_services,
-          domain::OpsObservationOperation::linux_service_health},
-         {},
-         {}});
+    std::vector<domain::OpsObservationOperation> operations;
+    if (*kind == domain::OpsTargetKind::linux_local) {
+      operations = {domain::OpsObservationOperation::linux_health,
+                    domain::OpsObservationOperation::linux_services,
+                    domain::OpsObservationOperation::linux_service_health};
+    } else {
+      operations = {domain::OpsObservationOperation::kubernetes_workloads,
+                    domain::OpsObservationOperation::kubernetes_pod_health,
+                    domain::OpsObservationOperation::kubernetes_events};
+    }
+    auto authority =
+        domain::OpsObservationAuthority::create({owner,
+                                                 *state.session,
+                                                 target,
+                                                 generation,
+                                                 std::move(operations),
+                                                 {},
+                                                 {}});
     if (!authority) return report({Code::invalid_input});
     auto bound = binding->bind(std::move(*authority), source, endpoint);
     if (!bound) return report(bound.error());
@@ -296,6 +356,7 @@ struct AdminController::Impl {
     state.selection_generation = generation;
     state.current.reset();
     state.current_status = domain::RunStatus::not_started;
+    current_slot.reset();
     state.problem.reset();
     state.source_problem.reset();
     return {};
@@ -362,20 +423,29 @@ struct AdminController::Impl {
     if (preparation || state.pending_target) return report({Code::busy});
     if (!state.active_target || !manual->inspect_observations().available)
       return report({Code::unavailable});
+    const auto kind = domain::ops_target_kind(*state.active_target);
+    if (!kind) return report({Code::invalid_input});
     const bool target_read =
         operation == domain::OpsObservationOperation::linux_health ||
-        operation == domain::OpsObservationOperation::linux_services;
+        operation == domain::OpsObservationOperation::linux_services ||
+        operation == domain::OpsObservationOperation::kubernetes_workloads ||
+        (operation == domain::OpsObservationOperation::kubernetes_events &&
+         std::holds_alternative<std::monostate>(resource));
     const bool valid_resource =
         target_read
             ? std::holds_alternative<std::monostate>(resource)
-            : operation ==
-                      domain::OpsObservationOperation::linux_service_health &&
-                  std::holds_alternative<domain::LinuxServiceIdentity>(
-                      resource) &&
+            : (operation ==
+                   domain::OpsObservationOperation::linux_service_health ||
+               operation ==
+                   domain::OpsObservationOperation::kubernetes_pod_health ||
+               operation ==
+                   domain::OpsObservationOperation::kubernetes_events) &&
                   domain::validate_ops_resource_identity(*state.active_target,
                                                          resource)
                       .has_value();
-    if (!valid_resource) return report({Code::invalid_input});
+    const auto slot = snapshot_index(operation);
+    if (!operation_matches(*kind, operation) || !valid_resource || !slot)
+      return report({Code::invalid_input});
     auto submitted = manual->submit_observation({state.active_target->target_id,
                                                  state.selection_generation,
                                                  operation,
@@ -383,6 +453,8 @@ struct AdminController::Impl {
                                                  {}});
     if (!submitted) return report(submitted.error());
     state.current = std::move(*submitted);
+    current_slot = slot;
+    state.freshness[*slot] = AdminEvidenceFreshness::refreshing;
     state.current_status = domain::RunStatus::running;
     state.problem.reset();
     state.source_problem.reset();
@@ -406,6 +478,65 @@ struct AdminController::Impl {
       return report({Code::invalid_input});
     return read(domain::OpsObservationOperation::linux_service_health,
                 inventory->services[action.row].identity);
+  }
+  auto cached_pod(const domain::SessionId& session,
+                  const domain::EventId& inventory_event,
+                  std::uint64_t selection_generation, std::size_t row,
+                  domain::OpsObservationOperation operation)
+      -> std::expected<void, Failure> {
+    const auto& cached = state.snapshots[3];
+    if (!state.session || session != *state.session || !cached ||
+        cached->observation.request.session_id != session ||
+        cached->observation_event_id != inventory_event ||
+        selection_generation != state.selection_generation ||
+        cached->observation.request.selection_generation !=
+            state.selection_generation ||
+        !state.active_target ||
+        cached->observation.request.target != *state.active_target)
+      return report({Code::wrong_operation});
+    const auto* inventory = std::get_if<domain::KubernetesWorkloadsObservation>(
+        &cached->observation.payload);
+    if (inventory == nullptr || row >= inventory->workloads.size())
+      return report({Code::invalid_input});
+    const auto& identity = inventory->workloads[row].identity;
+    if (identity.kind != domain::OpsWorkloadKind::pod)
+      return report({Code::invalid_input});
+    return read(operation,
+                domain::KubernetesPodIdentity{
+                    identity.namespace_name, identity.name, identity.uid, {}});
+  }
+  auto named_pod(std::string name, domain::OpsResourceUid uid,
+                 domain::OpsObservationOperation operation)
+      -> std::expected<void, Failure> {
+    if (!state.active_target) return report({Code::unavailable});
+    const auto* identity = std::get_if<domain::KubernetesOpsIdentity>(
+        &state.active_target->identity);
+    if (identity == nullptr) return report({Code::invalid_input});
+    return read(
+        operation,
+        domain::KubernetesPodIdentity{
+            identity->namespace_name, std::move(name), std::move(uid), {}});
+  }
+  auto refresh_displayed(const AdminRefreshDisplayed& action)
+      -> std::expected<void, Failure> {
+    const auto slot = snapshot_index(action.operation);
+    if (!slot) return report({Code::invalid_input});
+    const auto& cached = state.snapshots[*slot];
+    if (!state.session || action.session != *state.session || !cached ||
+        !state.active_target || action.target != *state.active_target ||
+        action.selection_generation != state.selection_generation ||
+        cached->observation_event_id != action.observation_event) {
+      return report({Code::wrong_operation});
+    }
+    const auto& request = cached->observation.request;
+    if (request.session_id != action.session ||
+        request.target != action.target ||
+        request.selection_generation != action.selection_generation ||
+        request.operation != action.operation ||
+        request.resource != action.resource) {
+      return report({Code::wrong_operation});
+    }
+    return read(action.operation, action.resource);
   }
 };
 
@@ -498,6 +629,7 @@ auto AdminController::pump() -> std::expected<void, ManualOpsFailure> {
     return m_impl->report({Code::internal_failure});
   }
 }
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Typed dispatch.
 auto AdminController::execute(const AdminAction& action)
     -> std::expected<void, ManualOpsFailure> {
   try {
@@ -522,6 +654,32 @@ auto AdminController::execute(const AdminAction& action)
                 domain::LinuxServiceIdentity{value.unit, {}});
           } else if constexpr (std::same_as<T, AdminReadCachedService>) {
             return m_impl->cached_service(value);
+          } else if constexpr (std::same_as<T, AdminReadWorkloads>) {
+            return m_impl->read(
+                domain::OpsObservationOperation::kubernetes_workloads);
+          } else if constexpr (std::same_as<T, AdminReadEvents>) {
+            return m_impl->read(
+                domain::OpsObservationOperation::kubernetes_events);
+          } else if constexpr (std::same_as<T, AdminReadNamedPod>) {
+            return m_impl->named_pod(
+                value.name, value.uid,
+                domain::OpsObservationOperation::kubernetes_pod_health);
+          } else if constexpr (std::same_as<T, AdminReadNamedPodEvents>) {
+            return m_impl->named_pod(
+                value.name, value.uid,
+                domain::OpsObservationOperation::kubernetes_events);
+          } else if constexpr (std::same_as<T, AdminReadCachedPod>) {
+            return m_impl->cached_pod(
+                value.session, value.inventory_event,
+                value.selection_generation, value.row,
+                domain::OpsObservationOperation::kubernetes_pod_health);
+          } else if constexpr (std::same_as<T, AdminReadCachedPodEvents>) {
+            return m_impl->cached_pod(
+                value.session, value.inventory_event,
+                value.selection_generation, value.row,
+                domain::OpsObservationOperation::kubernetes_events);
+          } else if constexpr (std::same_as<T, AdminRefreshDisplayed>) {
+            return m_impl->refresh_displayed(value);
           } else {
             if constexpr (std::same_as<T, AdminCloseView>)
               m_impl->state.visible = false;

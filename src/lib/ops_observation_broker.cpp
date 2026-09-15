@@ -228,8 +228,9 @@ struct OpsObservationBroker::Impl {
     }
     return true;
   }
-  auto service_entry(const std::shared_ptr<Entry>& entry, Clock::time_point now)
-      -> void {
+  [[nodiscard]] auto service_entry(const std::shared_ptr<Entry>& entry,
+                                   Clock::time_point now)
+      -> std::optional<OpsBrokerFailure> {
     std::optional<OpsBrokerFailure> rejected;
     bool dispatch{};
     {
@@ -248,27 +249,33 @@ struct OpsObservationBroker::Impl {
     }
     if (rejected) {
       discard(entry, *rejected);
-      return;
+      return {};
     }
-    if (dispatch && !submit_entry(entry)) return;
-    if (!entry->token) return;
+    if (dispatch && !submit_entry(entry)) return {};
+    if (!entry->token) return {};
     auto completed = worker->poll(*entry->token);
     if (!completed) {
       discard(entry, worker_failure(completed.error()));
-      return;
+      return {};
     }
-    if (!*completed) return;
+    if (!*completed) return {};
     entry->token.reset();
     const auto& result = (**completed).result;
     if (!result) {
-      discard(entry, {Code::source_failure, result.error()});
-      return;
+      OpsBrokerFailure source_failure{Code::source_failure, result.error()};
+      discard(entry, source_failure);
+      // A disconnected native source invalidates owner-visible availability,
+      // rather than remaining only an individual executor failure. Other
+      // typed source failures remain request-local.
+      if (result.error() == OpsObservationSourceError::disconnected)
+        return source_failure;
+      return {};
     }
     if (!authority || !current(entry->request) ||
         !domain::validate_ops_observation(*authority, entry->request,
                                           *result)) {
       discard(entry, {Code::stale_request});
-      return;
+      return {};
     }
     {
       const std::lock_guard lock(state->mutex);
@@ -276,6 +283,7 @@ struct OpsObservationBroker::Impl {
         entry->result = std::move((**completed).result.value());
     }
     state->changed.notify_all();
+    return {};
   }
 };
 
@@ -364,8 +372,12 @@ auto OpsObservationBroker::service(Clock::time_point now)
       const std::lock_guard lock(m_impl->state->mutex);
       entries = m_impl->state->entries;
     }
-    for (const auto& entry : entries)
-      m_impl->service_entry(entry, now);
+    std::optional<OpsBrokerFailure> first_disconnect;
+    for (const auto& entry : entries) {
+      auto failure = m_impl->service_entry(entry, now);
+      if (failure && !first_disconnect) first_disconnect = failure;
+    }
+    if (first_disconnect) return std::unexpected(*first_disconnect);
     return {};
   } catch (...) {
     fail_closed(m_impl->state);

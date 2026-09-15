@@ -422,6 +422,30 @@ TEST_CASE("Ops source failures stay typed and no retry occurs",
   REQUIRE(fixture.source->calls == 1);
 }
 
+TEST_CASE("Ops owner service reports source disconnection exactly once",
+          "[ops-broker][failure]") {
+  Fixture fixture;
+  fixture.source->failure = runtime::OpsObservationSourceError::disconnected;
+  Call call{fixture.endpoint};
+  REQUIRE(until([&] { return fixture.broker->pending_work().value(); }));
+  std::optional<Failure> owner_failure;
+  REQUIRE(until([&] {
+    auto serviced = fixture.broker->service();
+    if (!serviced) owner_failure = serviced.error();
+    return owner_failure.has_value() && call.ready();
+  }));
+  REQUIRE(owner_failure);
+  CHECK(owner_failure->code == Code::source_failure);
+  CHECK(owner_failure->source ==
+        runtime::OpsObservationSourceError::disconnected);
+  auto waiter = call.future.get();
+  REQUIRE_FALSE(waiter);
+  CHECK(waiter.error() == *owner_failure);
+  CHECK(fixture.broker->service());
+  CHECK_FALSE(fixture.broker->pending_work().value());
+  CHECK(fixture.source->calls == 1);
+}
+
 TEST_CASE("Ops close wakes waiter while physical read remains blocked",
           "[ops-broker]") {
   Fixture fixture;

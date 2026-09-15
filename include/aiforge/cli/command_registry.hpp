@@ -3,6 +3,7 @@
 #include <aiforge/cli/parser.hpp>
 #include <aiforge/domain/ids.hpp>
 #include <aiforge/domain/money.hpp>
+#include <aiforge/domain/ops_target.hpp>
 #include <aiforge/persona/source.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -123,12 +124,22 @@ class ContextCommand {
 class AdminCommand {
  public:
   virtual ~AdminCommand() = default;
-  enum class Operation { targets, health, services, service };
+  enum class Operation {
+    targets,
+    health,
+    services,
+    service,
+    workloads,
+    pod,
+    events
+  };
   enum class OutputFormat { text, json };
   struct Request {
     Operation operation{Operation::targets};
     std::string target{"local"};
     std::optional<std::string> unit{};
+    std::optional<std::string> pod{};
+    std::optional<domain::OpsResourceUid> pod_uid{};
     OutputFormat format{OutputFormat::text};
     auto operator==(const Request&) const -> bool = default;
   };

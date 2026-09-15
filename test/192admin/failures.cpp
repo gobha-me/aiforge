@@ -220,8 +220,15 @@ class Dependencies final : public adapters::admin_detail::Dependencies {
           cli::CommandFailureKind::runtime, "test storage unavailable"});
     return std::make_unique<Store>(std::move(*store), state, refusal);
   }
-  auto factory(runtime::OpsSourcePreparationIdentity identity) -> Result<
-      std::shared_ptr<runtime::OpsSourcePreparationFactory>> override {
+  auto factory(const config::OpsTargetConfig& target,
+               domain::OpsConfigurationRevision revision)
+      -> Result<
+          std::shared_ptr<runtime::OpsSourcePreparationFactory>> override {
+    auto target_id = domain::OpsTargetId::from(target.id);
+    REQUIRE(target_id);
+    runtime::OpsSourcePreparationIdentity identity{
+        std::move(*target_id), std::move(revision),
+        domain::OpsTargetKind::linux_local};
     return std::make_shared<Factory>(std::move(identity), state);
   }
   auto instance_identity() -> Result<std::string> override {
