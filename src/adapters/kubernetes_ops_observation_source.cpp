@@ -82,6 +82,10 @@ auto KubernetesOpsObservationSource::observe(
     const auto started = domain::EventTimestamp{
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())};
+    if (request.operation ==
+        domain::OpsObservationOperation::kubernetes_pod_logs)
+      return read_kubernetes_log_observation(m_impl->configuration, request,
+                                             deadline, started, stop);
     return read_kubernetes_observation(m_impl->configuration, request, deadline,
                                        started, stop);
   } catch (const std::bad_alloc&) {

@@ -223,6 +223,8 @@ auto credentials() -> const Credentials& {
 }
 struct Peer::Impl {
   PeerOptions options;
+  std::vector<std::string> responses;
+  unsigned stall_body_connection{};
   std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> context{nullptr,
                                                             SSL_CTX_free};
   Descriptor listener;
@@ -233,8 +235,18 @@ struct Peer::Impl {
   std::atomic<bool> headers{};
   mutable std::mutex mutex;
   std::string line;
+  std::vector<std::string> lines;
   std::jthread thread;
-  explicit Impl(PeerOptions settings) : options(std::move(settings)) {
+  explicit Impl(PeerOptions settings,
+                std::vector<std::string> connection_responses = {},
+                unsigned stalled_connection = 0)
+      : options(std::move(settings)),
+        responses(std::move(connection_responses)),
+        stall_body_connection(stalled_connection) {
+    if (!responses.empty()) {
+      options.connections = static_cast<unsigned>(responses.size());
+      options.stall_body = stall_body_connection != 0;
+    }
     const auto& certs = credentials();
     context.reset(SSL_CTX_new(TLS_server_method()));
     ensure(bool(context));
@@ -308,7 +320,7 @@ struct Peer::Impl {
                 error == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT, stop,
                 deadline);
   }
-  auto serve(std::stop_token stop,
+  auto serve(unsigned connection, std::stop_token stop,
              std::chrono::steady_clock::time_point deadline) -> void {
     if (!wait(listener.fd, POLLIN, stop, deadline)) return;
     Descriptor socket{
@@ -343,6 +355,7 @@ struct Peer::Impl {
     {
       std::lock_guard lock{mutex};
       line = request.substr(0, request.find("\r\n"));
+      lines.push_back(line);
     }
     auth.store(request.find("Authorization: Bearer " + std::string{token} +
                             "\r\n") != std::string::npos ||
@@ -354,9 +367,14 @@ struct Peer::Impl {
         request.find("Accept: application/json\r\n") != std::string::npos &&
         request.find("Accept-Encoding: identity\r\n") != std::string::npos);
     request_seen.store(true);
-    std::string_view output = options.response;
-    if (options.stall_body)
-      output = output.substr(0, output.find("\r\n\r\n") + 4);
+    std::string_view output =
+        responses.empty() ? std::string_view{options.response}
+                          : std::string_view{responses.at(std::min<std::size_t>(
+                                connection, responses.size() - 1))};
+    const bool stall =
+        options.stall_body &&
+        (stall_body_connection == 0 || stall_body_connection == connection + 1);
+    if (stall) output = output.substr(0, output.find("\r\n\r\n") + 4);
     while (!output.empty() && !stop.stop_requested()) {
       const auto wrote =
           SSL_write(ssl.get(), output.data(), static_cast<int>(output.size()));
@@ -365,7 +383,7 @@ struct Peer::Impl {
       else if (!step(ssl.get(), wrote, stop, deadline))
         return;
     }
-    if (options.stall_body)
+    if (stall)
       while (!stop.stop_requested() &&
              std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds{2});
@@ -381,7 +399,7 @@ struct Peer::Impl {
           std::chrono::steady_clock::now() + std::chrono::seconds{4};
       for (unsigned i = 0; i < options.connections && !stop.stop_requested();
            ++i)
-        serve(stop, deadline);
+        serve(i, stop, deadline);
     } catch (
         ...) { /* Fixed fixture state only; never leak request/TLS bytes. */
     }
@@ -389,6 +407,13 @@ struct Peer::Impl {
 };
 Peer::Peer(PeerOptions options)
     : m_impl(std::make_unique<Impl>(std::move(options))) {
+}
+Peer::Peer(std::unique_ptr<Impl> impl) : m_impl(std::move(impl)) {
+}
+auto Peer::sequence(std::vector<std::string> responses,
+                    unsigned stall_body_connection) -> Peer {
+  return Peer{std::make_unique<Impl>(PeerOptions{}, std::move(responses),
+                                     stall_body_connection)};
 }
 Peer::~Peer() = default;
 auto Peer::port() const noexcept -> std::uint16_t {
@@ -409,6 +434,10 @@ auto Peer::standard_headers() const noexcept -> bool {
 auto Peer::request_line() const -> std::string {
   std::lock_guard lock{m_impl->mutex};
   return m_impl->line;
+}
+auto Peer::request_lines() const -> std::vector<std::string> {
+  std::lock_guard lock{m_impl->mutex};
+  return m_impl->lines;
 }
 auto configuration(std::uint16_t port, bool certificate_auth, std::string ca,
                    std::string chain, std::string private_key, std::string host)
@@ -479,6 +508,13 @@ auto response(std::string body, std::string headers, int status)
     -> std::string {
   return "HTTP/1.1 " + std::to_string(status) +
          " Result\r\nContent-Type: application/json\r\nContent-Length: " +
+         std::to_string(body.size()) + "\r\n" + headers +
+         "Connection: close\r\n\r\n" + body;
+}
+auto text_response(std::string body, std::string headers, int status)
+    -> std::string {
+  return "HTTP/1.1 " + std::to_string(status) +
+         " Result\r\nContent-Type: text/plain\r\nContent-Length: " +
          std::to_string(body.size()) + "\r\n" + headers +
          "Connection: close\r\n\r\n" + body;
 }

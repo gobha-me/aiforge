@@ -1,5 +1,6 @@
 #include <aiforge/runtime/ops_observation_broker.hpp>
 
+#include "ops_log_consent_state.hpp"
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -24,6 +25,15 @@ auto valid_identity(std::string_view value) -> bool {
          std::ranges::none_of(value, [](unsigned char byte) {
            return byte < 32 || byte == 127;
          });
+}
+auto logs_operation(domain::OpsObservationOperation operation) -> bool {
+  return operation == domain::OpsObservationOperation::linux_service_logs ||
+         operation == domain::OpsObservationOperation::kubernetes_pod_logs;
+}
+auto has_log_capability(const domain::OpsObservationAuthoritySpec& authority)
+    -> bool {
+  return authority.logs.enabled || !authority.logs.permitted_sources.empty() ||
+         std::ranges::any_of(authority.operations, logs_operation);
 }
 struct Entry {
   std::uint64_t ticket;
@@ -81,8 +91,10 @@ OpsObservationReceipt::OpsObservationReceipt(
     : m_issuer(std::move(issuer)), m_ticket(ticket) {
 }
 OpsObservationEndpoint::OpsObservationEndpoint(
-    std::shared_ptr<OpsObservationMailbox> state)
-    : m_state(std::move(state)) {
+    std::shared_ptr<OpsObservationMailbox> state,
+    std::shared_ptr<OpsLogConsentActivation> log_consent_activation)
+    : m_state(std::move(state)),
+      m_log_consent_activation(std::move(log_consent_activation)) {
 }
 
 auto OpsObservationEndpoint::observe(
@@ -145,6 +157,7 @@ struct OpsObservationBroker::Impl {
   std::shared_ptr<OpsObservationMailbox> state;
   std::optional<domain::OpsObservationAuthority> authority;
   std::shared_ptr<OpsObservationSource> source;
+  std::shared_ptr<OpsLogConsentActivation> log_consent_activation;
   std::uint64_t epoch{};
   bool closed{};
 
@@ -159,6 +172,9 @@ struct OpsObservationBroker::Impl {
         !next_source->guarantees_bound_read_only_observations() ||
         next_source->target_binding() != next.target)
       return failure(Code::invalid_request);
+    if (has_log_capability(next) &&
+        !ops_log_consent_matches(log_consent_activation, next))
+      return failure(Code::stale_request);
     if (authority) {
       const auto& previous = authority->specification();
       if (next.owner_id != previous.owner_id ||
@@ -206,8 +222,12 @@ struct OpsObservationBroker::Impl {
   }
   [[nodiscard]] auto current(const domain::OpsObservationRequest& request) const
       -> bool {
-    return !closed && state && !state->failed.load() && !state->closed &&
-           authority && authority->validate(request).has_value();
+    if (closed || !state || state->failed.load() || state->closed ||
+        !authority || !authority->validate(request))
+      return false;
+    return !has_log_capability(authority->specification()) ||
+           ops_log_consent_matches(log_consent_activation,
+                                   authority->specification());
   }
   [[nodiscard]] auto submit_entry(const std::shared_ptr<Entry>& entry) -> bool {
     if (!authority) {
@@ -319,11 +339,15 @@ auto OpsObservationBroker::activate_session(domain::SessionId session)
       return failure(Code::resource_exhausted);
     auto state = std::make_shared<OpsObservationMailbox>(
         std::move(session), m_impl->limits.maximum_pending);
+    auto log_consent_activation =
+        std::make_shared<OpsLogConsentActivation>(state->session);
     auto endpoint = std::shared_ptr<OpsObservationEndpoint>{
-        new OpsObservationEndpoint{state}};
+        new OpsObservationEndpoint{state, log_consent_activation}};
+    revoke_ops_log_consent(m_impl->log_consent_activation);
     m_impl->discard_all(Code::closed, true);
     ++m_impl->epoch;
     m_impl->state = std::move(state);
+    m_impl->log_consent_activation = std::move(log_consent_activation);
     m_impl->authority.reset();
     m_impl->source.reset();
     return endpoint;
@@ -338,6 +362,8 @@ auto OpsObservationBroker::select(domain::OpsObservationAuthority authority,
     if (auto valid = m_impl->validate_selection(authority, source); !valid)
       return valid;
     m_impl->discard_all(Code::stale_request, false);
+    revoke_stale_ops_log_consent(m_impl->log_consent_activation,
+                                 authority.specification());
     m_impl->authority = std::move(authority);
     m_impl->source = std::move(source);
     return {};
@@ -475,6 +501,7 @@ auto OpsObservationBroker::cancel_invocation(
 auto OpsObservationBroker::deactivate_session()
     -> std::expected<void, OpsBrokerFailure> {
   try {
+    revoke_ops_log_consent(m_impl->log_consent_activation);
     m_impl->discard_all(Code::closed, true);
     m_impl->authority.reset();
     m_impl->source.reset();

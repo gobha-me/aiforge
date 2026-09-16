@@ -14,6 +14,8 @@ namespace aiforge::runtime {
 
 class LocalSourceWorker;
 struct OpsObservationMailbox;
+struct OpsLogConsentActivation;
+class OpsSessionLogConsent;
 class OpsObservationBroker;
 class OpsObservationEndpoint;
 
@@ -79,8 +81,12 @@ class OpsObservationEndpoint final {
 
  private:
   friend class OpsObservationBroker;
-  explicit OpsObservationEndpoint(std::shared_ptr<OpsObservationMailbox> state);
+  friend class OpsSessionLogConsent;
+  OpsObservationEndpoint(
+      std::shared_ptr<OpsObservationMailbox> state,
+      std::shared_ptr<OpsLogConsentActivation> log_consent_activation);
   std::shared_ptr<OpsObservationMailbox> m_state;
+  std::shared_ptr<OpsLogConsentActivation> m_log_consent_activation;
 };
 
 // All methods except Endpoint::observe are application owner-thread operations.

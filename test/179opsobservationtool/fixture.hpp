@@ -1,12 +1,14 @@
 #pragma once
 
 #include <aiforge/runtime/local_source_worker.hpp>
+#include <aiforge/runtime/ops_log_consent.hpp>
 #include <aiforge/runtime/ops_observation_tool.hpp>
 #include <aiforge/runtime/tool_policy.hpp>
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <future>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <thread>
 
 namespace {
@@ -74,15 +76,19 @@ struct Fixture {
   std::shared_ptr<runtime::OpsObservationEndpoint> endpoint{
       broker->activate_session(spec().session_id).value()};
   std::shared_ptr<Source> source{std::make_shared<Source>()};
+  std::optional<runtime::OpsSessionLogConsent> log_consent;
   runtime::ToolRegistrySnapshot registry;
   const runtime::OpsObservationTool* tool{};
   Fixture() {
-    REQUIRE(broker->select(
-        domain::OpsObservationAuthority::create(spec()).value(), source));
+    auto activated = runtime::OpsSessionLogConsent::start(*endpoint, spec());
+    REQUIRE(activated);
+    log_consent.emplace(std::move(*activated));
+    auto authority = log_consent->authority();
+    REQUIRE(authority);
+    REQUIRE(broker->select(*authority, source));
     runtime::ToolRegistry registrations;
-    REQUIRE(runtime::register_ops_observation_tool(
-        registrations, domain::OpsObservationAuthority::create(spec()).value(),
-        endpoint));
+    REQUIRE(runtime::register_ops_observation_tool(registrations, *authority,
+                                                   endpoint));
     registry = registrations.snapshot().value();
     tool = dynamic_cast<const runtime::OpsObservationTool*>(
         registry.find("observe_target")->executor.get());

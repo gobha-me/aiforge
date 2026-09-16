@@ -4,8 +4,10 @@
 // during a blocked read, and after receipt delivery invalidates publication.
 // Foreign broker/old-session/wrong-invocation/wrong-request receipts never
 // publish or consume another receipt; duplicate consumption fails. Selection,
-// log-policy revocation and expiration invalidate completed receipts with zero
-// additional IO. Completed receipts retain mailbox capacity. Source failures,
+// absent process-local log activation, activation-bound log-policy revocation,
+// log-free target replacement, same-ID reactivation, overflow and expiration
+// invalidate queued/in-flight/completed work before new source IO or
+// publication. Completed receipts retain mailbox capacity. Source failures,
 // malformed results and worker failures remain typed. Closing wakes waiters
 // without waiting for stalled IO; exact retired physical slots remain occupied.
 // Headless owner service is sufficient; a final smoke proves one collection and
@@ -20,6 +22,7 @@
 #include <thread>
 
 #include <aiforge/runtime/local_source_worker.hpp>
+#include <aiforge/runtime/ops_log_consent.hpp>
 #include <aiforge/runtime/ops_observation_broker.hpp>
 
 namespace {
@@ -55,6 +58,25 @@ auto request(unsigned sequence = 1) -> domain::OpsObservationRequest {
           {},
           spec.logs.revision,
           {}};
+}
+auto log_specification(std::uint64_t generation = 2, std::uint64_t revision = 2)
+    -> domain::OpsObservationAuthoritySpec {
+  auto result = specification();
+  result.selection_generation = generation;
+  result.operations.push_back(
+      domain::OpsObservationOperation::linux_service_logs);
+  result.logs.revision = revision;
+  return result;
+}
+auto log_request(const domain::OpsObservationAuthoritySpec& spec,
+                 unsigned sequence = 1) -> domain::OpsObservationRequest {
+  auto result = request(sequence);
+  result.selection_generation = spec.selection_generation;
+  result.operation = domain::OpsObservationOperation::linux_service_logs;
+  result.resource = domain::LinuxServiceIdentity{
+      "application.service", id<domain::OpsResourceUid>("invocation")};
+  result.log_policy_revision = spec.logs.revision;
+  return result;
 }
 auto invocation(unsigned sequence = 1) -> domain::InvocationId {
   return id<domain::InvocationId>("invocation-" + std::to_string(sequence));
@@ -286,37 +308,267 @@ TEST_CASE("Ops structurally valid stale authority is rejected at dispatch",
   REQUIRE_FALSE(fixture.broker->pending_work().value());
 }
 
+TEST_CASE("Ops log-capable selection requires process-local consent activation",
+          "[ops-broker][logs][consent]") {
+  auto worker = std::shared_ptr<runtime::LocalSourceWorker>{
+      runtime::LocalSourceWorker::create(1).value()};
+  auto broker = runtime::OpsObservationBroker::create(worker).value();
+  auto source = std::make_shared<Source>();
+  const auto spec = log_specification();
+  auto endpoint = broker->activate_session(spec.session_id);
+  REQUIRE(endpoint);
+  auto authority = domain::OpsObservationAuthority::create(spec);
+  REQUIRE(authority);
+  const auto selected = broker->select(*authority, source);
+  REQUIRE_FALSE(selected);
+  CHECK(selected.error().code == Code::stale_request);
+  CHECK(source->calls == 0);
+}
+
 TEST_CASE("Ops enabled log receipt is invalid after consent changes",
           "[ops-broker]") {
   Fixture fixture;
-  auto spec = specification();
-  ++spec.selection_generation;
-  spec.operations.push_back(
-      domain::OpsObservationOperation::linux_service_logs);
-  spec.logs.enabled = true;
-  ++spec.logs.revision;
-  spec.logs.permitted_sources.push_back(domain::LinuxServiceIdentity{
-      "application.service", id<domain::OpsResourceUid>("invocation")});
-  REQUIRE(fixture.broker->select(
-      domain::OpsObservationAuthority::create(spec).value(), fixture.source));
-  auto value = request();
-  value.selection_generation = spec.selection_generation;
-  value.log_policy_revision = spec.logs.revision;
-  value.operation = domain::OpsObservationOperation::linux_service_logs;
-  value.resource = spec.logs.permitted_sources.front();
+  auto consent = runtime::OpsSessionLogConsent::start(*fixture.endpoint,
+                                                      log_specification());
+  REQUIRE(consent);
+  auto spec = consent->authority()->specification();
+  auto enabled = consent->apply(
+      {spec.session_id, spec.target, spec.selection_generation,
+       spec.logs.revision,
+       domain::LinuxServiceIdentity{"application.service",
+                                    id<domain::OpsResourceUid>("invocation")},
+       true});
+  REQUIRE(enabled);
+  spec = enabled->specification();
+  REQUIRE(fixture.broker->select(*enabled, fixture.source));
+  auto value = log_request(spec);
   Call call{fixture.endpoint, value};
   auto receipt = fixture.pump(call);
   REQUIRE(receipt);
-  ++spec.selection_generation;
-  spec.logs.enabled = false;
-  REQUIRE_FALSE(fixture.broker->select(
-      domain::OpsObservationAuthority::create(spec).value(), fixture.source));
-  ++spec.logs.revision;
-  REQUIRE(fixture.broker->select(
-      domain::OpsObservationAuthority::create(spec).value(), fixture.source));
+  auto disabled = consent->apply({spec.session_id, spec.target,
+                                  spec.selection_generation, spec.logs.revision,
+                                  spec.logs.permitted_sources.front(), false});
+  REQUIRE(disabled);
+  REQUIRE(fixture.broker->select(*disabled, fixture.source));
   REQUIRE_FALSE(
       fixture.broker->take_for_publication(*receipt, invocation(), value));
   REQUIRE(fixture.source->calls == 1);
+}
+
+TEST_CASE("Ops disabled and stale log consent stop before source dispatch",
+          "[ops-broker]") {
+  Fixture fixture;
+  auto consent = runtime::OpsSessionLogConsent::start(*fixture.endpoint,
+                                                      log_specification());
+  REQUIRE(consent);
+  const auto disabled = consent->authority()->specification();
+  REQUIRE(fixture.broker->select(*consent->authority(), fixture.source));
+  Call disabled_call{fixture.endpoint, log_request(disabled)};
+  auto disabled_result = fixture.pump(disabled_call);
+  REQUIRE_FALSE(disabled_result);
+  REQUIRE(disabled_result.error().code == Code::stale_request);
+  REQUIRE(fixture.source->calls == 0);
+
+  auto enabled = consent->apply(
+      {disabled.session_id, disabled.target, disabled.selection_generation,
+       disabled.logs.revision,
+       domain::LinuxServiceIdentity{"application.service",
+                                    id<domain::OpsResourceUid>("invocation")},
+       true});
+  REQUIRE(enabled);
+  REQUIRE(fixture.broker->select(*enabled, fixture.source));
+  auto old_request = log_request(enabled->specification(), 2);
+  auto revoked = consent->apply(
+      {enabled->specification().session_id, enabled->specification().target,
+       enabled->specification().selection_generation,
+       enabled->specification().logs.revision,
+       enabled->specification().logs.permitted_sources.front(), false});
+  REQUIRE(revoked);
+  Call stale_call{fixture.endpoint, old_request, 2};
+  auto stale_result = fixture.pump(stale_call);
+  REQUIRE_FALSE(stale_result);
+  REQUIRE(stale_result.error().code == Code::stale_request);
+  CHECK(fixture.source->calls == 0);
+}
+
+TEST_CASE("Ops same-ID reactivation rejects stale enabled consent",
+          "[ops-broker]") {
+  Fixture fixture;
+  auto consent = runtime::OpsSessionLogConsent::start(*fixture.endpoint,
+                                                      log_specification());
+  REQUIRE(consent);
+  const auto disabled = consent->authority()->specification();
+  auto enabled = consent->apply(
+      {disabled.session_id, disabled.target, disabled.selection_generation,
+       disabled.logs.revision,
+       domain::LinuxServiceIdentity{"application.service",
+                                    id<domain::OpsResourceUid>("invocation")},
+       true});
+  REQUIRE(enabled);
+  REQUIRE(fixture.broker->select(*enabled, fixture.source));
+  const auto stale_authority = *enabled;
+  auto replacement =
+      fixture.broker->activate_session(specification().session_id);
+  REQUIRE(replacement);
+  auto rebound = fixture.broker->select(stale_authority, fixture.source);
+  REQUIRE_FALSE(rebound);
+  REQUIRE(rebound.error().code == Code::stale_request);
+  Call call{*replacement, log_request(stale_authority.specification())};
+  auto result = fixture.pump(call);
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == Code::stale_request);
+  CHECK(fixture.source->calls == 0);
+}
+
+TEST_CASE("Ops log-free target switch revokes retained consent",
+          "[ops-broker]") {
+  Fixture fixture;
+  auto consent = runtime::OpsSessionLogConsent::start(*fixture.endpoint,
+                                                      log_specification());
+  REQUIRE(consent);
+  const auto disabled = consent->authority()->specification();
+  auto enabled = consent->apply(
+      {disabled.session_id, disabled.target, disabled.selection_generation,
+       disabled.logs.revision,
+       domain::LinuxServiceIdentity{"application.service",
+                                    id<domain::OpsResourceUid>("invocation")},
+       true});
+  REQUIRE(enabled);
+  REQUIRE(fixture.broker->select(*enabled, fixture.source));
+
+  auto target_b = specification();
+  target_b.target.target_id = id<domain::OpsTargetId>("target-b");
+  target_b.target.configuration_revision =
+      id<domain::OpsConfigurationRevision>("revision-b");
+  target_b.selection_generation =
+      enabled->specification().selection_generation + 1;
+  auto source_b = std::make_shared<Source>();
+  source_b->target = target_b.target;
+  REQUIRE(fixture.broker->select(
+      domain::OpsObservationAuthority::create(target_b).value(), source_b));
+
+  auto stale_advance = consent->apply(
+      {enabled->specification().session_id, enabled->specification().target,
+       enabled->specification().selection_generation,
+       enabled->specification().logs.revision,
+       enabled->specification().logs.permitted_sources.front(), false});
+  REQUIRE_FALSE(stale_advance);
+  REQUIRE(stale_advance.error().code ==
+          domain::OpsTargetErrorCode::stale_log_policy);
+  REQUIRE_FALSE(consent->authority());
+
+  auto forged_a = enabled->specification();
+  forged_a.selection_generation = target_b.selection_generation + 1;
+  ++forged_a.logs.revision;
+  auto rebound = fixture.broker->select(
+      domain::OpsObservationAuthority::create(forged_a).value(),
+      fixture.source);
+  REQUIRE_FALSE(rebound);
+  REQUIRE(rebound.error().code == Code::stale_request);
+  Call stale_call{fixture.endpoint, log_request(forged_a)};
+  auto stale_result = fixture.pump(stale_call);
+  REQUIRE_FALSE(stale_result);
+  REQUIRE(stale_result.error().code == Code::stale_request);
+  CHECK(fixture.source->calls == 0);
+  CHECK(source_b->calls == 0);
+}
+
+TEST_CASE("Ops exact disabled consent replacement survives target bind",
+          "[ops-broker]") {
+  Fixture fixture;
+  auto consent = runtime::OpsSessionLogConsent::start(*fixture.endpoint,
+                                                      log_specification());
+  REQUIRE(consent);
+  const auto disabled = consent->authority()->specification();
+  auto enabled = consent->apply(
+      {disabled.session_id, disabled.target, disabled.selection_generation,
+       disabled.logs.revision,
+       domain::LinuxServiceIdentity{"application.service",
+                                    id<domain::OpsResourceUid>("invocation")},
+       true});
+  REQUIRE(enabled);
+  REQUIRE(fixture.broker->select(*enabled, fixture.source));
+
+  auto target_b = specification();
+  target_b.target.target_id = id<domain::OpsTargetId>("target-b");
+  target_b.target.configuration_revision =
+      id<domain::OpsConfigurationRevision>("revision-b");
+  target_b.selection_generation =
+      enabled->specification().selection_generation + 1;
+  target_b.logs.revision = enabled->specification().logs.revision + 1;
+  auto replaced = consent->replace_selection(target_b);
+  REQUIRE(replaced);
+  auto source_b = std::make_shared<Source>();
+  source_b->target = target_b.target;
+  REQUIRE(fixture.broker->select(*replaced, source_b));
+  REQUIRE(consent->authority());
+  CHECK(consent->authority()->specification() == target_b);
+}
+
+TEST_CASE("Ops in-flight log read is revoked by live consent change",
+          "[ops-broker]") {
+  Fixture fixture;
+  auto consent = runtime::OpsSessionLogConsent::start(*fixture.endpoint,
+                                                      log_specification());
+  REQUIRE(consent);
+  const auto disabled = consent->authority()->specification();
+  auto enabled = consent->apply(
+      {disabled.session_id, disabled.target, disabled.selection_generation,
+       disabled.logs.revision,
+       domain::LinuxServiceIdentity{"application.service",
+                                    id<domain::OpsResourceUid>("invocation")},
+       true});
+  REQUIRE(enabled);
+  REQUIRE(fixture.broker->select(*enabled, fixture.source));
+  auto gate = std::make_shared<Gate>();
+  fixture.source->gate = gate;
+  Release release{gate};
+  Call call{fixture.endpoint, log_request(enabled->specification())};
+  REQUIRE(until([&] { return fixture.broker->pending_work().value(); }));
+  REQUIRE(fixture.broker->service());
+  REQUIRE(until([&] { return fixture.source->calls == 1; }));
+  auto revoked = consent->apply(
+      {enabled->specification().session_id, enabled->specification().target,
+       enabled->specification().selection_generation,
+       enabled->specification().logs.revision,
+       enabled->specification().logs.permitted_sources.front(), false});
+  REQUIRE(revoked);
+  REQUIRE(fixture.broker->service());
+  REQUIRE(until([&] { return call.ready(); }));
+  REQUIRE(call.future.get().error().code == Code::stale_request);
+  CHECK(fixture.source->calls == 1);
+}
+
+TEST_CASE("Ops consent overflow revokes broker-held enabled authority",
+          "[ops-broker]") {
+  Fixture fixture;
+  const auto maximum =
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+  auto consent = runtime::OpsSessionLogConsent::start(
+      *fixture.endpoint, log_specification(maximum - 1, maximum - 1));
+  REQUIRE(consent);
+  const auto disabled = consent->authority()->specification();
+  auto enabled = consent->apply(
+      {disabled.session_id, disabled.target, disabled.selection_generation,
+       disabled.logs.revision,
+       domain::LinuxServiceIdentity{"application.service",
+                                    id<domain::OpsResourceUid>("invocation")},
+       true});
+  REQUIRE(enabled);
+  REQUIRE(fixture.broker->select(*enabled, fixture.source));
+  auto overflow = consent->apply(
+      {enabled->specification().session_id, enabled->specification().target,
+       enabled->specification().selection_generation,
+       enabled->specification().logs.revision,
+       enabled->specification().logs.permitted_sources.front(), false});
+  REQUIRE_FALSE(overflow);
+  REQUIRE(overflow.error().code ==
+          domain::OpsTargetErrorCode::resource_exhausted);
+  Call call{fixture.endpoint, log_request(enabled->specification())};
+  auto result = fixture.pump(call);
+  REQUIRE_FALSE(result);
+  REQUIRE(result.error().code == Code::stale_request);
+  CHECK(fixture.source->calls == 0);
 }
 
 TEST_CASE("Ops completed receipt retains mailbox and refuses foreign proof",

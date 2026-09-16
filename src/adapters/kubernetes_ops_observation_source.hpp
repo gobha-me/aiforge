@@ -16,7 +16,8 @@ class KubernetesOpsObservationSource final
   static constexpr std::array supported_operations{
       domain::OpsObservationOperation::kubernetes_workloads,
       domain::OpsObservationOperation::kubernetes_pod_health,
-      domain::OpsObservationOperation::kubernetes_events};
+      domain::OpsObservationOperation::kubernetes_events,
+      domain::OpsObservationOperation::kubernetes_pod_logs};
   [[nodiscard]] static auto create(
       const domain::OpsTargetBinding& binding,
       StaticKubernetesConfig configuration) noexcept
