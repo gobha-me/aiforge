@@ -968,3 +968,32 @@ revision plus the selected context, explicit namespace, HTTPS endpoint and
 non-secret CA trust identity. Preparation performs no observation or network
 request. Log consent, Explain and the standalone Admin TUI remain later
 milestones.
+
+### Bounded committed-snapshot Explain milestone
+
+An explicit Explain action names exactly one earlier
+`OpsObservationRecorded` event. The observation, its exact `ToolResultRecorded`
+event and the successful source-run terminal must all precede the selection.
+The runtime deterministically formats that already committed observation as one
+untrusted evidence message with stable event provenance and digest. It performs
+no recollection, source lookup, artifact read, broker request or other external
+work. A 64 KiB projected-byte ceiling, a 64 Ki-token estimate ceiling, one
+million event ceiling and 4096-selection session ceiling fail closed without
+truncation.
+
+The Explain request contains one current user message, the selected evidence
+and exactly one runtime-owned, fixed and digested Explain instruction, alongside
+validated user-global and optional persona instructions. The current message
+cannot reference artifacts, including artifacts already present in the session.
+Other instruction layers, conversation history, tool results, other evidence,
+memory, conversation admission, repository/local admission, artifacts,
+continuation state, summary work and advertised tools are forbidden.
+The selection is committed atomically before user content and inference start.
+
+Replay validates the same source ordering and an exact allowlist for the
+selected run: optional provenance/persona prefix, selection, current user,
+completion request, inference start, inference output/accounting and run
+terminal events. Tool, source-admission, artifact, question, memory and other
+effect-bearing events reject the history. Replay uses a bounded single-pass
+index over durable events and never launches a backend or source operation.
+Normal Admin Chat remains the separate path for follow-up collection.

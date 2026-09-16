@@ -340,7 +340,6 @@ src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	476b058506525184a3ee	u
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	49df6ded2928a44210e2	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	4aa47b64507dbe92ff31	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	569a24a14226ea70c72d	unchecked access to optional value
-src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	75d754ebea4decf8f016	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8634384da1ead018866e	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8c1e43403bdfb3c78a3f	unchecked access to optional value
 src/lib/run_kernel.cpp	bugprone-unchecked-optional-access	8cb7b6e09ef257c1d98d	unchecked access to optional value

@@ -8,6 +8,7 @@
 #include <aiforge/domain/run_projection.hpp>
 #include <aiforge/domain/task_scheduler.hpp>
 #include <aiforge/runtime/child_runner.hpp>
+#include <aiforge/runtime/ops_explanation.hpp>
 #include <aiforge/runtime/ops_observation_tool.hpp>
 #include <aiforge/runtime/tool_policy.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
@@ -113,6 +114,7 @@ struct RunKernelLimits {
   std::size_t tool_argument_bytes{8U * 1024U * 1024U};
   domain::TaskSchedulingPolicy task_scheduling{};
   ToolApprovalPresentationLimits tool_approval_presentation{};
+  OpsExplanationLimits ops_explanation{};
   auto operator==(const RunKernelLimits&) const -> bool = default;
 };
 
@@ -148,6 +150,11 @@ struct RunStart {
   // Required for a tool-free summary producer; committed before dispatch.
   std::optional<domain::ConversationSummaryIntent> summary_intent{};
   std::optional<domain::LocalContextAdmission> local_admission{};
+  // Explicit bounded Explain input. The kernel validates that exactly this
+  // prior committed observation is present as untrusted evidence and records
+  // the selection before inference. Explain runs advertise no tools.
+  std::optional<domain::OpsObservationExplanationSelected>
+      ops_explanation_selection{};
   auto operator==(const RunStart&) const -> bool = default;
 };
 

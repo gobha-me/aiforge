@@ -22,6 +22,7 @@
 #include <aiforge/runtime/ask_user_tool.hpp>
 #include <aiforge/runtime/run_kernel.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
+#include <aiforge/runtime/user_global_instructions.hpp>
 #include <aiforge/testing/scripted_backend.hpp>
 #include <aiforge/testing/scripted_session_store.hpp>
 
@@ -117,26 +118,19 @@ auto user_global_document(std::string text = "Global defaults.")
 auto add_user_global(backend::BackendRequest& value,
                      const domain::UserGlobalInstructionDocument& document)
     -> void {
+  const auto input =
+      runtime::user_global_instruction_input(document, document.text.size(), 1);
+  REQUIRE(input);
+  REQUIRE(input->message);
   value.context.entries.insert(
       std::next(value.context.entries.begin()),
       domain::ContextEntry{
-          make_id<domain::ContextEntryId>("user-global-context"),
-          domain::ContextEntryKind::instruction,
-          domain::InstructionLayer::user_global,
-          domain::Message{make_id<domain::MessageId>("user-global-message"),
-                          domain::Role::system,
-                          {domain::TextBlock{document.text}},
-                          std::nullopt},
-          {document.reference.source_id, document.reference.source_location,
-           document.reference.content_digest.algorithm + ":" +
-               document.reference.content_digest.value},
-          0,
-          1,
-          document.text.size()});
+          input->entry_id, domain::ContextEntryKind::instruction, input->layer,
+          *input->message, input->provenance, input->specificity, input->order,
+          input->estimated_tokens});
   value.context.decisions.push_back(
-      {make_id<domain::ContextEntryId>("user-global-context"),
-       domain::ContextDecision::admitted, std::nullopt});
-  value.context.estimated_input_tokens += document.text.size();
+      {input->entry_id, domain::ContextDecision::admitted, std::nullopt});
+  value.context.estimated_input_tokens += input->estimated_tokens;
 }
 
 auto memory_start() -> runtime::RunStart {
