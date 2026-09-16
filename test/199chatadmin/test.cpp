@@ -412,6 +412,13 @@ TEST_CASE("Chat Admin successful session switch requires fresh selection",
   f.select("beta");
   f.press(U'h');
   f.press(U'r');
+  CHECK(f.catalog->beta->observations.load() == 0);
+  const auto* stale =
+      dynamic_cast<const adapters::AdminDialog*>(f.app->top_overlay());
+  REQUIRE(stale != nullptr);
+  CHECK(stale->status().find("does not match") != std::string_view::npos);
+  f.close();
+  f.command("/admin health");
   f.completed(1);
   const auto replacement = f.history("other");
   CHECK(count<OpsObservationRecorded>(replacement) == 1);

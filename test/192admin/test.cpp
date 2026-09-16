@@ -28,9 +28,15 @@ class Source final : public runtime::OpsObservationSource {
          std::shared_ptr<State> state)
       : m_binding{std::move(identity.target_id),
                   std::move(identity.configuration_revision),
-                  domain::LinuxOpsIdentity{
-                      domain::LinuxExecutionScope::container,
-                      "12345678-1234-1234-1234-123456789abc", 42, 43}},
+                  identity.kind == domain::OpsTargetKind::kubernetes
+                      ? domain::OpsTargetIdentity{domain::KubernetesOpsIdentity{
+                            "chosen",
+                            "default",
+                            {"127.0.0.1", 6443},
+                            "sha256:fixture"}}
+                      : domain::OpsTargetIdentity{domain::LinuxOpsIdentity{
+                            domain::LinuxExecutionScope::container,
+                            "12345678-1234-1234-1234-123456789abc", 42, 43}}},
         m_state(std::move(state)) {}
   auto guarantees_bound_read_only_observations() const noexcept
       -> bool override {
@@ -81,6 +87,50 @@ class Source final : public runtime::OpsObservationSource {
           std::get<domain::LinuxServiceIdentity>(request.resource),
           domain::OpsServiceState::active, domain::OpsObservationReason::none,
           0, 2};
+    } else if (request.operation ==
+               domain::OpsObservationOperation::kubernetes_workloads) {
+      result.source_version = "rv-workloads";
+      result.payload = domain::KubernetesWorkloadsObservation{
+          {{{domain::OpsWorkloadKind::pod, "default", "broken-pod",
+             domain::OpsResourceUid::from("pod-uid").value()},
+            domain::OpsHealthState::unhealthy,
+            1,
+            0,
+            1}}};
+    } else if (request.operation ==
+               domain::OpsObservationOperation::kubernetes_pod_health) {
+      result.source_version = "rv-pod";
+      result.payload = domain::KubernetesPodObservation{
+          std::get<domain::KubernetesPodIdentity>(request.resource),
+          domain::OpsPodPhase::failed,
+          {{"app",
+            {},
+            domain::OpsContainerState::terminated,
+            domain::OpsReadiness::not_ready,
+            domain::OpsObservationReason::failed_exit,
+            4,
+            7}}};
+    } else if (request.operation ==
+               domain::OpsObservationOperation::kubernetes_events) {
+      result.source_version = "rv-events";
+      const auto regarding =
+          std::holds_alternative<domain::KubernetesPodIdentity>(
+              request.resource)
+              ? std::get<domain::KubernetesPodIdentity>(request.resource)
+              : domain::KubernetesPodIdentity{
+                    "default",
+                    "broken-pod",
+                    domain::OpsResourceUid::from("pod-uid").value(),
+                    {}};
+      result.payload = domain::KubernetesEventsObservation{
+          {{domain::OpsResourceUid::from("event-uid").value(),
+            {domain::OpsWorkloadKind::pod, regarding.namespace_name,
+             regarding.name, regarding.uid},
+            domain::OpsEventSeverity::warning,
+            domain::OpsObservationReason::failed_exit,
+            {},
+            {},
+            2}}};
     }
     return result;
   }
@@ -165,9 +215,18 @@ class Dependencies final : public adapters::admin_detail::Dependencies {
           {domain::SessionId::from("test-admin").value(), {}}, {}));
     return std::move(*store);
   }
-  auto factory(runtime::OpsSourcePreparationIdentity identity) -> Result<
-      std::shared_ptr<runtime::OpsSourcePreparationFactory>> override {
+  auto factory(const config::OpsTargetConfig& target,
+               domain::OpsConfigurationRevision revision)
+      -> Result<
+          std::shared_ptr<runtime::OpsSourcePreparationFactory>> override {
     ++factory_calls;
+    auto target_id = domain::OpsTargetId::from(target.id);
+    REQUIRE(target_id);
+    runtime::OpsSourcePreparationIdentity identity{
+        std::move(*target_id), std::move(revision),
+        std::holds_alternative<config::LinuxLocalTargetConfig>(target.source)
+            ? domain::OpsTargetKind::linux_local
+            : domain::OpsTargetKind::kubernetes};
     return std::make_shared<Factory>(std::move(identity), state);
   }
   auto instance_identity() -> Result<std::string> override {
@@ -324,6 +383,7 @@ TEST_CASE("Admin capacity-one preparation hands off to one durable native "
   REQUIRE(output.str().find("512") != std::string::npos);
   REQUIRE(output.str().find("partial") != std::string::npos);
   REQUIRE(output.str().find("container") != std::string::npos);
+  REQUIRE(output.str().find("last_success") != std::string::npos);
   const auto events = deps.history();
   REQUIRE(count<domain::HumanObservationRequested>(events) == 1);
   REQUIRE(count<domain::OpsObservationRecorded>(events) == 1);
@@ -355,4 +415,57 @@ TEST_CASE("Admin service commands retain selected operation and exact unit",
                                 : "linux_services") != std::string::npos);
   if (request.unit)
     REQUIRE(output.str().find("linux_services\n") == std::string::npos);
+}
+
+TEST_CASE(
+    "Admin Kubernetes commands retain context namespace and exact Pod identity",
+    "[admin][kubernetes]") {
+  for (auto request :
+       {Command::Request{Command::Operation::workloads, "cluster"},
+        Command::Request{Command::Operation::events, "cluster"},
+        Command::Request{Command::Operation::pod,
+                         "cluster",
+                         {},
+                         "broken-pod",
+                         domain::OpsResourceUid::from("pod-uid").value()},
+        Command::Request{Command::Operation::events,
+                         "cluster",
+                         {},
+                         "broken-pod",
+                         domain::OpsResourceUid::from("pod-uid").value()}}) {
+    Dependencies deps;
+    std::ostringstream output;
+    REQUIRE(execute(request, deps, {}, output));
+    CHECK(output.str().find("context_name=\"chosen\"") != std::string::npos);
+    CHECK(output.str().find("namespace_name=\"default\"") != std::string::npos);
+    CHECK(output.str().find("completed_at_ms=1001") != std::string::npos);
+    CHECK(output.str().find("last_success") != std::string::npos);
+    if (request.pod) {
+      CHECK(output.str().find("broken-pod") != std::string::npos);
+      CHECK(output.str().find("pod-uid") != std::string::npos);
+    }
+    CHECK(deps.state->preparations == 1);
+    CHECK(deps.state->observations == 1);
+  }
+}
+
+TEST_CASE("Admin refuses target-kind and partial Pod identity mismatch before "
+          "preparation",
+          "[admin][kubernetes][failure]") {
+  Dependencies deps;
+  for (auto request :
+       {Command::Request{Command::Operation::workloads, "local"},
+        Command::Request{Command::Operation::health, "cluster"},
+        Command::Request{Command::Operation::pod, "cluster"},
+        Command::Request{
+            Command::Operation::events, "cluster", {}, "broken-pod"}}) {
+    std::ostringstream output;
+    const auto result = execute(request, deps, {}, output);
+    REQUIRE_FALSE(result);
+    CHECK(result.error().kind == cli::CommandFailureKind::usage);
+    CHECK(output.str().empty());
+  }
+  CHECK(deps.factory_calls == 0);
+  CHECK(deps.state->preparations == 0);
+  CHECK(deps.state->observations == 0);
 }

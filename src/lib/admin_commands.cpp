@@ -26,10 +26,14 @@ auto without_argument(std::string_view action) -> Result {
   if (action == "health") return AdminCommand{AdminAction{AdminReadHealth{}}};
   if (action == "services")
     return AdminCommand{AdminAction{AdminReadServices{}}};
+  if (action == "workloads")
+    return AdminCommand{AdminAction{AdminReadWorkloads{}}};
+  if (action == "events") return AdminCommand{AdminAction{AdminReadEvents{}}};
   if (action == "cancel") return AdminCommand{AdminAction{AdminCancel{}}};
   if (action == "close") return AdminCommand{AdminAction{AdminCloseView{}}};
   return invalid();
 }
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Closed grammar.
 auto parse(std::string_view text) -> Result {
   if (!text.starts_with("/admin")) return std::nullopt;
   if (text.size() > 6 && text[6] != ' ' && text[6] != '\t') {
@@ -43,8 +47,22 @@ auto parse(std::string_view text) -> Result {
   text.remove_prefix(6);
   const auto action = word(text);
   const auto argument = word(text);
+  const auto second_argument = word(text);
   if (!word(text).empty()) return invalid();
+  if (argument.empty() && !second_argument.empty()) return invalid();
   if (argument.empty()) return without_argument(action);
+  if ((action == "pod" || action == "pod-events") &&
+      detail::valid_admin_pod(argument) &&
+      detail::valid_admin_resource_uid(second_argument)) {
+    auto uid = domain::OpsResourceUid::from(std::string{second_argument});
+    if (!uid) return invalid();
+    if (action == "pod")
+      return AdminCommand{AdminAction{
+          AdminReadNamedPod{std::string{argument}, std::move(*uid)}}};
+    return AdminCommand{AdminAction{
+        AdminReadNamedPodEvents{std::string{argument}, std::move(*uid)}}};
+  }
+  if (!second_argument.empty()) return invalid();
   if (action == "toolbar" && (argument == "show" || argument == "hide"))
     return AdminCommand{AdminToolbarVisibility{argument == "show"}};
   if (action == "service" && detail::valid_admin_service(argument))

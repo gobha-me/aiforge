@@ -23,7 +23,13 @@ struct ManualOpsFailure {
   ManualOpsErrorCode code{ManualOpsErrorCode::internal_failure};
   std::optional<runtime::RunKernelErrorCode> kernel{};
   std::optional<runtime::OpsBrokerError> broker{};
+  std::optional<runtime::OpsObservationSourceError> source{};
   auto operator==(const ManualOpsFailure&) const -> bool = default;
+};
+enum class ManualOpsSourceConnection {
+  unbound,
+  connected,
+  disconnected,
 };
 struct ObservationSubmission {
   domain::RunId run_id;
@@ -64,6 +70,8 @@ struct ManualOpsInspection {
   std::optional<runtime::PendingToolApproval> approval{};
   std::optional<domain::OpsTargetBinding> selection{};
   std::optional<ManualOpsFailure> problem{};
+  ManualOpsSourceConnection source_connection{
+      ManualOpsSourceConnection::unbound};
   bool busy{};
   bool available{};
   bool closed{};

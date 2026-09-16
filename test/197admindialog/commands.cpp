@@ -14,14 +14,28 @@ template <class T> auto action(std::string_view command) -> T {
 }
 } // namespace
 TEST_CASE("Admin command failures stay commands", "[admin][commands]") {
-  for (const std::string_view text :
-       {"/admin\n", "/admin\r health", "/admin\033", "/admin health\n",
-        "/admin health extra", "/admin select", "/admin select -local",
-        "/admin select Local", "/admin select local/../other", "/admin service",
-        "/admin service bad", "/admin service -x.service",
-        "/admin service 'x.service'", "/admin service x.service extra",
-        "/admin service x.service;touch", "/admin toolbar maybe",
-        "/admin toolbar show extra", "/admin unknown"}) {
+  for (const std::string_view text : {"/admin\n",
+                                      "/admin\r health",
+                                      "/admin\033",
+                                      "/admin health\n",
+                                      "/admin health extra",
+                                      "/admin select",
+                                      "/admin select -local",
+                                      "/admin select Local",
+                                      "/admin select local/../other",
+                                      "/admin service",
+                                      "/admin service bad",
+                                      "/admin service -x.service",
+                                      "/admin service 'x.service'",
+                                      "/admin service x.service extra",
+                                      "/admin service x.service;touch",
+                                      "/admin toolbar maybe",
+                                      "/admin toolbar show extra",
+                                      "/admin pod",
+                                      "/admin pod broken-pod",
+                                      "/admin pod Broken pod-uid",
+                                      "/admin pod-events broken-pod",
+                                      "/admin unknown"}) {
     INFO(text);
     const auto parsed = parse_admin_command(text);
     REQUIRE_FALSE(parsed);
@@ -45,6 +59,8 @@ TEST_CASE("Admin parser distinguishes other commands and returns typed actions",
   static_cast<void>(action<AdminInspect>("/admin targets"));
   static_cast<void>(action<AdminReadHealth>("/admin\t health  "));
   static_cast<void>(action<AdminReadServices>("/admin services"));
+  static_cast<void>(action<AdminReadWorkloads>("/admin workloads"));
+  static_cast<void>(action<AdminReadEvents>("/admin events"));
   static_cast<void>(action<AdminCancel>("/admin cancel"));
   static_cast<void>(action<AdminCloseView>("/admin close"));
   CHECK(action<AdminSelectTarget>("/admin select local").target.value() ==
@@ -57,6 +73,14 @@ TEST_CASE("Admin parser distinguishes other commands and returns typed actions",
   CHECK(action<AdminReadNamedService>("/admin service " +
                                       std::string(247, 'a') + ".service")
             .unit.size() == 255);
+  const auto pod =
+      action<AdminReadNamedPod>("/admin pod broken-pod pod-uid-123");
+  CHECK(pod.name == "broken-pod");
+  CHECK(pod.uid.value() == "pod-uid-123");
+  const auto events = action<AdminReadNamedPodEvents>(
+      "/admin pod-events broken-pod pod-uid-123");
+  CHECK(events.name == "broken-pod");
+  CHECK(events.uid.value() == "pod-uid-123");
   for (const bool visible : {false, true}) {
     const auto result = parse_admin_command(visible ? "/admin toolbar show"
                                                     : "/admin toolbar hide");

@@ -9,6 +9,10 @@ recording AdminCommand port, with no adapter, store, source or provider calls.
   ASCII alphanumeric/underscore/hyphen inside. Never fall back to local on bad input.
 - Service name: 9..255 bytes, .service suffix, first byte not '-', ASCII
   alphanumeric plus _-.@:. No shell syntax, path, backslash, Unicode or controls.
+- Pod reads require an exact DNS-style name and opaque bounded UID. Events accept
+  either neither (namespace scope) or both; half identities and extra values fail
+  before catalog/source work. Linux/Kubernetes operation mismatch is a usage
+  failure without preparation.
 - --target belongs only to read leaves; --json belongs independently to each leaf.
   All argument IDs remain globally unique. Root model/session/repository options
   cannot accidentally become an Admin provider/session bootstrap.
@@ -29,5 +33,6 @@ fake sources. Includes zero-store/preparation listing and rejected selection;
 create collision, preparation/source/cancellation failure; atomic admission and
 publication refusal; output failure after commit; stalled source lifetime past
 the real logical deadline with rejected late evidence; all three implemented
-read operations and exact service identity. No provider or generic process port
+Linux reads plus Kubernetes workloads, exact Pod and namespace/exact-Pod events.
+Source context/namespace and captured timestamps remain in text/JSON output. No provider or generic process port
 is present. Pending full runtime execution is tracked in the PR evidence.

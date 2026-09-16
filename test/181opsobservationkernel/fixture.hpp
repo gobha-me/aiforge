@@ -32,6 +32,7 @@ class Source final : public runtime::OpsObservationSource {
   OpsTargetBinding binding{spec().target};
   std::atomic<unsigned> calls{};
   bool fail{};
+  std::optional<runtime::OpsObservationSourceError> failure{};
   bool malformed{};
   bool blocked{};
   auto guarantees_bound_read_only_observations() const noexcept
@@ -51,6 +52,7 @@ class Source final : public runtime::OpsObservationSource {
       std::condition_variable_any changed;
       changed.wait(lock, stop, [] { return false; });
     }
+    if (failure) return std::unexpected(*failure);
     if (fail || stop.stop_requested())
       return std::unexpected(runtime::OpsObservationSourceError::unavailable);
     auto captured = request;
@@ -317,6 +319,7 @@ struct Fixture {
     policy->fail_evaluation = false;
     policy->fail_approval = false;
     source->fail = false;
+    source->failure.reset();
     source->malformed = false;
     source->blocked = false;
     REQUIRE(kernel->start_observation_control(control("next")));

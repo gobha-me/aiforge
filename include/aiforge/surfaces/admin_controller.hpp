@@ -57,12 +57,48 @@ struct AdminReadCachedService {
   std::uint64_t selection_generation{};
   std::size_t row{};
 };
+struct AdminReadWorkloads {};
+struct AdminReadEvents {};
+struct AdminReadNamedPod {
+  std::string name;
+  domain::OpsResourceUid uid;
+};
+struct AdminReadNamedPodEvents {
+  std::string name;
+  domain::OpsResourceUid uid;
+};
+struct AdminReadCachedPod {
+  domain::SessionId session;
+  domain::EventId inventory_event;
+  std::uint64_t selection_generation{};
+  std::size_t row{};
+};
+struct AdminReadCachedPodEvents {
+  domain::SessionId session;
+  domain::EventId inventory_event;
+  std::uint64_t selection_generation{};
+  std::size_t row{};
+};
+// Immutable proof for refreshing the exact committed evidence displayed by a
+// surface. It cannot be reinterpreted under a later active target.
+struct AdminRefreshDisplayed {
+  domain::SessionId session;
+  domain::OpsTargetBinding target;
+  std::uint64_t selection_generation{};
+  domain::EventId observation_event;
+  domain::OpsObservationOperation operation{
+      domain::OpsObservationOperation::linux_health};
+  domain::OpsResourceIdentity resource{};
+};
 struct AdminCancel {};
 struct AdminCloseView {};
 using AdminAction =
     std::variant<AdminInspect, AdminSelectTarget, AdminReadHealth,
                  AdminReadServices, AdminReadNamedService,
-                 AdminReadCachedService, AdminCancel, AdminCloseView>;
+                 AdminReadCachedService, AdminReadWorkloads, AdminReadEvents,
+                 AdminReadNamedPod, AdminReadNamedPodEvents, AdminReadCachedPod,
+                 AdminReadCachedPodEvents, AdminRefreshDisplayed, AdminCancel,
+                 AdminCloseView>;
 enum class AdminPhase {
   detached,
   idle,
@@ -73,6 +109,14 @@ enum class AdminPhase {
   awaiting_approval,
   failed
 };
+enum class AdminEvidenceFreshness {
+  unavailable,
+  last_success,
+  refreshing,
+  refresh_failed,
+  disconnected
+};
+inline constexpr std::size_t admin_snapshot_count = 6;
 struct AdminState {
   std::vector<AdminTargetChoice> targets;
   std::optional<domain::SessionId> session;
@@ -84,7 +128,11 @@ struct AdminState {
   domain::RunStatus current_status{domain::RunStatus::not_started};
   // Health, loaded services and exact service health. Historical values keep
   // their original session/target/event identity and never imply current grant.
-  std::array<std::optional<CommittedOpsObservation>, 3> snapshots;
+  std::array<std::optional<CommittedOpsObservation>, admin_snapshot_count>
+      snapshots;
+  // Per-slot collection state. A failed/disconnected state never erases the
+  // last successful snapshot or changes its captured identity/timestamp.
+  std::array<AdminEvidenceFreshness, admin_snapshot_count> freshness{};
   AdminPhase phase{AdminPhase::detached};
   std::optional<ManualOpsFailure> problem;
   std::optional<runtime::OpsObservationSourceError> source_problem;

@@ -14,7 +14,11 @@ Recorded before implementation from the accepted186 API checkpoint.
   policy denial is terminal failure, never observation success.
 - Failed source, saturation, broker closure/selection change, cancellation and
   append refusal cannot publish uncommitted evidence. Last successful original-
-  target evidence remains separate from failed or running work.
+  target evidence remains separate from failed or running work. Broker/source
+  disconnection is typed separately from generic availability, including an
+  asynchronous native-source disconnect reported once by broker owner service;
+  ordinary source unavailability, explicit close and storage/history/internal
+  failures cannot masquerade as disconnection.
 - Pure projection rejects missing/substituted request, observation/result pair,
   invocation, canonical content or completion, and cancellation resurrection.
   Valid mixed conversation/manual history exposes only committed human evidence.

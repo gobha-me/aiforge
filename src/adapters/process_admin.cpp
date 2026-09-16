@@ -1,4 +1,5 @@
 #include "process_admin_internal.hpp"
+#include <aiforge/adapters/kubernetes_ops_source_preparation.hpp>
 #include <aiforge/adapters/linux_ops_source_preparation.hpp>
 #include <aiforge/adapters/sqlite_session_store.hpp>
 #include <aiforge/config/file_store.hpp>
@@ -35,11 +36,21 @@ class ProcessDependencies final : public admin_detail::Dependencies {
     if (!store) return failure("Admin session storage could not be opened");
     return std::move(*store);
   }
-  auto factory(runtime::OpsSourcePreparationIdentity identity) -> Result<
-      std::shared_ptr<runtime::OpsSourcePreparationFactory>> override {
+  auto factory(const config::OpsTargetConfig& target,
+               domain::OpsConfigurationRevision revision)
+      -> Result<
+          std::shared_ptr<runtime::OpsSourcePreparationFactory>> override {
+    auto id = domain::OpsTargetId::from(target.id);
+    if (!id) return failure("Admin target identity is invalid");
+    if (const auto* kube =
+            std::get_if<config::StaticKubernetesTargetConfig>(&target.source)) {
+      auto prepared = KubernetesOpsSourcePreparationFactory::create(
+          std::move(*id), std::move(revision), *kube);
+      if (!prepared) return failure("Admin source preparation is unavailable");
+      return std::move(*prepared);
+    }
     auto prepared = LinuxOpsSourcePreparationFactory::create(
-        std::move(identity.target_id),
-        std::move(identity.configuration_revision));
+        std::move(*id), std::move(revision));
     if (!prepared) return failure("Admin source preparation is unavailable");
     return std::move(*prepared);
   }

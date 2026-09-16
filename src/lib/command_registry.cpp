@@ -785,8 +785,12 @@ auto admin_operation(std::string_view command)
   if (command == "admin.health") return Operation::health;
   if (command == "admin.services") return Operation::services;
   if (command == "admin.service") return Operation::service;
+  if (command == "admin.workloads") return Operation::workloads;
+  if (command == "admin.pod") return Operation::pod;
+  if (command == "admin.events") return Operation::events;
   return std::nullopt;
 }
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Option grammar.
 auto admin_request(const ParsedInvocation& invocation)
     -> std::expected<AdminCommand::Request, std::string_view> {
   if (std::ranges::any_of(invocation.arguments, [](const auto& argument) {
@@ -811,6 +815,23 @@ auto admin_request(const ParsedInvocation& invocation)
         !detail::valid_admin_service(unit->front()))
       return std::unexpected("invalid Admin service name");
     request.unit = unit->front();
+  }
+  if (*operation == AdminCommand::Operation::pod ||
+      *operation == AdminCommand::Operation::events) {
+    const auto pod = parsed_text_values(invocation, command + ".pod");
+    const auto uid = parsed_text_values(invocation, command + ".uid");
+    if (pod.has_value() != uid.has_value() ||
+        (*operation == AdminCommand::Operation::pod && !pod) ||
+        (pod && (pod->size() != 1 || uid->size() != 1 ||
+                 !detail::valid_admin_pod(pod->front()) ||
+                 !detail::valid_admin_resource_uid(uid->front()))))
+      return std::unexpected("invalid Admin Pod identity");
+    if (pod) {
+      auto parsed_uid = domain::OpsResourceUid::from(std::string{uid->front()});
+      if (!parsed_uid) return std::unexpected("invalid Admin Pod identity");
+      request.pod = pod->front();
+      request.pod_uid = std::move(*parsed_uid);
+    }
   }
   if (parsed_argument(invocation, command + ".json") != nullptr)
     request.format = AdminCommand::OutputFormat::json;
@@ -853,6 +874,32 @@ auto admin_command_spec() -> CommandSpec {
            "Inspect one exact canonical .service unit."});
     return result;
   };
+  const auto pod_leaf = [&](std::string id, std::string name,
+                            std::string help) {
+    auto result =
+        leaf(std::move(id), std::move(name), std::move(help), true, false);
+    result.positionals.push_back(
+        {{result.id + ".pod", "pod", ArgumentValueKind::text, 1, 1},
+         "Select one exact Pod name."});
+    result.options.push_back(
+        {{result.id + ".uid", {"--uid"}, ArgumentValueKind::text, 1, 1},
+         "uid",
+         "Bind the selected Pod UID."});
+    return result;
+  };
+  const auto events = [&] {
+    auto result = leaf("admin.events", "events",
+                       "Observe namespace or exact-Pod events.", true, false);
+    result.options.push_back(
+        {{result.id + ".pod", {"--pod"}, ArgumentValueKind::text, 0, 1},
+         "pod",
+         "Select one exact Pod name."});
+    result.options.push_back(
+        {{result.id + ".uid", {"--uid"}, ArgumentValueKind::text, 0, 1},
+         "uid",
+         "Bind the selected Pod UID."});
+    return result;
+  }();
   return {"admin",
           "admin",
           "Inspect configured targets without inference.",
@@ -866,7 +913,10 @@ auto admin_command_spec() -> CommandSpec {
            leaf("admin.services", "services", "List selected target services.",
                 true, false),
            leaf("admin.service", "service", "Observe one selected service.",
-                true, true)},
+                true, true),
+           leaf("admin.workloads", "workloads",
+                "List namespace workloads and Pods.", true, false),
+           pod_leaf("admin.pod", "pod", "Observe one exact Pod."), events},
           admin_parent_handler};
 }
 

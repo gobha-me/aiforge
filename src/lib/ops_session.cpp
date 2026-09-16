@@ -45,6 +45,11 @@ auto terminal(domain::RunStatus status) -> bool {
          status == domain::RunStatus::failed ||
          status == domain::RunStatus::cancelled;
 }
+auto source_disconnected(const runtime::OpsBrokerFailure& failure) -> bool {
+  return failure.code == runtime::OpsBrokerError::closed ||
+         (failure.code == runtime::OpsBrokerError::source_failure &&
+          failure.source == runtime::OpsObservationSourceError::disconnected);
+}
 class NoInferenceBackend final : public backend::Backend {
  public:
   std::atomic<std::uint64_t> attempted_calls{};
@@ -186,6 +191,7 @@ auto OpsSession::bind_observation(
     if (!bound) return m_impl->report(kernel_failure(bound.error().code));
     static_assert(std::is_nothrow_move_assignable_v<decltype(visible)>);
     m_impl->inspection.selection = std::move(visible);
+    m_impl->inspection.source_connection = ManualOpsSourceConnection::connected;
     m_impl->inspection.available = true;
     m_impl->inspection.problem.reset();
     return {};
@@ -262,7 +268,14 @@ auto OpsSession::pump_observations() -> std::expected<void, Failure> {
     const auto service = [&] {
       auto result = m_impl->broker->service();
       if (!result) {
-        if (!first) first = Failure{Code::unavailable, {}, result.error().code};
+        if (!first)
+          first = Failure{Code::unavailable,
+                          {},
+                          result.error().code,
+                          result.error().source};
+        if (source_disconnected(result.error()))
+          m_impl->inspection.source_connection =
+              ManualOpsSourceConnection::disconnected;
         m_impl->inspection.available = false;
         const auto cancelled = m_impl->cancel_current();
         if (!cancelled && is_fatal(cancelled.error()))
@@ -290,6 +303,7 @@ auto OpsSession::close() -> std::expected<void, Failure> {
     if (!m_impl->inspection.closed) {
       m_impl->inspection.closed = true;
       m_impl->inspection.available = false;
+      m_impl->inspection.source_connection = ManualOpsSourceConnection::unbound;
       auto cancelled = m_impl->cancel_current();
       auto synced = m_impl->synchronize();
       if (!cancelled) return cancelled;
