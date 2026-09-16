@@ -2,6 +2,7 @@
 #include <aiforge/detail/utf8_text.hpp>
 #include <aiforge/surfaces/admin_controller.hpp>
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <type_traits>
 #include <utility>
@@ -40,15 +41,8 @@ auto worker_failure(WorkerCode code) -> Failure {
 }
 auto snapshot_index(domain::OpsObservationOperation operation)
     -> std::optional<std::size_t> {
-  switch (operation) {
-    case domain::OpsObservationOperation::linux_health: return 0;
-    case domain::OpsObservationOperation::linux_services: return 1;
-    case domain::OpsObservationOperation::linux_service_health: return 2;
-    case domain::OpsObservationOperation::kubernetes_workloads: return 3;
-    case domain::OpsObservationOperation::kubernetes_pod_health: return 4;
-    case domain::OpsObservationOperation::kubernetes_events: return 5;
-    default: return {};
-  }
+  const auto slot = manual_ops_catalog_slot(operation);
+  return slot < manual_ops_catalog_slots ? std::optional{slot} : std::nullopt;
 }
 auto operation_matches(domain::OpsTargetKind kind,
                        domain::OpsObservationOperation operation) -> bool {
@@ -68,10 +62,13 @@ auto operation_matches(domain::OpsTargetKind kind,
   return false;
 }
 auto disconnected(AdminState& state) noexcept -> void {
-  for (std::size_t slot{}; slot < state.snapshots.size(); ++slot)
+  for (std::size_t slot{}; slot < state.snapshots.size(); ++slot) {
+    if (state.freshness[slot] == AdminEvidenceFreshness::historical_unverified)
+      continue;
     state.freshness[slot] = state.snapshots[slot]
                                 ? AdminEvidenceFreshness::disconnected
                                 : AdminEvidenceFreshness::unavailable;
+  }
 }
 auto detached(AdminState& state) noexcept -> void {
   for (std::size_t slot{}; slot < state.snapshots.size(); ++slot) {
@@ -100,6 +97,143 @@ auto validate_catalog(std::span<const AdminTargetChoice> targets) -> bool {
       if (targets[earlier].id == target.id) return false;
   }
   return true;
+}
+struct HistoricalCandidate {
+  std::array<std::optional<CommittedOpsObservation>, admin_snapshot_count>
+      snapshots{};
+  std::array<AdminEvidenceFreshness, admin_snapshot_count> freshness{};
+  std::optional<domain::OpsTargetBinding> target{};
+  std::uint64_t selection_generation{};
+};
+struct HistoricalCatalogState {
+  std::size_t bytes{};
+  std::uint64_t maximum_generation{};
+  bool present{};
+};
+auto retain_historical_evidence(const domain::OpsOwnerId& owner,
+                                const domain::SessionId& session,
+                                std::size_t slot,
+                                const CommittedOpsObservation& evidence,
+                                HistoricalCandidate& candidate,
+                                HistoricalCatalogState& state)
+    -> std::expected<void, Failure> {
+  const auto& request = evidence.observation.request;
+  const auto usage =
+      domain::validate_recorded_ops_observation(evidence.observation);
+  if (manual_ops_catalog_slot(request.operation) != slot ||
+      request.owner_id != owner || request.session_id != session ||
+      !valid_id(evidence.submission.run_id.value()) ||
+      !valid_id(evidence.submission.invocation_id.value()) ||
+      !valid_id(evidence.observation_event_id.value()) ||
+      !valid_id(evidence.result_event_id.value()) ||
+      evidence.observation_event_id == evidence.result_event_id)
+    return failure(Code::invalid_history);
+  if (!usage)
+    return failure(usage.error().code ==
+                           domain::OpsObservationErrorCode::resource_exhausted
+                       ? Code::resource_exhausted
+                       : Code::invalid_history);
+  if (usage->evidence_bytes > maximum_manual_ops_catalog_bytes - state.bytes)
+    return failure(Code::resource_exhausted);
+  for (std::size_t earlier{}; earlier < slot; ++earlier) {
+    const auto& retained = candidate.snapshots[earlier];
+    if (retained &&
+        (retained->observation_event_id == evidence.observation_event_id ||
+         retained->observation_event_id == evidence.result_event_id ||
+         retained->result_event_id == evidence.observation_event_id ||
+         retained->result_event_id == evidence.result_event_id))
+      return failure(Code::invalid_history);
+  }
+  state.bytes += usage->evidence_bytes;
+  state.maximum_generation =
+      std::max(state.maximum_generation, request.selection_generation);
+  state.present = true;
+  candidate.snapshots[slot] = evidence;
+  candidate.freshness[slot] = AdminEvidenceFreshness::historical_unverified;
+  return {};
+}
+auto retain_historical_catalog(const domain::OpsOwnerId& owner,
+                               const domain::SessionId& session,
+                               const ManualOpsInspection& inspection,
+                               HistoricalCandidate& candidate)
+    -> std::expected<void, Failure> {
+  HistoricalCatalogState state;
+  for (std::size_t slot{}; slot < inspection.projection.catalog.size();
+       ++slot) {
+    const auto& evidence = inspection.projection.catalog[slot];
+    if (!evidence) continue;
+    auto retained = retain_historical_evidence(owner, session, slot, *evidence,
+                                               candidate, state);
+    if (!retained) return retained;
+  }
+  if (inspection.projection.latest_success) {
+    const auto slot = manual_ops_catalog_slot(
+        inspection.projection.latest_success->observation.request.operation);
+    if (slot >= candidate.snapshots.size())
+      return failure(Code::invalid_history);
+    const auto& retained = candidate.snapshots[slot];
+    if (!retained.has_value() ||
+        retained.value() != inspection.projection.latest_success.value())
+      return failure(Code::invalid_history);
+  } else if (state.present) {
+    return failure(Code::invalid_history);
+  }
+  if (inspection.projection.maximum_selection_generation <
+      state.maximum_generation)
+    return failure(Code::invalid_history);
+  return {};
+}
+auto retain_historical_selection(const ManualOpsInspection& inspection,
+                                 HistoricalCandidate& candidate)
+    -> std::expected<void, Failure> {
+  const auto& projected = inspection.projection.historical_selection;
+  if (inspection.source_connection ==
+      ManualOpsSourceConnection::historical_unverified) {
+    if (!inspection.selection || inspection.selection_generation == 0 ||
+        !projected || projected->target != *inspection.selection ||
+        projected->selection_generation != inspection.selection_generation ||
+        inspection.projection.maximum_selection_generation !=
+            inspection.selection_generation ||
+        !valid_id(projected->run_id.value()) ||
+        !valid_id(projected->event_id.value()) ||
+        !domain::validate_ops_target_binding(projected->target))
+      return failure(Code::invalid_history);
+    candidate.target = inspection.selection;
+    candidate.selection_generation = inspection.selection_generation;
+    return {};
+  }
+  if (inspection.source_connection == ManualOpsSourceConnection::unbound) {
+    if (inspection.selection || projected ||
+        inspection.selection_generation !=
+            inspection.projection.maximum_selection_generation)
+      return failure(Code::invalid_history);
+    candidate.selection_generation = inspection.selection_generation;
+    return {};
+  }
+  if (!inspection.selection || inspection.selection_generation == 0 ||
+      !projected || projected->target != *inspection.selection ||
+      projected->selection_generation != inspection.selection_generation ||
+      inspection.projection.maximum_selection_generation !=
+          inspection.selection_generation)
+    return failure(Code::invalid_history);
+  candidate.selection_generation = inspection.selection_generation;
+  return {};
+}
+auto historical_candidate(const domain::OpsOwnerId& owner,
+                          const domain::SessionId& session,
+                          const ManualOpsInspection& inspection)
+    -> std::expected<HistoricalCandidate, Failure> {
+  try {
+    HistoricalCandidate candidate;
+    auto catalog =
+        retain_historical_catalog(owner, session, inspection, candidate);
+    if (!catalog) return std::unexpected(catalog.error());
+    auto selection = retain_historical_selection(inspection, candidate);
+    if (!selection) return std::unexpected(selection.error());
+    return candidate;
+  } catch (...) {
+    return failure(Code::internal_failure);
+  }
 }
 } // namespace
 
@@ -132,7 +266,6 @@ struct AdminController::Impl {
     state.active_target.reset();
     state.current.reset();
     state.current_status = domain::RunStatus::not_started;
-    state.selection_generation = 0;
     current_slot.reset();
     detached(state);
   }
@@ -574,6 +707,10 @@ auto AdminController::attach(AdminSessionAttachment attachment)
     if (m_impl->state.session_epoch ==
         std::numeric_limits<std::uint64_t>::max())
       return m_impl->report({Code::resource_exhausted});
+    auto candidate =
+        historical_candidate(m_impl->owner, attachment.session,
+                             attachment.manual.inspect_observations());
+    if (!candidate) return std::unexpected(candidate.error());
     auto detached = detach();
     if (!detached) return detached;
     m_impl->manual = &attachment.manual;
@@ -581,6 +718,10 @@ auto AdminController::attach(AdminSessionAttachment attachment)
     m_impl->endpoint = std::move(attachment.endpoint);
     m_impl->state.session = std::move(attachment.session);
     ++m_impl->state.session_epoch;
+    m_impl->state.snapshots = std::move(candidate->snapshots);
+    m_impl->state.freshness = candidate->freshness;
+    m_impl->state.historical_target = std::move(candidate->target);
+    m_impl->state.selection_generation = candidate->selection_generation;
     m_impl->state.fatal = false;
     m_impl->state.problem.reset();
     m_impl->state.source_problem.reset();

@@ -425,6 +425,30 @@ TEST_CASE("Admin compact view keeps active target distinct from historical "
   CHECK(tiny.find("disconnected") == std::string::npos);
 }
 
+TEST_CASE("Admin compact view labels historical A evidence under active B",
+          "[admin][dialog][history][replay]") {
+  Controls controls;
+  auto historical = committed();
+  historical.observation.request.target.target_id =
+      id<domain::OpsTargetId>("alpha");
+  controls.state.snapshots[1] = historical;
+  controls.state.freshness[1] = AdminEvidenceFreshness::historical_unverified;
+  auto active = historical.observation.request.target;
+  active.target_id = id<domain::OpsTargetId>("beta");
+  active.configuration_revision =
+      id<domain::OpsConfigurationRevision>("beta-revision");
+  controls.state.active_target = std::move(active);
+  controls.state.phase = AdminPhase::ready;
+  adapters::AdminDialog dialog{controls};
+  REQUIRE(dialog.on_event(key(U's')));
+  CHECK(dialog.display_text().find("target.target_id=\"alpha\"") !=
+        std::string::npos);
+  const auto tiny = render(dialog, 20, 5);
+  CHECK(tiny.find("target beta") != std::string::npos);
+  CHECK(tiny.find("unverified history") != std::string::npos);
+  CHECK(tiny.find("disconnected") == std::string::npos);
+}
+
 TEST_CASE("Admin Kubernetes keyboard reads remain available without toolbar",
           "[admin][dialog][kubernetes]") {
   Controls controls;
@@ -602,6 +626,33 @@ TEST_CASE("Admin tiny Kubernetes layout retains feedback with identity and "
   CHECK(tiny.find("apps") != std::string::npos);
   CHECK(tiny.find("refresh failed") != std::string::npos);
   CHECK(tiny.find("error busy") != std::string::npos);
+}
+
+TEST_CASE("Admin replay renders exact Kubernetes target as unverified",
+          "[admin][dialog][kubernetes][replay]") {
+  Controls controls;
+  controls.state.historical_target = domain::OpsTargetBinding{
+      id<domain::OpsTargetId>("cluster"),
+      id<domain::OpsConfigurationRevision>("revision"),
+      domain::KubernetesOpsIdentity{
+          "home", "apps", {"10.0.0.2", 6443}, "sha256:fixture"}};
+  controls.state.snapshots[3] = kube_committed();
+  controls.state.freshness[3] = AdminEvidenceFreshness::historical_unverified;
+  adapters::AdminDialog dialog{controls};
+  const auto presentation = render(dialog, 120, 32);
+  CHECK(presentation.find("Historical target: cluster") != std::string::npos);
+  CHECK(presentation.find("context home") != std::string::npos);
+  CHECK(presentation.find("namespace apps") != std::string::npos);
+  CHECK(presentation.find("unverified") != std::string::npos);
+  REQUIRE(dialog.on_event(key(U'w')));
+  CHECK(dialog.display_text().find("freshness unverified history") !=
+        std::string::npos);
+  const auto tiny = render(dialog, 20, 5);
+  CHECK(tiny.find("cluster") != std::string::npos);
+  CHECK(tiny.find("home") != std::string::npos);
+  CHECK(tiny.find("apps") != std::string::npos);
+  CHECK(tiny.find("history") != std::string::npos);
+  CHECK(tiny.find("unverified") != std::string::npos);
 }
 
 TEST_CASE("Admin explicit actions remain reachable with no visible buttons",

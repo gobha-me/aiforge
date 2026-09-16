@@ -104,6 +104,8 @@ auto action_value(const std::optional<AdminAction>& action)
 auto freshness_text(AdminEvidenceFreshness value) -> std::string_view {
   switch (value) {
     case AdminEvidenceFreshness::unavailable: return "unavailable";
+    case AdminEvidenceFreshness::historical_unverified:
+      return "unverified history";
     case AdminEvidenceFreshness::last_success: return "last success";
     case AdminEvidenceFreshness::refreshing: return "refreshing";
     case AdminEvidenceFreshness::refresh_failed: return "refresh failed";
@@ -608,8 +610,15 @@ auto AdminDialog::refresh() -> std::expected<void, ManualOpsFailure> {
     }
     refresh_targets(state);
     refresh_snapshots(state);
-    m_summary = "Active target: " + target_identity(state.active_target);
-    auto compact_identity = compact_target_identity(state.active_target);
+    const auto& displayed_target =
+        state.active_target ? state.active_target : state.historical_target;
+    m_summary = state.active_target || !state.historical_target
+                    ? "Active target: "
+                    : "Historical target: ";
+    m_summary += target_identity(displayed_target);
+    if (state.historical_target && !state.active_target)
+      m_summary += " | unverified; select again before reading";
+    auto compact_identity = compact_target_identity(displayed_target);
     m_compact_title = std::move(compact_identity.title);
     m_compact_identity = std::move(compact_identity.body);
     if (state.pending_target)
@@ -619,8 +628,9 @@ auto AdminDialog::refresh() -> std::expected<void, ManualOpsFailure> {
                          : state.source_problem ? "Source preparation failed"
                                                 : phase_text(state.phase);
     const auto compact = state.problem ? compact_error_text(state.problem->code)
-                         : state.source_problem
-                             ? "error source"
+                         : state.source_problem ? "error source"
+                         : state.historical_target && !state.active_target
+                             ? "status unverified"
                              : compact_phase_text(state.phase);
     report(std::string{message}, std::string{compact});
     refresh_body();

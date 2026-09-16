@@ -255,6 +255,20 @@ auto count(const std::vector<domain::RunEvent>& events) -> std::size_t {
         return std::holds_alternative<Event>(event.payload);
       }));
 }
+template <class Event>
+auto count_manual_run(const std::vector<domain::RunEvent>& events)
+    -> std::size_t {
+  const auto requested = std::ranges::find_if(events, [](const auto& event) {
+    return std::holds_alternative<domain::HumanObservationRequested>(
+        event.payload);
+  });
+  if (requested == events.end()) return 0;
+  return static_cast<std::size_t>(
+      std::ranges::count_if(events, [&](const auto& event) {
+        return event.metadata.run_id == requested->metadata.run_id &&
+               std::holds_alternative<Event>(event.payload);
+      }));
+}
 } // namespace
 
 TEST_CASE("Admin invalid selection and catalog never open storage or prepare a "
@@ -364,7 +378,7 @@ TEST_CASE("Admin output refusal preserves one committed read without retry",
   REQUIRE_FALSE(execute({Command::Operation::health}, deps, {}, output));
   REQUIRE(deps.state->observations == 1);
   REQUIRE(count<domain::OpsObservationRecorded>(deps.history()) == 1);
-  REQUIRE(count<domain::RunCompleted>(deps.history()) == 1);
+  REQUIRE(count_manual_run<domain::RunCompleted>(deps.history()) == 1);
 }
 TEST_CASE("Admin capacity-one preparation hands off to one durable native "
           "observation",
@@ -387,7 +401,7 @@ TEST_CASE("Admin capacity-one preparation hands off to one durable native "
   const auto events = deps.history();
   REQUIRE(count<domain::HumanObservationRequested>(events) == 1);
   REQUIRE(count<domain::OpsObservationRecorded>(events) == 1);
-  REQUIRE(count<domain::RunCompleted>(events) == 1);
+  REQUIRE(count_manual_run<domain::RunCompleted>(events) == 1);
   REQUIRE(count<domain::InferenceStarted>(events) == 0);
 }
 

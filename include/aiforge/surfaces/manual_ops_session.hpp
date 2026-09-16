@@ -1,9 +1,12 @@
 #pragma once
 
 #include <aiforge/runtime/run_kernel.hpp>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <optional>
+#include <stop_token>
 
 namespace aiforge::surfaces {
 enum class ManualOpsErrorCode {
@@ -28,6 +31,7 @@ struct ManualOpsFailure {
 };
 enum class ManualOpsSourceConnection {
   unbound,
+  historical_unverified,
   connected,
   disconnected,
 };
@@ -52,23 +56,51 @@ struct CommittedOpsObservation {
   domain::OpsObservation observation;
   auto operator==(const CommittedOpsObservation&) const -> bool = default;
 };
+inline constexpr std::size_t manual_ops_catalog_slots = 8;
+inline constexpr std::size_t maximum_manual_ops_catalog_bytes =
+    std::size_t{512} * 1024U;
+static_assert(maximum_manual_ops_catalog_bytes ==
+              manual_ops_catalog_slots *
+                  domain::ops_observation_maximum_evidence_bytes);
+[[nodiscard]] constexpr auto manual_ops_catalog_slot(
+    domain::OpsObservationOperation operation) -> std::size_t {
+  switch (operation) {
+    case domain::OpsObservationOperation::linux_health: return 0;
+    case domain::OpsObservationOperation::linux_services: return 1;
+    case domain::OpsObservationOperation::linux_service_health: return 2;
+    case domain::OpsObservationOperation::kubernetes_workloads: return 3;
+    case domain::OpsObservationOperation::kubernetes_pod_health: return 4;
+    case domain::OpsObservationOperation::kubernetes_events: return 5;
+    case domain::OpsObservationOperation::linux_service_logs: return 6;
+    case domain::OpsObservationOperation::kubernetes_pod_logs: return 7;
+  }
+  return manual_ops_catalog_slots;
+}
 struct ManualObservationProjection {
   std::uint64_t last_sequence{};
   std::optional<ManualObservationProgress> current{};
   std::optional<CommittedOpsObservation> latest_success{};
+  // Final latest successful terminal evidence only. Slot order is fixed by
+  // manual_ops_catalog_slot; total neutral evidence is capped at 512 KiB.
+  std::array<std::optional<CommittedOpsObservation>, manual_ops_catalog_slots>
+      catalog{};
+  std::optional<runtime::RecordedOpsTargetSelection> historical_selection{};
+  std::uint64_t maximum_selection_generation{};
   auto operator==(const ManualObservationProjection&) const -> bool = default;
 };
 // Pure, bounded committed-history projection shared by standalone and chat.
 // No current authority, source collection, persistence or provider work.
 [[nodiscard]] auto project_manual_observations(
     const domain::SessionEventLog& log,
-    const std::optional<ObservationSubmission>& current = {})
+    const std::optional<ObservationSubmission>& current = {},
+    std::stop_token stop = {})
     -> std::expected<ManualObservationProjection, ManualOpsFailure>;
 
 struct ManualOpsInspection {
   ManualObservationProjection projection;
   std::optional<runtime::PendingToolApproval> approval{};
   std::optional<domain::OpsTargetBinding> selection{};
+  std::uint64_t selection_generation{};
   std::optional<ManualOpsFailure> problem{};
   ManualOpsSourceConnection source_connection{
       ManualOpsSourceConnection::unbound};

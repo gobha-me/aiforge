@@ -5,6 +5,7 @@
 #include <aiforge/runtime/conversation_summary_generation.hpp>
 #include <aiforge/runtime/inference_spend.hpp>
 #include <aiforge/runtime/memory_tool.hpp>
+#include <aiforge/runtime/ops_observation_history.hpp>
 #include <aiforge/runtime/persona.hpp>
 #include <aiforge/runtime/session_context.hpp>
 #include <aiforge/runtime/session_evidence.hpp>
@@ -3184,6 +3185,24 @@ auto ChatSession::open(ChatSessionOpen request, backend::Backend& backend,
         std::move(dependencies.repository_context_selection);
     impl->async_repository_preparation =
         dependencies.async_repository_preparation;
+    if (durable && request.mode != ChatSessionOpen::Mode::create) {
+      auto observations = project_manual_observations(impl->kernel->event_log(),
+                                                      {}, impl->stop_token);
+      if (!observations)
+        return error(ChatSessionErrorCode::session_failed,
+                     "durable Ops history could not be opened");
+      impl->observation_inspection.projection = std::move(*observations);
+      impl->observation_inspection.selection_generation =
+          impl->observation_inspection.projection.maximum_selection_generation;
+      if (impl->observation_inspection.projection.historical_selection) {
+        const auto& selection =
+            *impl->observation_inspection.projection.historical_selection;
+        impl->observation_inspection.selection = selection.target;
+        impl->observation_inspection.source_connection =
+            ManualOpsSourceConnection::historical_unverified;
+        impl->observation_inspection.available = false;
+      }
+    }
     if (impl->repository_selection && impl->repository_controller == nullptr)
       return error(ChatSessionErrorCode::context_failed,
                    "Dev repository context is unavailable");
@@ -3199,9 +3218,12 @@ auto ChatSession::bind_observation(
     std::shared_ptr<runtime::OpsObservationSource> source,
     std::shared_ptr<runtime::OpsObservationEndpoint> endpoint)
     -> std::expected<void, ManualOpsFailure> {
+  bool bound_live{};
   try {
     if (m_impl->observation_inspection.closed)
       return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::closed});
+    if (auto synchronized = m_impl->synchronize_observations(); !synchronized)
+      return std::unexpected(synchronized.error());
     if (!m_impl->observation_broker || !m_impl->observation_context ||
         !m_impl->permission_profile_id)
       return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::unavailable});
@@ -3213,9 +3235,35 @@ auto ChatSession::bind_observation(
       return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::unavailable});
     std::optional<domain::OpsTargetBinding> selected{
         authority.specification().target};
+    const auto selected_generation =
+        authority.specification().selection_generation;
+    const auto selection_suffix = m_impl->identity_suffix_source();
+    auto selection_run =
+        make_id<domain::RunId>("chat-ops-selection", selection_suffix);
+    if (!selection_run)
+      return std::unexpected(
+          ManualOpsFailure{ManualOpsErrorCode::invalid_input});
+    domain::RunStarted selection_attributes{
+        m_impl->observation_context->surface_id,
+        m_impl->observation_context->workspace_id,
+        *m_impl->permission_profile_id,
+        {},
+        {},
+        domain::RunPurpose::control};
+    const auto before = m_impl->kernel->event_log().events().size();
     auto bound = m_impl->kernel->bind_ops_observation(
-        std::move(authority), std::move(source), std::move(endpoint));
-    if (!bound) return m_impl->report_observation_kernel_failure(bound.error());
+        std::move(authority), std::move(source), std::move(endpoint),
+        {*selection_run, std::move(selection_attributes)});
+    if (!bound) {
+      if (bound.error().code == runtime::RunKernelErrorCode::storage_failure)
+        m_impl->observation_inspection.source_connection =
+            m_impl->observation_inspection.selection
+                ? ManualOpsSourceConnection::historical_unverified
+                : ManualOpsSourceConnection::unbound;
+      return m_impl->report_observation_kernel_failure(bound.error());
+    }
+    bound_live = true;
+    m_impl->remember_observation_events(before);
     static_assert(
         std::is_nothrow_move_assignable_v<runtime::ToolRegistrySnapshot>);
     static_assert(std::is_nothrow_move_assignable_v<
@@ -3224,6 +3272,13 @@ auto ChatSession::bind_observation(
     m_impl->available_tools = std::move(bound->available_tools);
     m_impl->tool_policy = std::move(bound->policy);
     m_impl->observation_inspection.selection = std::move(selected);
+    m_impl->observation_inspection.selection_generation = selected_generation;
+    m_impl->observation_inspection.projection.last_sequence =
+        m_impl->kernel->event_log().last_sequence();
+    m_impl->observation_inspection.projection.historical_selection =
+        std::move(bound->selection);
+    m_impl->observation_inspection.projection.maximum_selection_generation =
+        selected_generation;
     m_impl->observation_inspection.problem.reset();
     m_impl->observation_inspection.source_connection =
         ManualOpsSourceConnection::connected;
@@ -3231,6 +3286,12 @@ auto ChatSession::bind_observation(
     m_impl->observation_inspection.busy = false;
     return {};
   } catch (...) {
+    if (bound_live) {
+      const auto deactivated = m_impl->observation_broker->deactivate_session();
+      if (!deactivated)
+        return m_impl->close_observation_admission(
+            {ManualOpsErrorCode::internal_failure});
+    }
     return m_impl->close_observation_admission(
         {ManualOpsErrorCode::internal_failure});
   }

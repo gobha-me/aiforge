@@ -37,6 +37,15 @@ TEST_CASE(
   ops_session_test::Fixture f;
   f.open();
   f.bind();
+  const auto& selection =
+      f.session->inspect_observations().projection.historical_selection;
+  REQUIRE(selection);
+  CHECK(selection->target == f.specification.target);
+  CHECK(selection->selection_generation ==
+        f.specification.selection_generation);
+  CHECK(f.session->inspect_observations()
+            .projection.maximum_selection_generation ==
+        f.specification.selection_generation);
   auto duplicate = OpsSession::open(f.request(), f.store, f.dependencies());
   REQUIRE_FALSE(duplicate);
   REQUIRE(f.store.opens == 0);
@@ -60,7 +69,7 @@ TEST_CASE(
     auto intent = f.intent();
     ++intent.selection_generation;
     REQUIRE_FALSE(f.session->submit_observation(intent));
-    REQUIRE(f.store.delegate.history.empty());
+    REQUIRE(count<OpsTargetSelected>(f.store.delegate.history) == 1);
   }
   SECTION("active") {
     f.bind();
@@ -76,11 +85,34 @@ TEST_CASE(
     f.bind();
     REQUIRE(f.session->submit_observation(f.intent()));
     f.idle();
-    f.suffix = 0;
+    f.suffix = 1;
     const auto count = f.store.delegate.history.size();
     REQUIRE_FALSE(f.session->submit_observation(f.intent()));
     REQUIRE(f.store.delegate.history.size() == count);
   }
+}
+TEST_CASE("Selection persistence refusal exposes no live or visible target",
+          "[ops-session][storage]") {
+  ops_session_test::Fixture f;
+  f.open();
+  f.endpoint = f.broker->activate_session(f.specification.session_id).value();
+  f.store.delegate.reject = [](std::span<const RunEvent> events) {
+    return count<OpsTargetSelected>(events) != 0;
+  };
+  auto bound = f.session->bind_observation(
+      OpsObservationAuthority::create(f.specification).value(), f.source,
+      f.endpoint);
+  REQUIRE_FALSE(bound);
+  const auto& inspection = f.session->inspect_observations();
+  CHECK_FALSE(inspection.selection);
+  CHECK_FALSE(inspection.available);
+  REQUIRE(inspection.problem);
+  CHECK(inspection.problem->code == ManualOpsErrorCode::storage_failure);
+  CHECK(count<OpsTargetSelected>(f.store.delegate.history) == 0);
+  CHECK_FALSE(f.broker->preflight_selection(
+      *f.endpoint, OpsObservationAuthority::create(f.specification).value(),
+      f.source));
+  CHECK(f.source->calls == 0);
 }
 TEST_CASE("Prompt decisions use exact current manual identity and scopes",
           "[ops-session]") {
@@ -361,7 +393,9 @@ TEST_CASE(
     "[ops-session]") {
   ops_session_test::Fixture f;
   auto dependencies = f.dependencies();
-  dependencies.identity_suffix_source = []() -> std::uint64_t {
+  unsigned calls{};
+  dependencies.identity_suffix_source = [&calls]() -> std::uint64_t {
+    if (++calls == 1) return 1;
     throw std::runtime_error("private generator error");
   };
   auto opened = OpsSession::open(f.request(), f.store, std::move(dependencies));
@@ -371,7 +405,7 @@ TEST_CASE(
   auto submitted = f.session->submit_observation(f.intent());
   REQUIRE_FALSE(submitted);
   REQUIRE(submitted.error().code == ManualOpsErrorCode::internal_failure);
-  REQUIRE(f.store.delegate.history.empty());
+  REQUIRE(count<OpsTargetSelected>(f.store.delegate.history) == 1);
   REQUIRE(f.source->calls == 0);
   REQUIRE_FALSE(f.session->inspect_observations().available);
 }

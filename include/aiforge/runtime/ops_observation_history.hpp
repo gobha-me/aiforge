@@ -45,10 +45,19 @@ struct RecordedOpsInvocation {
   std::optional<domain::EventId> observation_event_id{};
   std::optional<domain::EventId> result_event_id{};
 };
+struct RecordedOpsTargetSelection {
+  domain::RunId run_id;
+  domain::EventId event_id;
+  domain::OpsTargetBinding target;
+  std::uint64_t selection_generation{};
+  auto operator==(const RecordedOpsTargetSelection&) const -> bool = default;
+};
 struct OpsHistorySnapshot {
   std::uint64_t last_sequence{};
   std::vector<RecordedOpsInvocation> invocations;
   std::vector<domain::RunId> unfinished_manual_runs;
+  std::optional<RecordedOpsTargetSelection> latest_selection{};
+  std::uint64_t maximum_selection_generation{};
 };
 
 // Validate a complete historical snapshot or prospective atomic transaction.

@@ -257,6 +257,20 @@ auto count(const std::vector<domain::RunEvent>& events) -> std::size_t {
         return std::holds_alternative<Event>(event.payload);
       }));
 }
+template <class Event>
+auto count_manual_run(const std::vector<domain::RunEvent>& events)
+    -> std::size_t {
+  const auto requested = std::ranges::find_if(events, [](const auto& event) {
+    return std::holds_alternative<domain::HumanObservationRequested>(
+        event.payload);
+  });
+  if (requested == events.end()) return 0;
+  return static_cast<std::size_t>(
+      std::ranges::count_if(events, [&](const auto& event) {
+        return event.metadata.run_id == requested->metadata.run_id &&
+               std::holds_alternative<Event>(event.payload);
+      }));
+}
 struct Outcome {
   std::mutex mutex;
   std::condition_variable changed;
@@ -294,10 +308,14 @@ TEST_CASE("Admin append refusal preserves only committed SQLite history",
   const auto events = dependencies.history();
   REQUIRE(count<domain::OpsObservationRecorded>(events) == 0);
   REQUIRE(count<domain::ToolResultRecorded>(events) == 0);
-  REQUIRE(count<domain::RunCompleted>(events) == 0);
+  REQUIRE(count_manual_run<domain::RunCompleted>(events) == 0);
   REQUIRE(count<domain::InferenceStarted>(events) == 0);
   if (dependencies.refusal == Refusal::admission) {
-    REQUIRE(events.empty());
+    REQUIRE(events.size() == 3);
+    REQUIRE(count<domain::OpsTargetSelected>(events) == 1);
+    REQUIRE(count<domain::RunCompleted>(events) == 1);
+    REQUIRE(count<domain::HumanObservationRequested>(events) == 0);
+    REQUIRE(count<domain::ToolStarted>(events) == 0);
     REQUIRE(dependencies.state->observations == 0);
   } else {
     REQUIRE(dependencies.state->observations == 1);
@@ -353,10 +371,10 @@ TEST_CASE("Admin logical deadline returns before stalled source retirement",
   const auto before_release = dependencies->history();
   REQUIRE(count<domain::OpsObservationRecorded>(before_release) == 0);
   REQUIRE(count<domain::ToolResultRecorded>(before_release) == 0);
-  REQUIRE(count<domain::RunCompleted>(before_release) == 0);
+  REQUIRE(count_manual_run<domain::RunCompleted>(before_release) == 0);
   REQUIRE(count<domain::InferenceStarted>(before_release) == 0);
-  REQUIRE(count<domain::RunCancelled>(before_release) +
-              count<domain::RunFailed>(before_release) ==
+  REQUIRE(count_manual_run<domain::RunCancelled>(before_release) +
+              count_manual_run<domain::RunFailed>(before_release) ==
           1);
   dependencies->state->release_source();
   {
@@ -402,9 +420,9 @@ TEST_CASE("Admin cancellation append refusal remains a runtime failure",
   const auto events = dependencies.history();
   REQUIRE(count<domain::HumanObservationRequested>(events) == 1);
   REQUIRE(count<domain::ToolStarted>(events) == 1);
-  REQUIRE(count<domain::RunCancelled>(events) == 0);
+  REQUIRE(count_manual_run<domain::RunCancelled>(events) == 0);
   REQUIRE(count<domain::OpsObservationRecorded>(events) == 0);
   REQUIRE(count<domain::ToolResultRecorded>(events) == 0);
-  REQUIRE(count<domain::RunCompleted>(events) == 0);
+  REQUIRE(count_manual_run<domain::RunCompleted>(events) == 0);
   REQUIRE(count<domain::InferenceStarted>(events) == 0);
 }

@@ -3,6 +3,7 @@
 #include <aiforge/runtime/repository_context_controller.hpp>
 #include <aiforge/runtime/tool_launch_policy.hpp>
 #include <aiforge/surfaces/chat_session.hpp>
+#include <algorithm>
 #include <set>
 
 namespace {
@@ -190,6 +191,13 @@ TEST_CASE("Chat manual Ops refuses foreign binding and preserves selection",
   ChatFixture f;
   f.open();
   f.bind();
+  REQUIRE(f.chat->inspect_observations().projection.historical_selection);
+  CHECK(
+      f.chat->inspect_observations().projection.historical_selection->target ==
+      f.specification.target);
+  CHECK(
+      f.chat->inspect_observations().projection.maximum_selection_generation ==
+      f.specification.selection_generation);
   const auto original = f.chat->inspect_observations().selection;
   const auto lookups = f.models.calls;
   auto next = f.specification;
@@ -216,7 +224,7 @@ TEST_CASE("Chat manual Ops refuses foreign binding and preserves selection",
   REQUIRE_FALSE(f.chat->bind_observation(
       OpsObservationAuthority::create(next).value(), source, endpoint));
   CHECK(f.chat->inspect_observations().selection == original);
-  CHECK(f.store.history.empty());
+  CHECK(count<OpsTargetSelected>(f.store.history) == 1);
   CHECK(source->calls.load() == 0);
   CHECK(f.source->calls.load() == 0);
   f.no_provider(lookups);
@@ -254,7 +262,7 @@ TEST_CASE("Chat manual prompt uses exact current approval without model work",
   }
   f.idle();
   CHECK(count<OpsObservationRecorded>(f.store.history) == 1);
-  CHECK(count<RunCompleted>(f.store.history) == 1);
+  CHECK(count<RunCompleted>(f.store.history) == 2);
   REQUIRE_FALSE(f.chat->decide_observation_approval(
       submitted.run_id, submitted.invocation_id, allow));
   f.no_provider(lookups);
@@ -279,7 +287,7 @@ TEST_CASE("Chat manual denial and cancellation are durable terminal outcomes",
   f.idle();
   CHECK(f.source->calls.load() == 0);
   CHECK(count<OpsObservationRecorded>(f.store.history) == 0);
-  CHECK(count<RunCompleted>(f.store.history) == 0);
+  CHECK(count<RunCompleted>(f.store.history) == 1);
   CHECK(count<RunFailed>(f.store.history) +
             count<RunCancelled>(f.store.history) ==
         1);
@@ -328,6 +336,13 @@ TEST_CASE("Chat manual source failure preserves earlier evidence and identity",
   f.source->binding = f.specification.target;
   f.source->fail = true;
   f.bind();
+  REQUIRE(f.chat->inspect_observations().projection.historical_selection);
+  CHECK(
+      f.chat->inspect_observations().projection.historical_selection->target ==
+      f.specification.target);
+  CHECK(
+      f.chat->inspect_observations().projection.maximum_selection_generation ==
+      f.specification.selection_generation);
   f.submit();
   f.idle();
   const auto& inspection = f.chat->inspect_observations();
@@ -380,7 +395,7 @@ TEST_CASE("Chat manual persistence refusal never returns successful evidence",
   f.bind();
   f.store.reject = [](std::span<const RunEvent>) { return true; };
   REQUIRE_FALSE(f.chat->submit_observation(f.intent()));
-  CHECK(f.store.history.empty());
+  CHECK(count<OpsTargetSelected>(f.store.history) == 1);
   CHECK(f.source->calls.load() == 0);
   CHECK_FALSE(f.chat->inspect_observations().projection.latest_success);
   CHECK(f.backend.calls.load() == 0);
@@ -392,6 +407,122 @@ TEST_CASE("Chat manual persistence refusal never returns successful evidence",
   REQUIRE(f.chat->inspect_observations().problem);
   CHECK(f.chat->inspect_observations().problem->code ==
         surfaces::ManualOpsErrorCode::storage_failure);
+}
+
+TEST_CASE("Chat selection append refusal leaves no ready target or issuer",
+          "[chat][ops][storage]") {
+  ChatFixture f;
+  f.open();
+  f.store.reject = [](std::span<const RunEvent> events) {
+    return count<OpsTargetSelected>(events) != 0;
+  };
+  REQUIRE_FALSE(f.chat->bind_observation(
+      OpsObservationAuthority::create(f.specification).value(), f.source,
+      f.endpoint));
+  const auto& inspection = f.chat->inspect_observations();
+  CHECK_FALSE(inspection.selection);
+  CHECK_FALSE(inspection.available);
+  CHECK(inspection.source_connection ==
+        surfaces::ManualOpsSourceConnection::unbound);
+  REQUIRE(inspection.problem);
+  CHECK(inspection.problem->code ==
+        surfaces::ManualOpsErrorCode::storage_failure);
+  CHECK(f.store.history.empty());
+  CHECK_FALSE(f.broker->preflight_selection(
+      *f.endpoint, OpsObservationAuthority::create(f.specification).value(),
+      f.source));
+  CHECK(f.source->calls.load() == 0);
+  CHECK(f.backend.calls.load() == 0);
+}
+
+TEST_CASE("Chat reopen atomically exposes target and catalog as historical "
+          "unverified evidence",
+          "[chat][ops][replay]") {
+  ChatFixture f;
+  f.open();
+  f.bind();
+  f.submit();
+  f.idle();
+  const auto selected = f.specification.target;
+  const auto evidence =
+      f.chat->inspect_observations().projection.latest_success;
+  REQUIRE(evidence);
+  const auto source_calls = f.source->calls.load();
+  REQUIRE(count<OpsTargetSelected>(f.store.history) == 1);
+  f.chat.reset();
+  f.endpoint = f.broker->activate_session(f.specification.session_id).value();
+  f.open();
+
+  const auto& inspection = f.chat->inspect_observations();
+  REQUIRE(inspection.selection);
+  CHECK(*inspection.selection == selected);
+  CHECK(inspection.selection_generation ==
+        f.specification.selection_generation);
+  CHECK(inspection.source_connection ==
+        surfaces::ManualOpsSourceConnection::historical_unverified);
+  REQUIRE(inspection.projection.historical_selection);
+  CHECK(inspection.projection.historical_selection->target == selected);
+  CHECK(inspection.projection.latest_success == evidence);
+  CHECK(inspection.projection.catalog[0] == evidence);
+  for (std::size_t slot{1}; slot < inspection.projection.catalog.size(); ++slot)
+    CHECK_FALSE(inspection.projection.catalog[slot]);
+  CHECK_FALSE(inspection.available);
+  CHECK_FALSE(inspection.closed);
+  CHECK_FALSE(f.chat->submit_observation(f.intent()));
+  CHECK_FALSE(f.broker->preflight(*f.endpoint, evidence->observation.request));
+  CHECK(f.source->calls.load() == source_calls);
+  CHECK(f.backend.calls.load() == 0);
+}
+
+TEST_CASE("Chat legacy evidence seeds generation without restoring a target",
+          "[chat][ops][replay][migration]") {
+  ChatFixture f;
+  f.open();
+  f.bind();
+  f.submit();
+  f.idle();
+  auto evidence = f.chat->inspect_observations().projection.latest_success;
+  REQUIRE(evidence);
+  const auto selected =
+      std::ranges::find_if(f.store.history, [](const auto& e) {
+        return std::holds_alternative<OpsTargetSelected>(e.payload);
+      });
+  REQUIRE(selected != f.store.history.end());
+  const auto selection_run = selected->metadata.run_id;
+  std::erase_if(f.store.history, [&](const auto& event) {
+    return event.metadata.run_id == selection_run;
+  });
+  for (std::size_t index{}; index < f.store.history.size(); ++index) {
+    f.store.history[index].metadata.sequence = index + 1;
+    f.store.history[index].metadata.event_id =
+        id<EventId>("event-" + std::to_string(index + 1));
+    if (std::holds_alternative<OpsObservationRecorded>(
+            f.store.history[index].payload))
+      evidence->observation_event_id = f.store.history[index].metadata.event_id;
+    if (std::holds_alternative<ToolResultRecorded>(
+            f.store.history[index].payload))
+      evidence->result_event_id = f.store.history[index].metadata.event_id;
+  }
+  const auto source_calls = f.source->calls.load();
+  f.chat.reset();
+  f.endpoint = f.broker->activate_session(f.specification.session_id).value();
+  f.open();
+
+  const auto& inspection = f.chat->inspect_observations();
+  CHECK_FALSE(inspection.selection);
+  CHECK(inspection.selection_generation == 1);
+  CHECK(inspection.source_connection ==
+        surfaces::ManualOpsSourceConnection::unbound);
+  CHECK_FALSE(inspection.available);
+  CHECK(inspection.projection.maximum_selection_generation == 1);
+  CHECK_FALSE(inspection.projection.historical_selection);
+  CHECK(inspection.projection.catalog[0] == evidence);
+  CHECK(f.source->calls.load() == source_calls);
+
+  ++f.specification.selection_generation;
+  f.bind();
+  CHECK(f.chat->inspect_observations().selection_generation == 2);
+  CHECK(f.source->calls.load() == source_calls);
 }
 
 TEST_CASE(
@@ -438,7 +569,7 @@ TEST_CASE(
       f.endpoint));
   CHECK(f.chat->inspect_observations().closed);
   CHECK_FALSE(f.chat->inspect_observations().available);
-  CHECK(f.store.history.empty());
+  CHECK(count<OpsTargetSelected>(f.store.history) == 1);
   CHECK(f.source->calls.load() == 0);
 }
 
@@ -543,7 +674,7 @@ TEST_CASE(
   for (const auto& event : *events)
     CHECK(delivered.insert(event.metadata.sequence).second);
   CHECK(count<OpsObservationRecorded>(*events) == 1);
-  CHECK(count<RunCompleted>(*events) == 1);
+  CHECK(count<RunCompleted>(*events) == 2);
   REQUIRE(f.chat->pump_observations());
   auto again = f.chat->drain();
   REQUIRE(again);

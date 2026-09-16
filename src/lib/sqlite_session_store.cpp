@@ -3151,6 +3151,9 @@ auto parse_v2_tool_policy_fields(const Json& value,
           [](const domain::OpsObservationRecorded&) {
             return std::string{"ops.observation_recorded"};
           },
+          [](const domain::OpsTargetSelected&) {
+            return std::string{"ops.target_selected"};
+          },
           [](const domain::OpsObservationExplanationSelected&) {
             return std::string{"ops.explanation_selected"};
           },
@@ -3410,12 +3413,13 @@ auto parse_v2_tool_policy_fields(const Json& value,
 [[nodiscard]] auto known_payload_type(const std::string_view type) -> bool {
   // A payload added to the variant must also gain a name here and encode and
   // parse paths below. Bump this only alongside those edits.
-  static_assert(std::variant_size_v<domain::RunEventPayload> == 89,
+  static_assert(std::variant_size_v<domain::RunEventPayload> == 90,
                 "a new run event payload needs every codec path updated");
   static const std::set<std::string_view> types{
       "run.started",
       "ops.human_observation_requested",
       "ops.observation_recorded",
+      "ops.target_selected",
       "ops.explanation_selected",
       "run.provenance_recorded",
       "run.repository_context_admitted",
@@ -4703,6 +4707,17 @@ auto parse_ops_observation(const Json& value) -> domain::OpsObservation {
   if (!decoded) throw CodecFailure{"invalid recorded Ops observation"};
   return *decoded;
 }
+auto ops_target_binding_json(const domain::OpsTargetBinding& target) -> Json {
+  const auto encoded = encode_ops_target_binding(target);
+  if (!encoded) throw CodecFailure{"invalid Ops target binding"};
+  return Json::parse(*encoded).at("target");
+}
+auto parse_ops_target_binding(const Json& value) -> domain::OpsTargetBinding {
+  const auto decoded =
+      decode_ops_target_binding(Json{{"version", 1}, {"target", value}}.dump());
+  if (!decoded) throw CodecFailure{"invalid Ops target binding"};
+  return *decoded;
+}
 auto ops_tool_json(const domain::ToolProvenanceEntry& tool) -> Json {
   if (!domain::validate_tool_provenance_entry(tool) ||
       !tool.registration_digest)
@@ -4778,6 +4793,12 @@ auto parse_ops_tool(const Json& value) -> domain::ToolProvenanceEntry {
           [](const domain::OpsObservationRecorded& value) -> Json {
             return {{"invocation_id", id_text(value.invocation_id)},
                     {"observation", ops_observation_json(value.observation)}};
+          },
+          [](const domain::OpsTargetSelected& value) -> Json {
+            if (value.selection_generation == 0)
+              throw CodecFailure{"invalid Ops target selection generation"};
+            return {{"target", ops_target_binding_json(value.target)},
+                    {"selection_generation", value.selection_generation}};
           },
           [](const domain::OpsObservationExplanationSelected& value) -> Json {
             return {
@@ -5339,6 +5360,17 @@ auto parse_ops_tool(const Json& value) -> domain::ToolProvenanceEntry {
     return domain::OpsObservationRecorded{
         parse_id<domain::InvocationId>(value.at("invocation_id")),
         parse_ops_observation(value.at("observation"))};
+  }
+  if (type == "ops.target_selected") {
+    require_conversation_fields(value, {"target", "selection_generation"});
+    if (!value.at("selection_generation").is_number_unsigned())
+      throw CodecFailure{"invalid Ops target selection generation"};
+    const auto generation =
+        value.at("selection_generation").get<std::uint64_t>();
+    if (generation == 0)
+      throw CodecFailure{"invalid Ops target selection generation"};
+    return domain::OpsTargetSelected{
+        parse_ops_target_binding(value.at("target")), generation};
   }
   if (type == "ops.explanation_selected") {
     require_conversation_fields(value, {"observation_event_id"});

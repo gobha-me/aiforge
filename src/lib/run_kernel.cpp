@@ -5645,11 +5645,14 @@ auto RunKernel::start_observation_control(ObservationControlStart start)
   }
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Atomic flows.
 auto RunKernel::bind_ops_observation(
     domain::OpsObservationAuthority authority,
     std::shared_ptr<OpsObservationSource> source,
-    std::shared_ptr<OpsObservationEndpoint> endpoint)
+    std::shared_ptr<OpsObservationEndpoint> endpoint,
+    OpsTargetSelectionControl selection)
     -> std::expected<OpsObservationBinding, RunKernelError> {
+  bool selected_live{};
   const auto invalid = [] {
     return std::unexpected(kernel_error(
         RunKernelErrorCode::invalid_tool_state,
@@ -5674,10 +5677,41 @@ auto RunKernel::bind_ops_observation(
     if (!m_impl->observation_broker || !endpoint ||
         authority.specification().session_id != m_impl->event_log.session_id())
       return invalid();
+    const auto& attributes = selection.attributes;
+    if (attributes.purpose != domain::RunPurpose::control ||
+        attributes.persona_id || attributes.memory_selection ||
+        attributes.conversation_admission ||
+        attributes.local_context_admission_required ||
+        attributes.manual_observation_required)
+      return invalid();
+    const auto target = authority.specification().target;
+    const auto generation = authority.specification().selection_generation;
     if (auto current = m_impl->observation_broker->preflight_selection(
             *endpoint, authority, source);
         !current)
       return broker_failure(current.error());
+    auto transaction = m_impl->transaction();
+    if (auto recorded = m_impl->record(
+            selection.run_id, std::move(selection.attributes), transaction);
+        !recorded)
+      return std::unexpected(recorded.error());
+    if (auto recorded = m_impl->record(
+            selection.run_id, domain::OpsTargetSelected{target, generation},
+            transaction);
+        !recorded)
+      return std::unexpected(recorded.error());
+    if (auto recorded = m_impl->record(selection.run_id, domain::RunCompleted{},
+                                       transaction);
+        !recorded)
+      return std::unexpected(recorded.error());
+    auto history = recorded_ops_observations(transaction.event_log);
+    if (!history || !history->latest_selection ||
+        history->latest_selection->run_id != selection.run_id ||
+        history->latest_selection->target != target ||
+        history->latest_selection->selection_generation != generation)
+      return std::unexpected(kernel_error(
+          RunKernelErrorCode::event_log_rejected,
+          "Ops target selection history is incomplete or inconsistent"));
     ToolRegistry native_registry;
     if (!register_ops_observation_tool(native_registry, authority, endpoint))
       return invalid();
@@ -5694,7 +5728,8 @@ auto RunKernel::bind_ops_observation(
     // Any allocation for the surface's parallel references happens before the
     // broker changes authority. Only proven no-throw transfers follow
     // selection.
-    OpsObservationBinding owner_binding{*tools, *policy};
+    OpsObservationBinding owner_binding{*tools, *policy,
+                                        std::move(*history->latest_selection)};
     static_assert(std::is_nothrow_move_assignable_v<ToolRegistrySnapshot>);
     static_assert(
         std::is_nothrow_move_assignable_v<std::shared_ptr<ToolPolicy>>);
@@ -5703,10 +5738,26 @@ auto RunKernel::bind_ops_observation(
                                                            std::move(source));
         !selected)
       return broker_failure(selected.error());
+    selected_live = true;
+    if (auto committed = m_impl->commit(std::move(transaction)); !committed) {
+      // Persistence is part of selection admission. Remove the new live issuer
+      // before returning the durable failure so no unrecorded target remains
+      // usable even when the caller retains its endpoint.
+      const auto deactivated = m_impl->observation_broker->deactivate_session();
+      static_cast<void>(deactivated);
+      return std::unexpected(committed.error());
+    }
     m_impl->tools = std::move(*tools);
     m_impl->policy = std::move(*policy);
     return owner_binding;
   } catch (...) {
+    if (selected_live) {
+      const auto deactivated = m_impl->observation_broker->deactivate_session();
+      if (!deactivated)
+        return std::unexpected(
+            kernel_error(RunKernelErrorCode::internal_failure,
+                         "failed Ops target selection could not be revoked"));
+    }
     return std::unexpected(
         kernel_error(RunKernelErrorCode::internal_failure,
                      "observation binding failed internally"));

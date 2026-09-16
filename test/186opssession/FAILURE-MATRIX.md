@@ -22,6 +22,13 @@ Recorded before implementation from the accepted186 API checkpoint.
 - Pure projection rejects missing/substituted request, observation/result pair,
   invocation, canonical content or completion, and cancellation resurrection.
   Valid mixed conversation/manual history exposes only committed human evidence.
+  Replay retains the latest successful terminal observation in each of the final
+  eight operation slots under a fixed 512 KiB aggregate, preserves exact event
+  provenance and earlier success across later failure, and rejects cancellation,
+  malformed history or bounds before returning a partial catalog. Superseded
+  evidence does not count against the final retained aggregate. A target change
+  cannot cross an in-flight observation or its result publication, and the
+  latest catalog entry follows successful completion order when runs interleave.
 - Owner pumping advances the real manual kernel independently of inference.
   Cached inspection and unchanged history never perform IO or implicit refresh.
 - First and repeated explicit close preserve the original fatal cancellation

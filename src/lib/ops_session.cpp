@@ -184,13 +184,37 @@ auto OpsSession::bind_observation(
   try {
     if (m_impl->inspection.closed) return failure(Code::closed);
     if (m_impl->unusable) return failure(Code::unavailable);
+    const auto suffix = m_impl->identities();
+    if (suffix == 0) return failure(Code::invalid_input);
+    auto run = domain::RunId::from("ops-selection-" + std::to_string(suffix));
+    if (!run) return failure(Code::invalid_input);
     std::optional<domain::OpsTargetBinding> visible{
         authority.specification().target};
+    const auto selection_generation =
+        authority.specification().selection_generation;
     auto bound = m_impl->kernel->bind_ops_observation(
-        std::move(authority), std::move(source), std::move(endpoint));
-    if (!bound) return m_impl->report(kernel_failure(bound.error().code));
+        std::move(authority), std::move(source), std::move(endpoint),
+        {*run, m_impl->attributes});
+    if (!bound) {
+      if (bound.error().code == runtime::RunKernelErrorCode::storage_failure)
+        m_impl->inspection.source_connection =
+            m_impl->inspection.selection
+                ? ManualOpsSourceConnection::historical_unverified
+                : ManualOpsSourceConnection::unbound;
+      return m_impl->report(kernel_failure(bound.error().code));
+    }
     static_assert(std::is_nothrow_move_assignable_v<decltype(visible)>);
+    static_assert(
+        std::is_nothrow_move_assignable_v<
+            decltype(m_impl->inspection.projection.historical_selection)>);
     m_impl->inspection.selection = std::move(visible);
+    m_impl->inspection.selection_generation = selection_generation;
+    m_impl->inspection.projection.last_sequence =
+        m_impl->kernel->event_log().last_sequence();
+    m_impl->inspection.projection.historical_selection =
+        std::move(bound->selection);
+    m_impl->inspection.projection.maximum_selection_generation =
+        selection_generation;
     m_impl->inspection.source_connection = ManualOpsSourceConnection::connected;
     m_impl->inspection.available = true;
     m_impl->inspection.problem.reset();

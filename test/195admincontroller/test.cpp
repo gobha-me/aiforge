@@ -80,6 +80,206 @@ TEST_CASE(
         AdminEvidenceFreshness::last_success);
 }
 
+TEST_CASE("Replayed target attaches as historical and requires reselection",
+          "[admin][controller][replay]") {
+  Fixture f;
+  f.catalog->enable_kubernetes();
+  const OpsTargetBinding historical{id<OpsTargetId>("kube"),
+                                    id<OpsConfigurationRevision>("old-config"),
+                                    KubernetesOpsIdentity{"old-context",
+                                                          "old-namespace",
+                                                          {"10.0.0.2", 6443},
+                                                          "sha256:fixture"}};
+  f.manual.inspection.selection = historical;
+  f.manual.inspection.selection_generation = 7;
+  f.manual.inspection.projection.historical_selection =
+      runtime::RecordedOpsTargetSelection{id<RunId>("selection-7"),
+                                          id<EventId>("selection-event-7"),
+                                          historical, 7};
+  f.manual.inspection.projection.maximum_selection_generation = 7;
+  f.manual.inspection.source_connection =
+      ManualOpsSourceConnection::historical_unverified;
+  f.open();
+  const auto& replayed = f.controller->inspect();
+  CHECK_FALSE(replayed.active_target);
+  REQUIRE(replayed.historical_target);
+  CHECK(*replayed.historical_target == historical);
+  CHECK(replayed.selection_generation == 7);
+  CHECK(replayed.phase == AdminPhase::idle);
+  CHECK_FALSE(f.controller->execute(AdminReadWorkloads{}));
+  CHECK(f.manual.intents.empty());
+
+  f.select("kube");
+  f.ready();
+  REQUIRE(f.controller->inspect().active_target);
+  REQUIRE(f.controller->inspect().historical_target);
+  CHECK(*f.controller->inspect().historical_target == historical);
+  CHECK(f.controller->inspect().selection_generation == 8);
+}
+
+TEST_CASE("Historical catalog keeps A evidence beside selected B and replaces "
+          "absent slots on session change",
+          "[admin][controller][replay][catalog]") {
+  Fixture f;
+  f.open();
+  f.select();
+  f.ready();
+  f.capture(AdminReadHealth{});
+  const auto evidence = *f.manual.inspection.projection.catalog[0];
+  auto selected = evidence.observation.request.target;
+  selected.target_id = id<OpsTargetId>("beta");
+  selected.configuration_revision =
+      id<OpsConfigurationRevision>("beta-revision");
+  f.manual.inspection.selection = selected;
+  f.manual.inspection.selection_generation = 2;
+  f.manual.inspection.projection.historical_selection =
+      runtime::RecordedOpsTargetSelection{id<RunId>("selection-2"),
+                                          id<EventId>("selection-event-2"),
+                                          selected, 2};
+  f.manual.inspection.projection.maximum_selection_generation = 2;
+  f.manual.inspection.source_connection =
+      ManualOpsSourceConnection::historical_unverified;
+  f.manual.inspection.available = false;
+  REQUIRE(f.controller->detach());
+  REQUIRE(f.controller->attach({f.session, f.manual, f.binding, f.endpoint}));
+
+  const auto& replayed = f.controller->inspect();
+  REQUIRE(replayed.snapshots[0]);
+  CHECK(replayed.snapshots[0]->observation.request.target != selected);
+  CHECK(replayed.snapshots[0]->observation_event_id ==
+        evidence.observation_event_id);
+  CHECK(replayed.freshness[0] == AdminEvidenceFreshness::historical_unverified);
+  REQUIRE(replayed.historical_target);
+  CHECK(*replayed.historical_target == selected);
+  CHECK_FALSE(replayed.active_target);
+  f.manual.inspection.source_connection =
+      ManualOpsSourceConnection::disconnected;
+  REQUIRE(f.controller->pump());
+  CHECK(f.controller->inspect().freshness[0] ==
+        AdminEvidenceFreshness::historical_unverified);
+  f.select("beta");
+  f.ready();
+  REQUIRE(f.controller->inspect().active_target);
+  REQUIRE(f.controller->inspect().historical_target);
+  CHECK(*f.controller->inspect().historical_target == selected);
+  CHECK(f.controller->inspect().snapshots[0] == evidence);
+  f.manual.inspection.source_connection =
+      ManualOpsSourceConnection::disconnected;
+  f.manual.inspection.available = false;
+  REQUIRE(f.controller->pump());
+  CHECK(f.controller->inspect().freshness[0] ==
+        AdminEvidenceFreshness::historical_unverified);
+  f.manual.inspection.source_connection = ManualOpsSourceConnection::connected;
+  f.manual.inspection.available = true;
+  f.capture(AdminReadHealth{});
+  REQUIRE(f.controller->inspect().snapshots[0]);
+  CHECK(f.controller->inspect().snapshots[0]->observation.request.target ==
+        *f.controller->inspect().active_target);
+  CHECK(f.controller->inspect().snapshots[0]->observation_event_id !=
+        evidence.observation_event_id);
+  CHECK(f.controller->inspect().freshness[0] ==
+        AdminEvidenceFreshness::last_success);
+
+  Manual replacement;
+  Binding replacement_binding{f.broker, replacement};
+  const auto next_session = id<SessionId>("replacement-session");
+  auto next_endpoint = f.broker->activate_session(next_session);
+  REQUIRE(next_endpoint);
+  REQUIRE(f.controller->attach(
+      {next_session, replacement, replacement_binding, *next_endpoint}));
+  const auto& replaced = f.controller->inspect();
+  CHECK(replaced.session == next_session);
+  CHECK_FALSE(replaced.historical_target);
+  CHECK(replaced.selection_generation == 0);
+  for (std::size_t slot{}; slot < replaced.snapshots.size(); ++slot) {
+    CHECK_FALSE(replaced.snapshots[slot]);
+    CHECK(replaced.freshness[slot] == AdminEvidenceFreshness::unavailable);
+  }
+  REQUIRE(f.controller->detach());
+}
+
+TEST_CASE("Legacy observation generation seeds the next durable selection",
+          "[admin][controller][replay][migration]") {
+  Fixture f;
+  f.manual.inspection.projection.maximum_selection_generation = 1;
+  f.manual.inspection.selection_generation = 1;
+  f.open();
+  CHECK_FALSE(f.controller->inspect().historical_target);
+  CHECK_FALSE(f.controller->inspect().active_target);
+  CHECK(f.controller->inspect().selection_generation == 1);
+  f.select();
+  f.ready();
+  REQUIRE(f.manual.authority);
+  CHECK(f.manual.authority->selection_generation == 2);
+}
+
+TEST_CASE("Exhausted replay generation refuses source preparation",
+          "[admin][controller][replay][bounds]") {
+  Fixture f;
+  const OpsTargetBinding historical{
+      id<OpsTargetId>("alpha"), id<OpsConfigurationRevision>("old-config"),
+      LinuxOpsIdentity{LinuxExecutionScope::container,
+                       "12345678-1234-1234-1234-123456789abc", 42, 43}};
+  f.manual.inspection.selection = historical;
+  f.manual.inspection.projection.maximum_selection_generation =
+      std::numeric_limits<std::uint64_t>::max();
+  f.manual.inspection.selection_generation =
+      std::numeric_limits<std::uint64_t>::max();
+  f.manual.inspection.projection.historical_selection =
+      runtime::RecordedOpsTargetSelection{
+          id<RunId>("selection-max"), id<EventId>("selection-event-max"),
+          historical, std::numeric_limits<std::uint64_t>::max()};
+  f.manual.inspection.source_connection =
+      ManualOpsSourceConnection::historical_unverified;
+  f.open();
+  const auto selected =
+      f.controller->execute(AdminSelectTarget{id<OpsTargetId>("alpha")});
+  REQUIRE_FALSE(selected);
+  CHECK(selected.error().code == ManualOpsErrorCode::resource_exhausted);
+  CHECK(f.catalog->calls == 0);
+  CHECK(f.catalog->state->prepared == 0);
+}
+
+TEST_CASE("Malformed replacement catalog leaves current attachment untouched",
+          "[admin][controller][replay][catalog]") {
+  Fixture f;
+  f.open();
+  f.select();
+  f.ready();
+  f.capture(AdminReadHealth{});
+  const auto before = f.controller->inspect();
+  Manual replacement;
+  SECTION("wrong operation slot") {
+    replacement.inspection.projection.catalog[1] =
+        f.manual.inspection.projection.catalog[0];
+    replacement.inspection.projection.latest_success =
+        replacement.inspection.projection.catalog[1];
+  }
+  SECTION("foreign owner") {
+    auto evidence = *f.manual.inspection.projection.catalog[0];
+    evidence.observation.request.owner_id = id<OpsOwnerId>("foreign-owner");
+    replacement.inspection.projection.catalog[0] = evidence;
+    replacement.inspection.projection.latest_success = std::move(evidence);
+    replacement.inspection.projection.maximum_selection_generation = 1;
+    replacement.inspection.selection_generation = 1;
+  }
+  SECTION("connected selection missing durable projection") {
+    replacement.inspection.selection = f.controller->inspect().active_target;
+    replacement.inspection.selection_generation = 1;
+    replacement.inspection.projection.maximum_selection_generation = 1;
+    replacement.inspection.source_connection =
+        ManualOpsSourceConnection::connected;
+  }
+  Binding replacement_binding{f.broker, replacement};
+  const auto attached = f.controller->attach(
+      {f.session, replacement, replacement_binding, f.endpoint});
+  REQUIRE_FALSE(attached);
+  CHECK(attached.error().code == ManualOpsErrorCode::invalid_history);
+  CHECK(f.controller->inspect().session == before.session);
+  CHECK(f.controller->inspect().active_target == before.active_target);
+  CHECK(f.controller->inspect().snapshots == before.snapshots);
+}
+
 TEST_CASE("Cached Kubernetes Pod reads retain inventory identity and reject "
           "stale rows",
           "[admin][controller][kubernetes]") {
@@ -667,6 +867,32 @@ TEST_CASE("Detach clears borrowed ports even if cancellation refuses or throws",
   CHECK(f.manual.pumps == calls);
   CHECK(f.manual.cancels == cancels);
   CHECK(f.controller->inspect().fatal);
+}
+
+TEST_CASE("Detach failure preserves retained evidence after cancellation "
+          "refusal or exception",
+          "[admin][controller][failure]") {
+  Fixture f;
+  f.open();
+  f.select();
+  f.ready();
+  f.capture(AdminReadHealth{});
+  const auto snapshot = f.controller->inspect().snapshots[0];
+  f.manual.hold = true;
+  REQUIRE(f.controller->execute(AdminReadHealth{}));
+  SECTION("refuses") {
+    f.manual.cancel_failure =
+        ManualOpsFailure{ManualOpsErrorCode::storage_failure};
+  }
+  SECTION("throws") {
+    f.manual.throws_cancel = true;
+  }
+  REQUIRE_FALSE(f.controller->detach());
+  CHECK_FALSE(f.controller->inspect().session);
+  CHECK_FALSE(f.controller->inspect().active_target);
+  CHECK(f.controller->inspect().snapshots[0] == snapshot);
+  CHECK(f.controller->inspect().freshness[0] ==
+        AdminEvidenceFreshness::last_success);
 }
 
 TEST_CASE("Detached old preparation retires without touching replacement "

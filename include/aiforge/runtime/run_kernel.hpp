@@ -9,6 +9,7 @@
 #include <aiforge/domain/task_scheduler.hpp>
 #include <aiforge/runtime/child_runner.hpp>
 #include <aiforge/runtime/ops_explanation.hpp>
+#include <aiforge/runtime/ops_observation_history.hpp>
 #include <aiforge/runtime/ops_observation_tool.hpp>
 #include <aiforge/runtime/tool_policy.hpp>
 #include <aiforge/runtime/tool_registry.hpp>
@@ -370,6 +371,12 @@ struct ObservationControlStart {
 struct OpsObservationBinding {
   ToolRegistrySnapshot available_tools;
   std::shared_ptr<ToolPolicy> policy;
+  RecordedOpsTargetSelection selection;
+};
+
+struct OpsTargetSelectionControl {
+  domain::RunId run_id;
+  domain::RunStarted attributes;
 };
 
 class RunKernel final {
@@ -405,7 +412,8 @@ class RunKernel final {
   [[nodiscard]] auto bind_ops_observation(
       domain::OpsObservationAuthority authority,
       std::shared_ptr<OpsObservationSource> source,
-      std::shared_ptr<OpsObservationEndpoint> endpoint)
+      std::shared_ptr<OpsObservationEndpoint> endpoint,
+      OpsTargetSelectionControl selection)
       -> std::expected<OpsObservationBinding, RunKernelError>;
 
   RunKernel(const RunKernel&) = delete;

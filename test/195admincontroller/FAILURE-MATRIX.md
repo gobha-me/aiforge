@@ -13,7 +13,7 @@ freshness for retained evidence; fatal errors latch. Test old
 session/target/generation/event/index row callbacks versus explicit name-only
 reads; no implicit retry or log grant.
 Cached evidence comes only from exact committed current success, deduplicated by
-session and event, bounded to six operation snapshots, and retains original
+session and event, bounded to eight operation snapshots, and retains original
 target on failure. Kubernetes selection grants only workloads, Pod health and
 events. Cached Pod callbacks bind session, inventory event, selection generation,
 row, namespace, name and UID; stale/replaced/non-Pod rows fail before submission.
@@ -31,6 +31,13 @@ last-success, refresh-failed and actual source-disconnected evidence states;
 only an in-flight refreshing slot returns to its retained-evidence or unavailable
 state. Controller fakes do not prove actual Chat/SQLite policy or GUI behavior:
 those integration tests are required before full feature completion.
+On durable reopen, the entire eight-slot historical catalog is prevalidated and
+copied transactionally, absent slots replace prior-session state, and each
+present slot is visibly unverified. Evidence captured from A remains A while a
+later historical selection identifies B. Replay never restores active authority
+or performs collection. Legacy histories with observation generations but no
+selection event seed the next generation without inventing a target; exhausted
+generation refuses before source preparation.
 
 Specific evidence boundaries: the actual shared-worker request counter is driven
 to UINT64_MAX through normal admission, then controller selection must refuse

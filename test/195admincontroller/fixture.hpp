@@ -285,6 +285,11 @@ class Manual final : public ManualOpsSession {
              ? std::optional<std::string>{"resource-version"}
              : std::optional<std::string>{},
          std::move(payload)}};
+    inspection.projection.catalog[manual_ops_catalog_slot(intent.operation)] =
+        inspection.projection.latest_success;
+    inspection.projection.maximum_selection_generation =
+        std::max(inspection.projection.maximum_selection_generation,
+                 intent.selection_generation);
     return {};
   }
   auto inspect_observations() const noexcept
@@ -316,6 +321,14 @@ class Binding final : public AdminSelectionBinding {
           ManualOpsFailure{ManualOpsErrorCode::operation_failed});
     manual.authority = grant;
     manual.inspection.selection = grant.target;
+    manual.inspection.selection_generation = grant.selection_generation;
+    manual.inspection.projection.historical_selection =
+        runtime::RecordedOpsTargetSelection{
+            id<RunId>("selection-" + std::to_string(calls)),
+            id<EventId>("selection-event-" + std::to_string(calls)),
+            grant.target, grant.selection_generation};
+    manual.inspection.projection.maximum_selection_generation =
+        grant.selection_generation;
     manual.inspection.source_connection = ManualOpsSourceConnection::connected;
     manual.inspection.available = true;
     return {};
