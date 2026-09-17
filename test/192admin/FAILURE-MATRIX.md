@@ -34,5 +34,8 @@ create collision, preparation/source/cancellation failure; atomic admission and
 publication refusal; output failure after commit; stalled source lifetime past
 the real logical deadline with rejected late evidence; all three implemented
 Linux reads plus Kubernetes workloads, exact Pod and namespace/exact-Pod events.
-Source context/namespace and captured timestamps remain in text/JSON output. No provider or generic process port
-is present. Pending full runtime execution is tracked in the PR evidence.
+Terminal assertions are scoped to the manual run containing the human
+observation request, while admission refusal proves that only the completed
+target-selection control run survives. Source context/namespace and captured
+timestamps remain in text/JSON output. No provider or generic process port is
+present. Pending full runtime execution is tracked in the PR evidence.

@@ -469,12 +469,8 @@ struct Fixture {
     return std::move(*events);
   }
   auto completed(std::size_t number) -> void {
-    wait(
-        [&] {
-          return count<OpsObservationRecorded>(app->events()) == number &&
-                 count<RunCompleted>(app->events()) == number;
-        },
-        "completed observations " + std::to_string(number));
+    wait([&] { return count<OpsObservationRecorded>(app->events()) == number; },
+         "completed observations " + std::to_string(number));
   }
   auto no_model() const -> void {
     CHECK(backend.state->starts.load() == 0);

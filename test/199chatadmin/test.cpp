@@ -99,7 +99,8 @@ TEST_CASE(
   CHECK(count<HumanObservationRequested>(durable) == 3);
   CHECK(count<OpsObservationRecorded>(durable) == 3);
   CHECK(count<ToolResultRecorded>(durable) == 3);
-  CHECK(count<RunCompleted>(durable) == 3);
+  CHECK(count<RunCompleted>(durable) == 4);
+  CHECK(count<OpsTargetSelected>(durable) == 1);
   CHECK(count<InferenceStarted>(durable) == 0);
   CHECK(f.catalog->alpha->observations.load() == 3);
   CHECK(f.catalog->beta->observations.load() == 0);
@@ -402,24 +403,24 @@ TEST_CASE("Chat Admin successful session switch requires fresh selection",
   const auto* view =
       dynamic_cast<const adapters::AdminDialog*>(f.app->top_overlay());
   REQUIRE(view != nullptr);
+  CHECK(view->display_text().find("No committed observation") !=
+        std::string::npos);
   CHECK(view->display_text().find(
-            "observation.request.session_id=\"session\"") != std::string::npos);
-  CHECK(rendered(*f.app).find("Committed evidence") != std::string::npos);
+            "observation.request.session_id=\"session\"") == std::string::npos);
+  CHECK(rendered(*f.app).find("Committed evidence") == std::string::npos);
   f.press(U'r');
   CHECK(count<HumanObservationRequested>(f.history("other")) == 0);
   CHECK(f.catalog->alpha->observations.load() == 1);
+  const auto* unavailable =
+      dynamic_cast<const adapters::AdminDialog*>(f.app->top_overlay());
+  REQUIRE(unavailable != nullptr);
+  CHECK(unavailable->status().find("unavailable") != std::string_view::npos);
   f.close();
   f.select("beta");
   f.press(U'h');
   f.press(U'r');
-  CHECK(f.catalog->beta->observations.load() == 0);
-  const auto* stale =
-      dynamic_cast<const adapters::AdminDialog*>(f.app->top_overlay());
-  REQUIRE(stale != nullptr);
-  CHECK(stale->status().find("does not match") != std::string_view::npos);
-  f.close();
-  f.command("/admin health");
   f.completed(1);
+  CHECK(f.catalog->beta->observations.load() == 1);
   const auto replacement = f.history("other");
   CHECK(count<OpsObservationRecorded>(replacement) == 1);
   for (const auto& event : replacement)

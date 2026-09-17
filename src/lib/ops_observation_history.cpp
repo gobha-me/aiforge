@@ -3,6 +3,7 @@
 #include <aiforge/runtime/tool_policy.hpp>
 #include <algorithm>
 #include <exception>
+#include <limits>
 #include <map>
 #include <set>
 #include <string_view>
@@ -79,6 +80,8 @@ auto policy_bounded(const ToolPolicyProvenance& policy) -> bool {
 }
 struct RunState {
   const RunStarted* start{};
+  const RunEvent* start_event{};
+  std::uint32_t start_schema{};
   const HumanObservationRequested* intent{};
   const RunProvenance* provenance{};
   std::optional<std::size_t> manual_index;
@@ -86,6 +89,9 @@ struct RunState {
   bool next_marker{};
   bool next_proposal{};
   bool cancel_requested{};
+  bool selection{};
+  bool content_seen{};
+  bool unknown_content{};
 };
 struct InvocationState {
   std::size_t index;
@@ -104,7 +110,12 @@ class Validator {
             event.metadata.schema_version != 0);
     require(m_events.insert(event.metadata.event_id).second);
     m_snapshot.last_sequence = event.metadata.sequence;
-    if (std::holds_alternative<UnknownEvent>(event.payload)) return;
+    if (std::holds_alternative<UnknownEvent>(event.payload)) {
+      auto& run = m_runs[event.metadata.run_id];
+      require(!run.selection);
+      run.unknown_content = true;
+      return;
+    }
     auto& run = m_runs[event.metadata.run_id];
     if (const auto* started = std::get_if<RunStarted>(&event.payload)) {
       require(run.start == nullptr);
@@ -118,6 +129,8 @@ class Validator {
         run.next_marker = true;
       }
       run.start = started;
+      run.start_event = &event;
+      run.start_schema = event.metadata.schema_version;
       return;
     }
     // Non-Ops event histories keep their existing validator; this boundary
@@ -126,6 +139,16 @@ class Validator {
       require(std::holds_alternative<HumanObservationRequested>(event.payload));
     if (run.next_proposal)
       require(std::holds_alternative<ToolProposed>(event.payload));
+    if (const auto* selected = std::get_if<OpsTargetSelected>(&event.payload)) {
+      selection_event(event, run, *selected);
+      return;
+    }
+    if (run.selection)
+      require(!run.closed &&
+              std::holds_alternative<RunCompleted>(event.payload) &&
+              event.metadata.schema_version == 1 &&
+              !event.metadata.caused_by_event_id &&
+              !event.metadata.parent_run_id && !event.metadata.invocation_id);
     if (const auto* intent =
             std::get_if<HumanObservationRequested>(&event.payload)) {
       intent_event(event, run, *intent);
@@ -143,6 +166,7 @@ class Validator {
     guard_manual_event(event, run);
     route_invocation_event(event, run);
     finish_run_event(event, run);
+    run.content_seen = true;
   }
 
   auto finish() -> OpsHistorySnapshot {
@@ -152,6 +176,7 @@ class Validator {
         require(!terminal(m_snapshot.invocations[*run.manual_index].phase));
         m_snapshot.unfinished_manual_runs.push_back(id);
       }
+      if (run.selection) require(run.closed);
     }
     for (const auto& [id, invocation] : m_invocations) {
       static_cast<void>(id);
@@ -165,6 +190,41 @@ class Validator {
   }
 
  private:
+  auto selection_event(const RunEvent& event, RunState& run,
+                       const OpsTargetSelected& value) -> void {
+    require(run.start != nullptr && run.start_event != nullptr &&
+            run.start_schema == 3 && !run.closed && !run.content_seen &&
+            run.intent == nullptr && run.provenance == nullptr &&
+            !run.selection && !run.unknown_content &&
+            run.start->purpose == RunPurpose::control &&
+            !run.start->persona_id && !run.start->memory_selection &&
+            !run.start->conversation_admission &&
+            !run.start->local_context_admission_required &&
+            !run.start->manual_observation_required &&
+            !run.start_event->metadata.caused_by_event_id &&
+            !run.start_event->metadata.parent_run_id &&
+            !run.start_event->metadata.invocation_id &&
+            event.metadata.schema_version == 1 &&
+            !event.metadata.caused_by_event_id &&
+            !event.metadata.parent_run_id && !event.metadata.invocation_id &&
+            validate_ops_target_binding(value.target).has_value() &&
+            value.selection_generation != 0 &&
+            m_snapshot.maximum_selection_generation !=
+                std::numeric_limits<std::uint64_t>::max() &&
+            (m_snapshot.maximum_selection_generation == 0 ||
+             value.selection_generation ==
+                 m_snapshot.maximum_selection_generation + 1));
+    require(std::ranges::all_of(m_runs, [&](const auto& entry) {
+      return entry.first == event.metadata.run_id ||
+             entry.second.start == nullptr || entry.second.closed;
+    }));
+    run.selection = true;
+    run.content_seen = true;
+    m_snapshot.maximum_selection_generation = value.selection_generation;
+    m_snapshot.latest_selection = RecordedOpsTargetSelection{
+        event.metadata.run_id, event.metadata.event_id, value.target,
+        value.selection_generation};
+  }
   auto route_invocation_event(const RunEvent& event, RunState& run) -> void {
     std::visit(
         [&](const auto& value) {
@@ -285,6 +345,10 @@ class Validator {
         value.observation_request->session_id == m_session &&
         valid_effects(value.declared_effects) &&
         valid_scopes(value.requested_scopes));
+    require(current_selection_matches(*value.observation_request));
+    m_snapshot.maximum_selection_generation =
+        std::max(m_snapshot.maximum_selection_generation,
+                 value.observation_request->selection_generation);
     require(std::ranges::all_of(value.requested_scopes, [&](const auto& scope) {
       return std::ranges::contains(value.declared_effects, scope.effect);
     }));
@@ -348,7 +412,8 @@ class Validator {
             record.phase == OpsInvocationPhase::running &&
             state.observation == nullptr &&
             validate_recorded_ops_observation(value.observation).has_value() &&
-            value.observation.request == record.request);
+            value.observation.request == record.request &&
+            current_selection_matches(record.request));
     state.observation = &value;
     state.pending_result = true;
     record.observation_event_id = event.metadata.event_id;
@@ -456,7 +521,8 @@ class Validator {
 
     require(record.phase == OpsInvocationPhase::running &&
             state.observation != nullptr && state.pending_result &&
-            value.result_message_id == state.proposal->result_message_id);
+            value.result_message_id == state.proposal->result_message_id &&
+            current_selection_matches(record.request));
     const auto content =
         format_ops_observation_content(state.observation->observation);
     require(content.has_value() && value.content == *content);
@@ -474,6 +540,14 @@ class Validator {
     record.phase = OpsInvocationPhase::failed;
     state.must_error = false;
     record.result_event_id = event.metadata.event_id;
+  }
+
+  [[nodiscard]] auto current_selection_matches(
+      const OpsObservationRequest& request) const -> bool {
+    return !m_snapshot.latest_selection ||
+           (request.target == m_snapshot.latest_selection->target &&
+            request.selection_generation ==
+                m_snapshot.latest_selection->selection_generation);
   }
 
   const SessionId& m_session;

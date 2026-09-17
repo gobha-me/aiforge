@@ -270,6 +270,15 @@ struct OpsObservationRecorded {
   auto operator==(const OpsObservationRecorded&) const -> bool = default;
 };
 
+// Durable identity of a successfully selected observation target. This is
+// historical evidence only: it carries no source, credential, consent, or
+// current collection authority.
+struct OpsTargetSelected {
+  OpsTargetBinding target;
+  std::uint64_t selection_generation{};
+  auto operator==(const OpsTargetSelected&) const -> bool = default;
+};
+
 // Records the exact committed observation selected by an explicit Explain
 // action. The referenced event remains untrusted evidence; this fact grants no
 // collection authority and carries no source configuration or credential.
@@ -673,7 +682,7 @@ using RunEventPayload = std::variant<
     RepositoryContextAdmitted, LocalContextAdmitted, InferencePricingObserved,
     ReasoningMetadataAdded, UsageRecorded, InferenceCostRecorded,
     InferenceFinished, InferenceFailed, InferenceCancelled, ToolProposed,
-    HumanObservationRequested, OpsObservationRecorded,
+    HumanObservationRequested, OpsObservationRecorded, OpsTargetSelected,
     OpsObservationExplanationSelected, ToolPolicyDecided, ToolApprovalRequested,
     ToolApprovalDecided, ToolPolicyFailed, ToolSpendReserved, ToolStarted,
     ToolProgressed, ToolSpendReleased, ToolSpendFinalized,

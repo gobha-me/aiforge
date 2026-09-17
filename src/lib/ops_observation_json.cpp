@@ -956,4 +956,40 @@ auto decode_recorded_ops_request(std::string_view document)
     return std::unexpected(Error::internal_failure);
   }
 }
+auto encode_ops_target_binding(const domain::OpsTargetBinding& value)
+    -> std::expected<std::string, Error> {
+  try {
+    if (!domain::validate_ops_target_binding(value))
+      return std::unexpected(Error::invalid_record);
+    auto document = Json{{"version", 1}, {"target", encode(value)}}.dump();
+    if (document.size() > maximum_ops_target_binding_json_bytes)
+      return std::unexpected(Error::resource_exhausted);
+    return document;
+  } catch (...) {
+    return std::unexpected(Error::internal_failure);
+  }
+}
+auto decode_ops_target_binding(std::string_view document)
+    -> std::expected<domain::OpsTargetBinding, Error> {
+  try {
+    if (document.size() > maximum_ops_target_binding_json_bytes)
+      return std::unexpected(Error::resource_exhausted);
+    const auto parsed = parse(document);
+    fields(parsed, {"version", "target"});
+    if (decode<std::uint32_t>(parsed.at("version")) != 1)
+      throw InvalidDocument{};
+    auto result = decode<domain::OpsTargetBinding>(parsed.at("target"));
+    if (!domain::validate_ops_target_binding(result))
+      return std::unexpected(Error::invalid_record);
+    return result;
+  } catch (const DocumentLimit&) {
+    return std::unexpected(Error::resource_exhausted);
+  } catch (const InvalidDocument&) {
+    return std::unexpected(Error::invalid_document);
+  } catch (const Json::exception&) {
+    return std::unexpected(Error::invalid_document);
+  } catch (...) {
+    return std::unexpected(Error::internal_failure);
+  }
+}
 } // namespace aiforge::adapters

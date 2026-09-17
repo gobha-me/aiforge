@@ -164,7 +164,6 @@ TEST_CASE("Buffered manual events transfer once without an inference drain",
   f.open();
   f.bind();
   const auto lookups = f.models.calls;
-  CHECK(f.chat->take_buffered_surface_events().empty());
   f.submit();
   f.idle();
   const auto before = f.store.history.size();
@@ -172,7 +171,8 @@ TEST_CASE("Buffered manual events transfer once without an inference drain",
   auto events = f.chat->take_buffered_surface_events();
   REQUIRE(events.size() == before);
   CHECK(count<OpsObservationRecorded>(events) == 1);
-  CHECK(count<RunCompleted>(events) == 1);
+  CHECK(count<RunCompleted>(events) == 2);
+  CHECK(count<OpsTargetSelected>(events) == 1);
   for (std::size_t i{}; i < events.size(); ++i)
     CHECK(events[i].metadata.event_id == f.store.history[i].metadata.event_id);
   CHECK(f.chat->take_buffered_surface_events().empty());
@@ -265,7 +265,7 @@ TEST_CASE("Manual and ordinary cancellation buffers preserve exact event order",
   auto events = f.chat->take_buffered_surface_events();
   REQUIRE(events.size() >= manual_count);
   CHECK(count<OpsObservationRecorded>(events) == 1);
-  CHECK(count<RunCompleted>(events) == 1);
+  CHECK(count<RunCompleted>(events) == 2);
   CHECK(count<RunCancelRequested>(events) == 1);
   // Taking this buffer is pure; it must not drain the asynchronous terminal
   // cancellation just to make the returned event set look complete.

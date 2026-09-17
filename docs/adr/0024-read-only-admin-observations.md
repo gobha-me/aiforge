@@ -153,6 +153,32 @@ Target selection is a durable control fact, not a grant or refresh. The exact
 additive event contract must be reviewed with the corresponding kernel slice;
 existing inference-linked tool events cannot silently change meaning.
 
+The durable selection contract is an exact control run: `run.started` schema 3,
+one `ops.target_selected` schema 1, then `run.completed`. The selection payload
+contains only the complete neutral target binding and positive selection
+generation. It contains no source handle, credential, consent, log authority,
+endpoint or retry instruction. The Ops history validator requires an otherwise
+empty control run, no parent/invocation/cause lineage on any of its three
+events, and monotonic generations. Unknown events cannot hide inside that run.
+A later selection may reuse the same configured target ID only with the next
+generation. Existing observation events retain their established meaning.
+
+Binding prepares and validates this durable suffix before changing the broker,
+then selects the source, appends the whole control run atomically, and only then
+publishes the new tool and policy state to the surface. A broker failure appends
+nothing. An append failure deactivates the broker session and makes the kernel
+unusable, so an unrecorded issuer cannot remain live or appear ready. Replay
+projects the last exact binding and generation only as historical, unverified
+identity. It restores no source, broker authority, consent or log setting,
+performs no collection, and requires explicit reselection before any read.
+The same pure projection retains at most the latest successfully completed
+human observation for each of the final eight operations under a fixed 512 KiB
+aggregate. Each slot keeps its exact observation/result event provenance and
+captured request identity. A later failure does not replace prior success;
+superseded versions do not count against the final retained bound. A legacy
+history with observation generations but no selection event restores no target,
+but its maximum generation seeds the next explicit selection.
+
 Manual controls use the explicitly granted session/target read capabilities.
 Model tool support determines whether the model can request those operations;
 it does not prevent a human from inspecting an authorized source offline.
@@ -482,7 +508,8 @@ registry and the genuine launch policy together, validates the endpoint/source
 selection, then selects the broker and commits prepared state with no-throw
 moves. It rejects active runs/children, unavailable kernels, custom policies and
 foreign registrations; it never accepts a replacement approval mode or arbitrary
-policy from a widget or model. Selection performs no collection or durable append.
+policy from a widget or model. Selection performs no collection and appends only
+the exact durable control run defined above.
 
 Kernel and policy preserve their unrelated registries independently. Memory
 capture may narrow the current executor while its original launch-policy ceiling
@@ -784,10 +811,12 @@ integration work; these metadata and delivery APIs enable no collection path.
 
 ## Bounded Admin controller milestone
 
-The optional view controller owns only bounded catalog metadata, one exact
+The optional view controller owns only bounded target metadata, one exact
 preparation/claimed-source retirement state, a current manual submission and
-six operation-specific historical snapshot slots: Linux health, services and
-service details, then Kubernetes workloads, Pod details and events. It borrows
+eight operation-specific historical snapshot slots. The established first six
+remain Linux health, services and service details, then Kubernetes workloads,
+Pod details and events; Linux service logs and Kubernetes Pod logs occupy the
+final two slots. It borrows
 the application manual session and
 native binding port while attached; detach clears those borrows even when
 cancellation refuses. Configuration factories own their private inputs and run
@@ -803,7 +832,9 @@ never relabels active A, and ordinary refusal retains A. Fatal storage/history o
 internal failures latch. Source cleanup after successful claim remains owned by
 the application and does not acquire a new pool or cancellation guarantee.
 
-Reads are limited to those six operations with logs disabled. Explicit Linux
+Until explicit log consent is integrated, reads remain limited to the six
+non-log operations while both log slots are replay-capable and unavailable for
+refresh. Explicit Linux
 unit input remains name-only. Service and Pod inventory actions require the
 original session, observation event, selection generation and row, matching the
 full current binding; Pod actions retain exact namespace, name and UID. Events
@@ -926,6 +957,14 @@ Enter retains the draft until that run finishes. Inspection, drawing and closing
 Admin never cancel an unrelated run or implicitly request model explanation.
 Production obtains the catalog from the strict actual configuration loader;
 rejected configuration cannot silently select a local source.
+
+Durable reopen projects the historical target and all eight catalog slots as one
+bounded value before attachment, with no broker/source/model work. Admin
+prevalidates and copies the complete candidate transactionally, replacing absent
+slots from a previous session. Replayed slots are `historical_unverified`; they
+survive detach, typed source disconnection and target selection until an explicit
+refresh produces a new successful observation. Evidence captured from A remains
+attributed to A even when the latest selected identity is B.
 
 Manual updates use the manual pump and transfer committed surface events even
 when the pump fails. Tick and wake handling retain entry-time manual identity

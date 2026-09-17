@@ -111,23 +111,28 @@ enum class AdminPhase {
 };
 enum class AdminEvidenceFreshness {
   unavailable,
+  historical_unverified,
   last_success,
   refreshing,
   refresh_failed,
   disconnected
 };
-inline constexpr std::size_t admin_snapshot_count = 6;
+inline constexpr std::size_t admin_snapshot_count = manual_ops_catalog_slots;
 struct AdminState {
   std::vector<AdminTargetChoice> targets;
   std::optional<domain::SessionId> session;
   std::uint64_t session_epoch{};
   std::optional<domain::OpsTargetId> pending_target;
   std::optional<domain::OpsTargetBinding> active_target;
+  // Replayed identity is presentation evidence only. It never substitutes for
+  // active_target in reads or grants.
+  std::optional<domain::OpsTargetBinding> historical_target;
   std::uint64_t selection_generation{};
   std::optional<ObservationSubmission> current;
   domain::RunStatus current_status{domain::RunStatus::not_started};
-  // Health, loaded services and exact service health. Historical values keep
-  // their original session/target/event identity and never imply current grant.
+  // Final eight closed operations, including both consent-gated log slots.
+  // Historical values keep their original session/target/event identity and
+  // never imply a current grant.
   std::array<std::optional<CommittedOpsObservation>, admin_snapshot_count>
       snapshots;
   // Per-slot collection state. A failed/disconnected state never erases the

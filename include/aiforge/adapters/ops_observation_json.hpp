@@ -32,4 +32,11 @@ enum class OpsObservationJsonError {
 [[nodiscard]] auto decode_recorded_ops_request(std::string_view document)
     -> std::expected<domain::OpsObservationRequest, OpsObservationJsonError>;
 
+inline constexpr std::size_t maximum_ops_target_binding_json_bytes = 4096;
+[[nodiscard]] auto encode_ops_target_binding(
+    const domain::OpsTargetBinding& value)
+    -> std::expected<std::string, OpsObservationJsonError>;
+[[nodiscard]] auto decode_ops_target_binding(std::string_view document)
+    -> std::expected<domain::OpsTargetBinding, OpsObservationJsonError>;
+
 } // namespace aiforge::adapters

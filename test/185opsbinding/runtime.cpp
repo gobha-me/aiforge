@@ -8,6 +8,7 @@ using namespace std::chrono_literals;
 
 struct BindingFixture : Fixture {
   std::shared_ptr<runtime::ToolPolicy> launch_policy;
+  std::uint64_t selection_suffix{};
   auto open_binding(
       runtime::ApprovalMode mode = runtime::ApprovalMode::allow_all,
       bool with_broker = true, std::shared_ptr<runtime::ToolPolicy> custom = {},
@@ -55,9 +56,16 @@ struct BindingFixture : Fixture {
                        runtime::RunKernelError> {
     auto authority = OpsObservationAuthority::create(next);
     REQUIRE(authority);
-    return kernel->bind_ops_observation(std::move(*authority),
-                                        std::move(next_source),
-                                        std::move(next_endpoint));
+    const auto suffix = ++selection_suffix;
+    return kernel->bind_ops_observation(
+        std::move(*authority), std::move(next_source), std::move(next_endpoint),
+        {id<RunId>("selection-" + std::to_string(suffix)),
+         RunStarted{id<SurfaceId>("admin"),
+                    id<WorkspaceId>("ops"),
+                    id<PermissionProfileId>("observe"),
+                    {},
+                    {},
+                    RunPurpose::control}});
   }
 };
 
@@ -357,9 +365,9 @@ TEST_CASE("Successful idle binding drives the next durable manual observation",
   const auto attempts = f.store.attempts;
   auto result = f.bind(next, source, f.endpoint);
   REQUIRE(result);
-  CHECK(f.store.attempts == attempts);
-  CHECK(f.store.history.empty());
-  CHECK(f.kernel->event_log().events().empty());
+  CHECK(f.store.attempts == attempts + 1);
+  CHECK(count<OpsTargetSelected>(f.store.history) == 1);
+  CHECK(f.kernel->event_log().events() == f.store.history);
   CHECK(f.source->calls == 0);
   CHECK(source->calls == 0);
   CHECK(f.backend.calls == 0);
@@ -374,7 +382,7 @@ TEST_CASE("Successful idle binding drives the next durable manual observation",
   CHECK(source->calls == 1);
   CHECK(f.backend.calls == 0);
   REQUIRE(count<OpsObservationRecorded>(f.store.history) == 1);
-  CHECK(count<RunCompleted>(f.store.history) == 1);
+  CHECK(count<RunCompleted>(f.store.history) == 2);
   CHECK(count<ToolResultRecorded>(f.store.history) == 1);
   for (const auto& event : f.store.history) {
     if (const auto* recorded =
@@ -386,6 +394,52 @@ TEST_CASE("Successful idle binding drives the next durable manual observation",
     }
   }
   CHECK(runtime::recorded_ops_observations(f.kernel->event_log()));
+}
+
+TEST_CASE("Selection append failure revokes the unrecorded broker authority",
+          "[ops][binding][storage]") {
+  BindingFixture f;
+  f.open_binding();
+  auto next = f.next_spec();
+  auto source = source_for(next);
+  const auto old = f.old_request();
+  f.store.reject = [](std::span<const RunEvent> events) {
+    return std::ranges::any_of(events, [](const auto& event) {
+      return std::holds_alternative<OpsTargetSelected>(event.payload);
+    });
+  };
+
+  const auto result = f.bind(next, source, f.endpoint);
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == runtime::RunKernelErrorCode::storage_failure);
+  CHECK(f.store.history.empty());
+  CHECK(f.kernel->event_log().events().empty());
+  CHECK_FALSE(f.broker->preflight(*f.endpoint, old));
+  CHECK(f.source->calls == 0);
+  CHECK(source->calls == 0);
+  CHECK(f.backend.calls == 0);
+}
+
+TEST_CASE("Same configured target reselection records the next generation",
+          "[ops][binding][selection]") {
+  BindingFixture f;
+  f.open_binding();
+  auto selected = f.next_spec();
+  auto first_source = source_for(selected);
+  REQUIRE(f.bind(selected, first_source, f.endpoint));
+  ++selected.selection_generation;
+  auto second_source = source_for(selected);
+  REQUIRE(f.bind(selected, second_source, f.endpoint));
+  const auto history =
+      runtime::recorded_ops_observations(f.kernel->event_log());
+  REQUIRE(history);
+  REQUIRE(history->latest_selection);
+  CHECK(history->latest_selection->target == selected.target);
+  CHECK(history->latest_selection->selection_generation ==
+        selected.selection_generation);
+  CHECK(count<OpsTargetSelected>(f.store.history) == 2);
+  CHECK(first_source->calls == 0);
+  CHECK(second_source->calls == 0);
 }
 
 TEST_CASE(
