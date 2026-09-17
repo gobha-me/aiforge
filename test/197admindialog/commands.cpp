@@ -12,6 +12,13 @@ template <class T> auto action(std::string_view command) -> T {
   REQUIRE(std::holds_alternative<T>(value));
   return std::get<T>(value);
 }
+template <class T> auto command(std::string_view text) -> T {
+  auto parsed = parse_admin_command(text);
+  REQUIRE(parsed);
+  REQUIRE(parsed->has_value());
+  REQUIRE(std::holds_alternative<T>(**parsed));
+  return std::get<T>(**parsed);
+}
 } // namespace
 TEST_CASE("Admin command failures stay commands", "[admin][commands]") {
   for (const std::string_view text : {"/admin\n",
@@ -35,6 +42,10 @@ TEST_CASE("Admin command failures stay commands", "[admin][commands]") {
                                       "/admin pod broken-pod",
                                       "/admin pod Broken pod-uid",
                                       "/admin pod-events broken-pod",
+                                      "/admin logs",
+                                      "/admin logs maybe",
+                                      "/admin logs enable App",
+                                      "/admin logs enable app extra",
                                       "/admin unknown"}) {
     INFO(text);
     const auto parsed = parse_admin_command(text);
@@ -63,6 +74,12 @@ TEST_CASE("Admin parser distinguishes other commands and returns typed actions",
   static_cast<void>(action<AdminReadEvents>("/admin events"));
   static_cast<void>(action<AdminCancel>("/admin cancel"));
   static_cast<void>(action<AdminCloseView>("/admin close"));
+  CHECK_FALSE(action<AdminEnableDisplayedLogs>("/admin logs enable").displayed);
+  CHECK_FALSE(
+      action<AdminDisableDisplayedLogs>("/admin logs disable").displayed);
+  CHECK_FALSE(action<AdminReadDisplayedLogs>("/admin logs read").displayed);
+  CHECK(command<AdminEnableDisplayedContainerLogs>("/admin logs enable sidecar")
+            .container == "sidecar");
   CHECK(action<AdminSelectTarget>("/admin select local").target.value() ==
         "local");
   CHECK(action<AdminSelectTarget>("/admin select " + std::string(64, 'a'))

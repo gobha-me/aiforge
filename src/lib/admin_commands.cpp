@@ -51,6 +51,19 @@ auto parse(std::string_view text) -> Result {
   if (!word(text).empty()) return invalid();
   if (argument.empty() && !second_argument.empty()) return invalid();
   if (argument.empty()) return without_argument(action);
+  if (action == "logs" && second_argument.empty()) {
+    if (argument == "enable")
+      return AdminCommand{AdminAction{AdminEnableDisplayedLogs{}}};
+    if (argument == "disable")
+      return AdminCommand{AdminAction{AdminDisableDisplayedLogs{}}};
+    if (argument == "read")
+      return AdminCommand{AdminAction{AdminReadDisplayedLogs{}}};
+    return invalid();
+  }
+  if (action == "logs" && argument == "enable" &&
+      detail::valid_admin_container(second_argument))
+    return AdminCommand{
+        AdminEnableDisplayedContainerLogs{std::string{second_argument}}};
   if ((action == "pod" || action == "pod-events") &&
       detail::valid_admin_pod(argument) &&
       detail::valid_admin_resource_uid(second_argument)) {

@@ -581,7 +581,9 @@ using ToolTargetValidator = auto (*)(std::string_view) -> bool;
        idle_available, memory_handler},
       {"admin", "admin",
        "[targets | select <target> | health | services | service <unit> | "
-       "cancel | close | toolbar show/hide]",
+       "workloads | pod <name> <uid> | events | pod-events <name> <uid> | "
+       "logs enable [container]/disable/read | cancel | close | toolbar "
+       "show/hide]",
        "Inspect configured Admin targets and explicitly read selected "
        "evidence.",
        inspection_available, admin_handler},

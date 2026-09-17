@@ -101,6 +101,10 @@ auto action_value(const std::optional<AdminAction>& action)
     -> const AdminAction* {
   return action ? &action.value() : nullptr;
 }
+template <class Value>
+auto optional_value(const std::optional<Value>& value) -> const Value* {
+  return value ? &value.value() : nullptr;
+}
 auto freshness_text(AdminEvidenceFreshness value) -> std::string_view {
   switch (value) {
     case AdminEvidenceFreshness::unavailable: return "unavailable";
@@ -130,6 +134,8 @@ struct PreparedSnapshot {
   std::string text{"No committed observation for this view."};
   std::vector<std::string> labels;
   std::vector<std::optional<AdminAction>> actions;
+  std::optional<AdminDisplayedLogSource> log_source;
+  std::vector<AdminDisplayedLogSource> log_sources;
 };
 auto supports_refresh(std::size_t slot,
                       const domain::OpsObservationRequest& request) -> bool {
@@ -221,12 +227,38 @@ auto prepare_snapshot(const std::optional<CommittedOpsObservation>& snapshot,
     return AdminRefreshDisplayed{request.session_id,
                                  request.target,
                                  request.selection_generation,
+                                 request.log_policy_revision,
                                  event,
                                  request.operation,
                                  request.resource};
   };
   if (supports_refresh(slot, request)) result.refresh_action = displayed();
   prepare_inventory_actions(committed, event, slot, result);
+  if (slot == 2) {
+    const auto* service = std::get_if<domain::LinuxServiceObservation>(
+        &committed.observation.payload);
+    if (service != nullptr && service->identity.invocation_id)
+      result.log_source = AdminDisplayedLogSource{request.session_id,
+                                                  request.target,
+                                                  request.selection_generation,
+                                                  request.log_policy_revision,
+                                                  event,
+                                                  service->identity};
+  } else if (slot == 4) {
+    const auto* pod = std::get_if<domain::KubernetesPodObservation>(
+        &committed.observation.payload);
+    if (pod != nullptr)
+      for (const auto& container : pod->containers) {
+        if (!container.runtime_identity) continue;
+        auto source = pod->identity;
+        source.container = domain::KubernetesContainerIdentity{
+            container.name, *container.runtime_identity};
+        result.labels.push_back("Container " + safe_label(container.name));
+        result.log_sources.push_back(AdminDisplayedLogSource{
+            request.session_id, request.target, request.selection_generation,
+            request.log_policy_revision, event, std::move(source)});
+      }
+  }
   return result;
 }
 
@@ -237,7 +269,9 @@ enum class PresentedView {
   details,
   workloads,
   pod,
-  events
+  events,
+  service_logs,
+  pod_logs
 };
 template <class... Callables> struct Overloaded : Callables... {
   using Callables::operator()...;
@@ -257,6 +291,14 @@ auto presented_view(const AdminAction& action) -> PresentedView {
           [](const AdminReadEvents&) { return PresentedView::events; },
           [](const AdminReadNamedPodEvents&) { return PresentedView::events; },
           [](const AdminReadCachedPodEvents&) { return PresentedView::events; },
+          [](const AdminReadDisplayedLogs& read) {
+            const auto* displayed = optional_value(read.displayed);
+            return displayed != nullptr &&
+                           std::holds_alternative<domain::LinuxServiceIdentity>(
+                               displayed->source)
+                       ? PresentedView::service_logs
+                       : PresentedView::pod_logs;
+          },
           [](const AdminRefreshDisplayed& displayed) {
             switch (displayed.operation) {
               case domain::OpsObservationOperation::linux_services:
@@ -271,6 +313,9 @@ auto presented_view(const AdminAction& action) -> PresentedView {
                 return PresentedView::events;
               case domain::OpsObservationOperation::linux_health:
                 return PresentedView::health;
+              case domain::OpsObservationOperation::linux_service_logs:
+              case domain::OpsObservationOperation::kubernetes_pod_logs:
+                return PresentedView::unchanged;
             }
             return PresentedView::unchanged;
           },
@@ -326,6 +371,167 @@ auto compact_target_identity(
   result.body = "unavailable kind";
   return result;
 }
+auto same_log_source(const AdminDisplayedLogSource& left,
+                     const AdminDisplayedLogSource& right) -> bool {
+  return left.session == right.session && left.target == right.target &&
+         left.observation_event == right.observation_event &&
+         left.source == right.source;
+}
+auto bind_log_action(AdminAction action,
+                     const std::optional<AdminDisplayedLogSource>& active,
+                     const std::optional<AdminDisplayedLogSource>& displayed,
+                     bool showing_logs) -> AdminAction {
+  const auto* active_value = optional_value(active);
+  const auto* displayed_value = optional_value(displayed);
+  const bool retain_active =
+      active_value != nullptr &&
+      (showing_logs || (displayed_value != nullptr &&
+                        same_log_source(*displayed_value, *active_value)));
+  const auto& action_source = retain_active ? active : displayed;
+  std::visit(Overloaded{[&](AdminEnableDisplayedLogs& value) {
+                          if (!value.displayed) value.displayed = action_source;
+                        },
+                        [&](AdminDisableDisplayedLogs& value) {
+                          if (!value.displayed) value.displayed = active;
+                        },
+                        [&](AdminReadDisplayedLogs& value) {
+                          if (!value.displayed) value.displayed = action_source;
+                        },
+                        [](auto&) {}},
+             action);
+  return action;
+}
+enum class InventoryChange { none, services, workloads, pod };
+auto install_snapshot_inventory(
+    std::size_t slot, bool evidence_changed, PreparedSnapshot& prepared,
+    std::vector<std::string>& service_labels,
+    std::vector<std::optional<AdminAction>>& service_actions,
+    std::vector<std::string>& workload_labels,
+    std::vector<std::optional<AdminAction>>& workload_actions,
+    std::vector<std::string>& pod_labels,
+    std::vector<AdminDisplayedLogSource>& pod_sources,
+    std::optional<AdminDisplayedLogSource>& selected_pod_source)
+    -> InventoryChange {
+  if (!evidence_changed) return InventoryChange::none;
+  switch (slot) {
+    case 1:
+      service_labels = std::move(prepared.labels);
+      service_actions = std::move(prepared.actions);
+      return InventoryChange::services;
+    case 3:
+      workload_labels = std::move(prepared.labels);
+      workload_actions = std::move(prepared.actions);
+      return InventoryChange::workloads;
+    case 4:
+      pod_labels = std::move(prepared.labels);
+      pod_sources = std::move(prepared.log_sources);
+      selected_pod_source = pod_sources.size() == 1
+                                ? std::optional{pod_sources.front()}
+                                : std::nullopt;
+      return InventoryChange::pod;
+    default: return InventoryChange::none;
+  }
+}
+struct TargetPresentation {
+  std::string summary;
+  std::string compact_title;
+  std::string compact_identity;
+};
+auto prepare_target_presentation(const AdminState& state)
+    -> TargetPresentation {
+  const auto& displayed =
+      state.active_target ? state.active_target : state.historical_target;
+  TargetPresentation result;
+  result.summary = state.active_target || !state.historical_target
+                       ? "Active target: "
+                       : "Historical target: ";
+  result.summary += target_identity(displayed);
+  if (state.historical_target && !state.active_target)
+    result.summary += " | unverified; select again before reading";
+  if (const auto* pending = optional_value(state.pending_target))
+    result.summary += " | Pending: " + safe_label(pending->value());
+  auto compact = compact_target_identity(displayed);
+  result.compact_title = std::move(compact.title);
+  result.compact_identity = std::move(compact.body);
+  return result;
+}
+auto log_source_label(const domain::OpsResourceIdentity& source)
+    -> std::string {
+  if (const auto* service = std::get_if<domain::LinuxServiceIdentity>(&source))
+    return safe_label(service->unit_name);
+  const auto* pod = std::get_if<domain::KubernetesPodIdentity>(&source);
+  if (pod == nullptr) return "none";
+  const auto* container = optional_value(pod->container);
+  if (container == nullptr) return "none";
+  return safe_label(pod->name) + "/" + safe_label(container->name);
+}
+auto log_consent_text(AdminLogConsentState consent) -> std::string_view {
+  switch (consent) {
+    case AdminLogConsentState::enabled: return "enabled";
+    case AdminLogConsentState::disabled: return "disabled";
+    case AdminLogConsentState::unavailable: return "unavailable";
+  }
+  return "unavailable";
+}
+auto compact_log_consent_text(AdminLogConsentState consent)
+    -> std::string_view {
+  switch (consent) {
+    case AdminLogConsentState::enabled: return "on";
+    case AdminLogConsentState::disabled: return "off";
+    case AdminLogConsentState::unavailable: return "n/a";
+  }
+  return "n/a";
+}
+struct LogPresentation {
+  std::string summary;
+  std::string compact;
+  std::optional<AdminDisplayedLogSource> active;
+};
+auto prepare_log_presentation(
+    const AdminState& state,
+    const std::optional<AdminDisplayedLogSource>& displayed)
+    -> LogPresentation {
+  std::string source_label{"none"};
+  LogPresentation result;
+  if (const auto* source = optional_value(state.log_source)) {
+    source_label = log_source_label(*source);
+    const auto* session = optional_value(state.session);
+    const auto* target = optional_value(state.active_target);
+    const auto* event = optional_value(state.log_evidence_event);
+    if (session != nullptr && target != nullptr && event != nullptr)
+      result.active = AdminDisplayedLogSource{*session,
+                                              *target,
+                                              state.selection_generation,
+                                              state.log_policy_revision,
+                                              *event,
+                                              *source};
+  } else if (const auto* candidate = optional_value(displayed)) {
+    source_label = log_source_label(candidate->source);
+  }
+  const auto consent = log_consent_text(state.log_consent);
+  result.summary =
+      "\nLog consent: " + std::string{consent} + " | source " + source_label;
+  std::string compact_source;
+  if (source_label != "none") compact_source = " " + source_label.substr(0, 6);
+  result.compact = "log " +
+                   std::string{compact_log_consent_text(state.log_consent)} +
+                   compact_source;
+  return result;
+}
+struct StatusPresentation {
+  std::string_view message;
+  std::string_view compact;
+};
+auto prepare_status_presentation(const AdminState& state)
+    -> StatusPresentation {
+  if (const auto* problem = optional_value(state.problem))
+    return {error_text(problem->code), compact_error_text(problem->code)};
+  if (state.source_problem)
+    return {"Source preparation failed", "error source"};
+  if (state.historical_target && !state.active_target)
+    return {phase_text(state.phase), "status unverified"};
+  return {phase_text(state.phase), compact_phase_text(state.phase)};
+}
 } // namespace
 
 AdminDialog::AdminDialog(AdminControls& controls,
@@ -365,6 +571,11 @@ AdminDialog::AdminDialog(AdminControls& controls,
           }},
          {"Selected Pod events",
           [this] { read_resource_events(m_services.selected()); }},
+         {"Enable displayed logs",
+          [this] { perform(AdminEnableDisplayedLogs{}); }},
+         {"Disable displayed logs",
+          [this] { perform(AdminDisableDisplayedLogs{}); }},
+         {"Read displayed logs", [this] { perform(AdminReadDisplayedLogs{}); }},
          {"Cancel", [this] { perform(AdminCancel{}); }}}},
        {"View",
         {{"Targets", [this] { show(View::targets); }},
@@ -374,6 +585,8 @@ AdminDialog::AdminDialog(AdminControls& controls,
          {"Workloads", [this] { show(View::workloads); }},
          {"Pod", [this] { show(View::pod); }},
          {"Events", [this] { show(View::events); }},
+         {"Service logs", [this] { show(View::service_logs); }},
+         {"Pod logs", [this] { show(View::pod_logs); }},
          {"Hide toolbar", [this] { set_toolbar_visible(false); }}}}});
   m_targets.on_select([this](int, const std::string&) {
     report("Use target explicitly to prepare the highlighted target",
@@ -381,8 +594,13 @@ AdminDialog::AdminDialog(AdminControls& controls,
   });
   m_services.on_select(
       [this](int row, const std::string&) { read_resource(row); });
+  m_containers.on_select(
+      [this](int row, const std::string&) { select_pod_log_source(row); });
   m_use.on_activate([this] { use_target(); });
   m_read.on_activate([this] { read_view(); });
+  m_enable_logs.on_activate([this] { perform(AdminEnableDisplayedLogs{}); });
+  m_disable_logs.on_activate([this] { perform(AdminDisableDisplayedLogs{}); });
+  m_read_logs.on_activate([this] { perform(AdminReadDisplayedLogs{}); });
   m_cancel.on_activate([this] { perform(AdminCancel{}); });
   m_close.on_activate([this] { on_escape(); });
   children();
@@ -396,13 +614,19 @@ auto AdminDialog::report(std::string message, std::string compact) -> void {
       m_status + "\n" + m_summary +
       "\nT targets | H health | S services | D details | W workloads | P "
       "pod | E events"
-      "\nU use | R read | C cancel | F10 toolbar | Esc close";
+      " | G logs"
+      "\nU use | R read | L allow | O revoke | G read logs | C cancel | "
+      "F10 toolbar | Esc close";
   if (!m_compact) set_text(m_dialog_text);
 }
 auto AdminDialog::execute(const AdminAction& action)
     -> std::expected<void, ManualOpsFailure> {
   try {
-    auto result = m_controls.execute(action);
+    const auto proof = displayed_log_source();
+    auto dispatched = bind_log_action(action, m_active_log_source, proof,
+                                      m_view == View::service_logs ||
+                                          m_view == View::pod_logs);
+    auto result = m_controls.execute(dispatched);
     const auto presentation = refresh();
     if (!result) {
       report(std::string{error_text(result.error().code)},
@@ -410,16 +634,53 @@ auto AdminDialog::execute(const AdminAction& action)
       return result;
     }
     if (!presentation) return presentation;
-    switch (presented_view(action)) {
+    switch (presented_view(dispatched)) {
       case PresentedView::health: show(View::health); break;
       case PresentedView::services: show(View::services); break;
       case PresentedView::details: show(View::details); break;
       case PresentedView::workloads: show(View::workloads); break;
       case PresentedView::pod: show(View::pod); break;
       case PresentedView::events: show(View::events); break;
+      case PresentedView::service_logs: show(View::service_logs); break;
+      case PresentedView::pod_logs: show(View::pod_logs); break;
       case PresentedView::unchanged: break;
     }
     return {};
+  } catch (...) {
+    return failure();
+  }
+}
+auto AdminDialog::enable_displayed_container_logs(std::string_view container)
+    -> std::expected<void, ManualOpsFailure> {
+  try {
+    if (!detail::valid_admin_container(container) || m_view != View::pod) {
+      report("Choose an exact displayed Pod container before allowing logs",
+             "status choose container");
+      return std::unexpected(
+          ManualOpsFailure{ManualOpsErrorCode::wrong_operation});
+    }
+    std::optional<AdminDisplayedLogSource> selected;
+    for (const auto& candidate : m_pod_log_sources) {
+      const auto* pod =
+          std::get_if<domain::KubernetesPodIdentity>(&candidate.source);
+      if (pod == nullptr || !pod->container ||
+          pod->container->name != container)
+        continue;
+      if (selected) {
+        report("Displayed Pod container identity is ambiguous",
+               "error wrong operation");
+        return std::unexpected(
+            ManualOpsFailure{ManualOpsErrorCode::wrong_operation});
+      }
+      selected = candidate;
+    }
+    if (!selected) {
+      report("Displayed Pod container has no current runtime identity",
+             "error wrong operation");
+      return std::unexpected(
+          ManualOpsFailure{ManualOpsErrorCode::wrong_operation});
+    }
+    return execute(AdminEnableDisplayedLogs{std::move(selected)});
   } catch (...) {
     return failure();
   }
@@ -430,7 +691,7 @@ auto AdminDialog::perform(AdminAction action) -> void {
            std::string{compact_error_text(result.error().code)});
 }
 auto AdminDialog::read_view() -> void {
-  constexpr std::array slots{0U, 0U, 1U, 2U, 3U, 4U, 5U};
+  constexpr std::array slots{0U, 0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U};
   const auto slot = slots[static_cast<std::size_t>(m_view)];
   if (const auto* action = action_value(m_snapshot_actions[slot])) {
     perform(*action);
@@ -449,6 +710,11 @@ auto AdminDialog::read_view() -> void {
     case View::services: perform(AdminReadServices{}); break;
     case View::workloads: perform(AdminReadWorkloads{}); break;
     case View::health: perform(AdminReadHealth{}); break;
+    case View::service_logs:
+    case View::pod_logs:
+      report("Read evidence for this view before refreshing it",
+             "status no evidence");
+      break;
     case View::targets: break;
   }
 }
@@ -472,6 +738,26 @@ auto AdminDialog::read_resource(int row) -> void {
   const bool pod = std::holds_alternative<AdminReadCachedPod>(action);
   perform(std::move(action));
   show(pod ? View::pod : View::details);
+}
+auto AdminDialog::select_pod_log_source(int row) -> void {
+  if (row < 0 || static_cast<std::size_t>(row) >= m_pod_log_sources.size()) {
+    report("Choose an exact Pod container before allowing logs",
+           "status choose container");
+    return;
+  }
+  const auto& source = m_pod_log_sources[static_cast<std::size_t>(row)];
+  const auto* pod = std::get_if<domain::KubernetesPodIdentity>(&source.source);
+  const auto* container =
+      pod == nullptr ? nullptr : optional_value(pod->container);
+  if (pod == nullptr || container == nullptr) {
+    report("Choose an exact Pod container before allowing logs",
+           "status choose container");
+    return;
+  }
+  m_log_sources[1] = source;
+  report("Selected log source: " + safe_label(pod->name) + "/" +
+             safe_label(container->name) + "; use Allow logs",
+         "status source selected");
 }
 auto AdminDialog::read_service(int row) -> void {
   const auto* selected = action_at(m_resource_actions, row);
@@ -548,20 +834,18 @@ auto AdminDialog::refresh_snapshots(const AdminState& state) -> void {
     auto prepared = prepare_snapshot(snapshot, state.freshness[slot],
                                      m_timestamp_source(), slot);
     const bool evidence_changed = m_events[slot] != prepared.event;
-    if (slot == 1 || slot == 3) {
-      if (slot == 1 && evidence_changed) {
-        m_service_labels = std::move(prepared.labels);
-        m_service_actions = std::move(prepared.actions);
-        service_inventory_changed = true;
-      } else if (slot == 3 && evidence_changed) {
-        m_workload_labels = std::move(prepared.labels);
-        m_workload_actions = std::move(prepared.actions);
-        workload_inventory_changed = true;
-      }
-    }
+    const auto inventory = install_snapshot_inventory(
+        slot, evidence_changed, prepared, m_service_labels, m_service_actions,
+        m_workload_labels, m_workload_actions, m_pod_container_labels,
+        m_pod_log_sources, m_log_sources[1]);
+    service_inventory_changed |= inventory == InventoryChange::services;
+    workload_inventory_changed |= inventory == InventoryChange::workloads;
+    if (inventory == InventoryChange::pod && m_view == View::pod)
+      m_containers.set_items(m_pod_container_labels);
     m_snapshots[slot] = std::move(prepared.text);
     m_snapshot_actions[slot] = std::move(prepared.refresh_action);
     m_snapshot_present[slot] = snapshot.has_value();
+    if (slot == 2) m_log_sources[0] = std::move(prepared.log_source);
     m_events[slot] = std::move(prepared.event);
     m_freshness[slot] = state.freshness[slot];
   }
@@ -574,7 +858,7 @@ auto AdminDialog::refresh_snapshots(const AdminState& state) -> void {
   }
 }
 auto AdminDialog::refresh_body() -> void {
-  constexpr std::array slots{0U, 0U, 1U, 2U, 3U, 4U, 5U};
+  constexpr std::array slots{0U, 0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U};
   const auto slot = slots[static_cast<std::size_t>(m_view)];
   const auto& snapshot = m_snapshots[slot];
   const std::string_view text = snapshot.empty()
@@ -606,33 +890,26 @@ auto AdminDialog::refresh() -> std::expected<void, ManualOpsFailure> {
       m_workload_actions.clear();
       m_service_labels.clear();
       m_workload_labels.clear();
+      m_pod_container_labels.clear();
+      m_pod_log_sources.clear();
+      m_log_sources = {};
+      m_active_log_source.reset();
       m_services.set_items({});
+      m_containers.set_items({});
     }
     refresh_targets(state);
     refresh_snapshots(state);
-    const auto& displayed_target =
-        state.active_target ? state.active_target : state.historical_target;
-    m_summary = state.active_target || !state.historical_target
-                    ? "Active target: "
-                    : "Historical target: ";
-    m_summary += target_identity(displayed_target);
-    if (state.historical_target && !state.active_target)
-      m_summary += " | unverified; select again before reading";
-    auto compact_identity = compact_target_identity(displayed_target);
-    m_compact_title = std::move(compact_identity.title);
-    m_compact_identity = std::move(compact_identity.body);
-    if (state.pending_target)
-      m_summary += " | Pending: " + safe_label(state.pending_target->value());
+    auto target = prepare_target_presentation(state);
+    m_summary = std::move(target.summary);
+    m_compact_title = std::move(target.compact_title);
+    m_compact_identity = std::move(target.compact_identity);
+    auto logs = prepare_log_presentation(state, displayed_log_source());
+    m_summary += logs.summary;
+    m_compact_log = std::move(logs.compact);
+    m_active_log_source = std::move(logs.active);
     m_summary += "\nEvidence retains its original target and observation time.";
-    const auto message = state.problem ? error_text(state.problem->code)
-                         : state.source_problem ? "Source preparation failed"
-                                                : phase_text(state.phase);
-    const auto compact = state.problem ? compact_error_text(state.problem->code)
-                         : state.source_problem ? "error source"
-                         : state.historical_target && !state.active_target
-                             ? "status unverified"
-                             : compact_phase_text(state.phase);
-    report(std::string{message}, std::string{compact});
+    const auto status = prepare_status_presentation(state);
+    report(std::string{status.message}, std::string{status.compact});
     refresh_body();
     mark_dirty();
     return {};
@@ -649,10 +926,19 @@ auto AdminDialog::show(View view) -> void {
   } else if (view == View::workloads) {
     m_services.set_items(m_workload_labels);
     m_resource_actions = m_workload_actions;
+  } else if (view == View::pod) {
+    m_containers.set_items(m_pod_container_labels);
   }
   refresh_body();
+  [[maybe_unused]] const auto refresh_result = refresh();
   children();
   mark_dirty();
+}
+auto AdminDialog::displayed_log_source() const
+    -> std::optional<AdminDisplayedLogSource> {
+  if (m_view == View::details) return m_log_sources[0];
+  if (m_view == View::pod) return m_log_sources[1];
+  return {};
 }
 auto AdminDialog::set_toolbar_visible(bool visible) -> void {
   m_menu.close_dropdown();
@@ -671,10 +957,17 @@ auto AdminDialog::children() -> void {
     visible(&m_targets);
     visible(&m_use);
   }
-  if (m_view == View::services || m_view == View::workloads)
-    visible(&m_services);
+  if (m_view == View::services || m_view == View::workloads ||
+      m_view == View::pod)
+    visible(m_view == View::pod ? &m_containers : &m_services);
   if (m_wide || m_view != View::targets) visible(&m_evidence);
   if (m_view != View::targets) visible(&m_read);
+  if (m_view == View::details || m_view == View::pod ||
+      m_view == View::service_logs || m_view == View::pod_logs) {
+    visible(&m_enable_logs);
+    visible(&m_disable_logs);
+    visible(&m_read_logs);
+  }
   visible(&m_cancel);
   visible(&m_close);
   static_cast<void>(ring().focus(previous));
@@ -705,25 +998,31 @@ auto AdminDialog::layout_content(termforge::Rect area) -> void {
   const auto body_rows = area.h - buttons;
   m_targets.set_geometry({});
   m_services.set_geometry({});
+  m_containers.set_geometry({});
   m_evidence.set_geometry({});
   const auto left = m_wide ? area.w / 3 : 0;
   if (!m_compact && (m_wide || m_view == View::targets))
     m_targets.set_geometry({area.x, area.y, m_wide ? left : area.w, body_rows});
   termforge::Rect body{area.x + left, area.y, area.w - left, body_rows};
-  if (!m_compact && (m_view == View::services || m_view == View::workloads)) {
+  if (!m_compact && (m_view == View::services || m_view == View::workloads ||
+                     m_view == View::pod)) {
     const auto rows = body.h / 2;
-    m_services.set_geometry({body.x, body.y, body.w, rows});
+    auto& list = m_view == View::pod ? m_containers : m_services;
+    list.set_geometry({body.x, body.y, body.w, rows});
     body.y += rows;
     body.h -= rows;
   }
   if (m_wide || m_view != View::targets) m_evidence.set_geometry(body);
-  const auto width = area.w / 4;
+  const auto width = area.w / 7;
   const auto y = area.y + body_rows;
   m_use.set_geometry({area.x, y, width, buttons});
   m_read.set_geometry({area.x + width, y, width, buttons});
-  m_cancel.set_geometry({area.x + (2 * width), y, width, buttons});
+  m_enable_logs.set_geometry({area.x + (2 * width), y, width, buttons});
+  m_disable_logs.set_geometry({area.x + (3 * width), y, width, buttons});
+  m_read_logs.set_geometry({area.x + (4 * width), y, width, buttons});
+  m_cancel.set_geometry({area.x + (5 * width), y, width, buttons});
   m_close.set_geometry(
-      {area.x + (3 * width), y, area.w - (3 * width), buttons});
+      {area.x + (6 * width), y, area.w - (6 * width), buttons});
   children();
 }
 auto AdminDialog::draw(termforge::Screen& screen) -> void {
@@ -734,14 +1033,22 @@ auto AdminDialog::draw(termforge::Screen& screen) -> void {
     children();
   }
   if (m_compact) {
-    constexpr std::array slots{0U, 0U, 1U, 2U, 3U, 4U, 5U};
+    constexpr std::array slots{0U, 0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U};
     const auto slot = slots[static_cast<std::size_t>(m_view)];
     set_title(m_compact_title);
     auto text = m_compact_identity;
     if (!text.empty()) text += '\n';
     text += freshness_text(m_freshness[slot]);
     text += '\n';
-    text += m_compact_status;
+    if (m_compact_log == "log n/a") {
+      text += m_compact_status;
+    } else {
+      const auto compact_status =
+          m_compact_status.starts_with("status ")
+              ? std::string_view{m_compact_status}.substr(7)
+              : std::string_view{m_compact_status};
+      text += m_compact_log + " " + std::string{compact_status};
+    }
     set_text(std::move(text));
   } else {
     set_title("Admin");
@@ -752,9 +1059,16 @@ auto AdminDialog::draw(termforge::Screen& screen) -> void {
 auto AdminDialog::draw_content(termforge::Screen& screen) -> void {
   m_targets.draw(screen);
   m_services.draw(screen);
+  m_containers.draw(screen);
   m_evidence.draw(screen);
   if (m_wide || m_view == View::targets) m_use.draw(screen);
   if (m_view != View::targets) m_read.draw(screen);
+  if (m_view == View::details || m_view == View::pod ||
+      m_view == View::service_logs || m_view == View::pod_logs) {
+    m_enable_logs.draw(screen);
+    m_disable_logs.draw(screen);
+    m_read_logs.draw(screen);
+  }
   m_cancel.draw(screen);
   m_close.draw(screen);
   if (m_toolbar_visible) m_menu.draw(screen);
@@ -778,6 +1092,9 @@ auto AdminDialog::on_event(const termforge::Event& event) -> bool {
         case U'w': show(View::workloads); return true;
         case U'p': show(View::pod); return true;
         case U'e': show(View::events); return true;
+        case U'l': perform(AdminEnableDisplayedLogs{}); return true;
+        case U'o': perform(AdminDisableDisplayedLogs{}); return true;
+        case U'g': perform(AdminReadDisplayedLogs{}); return true;
         case U'u': use_target(); return true;
         case U'r': read_view(); return true;
         case U'c': perform(AdminCancel{}); return true;
