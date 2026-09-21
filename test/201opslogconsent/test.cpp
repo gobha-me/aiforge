@@ -185,3 +185,18 @@ TEST_CASE("Same SessionId reactivation cannot regain old log consent") {
   REQUIRE(fresh);
   CHECK_FALSE(fresh->authority()->specification().logs.enabled);
 }
+
+TEST_CASE("Explicit consent revocation is immediate and idempotent") {
+  Activation activation;
+  auto consent = start(activation);
+  REQUIRE(consent);
+  REQUIRE(consent->apply(change(spec(), true)));
+  consent->revoke();
+  consent->revoke();
+  REQUIRE_FALSE(consent->authority());
+  REQUIRE_FALSE(consent->apply(change(spec(), true)));
+  auto next = spec("next-target");
+  next.selection_generation = 3;
+  next.logs.revision = 3;
+  REQUIRE_FALSE(consent->replace_selection(std::move(next)));
+}

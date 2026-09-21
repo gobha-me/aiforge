@@ -39,3 +39,15 @@ observation request, while admission refusal proves that only the completed
 target-selection control run survives. Source context/namespace and captured
 timestamps remain in text/JSON output. No provider or generic process port is
 present. Pending full runtime execution is tracked in the PR evidence.
+
+Service and Pod log leaves require the explicit `--allow-log-text` flag; it is
+invalid on every other leaf. The service leaf accepts only a canonical unit.
+The Pod leaf also requires exact name, UID and bounded container name. Production
+performs one bounded health proof read, refuses absent service invocation or
+container runtime identity, then enables that exact source and performs one
+finite log read. Cancellation, deadline, preparation, proof, bind, log, output
+and teardown exits revoke consent and close the session/broker without retry.
+The second durable selection append is refused after proof and consent mutation;
+the command returns the fixed bind failure, performs no log read, persists no
+enabled selection and tears down the temporary activation.
+The standalone path contains no provider or Explain dependency.

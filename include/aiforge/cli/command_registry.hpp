@@ -129,9 +129,11 @@ class AdminCommand {
     health,
     services,
     service,
+    service_logs,
     workloads,
     pod,
-    events
+    events,
+    pod_logs
   };
   enum class OutputFormat { text, json };
   struct Request {
@@ -140,6 +142,8 @@ class AdminCommand {
     std::optional<std::string> unit{};
     std::optional<std::string> pod{};
     std::optional<domain::OpsResourceUid> pod_uid{};
+    std::optional<std::string> container{};
+    bool allow_log_text{};
     OutputFormat format{OutputFormat::text};
     auto operator==(const Request&) const -> bool = default;
   };

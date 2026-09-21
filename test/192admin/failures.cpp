@@ -16,10 +16,16 @@ using namespace aiforge;
 using adapters::admin_detail::Result;
 using Command = cli::AdminCommand;
 using Clock = std::chrono::steady_clock;
-enum class Refusal { none, admission, publication, cancellation };
+enum class Refusal {
+  none,
+  admission,
+  publication,
+  cancellation,
+  second_selection
+};
 struct State {
   std::atomic<unsigned> preparations{}, observations{}, returned{}, destroyed{},
-      refused{};
+      refused{}, selection_appends{};
   std::mutex mutex;
   std::condition_variable changed;
   bool release{}, stop_observed{};
@@ -81,7 +87,7 @@ class Source final : public runtime::OpsObservationSource {
     }
     ++m_state->returned;
     // A valid late value must still be discarded after logical cancellation.
-    return domain::OpsObservation{
+    domain::OpsObservation result{
         request,
         domain::EventTimestamp{std::chrono::milliseconds{1000}},
         domain::EventTimestamp{std::chrono::milliseconds{1001}},
@@ -93,6 +99,16 @@ class Source final : public runtime::OpsObservationSource {
             domain::OpsHealthState::unknown, 12,
             domain::LinuxMemoryObservation{domain::OpsMemoryScope::kernel, 1024,
                                            512}}};
+    if (request.operation ==
+        domain::OpsObservationOperation::linux_service_health) {
+      auto identity = std::get<domain::LinuxServiceIdentity>(request.resource);
+      identity.invocation_id =
+          domain::OpsResourceUid::from("service-invocation").value();
+      result.payload = domain::LinuxServiceObservation{
+          std::move(identity), domain::OpsServiceState::active,
+          domain::OpsObservationReason::none, 0, 2};
+    }
+    return result;
   }
 
  private:
@@ -157,6 +173,11 @@ class Store final : public storage::SessionStore {
                      std::span<const domain::RunEvent> events,
                      std::stop_token stop)
       -> std::expected<void, storage::SessionStoreError> override {
+    const bool selection = std::ranges::any_of(events, [](const auto& event) {
+      return std::holds_alternative<domain::OpsTargetSelected>(event.payload);
+    });
+    const auto selection_append = selection ? ++m_state->selection_appends
+                                            : m_state->selection_appends.load();
     const bool refuse = std::ranges::any_of(events, [&](const auto& event) {
       return (m_refusal == Refusal::admission &&
               std::holds_alternative<domain::HumanObservationRequested>(
@@ -165,7 +186,9 @@ class Store final : public storage::SessionStore {
               std::holds_alternative<domain::OpsObservationRecorded>(
                   event.payload)) ||
              (m_refusal == Refusal::cancellation &&
-              std::holds_alternative<domain::RunCancelled>(event.payload));
+              std::holds_alternative<domain::RunCancelled>(event.payload)) ||
+             (m_refusal == Refusal::second_selection && selection &&
+              selection_append == 2);
     });
     if (refuse) {
       ++m_state->refused;
@@ -309,11 +332,11 @@ TEST_CASE("Admin append refusal preserves only committed SQLite history",
   REQUIRE(count<domain::OpsObservationRecorded>(events) == 0);
   REQUIRE(count<domain::ToolResultRecorded>(events) == 0);
   REQUIRE(count_manual_run<domain::RunCompleted>(events) == 0);
+  REQUIRE(count<domain::OpsTargetSelected>(events) == 1);
+  REQUIRE(count<domain::RunCompleted>(events) == 1);
   REQUIRE(count<domain::InferenceStarted>(events) == 0);
   if (dependencies.refusal == Refusal::admission) {
     REQUIRE(events.size() == 3);
-    REQUIRE(count<domain::OpsTargetSelected>(events) == 1);
-    REQUIRE(count<domain::RunCompleted>(events) == 1);
     REQUIRE(count<domain::HumanObservationRequested>(events) == 0);
     REQUIRE(count<domain::ToolStarted>(events) == 0);
     REQUIRE(dependencies.state->observations == 0);
@@ -372,6 +395,8 @@ TEST_CASE("Admin logical deadline returns before stalled source retirement",
   REQUIRE(count<domain::OpsObservationRecorded>(before_release) == 0);
   REQUIRE(count<domain::ToolResultRecorded>(before_release) == 0);
   REQUIRE(count_manual_run<domain::RunCompleted>(before_release) == 0);
+  REQUIRE(count<domain::OpsTargetSelected>(before_release) == 1);
+  REQUIRE(count<domain::RunCompleted>(before_release) == 1);
   REQUIRE(count<domain::InferenceStarted>(before_release) == 0);
   REQUIRE(count_manual_run<domain::RunCancelled>(before_release) +
               count_manual_run<domain::RunFailed>(before_release) ==
@@ -424,5 +449,35 @@ TEST_CASE("Admin cancellation append refusal remains a runtime failure",
   REQUIRE(count<domain::OpsObservationRecorded>(events) == 0);
   REQUIRE(count<domain::ToolResultRecorded>(events) == 0);
   REQUIRE(count_manual_run<domain::RunCompleted>(events) == 0);
+  REQUIRE(count<domain::OpsTargetSelected>(events) == 1);
+  REQUIRE(count<domain::RunCompleted>(events) == 1);
   REQUIRE(count<domain::InferenceStarted>(events) == 0);
+}
+
+TEST_CASE("Admin second durable log bind refusal stops after the proof read",
+          "[admin][logs][failure]") {
+  Dependencies dependencies;
+  dependencies.refusal = Refusal::second_selection;
+  Command::Request request{Command::Operation::service_logs};
+  request.unit = "Selected.service";
+  request.allow_log_text = true;
+  std::ostringstream output;
+  const auto result =
+      adapters::admin_detail::execute(request, dependencies, {}, output);
+  REQUIRE_FALSE(result);
+  CHECK(result.error().kind == cli::CommandFailureKind::runtime);
+  CHECK(result.error().message == "Admin log source binding failed");
+  CHECK(output.str().empty());
+  CHECK(dependencies.state->preparations == 1);
+  CHECK(dependencies.state->observations == 1);
+  CHECK(dependencies.state->destroyed == 1);
+  CHECK(dependencies.state->selection_appends == 2);
+  CHECK(dependencies.state->refused == 1);
+  const auto events = dependencies.history();
+  CHECK(count<domain::OpsTargetSelected>(events) == 1);
+  CHECK(count<domain::OpsObservationRecorded>(events) == 1);
+  CHECK(count<domain::HumanObservationRequested>(events) == 1);
+  CHECK(count_manual_run<domain::RunCompleted>(events) == 1);
+  CHECK(count<domain::RunCompleted>(events) == 2);
+  CHECK(count<domain::InferenceStarted>(events) == 0);
 }

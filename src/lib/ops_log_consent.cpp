@@ -186,4 +186,8 @@ auto OpsSessionLogConsent::replace_selection(
   }
 }
 
+auto OpsSessionLogConsent::revoke() noexcept -> void {
+  revoke_ops_log_consent(m_activation);
+}
+
 } // namespace aiforge::runtime

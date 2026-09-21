@@ -65,7 +65,9 @@ TEST_CASE(
   CHECK(f.manual.authority->operations ==
         std::vector{OpsObservationOperation::kubernetes_workloads,
                     OpsObservationOperation::kubernetes_pod_health,
-                    OpsObservationOperation::kubernetes_events});
+                    OpsObservationOperation::kubernetes_events,
+                    OpsObservationOperation::kubernetes_pod_logs});
+  CHECK_FALSE(f.manual.authority->logs.enabled);
   const auto* identity = std::get_if<KubernetesOpsIdentity>(
       &f.controller->inspect().active_target->identity);
   REQUIRE(identity);
@@ -141,6 +143,9 @@ TEST_CASE("Historical catalog keeps A evidence beside selected B and replaces "
       ManualOpsSourceConnection::historical_unverified;
   f.manual.inspection.available = false;
   REQUIRE(f.controller->detach());
+  auto replay_endpoint = f.broker->activate_session(f.session);
+  REQUIRE(replay_endpoint);
+  f.endpoint = *replay_endpoint;
   REQUIRE(f.controller->attach({f.session, f.manual, f.binding, f.endpoint}));
 
   const auto& replayed = f.controller->inspect();
@@ -369,6 +374,7 @@ TEST_CASE("Displayed resource refresh proof rejects every target change",
   AdminRefreshDisplayed displayed{request.session_id,
                                   request.target,
                                   request.selection_generation,
+                                  request.log_policy_revision,
                                   snapshot.observation_event_id,
                                   request.operation,
                                   request.resource};
@@ -536,7 +542,7 @@ TEST_CASE("First unbound native selection is allowed while busy and closed "
     REQUIRE(f.manual.authority);
     CHECK_FALSE(f.manual.authority->logs.enabled);
     CHECK(f.manual.authority->logs.permitted_sources.empty());
-    CHECK(f.manual.authority->operations.size() == 3);
+    CHECK(f.manual.authority->operations.size() == 4);
     CHECK(f.catalog->state->observed == 0);
   }
 }
@@ -659,8 +665,8 @@ TEST_CASE(
   CHECK(f.catalog->calls == 1);
 }
 
-TEST_CASE("Failed B preparation or binding preserves active A and its last "
-          "good evidence",
+TEST_CASE("Failed B preparation preserves A while post-replace binding failure "
+          "is unbound",
           "[admin][controller]") {
   Fixture f;
   f.open();
@@ -669,6 +675,11 @@ TEST_CASE("Failed B preparation or binding preserves active A and its last "
   f.capture(AdminReadHealth{});
   const auto target = f.controller->inspect().active_target;
   const auto snapshot = f.controller->inspect().snapshots[0];
+  REQUIRE(f.manual.authority);
+  auto old_authority = OpsObservationAuthority::create(*f.manual.authority);
+  REQUIRE(old_authority);
+  REQUIRE(f.binding.selected_source);
+  REQUIRE(f.binding.selected_endpoint);
   f.catalog->state = std::make_shared<PreparationState>();
   bool fatal{};
   SECTION("source fails") {
@@ -681,6 +692,7 @@ TEST_CASE("Failed B preparation or binding preserves active A and its last "
         runtime::OpsObservationSourceError::internal_failure;
   }
   SECTION("ordinary bind refusal") {
+    fatal = true;
     f.binding.failure = ManualOpsFailure{ManualOpsErrorCode::busy};
   }
   SECTION("fatal bind refusal") {
@@ -693,10 +705,15 @@ TEST_CASE("Failed B preparation or binding preserves active A and its last "
     static_cast<void>(f.controller->pump());
     return f.controller->inspect().problem.has_value();
   }));
-  CHECK(f.controller->inspect().active_target == target);
+  CHECK(f.controller->inspect().active_target ==
+        (fatal ? std::nullopt : target));
   CHECK(f.controller->inspect().snapshots[0] == snapshot);
   CHECK(f.controller->inspect().selection_generation == 1);
   CHECK(f.controller->inspect().fatal == fatal);
+  if (fatal)
+    CHECK_FALSE(f.broker->preflight_selection(*f.binding.selected_endpoint,
+                                              *old_authority,
+                                              f.binding.selected_source));
   if (fatal) {
     const auto calls = f.catalog->calls;
     REQUIRE_FALSE(
@@ -977,4 +994,568 @@ TEST_CASE(
   auto owner = OpsOwnerId::from(std::string(OpsOwnerId::max_size + 1, 'x'));
   REQUIRE_FALSE(owner);
   CHECK(owner.error() == IdError::too_long);
+}
+
+TEST_CASE("Admin log consent starts disabled and requires exact displayed "
+          "service invocation evidence",
+          "[admin][controller][logs]") {
+  Fixture f;
+  f.open();
+  f.select();
+  f.ready();
+  REQUIRE(f.manual.authority);
+  CHECK_FALSE(f.manual.authority->logs.enabled);
+  CHECK(std::ranges::find(f.manual.authority->operations,
+                          OpsObservationOperation::linux_service_logs) !=
+        f.manual.authority->operations.end());
+
+  f.capture(AdminReadServices{});
+  const auto inventory = *f.controller->inspect().snapshots[1];
+  f.capture(AdminReadCachedService{f.session, inventory.observation_event_id,
+                                   f.controller->inspect().selection_generation,
+                                   0});
+  const auto details = *f.controller->inspect().snapshots[2];
+  const auto source =
+      std::get<LinuxServiceObservation>(details.observation.payload).identity;
+  AdminDisplayedLogSource displayed{
+      f.session,
+      *f.controller->inspect().active_target,
+      f.controller->inspect().selection_generation,
+      details.observation.request.log_policy_revision,
+      details.observation_event_id,
+      source};
+
+  auto stale = displayed;
+  ++stale.log_policy_revision;
+  REQUIRE_FALSE(
+      f.controller->execute(AdminEnableDisplayedLogs{std::move(stale)}));
+  CHECK(f.controller->inspect().log_consent == AdminLogConsentState::disabled);
+
+  REQUIRE(f.controller->execute(AdminEnableDisplayedLogs{displayed}));
+  REQUIRE(f.controller->pump());
+  CHECK(f.controller->inspect().log_consent == AdminLogConsentState::enabled);
+  REQUIRE(f.controller->inspect().log_source);
+  CHECK(*f.controller->inspect().log_source == OpsResourceIdentity{source});
+  CHECK(f.manual.authority->logs.enabled);
+  REQUIRE(f.manual.authority->logs.permitted_sources ==
+          std::vector<OpsResourceIdentity>{source});
+
+  displayed.selection_generation = f.controller->inspect().selection_generation;
+  displayed.log_policy_revision = f.controller->inspect().log_policy_revision;
+  REQUIRE(f.controller->execute(AdminReadDisplayedLogs{displayed}));
+  REQUIRE(f.controller->pump());
+  REQUIRE(f.controller->inspect().snapshots[6]);
+  CHECK(f.controller->inspect().snapshots[6]->observation.request.resource ==
+        OpsResourceIdentity{source});
+  REQUIRE(f.controller->execute(AdminDisableDisplayedLogs{displayed}));
+  REQUIRE(f.controller->pump());
+  CHECK(f.controller->inspect().log_consent == AdminLogConsentState::disabled);
+  CHECK_FALSE(f.manual.authority->logs.enabled);
+}
+
+TEST_CASE("Admin Kubernetes logs require displayed container runtime identity",
+          "[admin][controller][logs]") {
+  Fixture f;
+  f.catalog->enable_kubernetes();
+  f.open();
+  f.select("kube");
+  f.ready();
+  f.capture(AdminReadWorkloads{});
+  const auto inventory = *f.controller->inspect().snapshots[3];
+  f.capture(AdminReadCachedPod{f.session, inventory.observation_event_id,
+                               f.controller->inspect().selection_generation,
+                               0});
+  const auto pod = *f.controller->inspect().snapshots[4];
+  const auto& observed =
+      std::get<KubernetesPodObservation>(pod.observation.payload);
+  auto source = observed.identity;
+  REQUIRE(observed.containers.front().runtime_identity);
+  source.container = KubernetesContainerIdentity{
+      observed.containers.front().name,
+      *observed.containers.front().runtime_identity};
+  AdminDisplayedLogSource displayed{
+      f.session,
+      *f.controller->inspect().active_target,
+      f.controller->inspect().selection_generation,
+      pod.observation.request.log_policy_revision,
+      pod.observation_event_id,
+      source};
+  auto missing_runtime = displayed;
+  std::get<KubernetesPodIdentity>(missing_runtime.source)
+      .container->runtime_identity = "foreign";
+  REQUIRE_FALSE(f.controller->execute(
+      AdminEnableDisplayedLogs{std::move(missing_runtime)}));
+  REQUIRE(f.controller->execute(AdminEnableDisplayedLogs{displayed}));
+  displayed.selection_generation = f.controller->inspect().selection_generation;
+  displayed.log_policy_revision = f.controller->inspect().log_policy_revision;
+  REQUIRE(f.controller->execute(AdminReadDisplayedLogs{displayed}));
+  REQUIRE(f.controller->pump());
+  REQUIRE(f.controller->inspect().snapshots[7]);
+  CHECK(f.controller->inspect().snapshots[7]->observation.request.resource ==
+        OpsResourceIdentity{source});
+}
+
+TEST_CASE("Log enable refuses busy before mutating consent",
+          "[admin][controller][logs][failure]") {
+  Fixture f;
+  f.open();
+  f.select();
+  f.ready();
+  f.capture(AdminReadServices{});
+  const auto inventory = *f.controller->inspect().snapshots[1];
+  f.capture(AdminReadCachedService{f.session, inventory.observation_event_id,
+                                   f.controller->inspect().selection_generation,
+                                   0});
+  const auto details = *f.controller->inspect().snapshots[2];
+  AdminDisplayedLogSource displayed{
+      f.session,
+      *f.controller->inspect().active_target,
+      f.controller->inspect().selection_generation,
+      details.observation.request.log_policy_revision,
+      details.observation_event_id,
+      std::get<LinuxServiceObservation>(details.observation.payload).identity};
+  f.manual.hold = true;
+  REQUIRE(f.controller->execute(AdminReadHealth{}));
+  const auto revision = f.controller->inspect().log_policy_revision;
+  const auto binding_calls = f.binding.calls;
+  const auto result =
+      f.controller->execute(AdminEnableDisplayedLogs{std::move(displayed)});
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == ManualOpsErrorCode::busy);
+  CHECK(f.controller->inspect().log_consent == AdminLogConsentState::disabled);
+  CHECK(f.controller->inspect().log_policy_revision == revision);
+  CHECK(f.binding.calls == binding_calls);
+}
+
+TEST_CASE("Log disable rejects a different displayed source without revocation",
+          "[admin][controller][logs][failure]") {
+  Fixture f;
+  f.open();
+  f.select();
+  f.ready();
+  f.capture(AdminReadServices{});
+  auto inventory = *f.controller->inspect().snapshots[1];
+  f.capture(AdminReadCachedService{f.session, inventory.observation_event_id,
+                                   f.controller->inspect().selection_generation,
+                                   0});
+  const auto alpha = *f.controller->inspect().snapshots[2];
+  AdminDisplayedLogSource allowed{
+      f.session,
+      *f.controller->inspect().active_target,
+      f.controller->inspect().selection_generation,
+      alpha.observation.request.log_policy_revision,
+      alpha.observation_event_id,
+      std::get<LinuxServiceObservation>(alpha.observation.payload).identity};
+  REQUIRE(f.controller->execute(AdminEnableDisplayedLogs{allowed}));
+  allowed.selection_generation = f.controller->inspect().selection_generation;
+  allowed.log_policy_revision = f.controller->inspect().log_policy_revision;
+
+  f.manual.service_unit = "other.service";
+  f.capture(AdminReadServices{});
+  inventory = *f.controller->inspect().snapshots[1];
+  f.capture(AdminReadCachedService{f.session, inventory.observation_event_id,
+                                   f.controller->inspect().selection_generation,
+                                   0});
+  const auto other = *f.controller->inspect().snapshots[2];
+  AdminDisplayedLogSource displayed_other{
+      f.session,
+      *f.controller->inspect().active_target,
+      f.controller->inspect().selection_generation,
+      other.observation.request.log_policy_revision,
+      other.observation_event_id,
+      std::get<LinuxServiceObservation>(other.observation.payload).identity};
+  const auto revision = f.controller->inspect().log_policy_revision;
+  const auto result = f.controller->execute(
+      AdminDisableDisplayedLogs{std::move(displayed_other)});
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == ManualOpsErrorCode::wrong_operation);
+  CHECK_FALSE(f.controller->inspect().fatal);
+  CHECK(f.controller->inspect().log_consent == AdminLogConsentState::enabled);
+  CHECK(f.controller->inspect().log_policy_revision == revision);
+  REQUIRE(f.controller->execute(AdminDisableDisplayedLogs{std::move(allowed)}));
+  CHECK(f.controller->inspect().log_consent == AdminLogConsentState::disabled);
+}
+
+TEST_CASE("Consent mutation followed by binding failure is fatal and unbound",
+          "[admin][controller][logs]") {
+  Fixture f;
+  f.open();
+  f.select();
+  f.ready();
+  f.capture(AdminReadServices{});
+  const auto inventory = *f.controller->inspect().snapshots[1];
+  f.capture(AdminReadCachedService{f.session, inventory.observation_event_id,
+                                   f.controller->inspect().selection_generation,
+                                   0});
+  const auto details = *f.controller->inspect().snapshots[2];
+  SECTION("expected refusal") {
+    f.binding.failure = ManualOpsFailure{ManualOpsErrorCode::operation_failed};
+  }
+  SECTION("exception") {
+    f.binding.throws = true;
+  }
+  REQUIRE(f.manual.authority);
+  auto old_authority = OpsObservationAuthority::create(*f.manual.authority);
+  REQUIRE(old_authority);
+  REQUIRE(f.binding.selected_source);
+  REQUIRE(f.binding.selected_endpoint);
+  REQUIRE_FALSE(
+      f.controller->execute(AdminEnableDisplayedLogs{AdminDisplayedLogSource{
+          f.session, *f.controller->inspect().active_target,
+          f.controller->inspect().selection_generation,
+          details.observation.request.log_policy_revision,
+          details.observation_event_id,
+          std::get<LinuxServiceObservation>(details.observation.payload)
+              .identity}}));
+  CHECK(f.controller->inspect().fatal);
+  CHECK_FALSE(f.controller->inspect().active_target);
+  CHECK(f.controller->inspect().log_consent ==
+        AdminLogConsentState::unavailable);
+  CHECK_FALSE(f.broker->preflight_selection(
+      *f.binding.selected_endpoint, *old_authority, f.binding.selected_source));
+}
+
+TEST_CASE("Disabling consent cancels an in-flight log after immediate revision",
+          "[admin][controller][logs]") {
+  Fixture f;
+  f.open();
+  f.select();
+  f.ready();
+  f.capture(AdminReadServices{});
+  const auto inventory = *f.controller->inspect().snapshots[1];
+  f.capture(AdminReadCachedService{f.session, inventory.observation_event_id,
+                                   f.controller->inspect().selection_generation,
+                                   0});
+  const auto details = *f.controller->inspect().snapshots[2];
+  const auto source =
+      std::get<LinuxServiceObservation>(details.observation.payload).identity;
+  AdminDisplayedLogSource displayed{
+      f.session,
+      *f.controller->inspect().active_target,
+      f.controller->inspect().selection_generation,
+      details.observation.request.log_policy_revision,
+      details.observation_event_id,
+      source};
+  REQUIRE(f.controller->execute(AdminEnableDisplayedLogs{displayed}));
+  displayed.selection_generation = f.controller->inspect().selection_generation;
+  displayed.log_policy_revision = f.controller->inspect().log_policy_revision;
+  f.manual.hold = true;
+  REQUIRE(f.controller->execute(AdminReadDisplayedLogs{displayed}));
+  REQUIRE(f.controller->inspect().current_status == RunStatus::running);
+  const auto revision = f.manual.authority->logs.revision;
+  REQUIRE(f.controller->execute(AdminDisableDisplayedLogs{displayed}));
+  CHECK(f.manual.cancels == 1);
+  CHECK(f.controller->inspect().current_status == RunStatus::not_started);
+  CHECK_FALSE(f.manual.authority->logs.enabled);
+  CHECK(f.manual.authority->logs.revision == revision + 1);
+  CHECK_FALSE(f.controller->inspect().snapshots[6]);
+}
+
+TEST_CASE("Log disable cancellation failure revokes authority and fails closed",
+          "[admin][controller][logs][failure]") {
+  Fixture f;
+  f.open();
+  f.select();
+  f.ready();
+  f.capture(AdminReadServices{});
+  const auto inventory = *f.controller->inspect().snapshots[1];
+  f.capture(AdminReadCachedService{f.session, inventory.observation_event_id,
+                                   f.controller->inspect().selection_generation,
+                                   0});
+  const auto details = *f.controller->inspect().snapshots[2];
+  AdminDisplayedLogSource displayed{
+      f.session,
+      *f.controller->inspect().active_target,
+      f.controller->inspect().selection_generation,
+      details.observation.request.log_policy_revision,
+      details.observation_event_id,
+      std::get<LinuxServiceObservation>(details.observation.payload).identity};
+  REQUIRE(f.controller->execute(AdminEnableDisplayedLogs{displayed}));
+  displayed.selection_generation = f.controller->inspect().selection_generation;
+  displayed.log_policy_revision = f.controller->inspect().log_policy_revision;
+  f.manual.hold = true;
+  REQUIRE(f.controller->execute(AdminReadDisplayedLogs{displayed}));
+  REQUIRE(f.controller->inspect().current_status == RunStatus::running);
+  REQUIRE(f.manual.authority);
+  const auto& authority = *f.manual.authority;
+  REQUIRE(authority.logs.permitted_sources.size() == 1);
+  REQUIRE(f.binding.selected_endpoint);
+  const OpsObservationRequest request{
+      authority.owner_id,
+      authority.session_id,
+      id<OpsRequestId>("disable-log-read"),
+      authority.target,
+      authority.selection_generation,
+      OpsObservationOperation::linux_service_logs,
+      authority.logs.permitted_sources.front(),
+      authority.logs.revision,
+      {}};
+  REQUIRE(f.broker->preflight(*f.binding.selected_endpoint, request));
+  const auto snapshots = f.controller->inspect().snapshots;
+  const auto binding_calls = f.binding.calls;
+  auto expected = ManualOpsErrorCode::operation_failed;
+  SECTION("refusal") {
+    f.manual.cancel_failure =
+        ManualOpsFailure{ManualOpsErrorCode::operation_failed};
+  }
+  SECTION("exception") {
+    f.manual.throws_cancel = true;
+    expected = ManualOpsErrorCode::internal_failure;
+  }
+
+  const auto result =
+      f.controller->execute(AdminDisableDisplayedLogs{std::move(displayed)});
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == expected);
+  CHECK(f.manual.cancels == 1);
+  CHECK(f.binding.calls == binding_calls);
+  CHECK(f.controller->inspect().fatal);
+  CHECK_FALSE(f.controller->inspect().active_target);
+  CHECK_FALSE(f.controller->inspect().current);
+  CHECK(f.controller->inspect().log_consent ==
+        AdminLogConsentState::unavailable);
+  CHECK(f.controller->inspect().log_policy_revision == 0);
+  CHECK_FALSE(f.controller->inspect().log_source);
+  CHECK(f.controller->inspect().snapshots == snapshots);
+  CHECK_FALSE(f.broker->preflight(*f.binding.selected_endpoint, request));
+}
+
+TEST_CASE("Log disable bind failure revokes mutated authority and fails closed",
+          "[admin][controller][logs][failure]") {
+  Fixture f;
+  f.open();
+  f.select();
+  f.ready();
+  f.capture(AdminReadServices{});
+  const auto inventory = *f.controller->inspect().snapshots[1];
+  f.capture(AdminReadCachedService{f.session, inventory.observation_event_id,
+                                   f.controller->inspect().selection_generation,
+                                   0});
+  const auto details = *f.controller->inspect().snapshots[2];
+  AdminDisplayedLogSource displayed{
+      f.session,
+      *f.controller->inspect().active_target,
+      f.controller->inspect().selection_generation,
+      details.observation.request.log_policy_revision,
+      details.observation_event_id,
+      std::get<LinuxServiceObservation>(details.observation.payload).identity};
+  REQUIRE(f.controller->execute(AdminEnableDisplayedLogs{displayed}));
+  displayed.selection_generation = f.controller->inspect().selection_generation;
+  displayed.log_policy_revision = f.controller->inspect().log_policy_revision;
+  REQUIRE(f.manual.authority);
+  const auto& authority = *f.manual.authority;
+  REQUIRE(authority.logs.permitted_sources.size() == 1);
+  REQUIRE(f.binding.selected_endpoint);
+  const OpsObservationRequest request{
+      authority.owner_id,
+      authority.session_id,
+      id<OpsRequestId>("disable-log-read"),
+      authority.target,
+      authority.selection_generation,
+      OpsObservationOperation::linux_service_logs,
+      authority.logs.permitted_sources.front(),
+      authority.logs.revision,
+      {}};
+  REQUIRE(f.broker->preflight(*f.binding.selected_endpoint, request));
+  const auto snapshots = f.controller->inspect().snapshots;
+  const auto binding_calls = f.binding.calls;
+  auto expected = ManualOpsErrorCode::operation_failed;
+  SECTION("refusal") {
+    f.binding.failure = ManualOpsFailure{ManualOpsErrorCode::operation_failed};
+  }
+  SECTION("exception") {
+    f.binding.throws = true;
+    expected = ManualOpsErrorCode::internal_failure;
+  }
+
+  const auto result =
+      f.controller->execute(AdminDisableDisplayedLogs{std::move(displayed)});
+  REQUIRE_FALSE(result);
+  CHECK(result.error().code == expected);
+  CHECK(f.manual.cancels == 0);
+  CHECK(f.binding.calls == binding_calls + 1);
+  CHECK(f.controller->inspect().fatal);
+  CHECK_FALSE(f.controller->inspect().active_target);
+  CHECK_FALSE(f.controller->inspect().current);
+  CHECK(f.controller->inspect().log_consent ==
+        AdminLogConsentState::unavailable);
+  CHECK(f.controller->inspect().log_policy_revision == 0);
+  CHECK_FALSE(f.controller->inspect().log_source);
+  CHECK(f.controller->inspect().snapshots == snapshots);
+  CHECK_FALSE(f.broker->preflight(*f.binding.selected_endpoint, request));
+}
+
+TEST_CASE("Target replacement revokes logs and stale source cannot be rebound",
+          "[admin][controller][logs]") {
+  Fixture f;
+  f.open();
+  f.select();
+  f.ready();
+  f.capture(AdminReadServices{});
+  const auto inventory = *f.controller->inspect().snapshots[1];
+  f.capture(AdminReadCachedService{f.session, inventory.observation_event_id,
+                                   f.controller->inspect().selection_generation,
+                                   0});
+  const auto details = *f.controller->inspect().snapshots[2];
+  AdminDisplayedLogSource old{
+      f.session,
+      *f.controller->inspect().active_target,
+      f.controller->inspect().selection_generation,
+      details.observation.request.log_policy_revision,
+      details.observation_event_id,
+      std::get<LinuxServiceObservation>(details.observation.payload).identity};
+  REQUIRE(f.controller->execute(AdminEnableDisplayedLogs{old}));
+  const auto enabled_generation = f.controller->inspect().selection_generation;
+  const auto enabled_revision = f.controller->inspect().log_policy_revision;
+  f.select("beta");
+  CHECK(f.controller->inspect().log_consent == AdminLogConsentState::disabled);
+  CHECK_FALSE(f.manual.authority->logs.enabled);
+  CHECK(f.controller->inspect().selection_generation == enabled_generation + 1);
+  CHECK(f.controller->inspect().log_policy_revision == enabled_revision + 1);
+  f.ready();
+  CHECK(f.controller->inspect().active_target->target_id ==
+        id<OpsTargetId>("beta"));
+  CHECK(f.controller->inspect().selection_generation > enabled_generation);
+  CHECK(f.controller->inspect().log_consent == AdminLogConsentState::disabled);
+  CHECK_FALSE(f.manual.authority->logs.enabled);
+  REQUIRE_FALSE(f.controller->execute(AdminEnableDisplayedLogs{old}));
+}
+
+TEST_CASE("Target replacement revokes and cancels an in-flight log first",
+          "[admin][controller][logs][cancellation]") {
+  Fixture f;
+  f.open();
+  f.select();
+  f.ready();
+  f.capture(AdminReadServices{});
+  const auto inventory = *f.controller->inspect().snapshots[1];
+  f.capture(AdminReadCachedService{f.session, inventory.observation_event_id,
+                                   f.controller->inspect().selection_generation,
+                                   0});
+  const auto details = *f.controller->inspect().snapshots[2];
+  AdminDisplayedLogSource displayed{
+      f.session,
+      *f.controller->inspect().active_target,
+      f.controller->inspect().selection_generation,
+      details.observation.request.log_policy_revision,
+      details.observation_event_id,
+      std::get<LinuxServiceObservation>(details.observation.payload).identity};
+  REQUIRE(f.controller->execute(AdminEnableDisplayedLogs{displayed}));
+  displayed.selection_generation = f.controller->inspect().selection_generation;
+  displayed.log_policy_revision = f.controller->inspect().log_policy_revision;
+  const auto enabled_generation = displayed.selection_generation;
+  const auto enabled_revision = displayed.log_policy_revision;
+  f.manual.hold = true;
+  REQUIRE(f.controller->execute(AdminReadDisplayedLogs{displayed}));
+  REQUIRE(f.controller->inspect().current_status == RunStatus::running);
+
+  f.select("beta");
+  CHECK(f.manual.cancels == 1);
+  CHECK_FALSE(f.manual.authority->logs.enabled);
+  CHECK(f.controller->inspect().selection_generation == enabled_generation + 1);
+  CHECK(f.controller->inspect().log_policy_revision == enabled_revision + 1);
+  CHECK(f.controller->inspect().log_consent == AdminLogConsentState::disabled);
+  CHECK(f.controller->inspect().current_status == RunStatus::not_started);
+  REQUIRE(f.controller->inspect().pending_target);
+  CHECK(f.controller->inspect().pending_target->value() == "beta");
+  CHECK_FALSE(f.controller->inspect().snapshots[6]);
+}
+
+TEST_CASE("Detach explicitly revokes the controller-owned broker activation",
+          "[admin][controller][logs][lifecycle]") {
+  Fixture f;
+  f.open();
+  f.select();
+  f.ready();
+  f.capture(AdminReadServices{});
+  const auto inventory = *f.controller->inspect().snapshots[1];
+  f.capture(AdminReadCachedService{f.session, inventory.observation_event_id,
+                                   f.controller->inspect().selection_generation,
+                                   0});
+  const auto details = *f.controller->inspect().snapshots[2];
+  REQUIRE(
+      f.controller->execute(AdminEnableDisplayedLogs{AdminDisplayedLogSource{
+          f.session, *f.controller->inspect().active_target,
+          f.controller->inspect().selection_generation,
+          details.observation.request.log_policy_revision,
+          details.observation_event_id,
+          std::get<LinuxServiceObservation>(details.observation.payload)
+              .identity}}));
+  REQUIRE(f.manual.authority);
+  auto authority = OpsObservationAuthority::create(*f.manual.authority);
+  REQUIRE(authority);
+  REQUIRE(f.binding.selected_source);
+  REQUIRE(f.binding.selected_endpoint);
+  REQUIRE(authority->specification().logs.permitted_sources.size() == 1);
+  domain::OpsObservationRequest request{
+      authority->specification().owner_id,
+      authority->specification().session_id,
+      id<OpsRequestId>("log-read"),
+      authority->specification().target,
+      authority->specification().selection_generation,
+      OpsObservationOperation::linux_service_logs,
+      authority->specification().logs.permitted_sources.front(),
+      authority->specification().logs.revision,
+      {}};
+  REQUIRE(f.broker->preflight(*f.binding.selected_endpoint, request));
+
+  REQUIRE(f.controller->detach());
+  CHECK(f.controller->inspect().log_consent ==
+        AdminLogConsentState::unavailable);
+  CHECK_FALSE(f.broker->preflight(*f.binding.selected_endpoint, request));
+}
+
+TEST_CASE("Fatal Admin failures revoke enabled log authority and preserve "
+          "evidence",
+          "[admin][controller][logs][failure]") {
+  using Code = ManualOpsErrorCode;
+  for (const auto failure : {Code::storage_failure, Code::invalid_history}) {
+    Fixture f;
+    f.open();
+    f.select();
+    f.ready();
+    f.capture(AdminReadServices{});
+    const auto inventory = *f.controller->inspect().snapshots[1];
+    f.capture(AdminReadCachedService{
+        f.session, inventory.observation_event_id,
+        f.controller->inspect().selection_generation, 0});
+    const auto details = *f.controller->inspect().snapshots[2];
+    REQUIRE(
+        f.controller->execute(AdminEnableDisplayedLogs{AdminDisplayedLogSource{
+            f.session, *f.controller->inspect().active_target,
+            f.controller->inspect().selection_generation,
+            details.observation.request.log_policy_revision,
+            details.observation_event_id,
+            std::get<LinuxServiceObservation>(details.observation.payload)
+                .identity}}));
+    const auto snapshots = f.controller->inspect().snapshots;
+    REQUIRE(f.manual.authority);
+    auto authority = OpsObservationAuthority::create(*f.manual.authority);
+    REQUIRE(authority);
+    REQUIRE(f.binding.selected_source);
+    REQUIRE(f.binding.selected_endpoint);
+    REQUIRE(authority->specification().logs.permitted_sources.size() == 1);
+    const OpsObservationRequest request{
+        authority->specification().owner_id,
+        authority->specification().session_id,
+        id<OpsRequestId>("fatal-log-read"),
+        authority->specification().target,
+        authority->specification().selection_generation,
+        OpsObservationOperation::linux_service_logs,
+        authority->specification().logs.permitted_sources.front(),
+        authority->specification().logs.revision,
+        {}};
+    REQUIRE(f.broker->preflight(*f.binding.selected_endpoint, request));
+
+    f.manual.inspection.problem = ManualOpsFailure{failure};
+    f.manual.pump_failure = ManualOpsFailure{failure};
+    REQUIRE_FALSE(f.controller->pump());
+    CHECK(f.controller->inspect().fatal);
+    CHECK_FALSE(f.controller->inspect().active_target);
+    CHECK(f.controller->inspect().log_consent ==
+          AdminLogConsentState::unavailable);
+    CHECK_FALSE(f.controller->inspect().log_source);
+    CHECK(f.controller->inspect().snapshots == snapshots);
+    CHECK_FALSE(f.broker->preflight(*f.binding.selected_endpoint, request));
+  }
 }

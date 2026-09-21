@@ -49,3 +49,24 @@ in this fixture. The actual delayed physical retirement predicate is exercised i
 194;195 independently checks producer-owned readiness while busy and a distinct
 claimed/retiring phase before binding. Fakes cannot prove durable Chat/SQLite
 publication, policy enforcement or GUI behavior.
+
+Log consent starts exactly once per broker activation with the target kind's
+log operation present but disabled. Enable, disable and read actions require a
+committed displayed service invocation or Pod/container runtime proof bound to
+the current session, full target, selection and evidence event. Policy changes
+advance both counters and rebind only the retained source. Disabling invalidates
+in-flight publication before cancellation. Requesting another target during an
+in-flight log read revokes the enabled source before cancellation or new source
+preparation; completed target replacement starts disabled from the consent
+owner's current counters. Any mutated-consent bind failure is fatal, unbound and
+explicitly revoked; detach and session replacement revoke it. Service and Pod
+logs occupy separate appended slots without shifting the six existing
+observation slots.
+Disable-side cancellation refusal or exception revokes the already-mutated
+authority before failing closed, without attempting a bind. Disable-side bind
+refusal or exception likewise revokes the authority, clears live controller
+state and preserves committed evidence.
+Storage failure, invalid history, resource exhaustion and internal failure also
+revoke any enabled activation and release current source/binding state. The old
+authority fails broker preflight and cannot publish late log text, while all
+previously committed snapshots retain their original provenance.

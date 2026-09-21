@@ -1600,6 +1600,36 @@ class ChatAppImpl final : public InteractiveChatApp {
     return executed.has_value();
   }
 
+  auto manage_admin(const surfaces::AdminEnableDisplayedContainerLogs& command)
+      -> bool {
+    if (!m_admin_controller) {
+      m_status = "Admin configuration is unavailable";
+      return false;
+    }
+    if (!m_admin_dialog) {
+      m_admin_dialog = std::make_unique<AdminDialog>(*m_admin_controller);
+      m_admin_dialog->on_close([this] {
+        if (!m_admin_dialog_active || top_overlay() != m_admin_dialog.get())
+          return;
+        pop_modal();
+        m_admin_dialog_active = false;
+        m_status = m_admin_dialog->status();
+        sync_composer_focus();
+      });
+    }
+    m_admin_dialog->set_toolbar_visible(m_context_toolbar_visible);
+    const auto executed =
+        m_admin_dialog->enable_displayed_container_logs(command.container);
+    m_status = m_admin_dialog->status();
+    if (!m_admin_dialog_active) {
+      m_admin_dialog_active = true;
+      push_modal(*m_admin_dialog, {.backdrop = termforge::Backdrop::Dim,
+                                   .dismiss_on_click_outside = false});
+    }
+    service_admin();
+    return executed.has_value();
+  }
+
   auto submit_admin(std::string_view draft) -> bool {
     const auto command = surfaces::parse_admin_command(draft);
     if (!command) {
@@ -1618,8 +1648,16 @@ class ChatAppImpl final : public InteractiveChatApp {
       m_composer.clear();
       return true;
     }
-    if (manage_admin(std::get<surfaces::AdminAction>(**command)))
-      m_composer.clear();
+    const auto managed = std::visit(
+        [this](const auto& value) -> bool {
+          using Value = std::remove_cvref_t<decltype(value)>;
+          if constexpr (std::same_as<Value, surfaces::AdminToolbarVisibility>)
+            return false;
+          else
+            return manage_admin(value);
+        },
+        **command);
+    if (managed) m_composer.clear();
     return true;
   }
 

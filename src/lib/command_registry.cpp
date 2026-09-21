@@ -785,9 +785,11 @@ auto admin_operation(std::string_view command)
   if (command == "admin.health") return Operation::health;
   if (command == "admin.services") return Operation::services;
   if (command == "admin.service") return Operation::service;
+  if (command == "admin.service-logs") return Operation::service_logs;
   if (command == "admin.workloads") return Operation::workloads;
   if (command == "admin.pod") return Operation::pod;
   if (command == "admin.events") return Operation::events;
+  if (command == "admin.pod-logs") return Operation::pod_logs;
   return std::nullopt;
 }
 // NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Option grammar.
@@ -809,7 +811,8 @@ auto admin_request(const ParsedInvocation& invocation)
       return std::unexpected("invalid Admin target");
     request.target = target->front();
   }
-  if (*operation == AdminCommand::Operation::service) {
+  if (*operation == AdminCommand::Operation::service ||
+      *operation == AdminCommand::Operation::service_logs) {
     const auto unit = parsed_text_values(invocation, command + ".unit");
     if (!unit || unit->size() != 1 ||
         !detail::valid_admin_service(unit->front()))
@@ -817,11 +820,14 @@ auto admin_request(const ParsedInvocation& invocation)
     request.unit = unit->front();
   }
   if (*operation == AdminCommand::Operation::pod ||
+      *operation == AdminCommand::Operation::pod_logs ||
       *operation == AdminCommand::Operation::events) {
     const auto pod = parsed_text_values(invocation, command + ".pod");
     const auto uid = parsed_text_values(invocation, command + ".uid");
     if (pod.has_value() != uid.has_value() ||
-        (*operation == AdminCommand::Operation::pod && !pod) ||
+        ((*operation == AdminCommand::Operation::pod ||
+          *operation == AdminCommand::Operation::pod_logs) &&
+         !pod) ||
         (pod && (pod->size() != 1 || uid->size() != 1 ||
                  !detail::valid_admin_pod(pod->front()) ||
                  !detail::valid_admin_resource_uid(uid->front()))))
@@ -832,6 +838,23 @@ auto admin_request(const ParsedInvocation& invocation)
       request.pod = pod->front();
       request.pod_uid = std::move(*parsed_uid);
     }
+  }
+  const bool logs = *operation == AdminCommand::Operation::service_logs ||
+                    *operation == AdminCommand::Operation::pod_logs;
+  request.allow_log_text =
+      parsed_argument(invocation, command + ".allow-log-text") != nullptr;
+  if (request.allow_log_text != logs)
+    return std::unexpected(
+        logs ? "Admin log reads require --allow-log-text"
+             : "--allow-log-text is only valid for Admin log reads");
+  const auto container = parsed_text_values(invocation, command + ".container");
+  if (*operation == AdminCommand::Operation::pod_logs) {
+    if (!container || container->size() != 1 ||
+        !detail::valid_admin_container(container->front()))
+      return std::unexpected("invalid Admin container name");
+    request.container = container->front();
+  } else if (container) {
+    return std::unexpected("Admin container is only valid for Pod logs");
   }
   if (parsed_argument(invocation, command + ".json") != nullptr)
     request.format = AdminCommand::OutputFormat::json;
@@ -900,6 +923,40 @@ auto admin_command_spec() -> CommandSpec {
          "Bind the selected Pod UID."});
     return result;
   }();
+  const auto service_logs = [&] {
+    auto result =
+        leaf("admin.service-logs", "service-logs",
+             "Read explicitly allowed exact service logs.", true, true);
+    result.options.push_back(
+        {{result.id + ".allow-log-text",
+          {"--allow-log-text"},
+          ArgumentValueKind::flag,
+          0,
+          1},
+         {},
+         "Explicitly authorize bounded application log text."});
+    return result;
+  }();
+  const auto pod_logs = [&] {
+    auto result = pod_leaf("admin.pod-logs", "pod-logs",
+                           "Read explicitly allowed exact Pod container logs.");
+    result.options.push_back({{result.id + ".container",
+                               {"--container"},
+                               ArgumentValueKind::text,
+                               1,
+                               1},
+                              "container",
+                              "Select one exact container name."});
+    result.options.push_back(
+        {{result.id + ".allow-log-text",
+          {"--allow-log-text"},
+          ArgumentValueKind::flag,
+          0,
+          1},
+         {},
+         "Explicitly authorize bounded application log text."});
+    return result;
+  }();
   return {"admin",
           "admin",
           "Inspect configured targets without inference.",
@@ -914,9 +971,11 @@ auto admin_command_spec() -> CommandSpec {
                 true, false),
            leaf("admin.service", "service", "Observe one selected service.",
                 true, true),
+           service_logs,
            leaf("admin.workloads", "workloads",
                 "List namespace workloads and Pods.", true, false),
-           pod_leaf("admin.pod", "pod", "Observe one exact Pod."), events},
+           pod_leaf("admin.pod", "pod", "Observe one exact Pod."), events,
+           pod_logs},
           admin_parent_handler};
 }
 

@@ -18,8 +18,12 @@ using adapters::admin_detail::Result;
 using Command = cli::AdminCommand;
 struct State {
   std::atomic<unsigned> preparations{}, observations{};
+  std::mutex mutex;
+  std::vector<domain::OpsObservationRequest> requests;
   bool preparation_failure{}, source_failure{}, wrong_source{};
+  bool missing_log_identity{};
   bool cancel_preparation{}, cancel_observation{};
+  std::optional<domain::OpsObservationOperation> cancel_operation;
   std::stop_source stop;
 };
 class Source final : public runtime::OpsObservationSource {
@@ -51,7 +55,12 @@ class Source final : public runtime::OpsObservationSource {
       -> std::expected<domain::OpsObservation,
                        runtime::OpsObservationSourceError> override {
     ++m_state->observations;
-    if (m_state->cancel_observation) {
+    {
+      const std::lock_guard lock{m_state->mutex};
+      m_state->requests.push_back(request);
+    }
+    if (m_state->cancel_observation ||
+        m_state->cancel_operation == request.operation) {
       m_state->stop.request_stop();
       std::mutex mutex;
       std::unique_lock lock{mutex};
@@ -83,10 +92,13 @@ class Source final : public runtime::OpsObservationSource {
             3}}};
     } else if (request.operation ==
                domain::OpsObservationOperation::linux_service_health) {
+      auto identity = std::get<domain::LinuxServiceIdentity>(request.resource);
+      if (!m_state->missing_log_identity)
+        identity.invocation_id =
+            domain::OpsResourceUid::from("service-invocation").value();
       result.payload = domain::LinuxServiceObservation{
-          std::get<domain::LinuxServiceIdentity>(request.resource),
-          domain::OpsServiceState::active, domain::OpsObservationReason::none,
-          0, 2};
+          std::move(identity), domain::OpsServiceState::active,
+          domain::OpsObservationReason::none, 0, 2};
     } else if (request.operation ==
                domain::OpsObservationOperation::kubernetes_workloads) {
       result.source_version = "rv-workloads";
@@ -104,12 +116,12 @@ class Source final : public runtime::OpsObservationSource {
           std::get<domain::KubernetesPodIdentity>(request.resource),
           domain::OpsPodPhase::failed,
           {{"app",
-            {},
+            m_state->missing_log_identity
+                ? std::nullopt
+                : std::optional<std::string>{"containerd://app"},
             domain::OpsContainerState::terminated,
             domain::OpsReadiness::not_ready,
-            domain::OpsObservationReason::failed_exit,
-            4,
-            7}}};
+            domain::OpsObservationReason::failed_exit, 4, 7}}};
     } else if (request.operation ==
                domain::OpsObservationOperation::kubernetes_events) {
       result.source_version = "rv-events";
@@ -131,6 +143,14 @@ class Source final : public runtime::OpsObservationSource {
             {},
             {},
             2}}};
+    } else if (request.operation ==
+                   domain::OpsObservationOperation::linux_service_logs ||
+               request.operation ==
+                   domain::OpsObservationOperation::kubernetes_pod_logs) {
+      result.payload = domain::OpsLogObservation{
+          request.resource,
+          {{domain::EventTimestamp{std::chrono::milliseconds{1000}},
+            "bounded log line"}}};
     }
     return result;
   }
@@ -379,6 +399,8 @@ TEST_CASE("Admin output refusal preserves one committed read without retry",
   REQUIRE(deps.state->observations == 1);
   REQUIRE(count<domain::OpsObservationRecorded>(deps.history()) == 1);
   REQUIRE(count_manual_run<domain::RunCompleted>(deps.history()) == 1);
+  REQUIRE(count<domain::OpsTargetSelected>(deps.history()) == 1);
+  REQUIRE(count<domain::RunCompleted>(deps.history()) == 2);
 }
 TEST_CASE("Admin capacity-one preparation hands off to one durable native "
           "observation",
@@ -402,6 +424,8 @@ TEST_CASE("Admin capacity-one preparation hands off to one durable native "
   REQUIRE(count<domain::HumanObservationRequested>(events) == 1);
   REQUIRE(count<domain::OpsObservationRecorded>(events) == 1);
   REQUIRE(count_manual_run<domain::RunCompleted>(events) == 1);
+  REQUIRE(count<domain::OpsTargetSelected>(events) == 1);
+  REQUIRE(count<domain::RunCompleted>(events) == 2);
   REQUIRE(count<domain::InferenceStarted>(events) == 0);
 }
 
@@ -482,4 +506,120 @@ TEST_CASE("Admin refuses target-kind and partial Pod identity mismatch before "
   CHECK(deps.factory_calls == 0);
   CHECK(deps.state->preparations == 0);
   CHECK(deps.state->observations == 0);
+}
+
+TEST_CASE("One-shot service logs prove invocation before one allowed log read",
+          "[admin][logs]") {
+  Dependencies deps;
+  Command::Request request{Command::Operation::service_logs};
+  request.target = "local";
+  request.unit = "Selected.service";
+  request.allow_log_text = true;
+  std::ostringstream output;
+  REQUIRE(execute(request, deps, {}, output));
+  REQUIRE(deps.state->observations == 2);
+  REQUIRE(deps.state->requests.size() == 2);
+  CHECK(deps.state->requests[0].operation ==
+        domain::OpsObservationOperation::linux_service_health);
+  CHECK(deps.state->requests[1].operation ==
+        domain::OpsObservationOperation::linux_service_logs);
+  const auto& source =
+      std::get<domain::LinuxServiceIdentity>(deps.state->requests[1].resource);
+  CHECK(source.unit_name == "Selected.service");
+  REQUIRE(source.invocation_id);
+  CHECK(source.invocation_id->value() == "service-invocation");
+  CHECK(deps.state->requests[1].selection_generation == 2);
+  CHECK(deps.state->requests[1].log_policy_revision == 2);
+  CHECK(output.str().find("bounded log line") != std::string::npos);
+  CHECK(output.str().find("explicitly allowed") != std::string::npos);
+}
+
+TEST_CASE("One-shot Pod logs prove exact container runtime before log read",
+          "[admin][kubernetes][logs]") {
+  Dependencies deps;
+  Command::Request request{Command::Operation::pod_logs};
+  request.target = "cluster";
+  request.pod = "broken-pod";
+  request.pod_uid = domain::OpsResourceUid::from("pod-uid").value();
+  request.container = "app";
+  request.allow_log_text = true;
+  std::ostringstream output;
+  REQUIRE(execute(request, deps, {}, output));
+  REQUIRE(deps.state->observations == 2);
+  REQUIRE(deps.state->requests.size() == 2);
+  CHECK(deps.state->requests[0].operation ==
+        domain::OpsObservationOperation::kubernetes_pod_health);
+  CHECK(deps.state->requests[1].operation ==
+        domain::OpsObservationOperation::kubernetes_pod_logs);
+  const auto& source =
+      std::get<domain::KubernetesPodIdentity>(deps.state->requests[1].resource);
+  REQUIRE(source.container);
+  CHECK(source.container->name == "app");
+  CHECK(source.container->runtime_identity == "containerd://app");
+  CHECK(output.str().find("bounded log line") != std::string::npos);
+}
+
+TEST_CASE("One-shot logs refuse absent consent before catalog or source work",
+          "[admin][logs][failure]") {
+  for (const auto operation :
+       {Command::Operation::service_logs, Command::Operation::pod_logs}) {
+    Dependencies deps;
+    Command::Request request{operation};
+    request.unit = operation == Command::Operation::service_logs
+                       ? std::optional<std::string>{"Selected.service"}
+                       : std::nullopt;
+    if (operation == Command::Operation::pod_logs) {
+      request.target = "cluster";
+      request.pod = "broken-pod";
+      request.pod_uid = domain::OpsResourceUid::from("pod-uid").value();
+      request.container = "app";
+    }
+    std::ostringstream output;
+    const auto result = execute(request, deps, {}, output);
+    REQUIRE_FALSE(result);
+    CHECK(result.error().kind == cli::CommandFailureKind::usage);
+    CHECK(deps.catalog_calls == 0);
+    CHECK(deps.store_calls == 0);
+    CHECK(deps.state->observations == 0);
+  }
+}
+
+TEST_CASE("One-shot logs fail closed when health lacks runtime identity",
+          "[admin][logs][failure]") {
+  for (const auto operation :
+       {Command::Operation::service_logs, Command::Operation::pod_logs}) {
+    Dependencies deps;
+    deps.state->missing_log_identity = true;
+    Command::Request request{operation};
+    request.allow_log_text = true;
+    if (operation == Command::Operation::service_logs) {
+      request.unit = "Selected.service";
+    } else {
+      request.target = "cluster";
+      request.pod = "broken-pod";
+      request.pod_uid = domain::OpsResourceUid::from("pod-uid").value();
+      request.container = "app";
+    }
+    std::ostringstream output;
+    REQUIRE_FALSE(execute(request, deps, {}, output));
+    CHECK(deps.state->observations == 1);
+    CHECK(output.str().empty());
+  }
+}
+
+TEST_CASE("One-shot log cancellation publishes only the completed health proof",
+          "[admin][logs][failure][cancellation]") {
+  Dependencies deps;
+  deps.state->cancel_operation =
+      domain::OpsObservationOperation::linux_service_logs;
+  Command::Request request{Command::Operation::service_logs};
+  request.unit = "Selected.service";
+  request.allow_log_text = true;
+  std::ostringstream output;
+  REQUIRE_FALSE(execute(request, deps, deps.state->stop.get_token(), output));
+  CHECK(deps.state->observations == 2);
+  CHECK(output.str().empty());
+  const auto events = deps.history();
+  CHECK(count<domain::OpsObservationRecorded>(events) == 1);
+  CHECK(count<domain::InferenceStarted>(events) == 0);
 }

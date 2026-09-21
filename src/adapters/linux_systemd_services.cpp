@@ -307,7 +307,6 @@ auto inspect(const domain::OpsObservationRequest& request,
   if (selected->invocation_id &&
       observed->value.identity.invocation_id != selected->invocation_id)
     return fail(Error::source_changed);
-  observed->value.identity = *selected;
   return domain::OpsObservation{
       request,
       started,

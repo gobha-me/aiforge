@@ -38,6 +38,9 @@ class OpsSessionLogConsent final {
   [[nodiscard]] auto replace_selection(
       domain::OpsObservationAuthoritySpec disabled_authority)
       -> std::expected<domain::OpsObservationAuthority, domain::OpsTargetError>;
+  // Immediate, idempotent process-local revocation. Outstanding source work
+  // may finish cleanup, but can no longer dispatch or publish log text.
+  auto revoke() noexcept -> void;
 
  private:
   explicit OpsSessionLogConsent(

@@ -253,6 +253,14 @@ TEST_CASE("Ops lists and exact reads reject replaced foreign and duplicate "
   std::get<LinuxServiceObservation>(single.payload).identity.invocation_id =
       id<OpsResourceUid>("restarted");
   CHECK_FALSE(exact.validate(single));
+  Fixture refined{OpsObservationOperation::linux_service_health};
+  std::get<LinuxServiceIdentity>(refined.request.resource)
+      .invocation_id.reset();
+  auto resolved = refined.observation();
+  REQUIRE(refined.validate(resolved));
+  std::get<LinuxServiceObservation>(resolved.payload).identity.unit_name =
+      "foreign.service";
+  CHECK_FALSE(refined.validate(resolved));
   Fixture pod_fixture{OpsObservationOperation::kubernetes_pod_health};
   auto pod_value = pod_fixture.observation();
   std::get<KubernetesPodObservation>(pod_value.payload).identity.uid =

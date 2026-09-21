@@ -353,7 +353,7 @@ TEST_CASE("Service signals unknown states and absent cycles stay truthful",
   const auto& service =
       std::get<domain::LinuxServiceObservation>(observed->payload);
   REQUIRE_FALSE(service.exit_status);
-  REQUIRE_FALSE(service.identity.invocation_id);
+  CHECK(service.identity.invocation_id.has_value() == !unit.before.empty());
 }
 TEST_CASE("Service source supports concurrent independent connections",
           "[linux-services]") {
@@ -391,6 +391,21 @@ TEST_CASE("Service smoke preserves selected identity and known zero values",
           std::get<domain::LinuxServiceIdentity>(request.resource));
   REQUIRE(service.exit_status == 0);
   REQUIRE(service.restart_count == 0);
+}
+TEST_CASE("Service health resolves the current invocation for a named unit",
+          "[linux-services][identity]") {
+  Fixture fixture;
+  fixture.health();
+  const auto request = fixture.request();
+  auto observed = fixture.source->observe(request);
+  REQUIRE(observed);
+  REQUIRE(domain::validate_recorded_ops_observation(*observed));
+  const auto& service =
+      std::get<domain::LinuxServiceObservation>(observed->payload);
+  REQUIRE(service.identity.unit_name == "ssh.service");
+  REQUIRE(service.identity.invocation_id);
+  CHECK(service.identity.invocation_id->value() ==
+        "01010101010101010101010101010101");
 }
 TEST_CASE(
     "Only implemented health service and exact log operations are advertised",

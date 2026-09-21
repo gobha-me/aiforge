@@ -13,6 +13,12 @@ using Code = ManualOpsErrorCode;
 using Failure = ManualOpsFailure;
 using SourceError = runtime::OpsObservationSourceError;
 using WorkerCode = runtime::LocalSourceWorkerErrorCode;
+template <class... Callables> struct Overloaded : Callables... {
+  using Callables::operator()...;
+};
+template <class... Callables>
+Overloaded(Callables...) -> Overloaded<Callables...>;
+
 auto failure(Code code) -> std::unexpected<Failure> {
   return std::unexpected(Failure{code});
 }
@@ -50,16 +56,77 @@ auto operation_matches(domain::OpsTargetKind kind,
     case domain::OpsTargetKind::linux_local:
       return operation == domain::OpsObservationOperation::linux_health ||
              operation == domain::OpsObservationOperation::linux_services ||
-             operation == domain::OpsObservationOperation::linux_service_health;
+             operation ==
+                 domain::OpsObservationOperation::linux_service_health ||
+             operation == domain::OpsObservationOperation::linux_service_logs;
     case domain::OpsTargetKind::kubernetes:
       return operation ==
                  domain::OpsObservationOperation::kubernetes_workloads ||
              operation ==
                  domain::OpsObservationOperation::kubernetes_pod_health ||
-             operation == domain::OpsObservationOperation::kubernetes_events;
+             operation == domain::OpsObservationOperation::kubernetes_events ||
+             operation == domain::OpsObservationOperation::kubernetes_pod_logs;
     case domain::OpsTargetKind::ceph: return false;
   }
   return false;
+}
+auto observation_operations(domain::OpsTargetKind kind)
+    -> std::vector<domain::OpsObservationOperation> {
+  if (kind == domain::OpsTargetKind::linux_local)
+    return {domain::OpsObservationOperation::linux_health,
+            domain::OpsObservationOperation::linux_services,
+            domain::OpsObservationOperation::linux_service_health,
+            domain::OpsObservationOperation::linux_service_logs};
+  return {domain::OpsObservationOperation::kubernetes_workloads,
+          domain::OpsObservationOperation::kubernetes_pod_health,
+          domain::OpsObservationOperation::kubernetes_events,
+          domain::OpsObservationOperation::kubernetes_pod_logs};
+}
+auto matches_log_evidence_request(const domain::OpsObservationRequest& request,
+                                  const AdminDisplayedLogSource& displayed)
+    -> bool {
+  return request.session_id == displayed.session &&
+         request.target == displayed.target &&
+         request.selection_generation == displayed.selection_generation &&
+         request.log_policy_revision == displayed.log_policy_revision;
+}
+auto matches_linux_log_source(const CommittedOpsObservation& cached,
+                              const domain::LinuxServiceIdentity& source)
+    -> bool {
+  const auto& request = cached.observation.request;
+  const auto* observed =
+      std::get_if<domain::LinuxServiceObservation>(&cached.observation.payload);
+  const auto* requested =
+      std::get_if<domain::LinuxServiceIdentity>(&request.resource);
+  return request.operation ==
+             domain::OpsObservationOperation::linux_service_health &&
+         observed != nullptr && requested != nullptr &&
+         requested->unit_name == source.unit_name &&
+         observed->identity == source && source.invocation_id.has_value();
+}
+auto matches_kubernetes_log_source(const CommittedOpsObservation& cached,
+                                   const domain::KubernetesPodIdentity& source)
+    -> bool {
+  if (!source.container) return false;
+  const auto& request = cached.observation.request;
+  const auto* observed = std::get_if<domain::KubernetesPodObservation>(
+      &cached.observation.payload);
+  const auto* requested =
+      std::get_if<domain::KubernetesPodIdentity>(&request.resource);
+  if (request.operation !=
+          domain::OpsObservationOperation::kubernetes_pod_health ||
+      observed == nullptr || requested == nullptr || requested->container ||
+      observed->identity != *requested ||
+      observed->identity.namespace_name != source.namespace_name ||
+      observed->identity.name != source.name ||
+      observed->identity.uid != source.uid)
+    return false;
+  const auto& container_source = *source.container;
+  return std::ranges::any_of(observed->containers, [&](const auto& container) {
+    return container.name == container_source.name &&
+           container.runtime_identity &&
+           *container.runtime_identity == container_source.runtime_identity;
+  });
 }
 auto disconnected(AdminState& state) noexcept -> void {
   for (std::size_t slot{}; slot < state.snapshots.size(); ++slot) {
@@ -249,6 +316,8 @@ struct AdminController::Impl {
   ManualOpsSession* manual{};
   AdminSelectionBinding* binding{};
   std::shared_ptr<runtime::OpsObservationEndpoint> endpoint;
+  std::shared_ptr<runtime::OpsObservationSource> selected_source;
+  std::optional<runtime::OpsSessionLogConsent> log_consent;
   std::optional<Preparation> preparation;
   std::optional<std::size_t> current_slot;
   AdminState state;
@@ -258,15 +327,27 @@ struct AdminController::Impl {
       : owner(std::move(identity)), catalog(std::move(sources)),
         worker(std::move(shared_worker)) {}
 
-  auto clear_attachment() noexcept -> void {
-    manual = nullptr;
+  auto revoke_current_authority() noexcept -> void {
+    if (log_consent) log_consent->revoke();
+    log_consent.reset();
+    selected_source.reset();
     binding = nullptr;
     endpoint.reset();
-    state.session.reset();
     state.active_target.reset();
+    state.log_consent = AdminLogConsentState::unavailable;
+    state.log_policy_revision = 0;
+    state.log_source.reset();
+    state.log_evidence_event.reset();
     state.current.reset();
     state.current_status = domain::RunStatus::not_started;
     current_slot.reset();
+  }
+
+  auto clear_attachment() noexcept -> void {
+    revoke_current_authority();
+    manual = nullptr;
+    state.session.reset();
+    state.selection_generation = 0;
     detached(state);
   }
   auto phase() -> void {
@@ -291,9 +372,31 @@ struct AdminController::Impl {
   }
   auto report(Failure value) -> std::unexpected<Failure> {
     if (!state.fatal) state.problem = value;
-    state.fatal = state.fatal || fatal(value);
+    if (fatal(value)) {
+      revoke_current_authority();
+      state.fatal = true;
+    }
     phase();
     return std::unexpected(state.problem.value_or(value));
+  }
+  auto fail_closed(Failure value) -> std::unexpected<Failure> {
+    revoke_current_authority();
+    state.fatal = true;
+    state.problem = value;
+    phase();
+    return std::unexpected(value);
+  }
+  auto bind_consent_authority(
+      const domain::OpsObservationAuthority& authority,
+      const std::shared_ptr<runtime::OpsObservationSource>& source)
+      -> std::expected<void, Failure> {
+    try {
+      auto bound = binding->bind(authority, source, endpoint);
+      if (!bound) return fail_closed(bound.error());
+      return {};
+    } catch (...) {
+      return fail_closed({Code::internal_failure});
+    }
   }
   auto source_failure(SourceError value) -> std::unexpected<Failure> {
     if (!state.fatal) state.source_problem = value;
@@ -303,7 +406,41 @@ struct AdminController::Impl {
       return report({Code::internal_failure});
     return report({Code::operation_failed});
   }
-  auto eligible() -> std::expected<void, Failure> {
+  auto revoke_selected_logs() -> std::expected<void, Failure> {
+    try {
+      if (state.log_consent != AdminLogConsentState::enabled) return {};
+      if (!state.session || !state.active_target || !endpoint ||
+          binding == nullptr || !log_consent || !selected_source ||
+          !state.log_source)
+        return fail_closed({Code::unavailable});
+      auto current = log_consent->authority();
+      if (!current) return fail_closed({Code::unavailable});
+      const auto& specification = current->specification();
+      auto authority = log_consent->apply({*state.session, *state.active_target,
+                                           specification.selection_generation,
+                                           specification.logs.revision,
+                                           *state.log_source, false});
+      if (!authority) return fail_closed({Code::operation_failed});
+      if (state.current && !terminal(state.current_status)) {
+        auto cancelled = cancel_current();
+        if (!cancelled) return fail_closed(cancelled.error());
+      }
+      if (auto bound = bind_consent_authority(*authority, selected_source);
+          !bound)
+        return bound;
+      state.selection_generation =
+          authority->specification().selection_generation;
+      state.log_consent = AdminLogConsentState::disabled;
+      state.log_policy_revision = authority->specification().logs.revision;
+      state.current.reset();
+      state.current_status = domain::RunStatus::not_started;
+      current_slot.reset();
+      return {};
+    } catch (...) {
+      return fail_closed({Code::internal_failure});
+    }
+  }
+  auto eligible(bool allow_busy = false) -> std::expected<void, Failure> {
     if (state.fatal) return report(state.problem.value_or(Failure{}));
     if (manual == nullptr || !state.session || !endpoint || binding == nullptr)
       return report({Code::unavailable});
@@ -311,7 +448,7 @@ struct AdminController::Impl {
     if (inspection.problem && fatal(*inspection.problem))
       return report(*inspection.problem);
     if (inspection.closed) return report({Code::closed});
-    if (inspection.busy) return report({Code::busy});
+    if (inspection.busy && !allow_busy) return report({Code::busy});
     // available is false for a legitimate first, as-yet-unbound session.
     return {};
   }
@@ -359,6 +496,7 @@ struct AdminController::Impl {
         request.session_id != *state.session ||
         request.target != *state.active_target ||
         request.selection_generation != state.selection_generation ||
+        request.log_policy_revision != state.log_policy_revision ||
         !valid_id(success->observation_event_id.value()) ||
         !valid_id(success->result_event_id.value()) ||
         !domain::validate_recorded_ops_observation(success->observation))
@@ -418,11 +556,13 @@ struct AdminController::Impl {
     const auto found =
         std::ranges::find(state.targets, target, &AdminTargetChoice::id);
     if (found == state.targets.end()) return report({Code::invalid_input});
-    if (auto allowed = eligible(); !allowed) return allowed;
+    if (auto allowed = eligible(true); !allowed) return allowed;
     if (preparation) {
       if (auto cancelled = cancel_preparation(); !cancelled) return cancelled;
       if (preparation) return report({Code::busy});
     }
+    if (auto revoked = revoke_selected_logs(); !revoked) return revoked;
+    if (auto allowed = eligible(); !allowed) return allowed;
     if (state.selection_generation == std::numeric_limits<std::uint64_t>::max())
       return report({Code::resource_exhausted});
     auto sequence = worker->allocate_request_id();
@@ -451,48 +591,77 @@ struct AdminController::Impl {
     phase();
     return {};
   }
-  auto bind_prepared() -> std::expected<void, Failure> {
-    if (auto allowed = eligible(); !allowed) return allowed;
-    if (!preparation || !preparation->claimed || !state.session)
-      return report({Code::internal_failure});
-    const auto& source = preparation->claimed->source;
-    auto valid = runtime::validate_ops_source_preparation_result(
-        preparation->request, *preparation->claimed);
-    if (!valid) return source_failure(valid.error());
-    const auto kind = domain::ops_target_kind(source->target_binding());
-    if (!kind || *kind == domain::OpsTargetKind::ceph)
-      return source_failure(SourceError::unsupported);
-    auto target = source->target_binding();
-    const auto generation = state.selection_generation + 1;
-    std::vector<domain::OpsObservationOperation> operations;
-    if (*kind == domain::OpsTargetKind::linux_local) {
-      operations = {domain::OpsObservationOperation::linux_health,
-                    domain::OpsObservationOperation::linux_services,
-                    domain::OpsObservationOperation::linux_service_health};
-    } else {
-      operations = {domain::OpsObservationOperation::kubernetes_workloads,
-                    domain::OpsObservationOperation::kubernetes_pod_health,
-                    domain::OpsObservationOperation::kubernetes_events};
+  auto make_selection_authority(
+      domain::OpsObservationAuthoritySpec specification)
+      -> std::expected<domain::OpsObservationAuthority, Failure> {
+    if (!log_consent) {
+      auto started =
+          runtime::OpsSessionLogConsent::start(*endpoint, specification);
+      if (!started) return report({Code::invalid_input});
+      auto& consent = log_consent.emplace(std::move(*started));
+      auto authority = consent.authority();
+      if (!authority) return fail_closed({Code::operation_failed});
+      return std::move(*authority);
     }
-    auto authority =
-        domain::OpsObservationAuthority::create({owner,
-                                                 *state.session,
-                                                 target,
-                                                 generation,
-                                                 std::move(operations),
-                                                 {},
-                                                 {}});
-    if (!authority) return report({Code::invalid_input});
-    auto bound = binding->bind(std::move(*authority), source, endpoint);
-    if (!bound) return report(bound.error());
-    state.active_target = std::move(target);
-    state.selection_generation = generation;
-    state.current.reset();
-    state.current_status = domain::RunStatus::not_started;
-    current_slot.reset();
-    state.problem.reset();
-    state.source_problem.reset();
-    return {};
+    auto& consent = *log_consent;
+    auto current = consent.authority();
+    if (!current) return fail_closed({Code::unavailable});
+    if (current->specification().selection_generation ==
+            std::numeric_limits<std::uint64_t>::max() ||
+        current->specification().logs.revision ==
+            std::numeric_limits<std::uint64_t>::max())
+      return fail_closed({Code::resource_exhausted});
+    specification.selection_generation =
+        current->specification().selection_generation + 1;
+    specification.logs.revision = current->specification().logs.revision + 1;
+    auto authority = consent.replace_selection(std::move(specification));
+    if (!authority) return fail_closed({Code::operation_failed});
+    return std::move(*authority);
+  }
+  auto bind_prepared() -> std::expected<void, Failure> {
+    try {
+      if (auto allowed = eligible(); !allowed) return allowed;
+      if (!preparation || !preparation->claimed || !state.session)
+        return report({Code::internal_failure});
+      const auto& source = preparation->claimed->source;
+      auto valid = runtime::validate_ops_source_preparation_result(
+          preparation->request, *preparation->claimed);
+      if (!valid) return source_failure(valid.error());
+      const auto kind = domain::ops_target_kind(source->target_binding());
+      if (!kind || *kind == domain::OpsTargetKind::ceph)
+        return source_failure(SourceError::unsupported);
+      auto target = source->target_binding();
+      const auto generation = state.selection_generation + 1;
+      domain::OpsObservationAuthoritySpec specification{
+          owner,
+          *state.session,
+          target,
+          generation,
+          observation_operations(*kind),
+          {},
+          {}};
+      auto authority = make_selection_authority(std::move(specification));
+      if (!authority) return std::unexpected(authority.error());
+      if (auto bound = bind_consent_authority(*authority, source); !bound)
+        return bound;
+      state.active_target = std::move(target);
+      state.selection_generation =
+          authority->specification().selection_generation;
+      selected_source = source;
+      state.log_consent = AdminLogConsentState::disabled;
+      state.log_policy_revision = authority->specification().logs.revision;
+      state.log_source.reset();
+      state.log_evidence_event.reset();
+      state.current.reset();
+      state.current_status = domain::RunStatus::not_started;
+      current_slot.reset();
+      state.problem.reset();
+      state.source_problem.reset();
+      return {};
+    } catch (...) {
+      if (log_consent) return fail_closed({Code::internal_failure});
+      return report({Code::internal_failure});
+    }
   }
   auto claim_prepared(const runtime::OpsSourcePreparationState& metadata)
       -> std::expected<void, Failure> {
@@ -570,11 +739,19 @@ struct AdminController::Impl {
             : (operation ==
                    domain::OpsObservationOperation::linux_service_health ||
                operation ==
+                   domain::OpsObservationOperation::linux_service_logs ||
+               operation ==
                    domain::OpsObservationOperation::kubernetes_pod_health ||
                operation ==
+                   domain::OpsObservationOperation::kubernetes_pod_logs ||
+               operation ==
                    domain::OpsObservationOperation::kubernetes_events) &&
-                  domain::validate_ops_resource_identity(*state.active_target,
-                                                         resource)
+                  domain::validate_ops_resource_identity(
+                      *state.active_target, resource,
+                      operation == domain::OpsObservationOperation::
+                                       linux_service_logs ||
+                          operation == domain::OpsObservationOperation::
+                                           kubernetes_pod_logs)
                       .has_value();
     const auto slot = snapshot_index(operation);
     if (!operation_matches(*kind, operation) || !valid_resource || !slot)
@@ -658,6 +835,7 @@ struct AdminController::Impl {
     if (!state.session || action.session != *state.session || !cached ||
         !state.active_target || action.target != *state.active_target ||
         action.selection_generation != state.selection_generation ||
+        action.log_policy_revision != state.log_policy_revision ||
         cached->observation_event_id != action.observation_event) {
       return report({Code::wrong_operation});
     }
@@ -665,11 +843,123 @@ struct AdminController::Impl {
     if (request.session_id != action.session ||
         request.target != action.target ||
         request.selection_generation != action.selection_generation ||
+        request.log_policy_revision != action.log_policy_revision ||
         request.operation != action.operation ||
         request.resource != action.resource) {
       return report({Code::wrong_operation});
     }
     return read(action.operation, action.resource);
+  }
+  auto validate_log_source(const AdminDisplayedLogSource& displayed)
+      -> std::expected<void, Failure> {
+    if (!state.session || !state.active_target ||
+        displayed.session != *state.session ||
+        displayed.target != *state.active_target ||
+        displayed.selection_generation != state.selection_generation ||
+        displayed.log_policy_revision != state.log_policy_revision)
+      return report({Code::wrong_operation});
+    if (state.log_source && state.log_evidence_event &&
+        displayed.source == *state.log_source &&
+        displayed.observation_event == *state.log_evidence_event)
+      return {};
+    const auto linux =
+        std::get_if<domain::LinuxServiceIdentity>(&displayed.source);
+    const auto pod =
+        std::get_if<domain::KubernetesPodIdentity>(&displayed.source);
+    const std::size_t slot = linux != nullptr ? 2U : 4U;
+    const auto& cached = state.snapshots[slot];
+    if (!cached || cached->observation_event_id != displayed.observation_event)
+      return report({Code::wrong_operation});
+    const auto& request = cached->observation.request;
+    if (!matches_log_evidence_request(request, displayed))
+      return report({Code::wrong_operation});
+    if (linux != nullptr && matches_linux_log_source(*cached, *linux))
+      return {};
+    if (pod != nullptr && matches_kubernetes_log_source(*cached, *pod))
+      return {};
+    return report({Code::wrong_operation});
+  }
+  auto validate_log_change(const AdminDisplayedLogSource& displayed,
+                           bool enabled) -> std::expected<void, Failure> {
+    if (preparation || state.pending_target) return report({Code::busy});
+    if (auto valid = validate_log_source(displayed); !valid) return valid;
+    const bool currently_enabled =
+        state.log_consent == AdminLogConsentState::enabled;
+    if (enabled == currently_enabled) return report({Code::wrong_operation});
+    if (!enabled && (!state.log_source || !state.log_evidence_event ||
+                     displayed.source != *state.log_source ||
+                     displayed.observation_event != *state.log_evidence_event))
+      return report({Code::wrong_operation});
+    if (enabled && state.current && !terminal(state.current_status))
+      return report({Code::busy});
+    return {};
+  }
+  auto change_logs(const AdminDisplayedLogSource& displayed, bool enabled)
+      -> std::expected<void, Failure> {
+    try {
+      // Disabling is allowed while an observation is running so publication is
+      // revoked before cancellation and physical source cleanup.
+      if (state.fatal || manual == nullptr || !endpoint || binding == nullptr)
+        return report({Code::unavailable});
+      if (!state.session || !state.active_target || !selected_source)
+        return report({Code::unavailable});
+      if (!log_consent) return report({Code::unavailable});
+      if (auto valid = validate_log_change(displayed, enabled); !valid)
+        return valid;
+      if (!log_consent) return fail_closed({Code::unavailable});
+      auto& consent = *log_consent;
+      const auto& session = *state.session;
+      const auto& target = *state.active_target;
+      const auto& source = selected_source;
+      auto current = consent.authority();
+      if (!current) return fail_closed({Code::unavailable});
+      auto retained_source = displayed.source;
+      auto retained_event = displayed.observation_event;
+      const auto& spec = current->specification();
+      runtime::OpsLogConsentChange change{session,
+                                          target,
+                                          spec.selection_generation,
+                                          spec.logs.revision,
+                                          displayed.source,
+                                          enabled};
+      auto authority = consent.apply(change);
+      if (!authority) return fail_closed({Code::operation_failed});
+      if (!enabled && state.current && !terminal(state.current_status)) {
+        auto cancelled = cancel_current();
+        if (!cancelled) return fail_closed(cancelled.error());
+      }
+      if (auto bound = bind_consent_authority(*authority, source); !bound)
+        return bound;
+      state.selection_generation =
+          authority->specification().selection_generation;
+      state.log_consent = enabled ? AdminLogConsentState::enabled
+                                  : AdminLogConsentState::disabled;
+      state.log_policy_revision = authority->specification().logs.revision;
+      state.log_source = std::move(retained_source);
+      state.log_evidence_event = std::move(retained_event);
+      state.current.reset();
+      state.current_status = domain::RunStatus::not_started;
+      current_slot.reset();
+      state.problem.reset();
+      state.source_problem.reset();
+      phase();
+      return {};
+    } catch (...) {
+      return fail_closed({Code::internal_failure});
+    }
+  }
+  auto read_logs(const AdminDisplayedLogSource& displayed)
+      -> std::expected<void, Failure> {
+    if (preparation || state.pending_target) return report({Code::busy});
+    if (auto valid = validate_log_source(displayed); !valid) return valid;
+    if (state.log_consent != AdminLogConsentState::enabled ||
+        !state.log_source || *state.log_source != displayed.source)
+      return report({Code::unavailable});
+    const auto operation =
+        std::holds_alternative<domain::LinuxServiceIdentity>(displayed.source)
+            ? domain::OpsObservationOperation::linux_service_logs
+            : domain::OpsObservationOperation::kubernetes_pod_logs;
+    return read(operation, displayed.source);
   }
 };
 
@@ -770,66 +1060,101 @@ auto AdminController::pump() -> std::expected<void, ManualOpsFailure> {
     return m_impl->report({Code::internal_failure});
   }
 }
-// NOLINTNEXTLINE(readability-function-cognitive-complexity) -- Typed dispatch.
 auto AdminController::execute(const AdminAction& action)
     -> std::expected<void, ManualOpsFailure> {
   try {
     return std::visit(
-        [&](const auto& value) -> std::expected<void, ManualOpsFailure> {
-          using T = std::remove_cvref_t<decltype(value)>;
-          if constexpr (std::same_as<T, AdminInspect>) {
-            m_impl->state.visible = true;
-            return {};
-          } else if constexpr (std::same_as<T, AdminSelectTarget>) {
-            return m_impl->select(value.target);
-          } else if constexpr (std::same_as<T, AdminReadHealth>) {
-            return m_impl->read(domain::OpsObservationOperation::linux_health);
-          } else if constexpr (std::same_as<T, AdminReadServices>) {
-            return m_impl->read(
-                domain::OpsObservationOperation::linux_services);
-          } else if constexpr (std::same_as<T, AdminReadNamedService>) {
-            if (!detail::valid_admin_service(value.unit))
-              return m_impl->report({Code::invalid_input});
-            return m_impl->read(
-                domain::OpsObservationOperation::linux_service_health,
-                domain::LinuxServiceIdentity{value.unit, {}});
-          } else if constexpr (std::same_as<T, AdminReadCachedService>) {
-            return m_impl->cached_service(value);
-          } else if constexpr (std::same_as<T, AdminReadWorkloads>) {
-            return m_impl->read(
-                domain::OpsObservationOperation::kubernetes_workloads);
-          } else if constexpr (std::same_as<T, AdminReadEvents>) {
-            return m_impl->read(
-                domain::OpsObservationOperation::kubernetes_events);
-          } else if constexpr (std::same_as<T, AdminReadNamedPod>) {
-            return m_impl->named_pod(
-                value.name, value.uid,
-                domain::OpsObservationOperation::kubernetes_pod_health);
-          } else if constexpr (std::same_as<T, AdminReadNamedPodEvents>) {
-            return m_impl->named_pod(
-                value.name, value.uid,
-                domain::OpsObservationOperation::kubernetes_events);
-          } else if constexpr (std::same_as<T, AdminReadCachedPod>) {
-            return m_impl->cached_pod(
-                value.session, value.inventory_event,
-                value.selection_generation, value.row,
-                domain::OpsObservationOperation::kubernetes_pod_health);
-          } else if constexpr (std::same_as<T, AdminReadCachedPodEvents>) {
-            return m_impl->cached_pod(
-                value.session, value.inventory_event,
-                value.selection_generation, value.row,
-                domain::OpsObservationOperation::kubernetes_events);
-          } else if constexpr (std::same_as<T, AdminRefreshDisplayed>) {
-            return m_impl->refresh_displayed(value);
-          } else {
-            if constexpr (std::same_as<T, AdminCloseView>)
+        Overloaded{
+            [&](const AdminInspect&) -> std::expected<void, Failure> {
+              m_impl->state.visible = true;
+              return {};
+            },
+            [&](const AdminSelectTarget& value) {
+              return m_impl->select(value.target);
+            },
+            [&](const AdminReadHealth&) {
+              return m_impl->read(
+                  domain::OpsObservationOperation::linux_health);
+            },
+            [&](const AdminReadServices&) {
+              return m_impl->read(
+                  domain::OpsObservationOperation::linux_services);
+            },
+            [&](const AdminReadNamedService& value)
+                -> std::expected<void, Failure> {
+              if (!detail::valid_admin_service(value.unit))
+                return m_impl->report({Code::invalid_input});
+              return m_impl->read(
+                  domain::OpsObservationOperation::linux_service_health,
+                  domain::LinuxServiceIdentity{value.unit, {}});
+            },
+            [&](const AdminReadCachedService& value) {
+              return m_impl->cached_service(value);
+            },
+            [&](const AdminReadWorkloads&) {
+              return m_impl->read(
+                  domain::OpsObservationOperation::kubernetes_workloads);
+            },
+            [&](const AdminReadEvents&) {
+              return m_impl->read(
+                  domain::OpsObservationOperation::kubernetes_events);
+            },
+            [&](const AdminReadNamedPod& value) {
+              return m_impl->named_pod(
+                  value.name, value.uid,
+                  domain::OpsObservationOperation::kubernetes_pod_health);
+            },
+            [&](const AdminReadNamedPodEvents& value) {
+              return m_impl->named_pod(
+                  value.name, value.uid,
+                  domain::OpsObservationOperation::kubernetes_events);
+            },
+            [&](const AdminReadCachedPod& value) {
+              return m_impl->cached_pod(
+                  value.session, value.inventory_event,
+                  value.selection_generation, value.row,
+                  domain::OpsObservationOperation::kubernetes_pod_health);
+            },
+            [&](const AdminReadCachedPodEvents& value) {
+              return m_impl->cached_pod(
+                  value.session, value.inventory_event,
+                  value.selection_generation, value.row,
+                  domain::OpsObservationOperation::kubernetes_events);
+            },
+            [&](const AdminRefreshDisplayed& value) {
+              return m_impl->refresh_displayed(value);
+            },
+            [&](const AdminEnableDisplayedLogs& value)
+                -> std::expected<void, Failure> {
+              if (!value.displayed)
+                return m_impl->report({Code::wrong_operation});
+              return m_impl->change_logs(*value.displayed, true);
+            },
+            [&](const AdminDisableDisplayedLogs& value)
+                -> std::expected<void, Failure> {
+              if (!value.displayed)
+                return m_impl->report({Code::wrong_operation});
+              return m_impl->change_logs(*value.displayed, false);
+            },
+            [&](const AdminReadDisplayedLogs& value)
+                -> std::expected<void, Failure> {
+              if (!value.displayed)
+                return m_impl->report({Code::wrong_operation});
+              return m_impl->read_logs(*value.displayed);
+            },
+            [&](const AdminCancel&) {
+              auto preparation = m_impl->cancel_preparation();
+              auto current = m_impl->cancel_current();
+              if (!preparation) return preparation;
+              return current;
+            },
+            [&](const AdminCloseView&) {
               m_impl->state.visible = false;
-            auto preparation = m_impl->cancel_preparation();
-            auto current = m_impl->cancel_current();
-            if (!preparation) return preparation;
-            return current;
-          }
-        },
+              auto preparation = m_impl->cancel_preparation();
+              auto current = m_impl->cancel_current();
+              if (!preparation) return preparation;
+              return current;
+            }},
         action);
   } catch (...) {
     return m_impl->report({Code::internal_failure});

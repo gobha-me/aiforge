@@ -14,6 +14,8 @@ class Controls final : public AdminControls {
   AdminState state;
   std::vector<AdminAction> actions;
   bool refuse{};
+  bool advance_log_policy{};
+  bool require_current_log_proof{};
   Controls() {
     state.targets.push_back({id<domain::OpsTargetId>("local"), "Local Linux",
                              domain::OpsTargetKind::linux_local});
@@ -26,6 +28,29 @@ class Controls final : public AdminControls {
     actions.push_back(value);
     if (refuse)
       return std::unexpected(ManualOpsFailure{ManualOpsErrorCode::busy});
+    if (require_current_log_proof) {
+      const auto* enabled = std::get_if<AdminEnableDisplayedLogs>(&value);
+      if (enabled != nullptr &&
+          (!enabled->displayed || !state.session || !state.active_target ||
+           enabled->displayed->session != *state.session ||
+           enabled->displayed->target != *state.active_target ||
+           enabled->displayed->selection_generation !=
+               state.selection_generation ||
+           enabled->displayed->log_policy_revision !=
+               state.log_policy_revision))
+        return std::unexpected(
+            ManualOpsFailure{ManualOpsErrorCode::wrong_operation});
+    }
+    if (advance_log_policy) {
+      if (const auto* enabled = std::get_if<AdminEnableDisplayedLogs>(&value);
+          enabled != nullptr && enabled->displayed) {
+        ++state.selection_generation;
+        ++state.log_policy_revision;
+        state.log_consent = AdminLogConsentState::enabled;
+        state.log_source = enabled->displayed->source;
+        state.log_evidence_event = enabled->displayed->observation_event;
+      }
+    }
     return {};
   }
   auto inspect() const noexcept -> const AdminState& override { return state; }
@@ -136,16 +161,14 @@ auto kube_committed(std::string event = "kube-observed")
 }
 auto service_details_committed() -> CommittedOpsObservation {
   auto result = committed("service-details");
+  const domain::LinuxServiceIdentity source{
+      "example.service", id<domain::OpsResourceUid>("invocation")};
   result.observation.request.operation =
       domain::OpsObservationOperation::linux_service_health;
-  result.observation.request.resource =
-      domain::LinuxServiceIdentity{"example.service", {}};
-  result.observation.payload =
-      domain::LinuxServiceObservation{{"example.service", {}},
-                                      domain::OpsServiceState::failed,
-                                      domain::OpsObservationReason::failed_exit,
-                                      7,
-                                      3};
+  result.observation.request.resource = source;
+  result.observation.payload = domain::LinuxServiceObservation{
+      source, domain::OpsServiceState::failed,
+      domain::OpsObservationReason::failed_exit, 7, 3};
   REQUIRE(domain::validate_recorded_ops_observation(result.observation));
   return result;
 }
@@ -156,8 +179,12 @@ auto kube_pod_committed() -> CommittedOpsObservation {
   result.observation.request.operation =
       domain::OpsObservationOperation::kubernetes_pod_health;
   result.observation.request.resource = pod;
-  result.observation.payload =
-      domain::KubernetesPodObservation{pod, domain::OpsPodPhase::failed, {}};
+  result.observation.payload = domain::KubernetesPodObservation{
+      pod,
+      domain::OpsPodPhase::failed,
+      {{"app", std::optional<std::string>{"containerd://app"},
+        domain::OpsContainerState::terminated, domain::OpsReadiness::not_ready,
+        domain::OpsObservationReason::failed_exit, 2, 7}}};
   REQUIRE(domain::validate_recorded_ops_observation(result.observation));
   return result;
 }
@@ -670,4 +697,335 @@ TEST_CASE("Admin explicit actions remain reachable with no visible buttons",
   CHECK(std::holds_alternative<AdminReadHealth>(controls.actions.back()));
   REQUIRE(dialog.on_event(key(U'c')));
   CHECK(std::holds_alternative<AdminCancel>(controls.actions.back()));
+}
+
+TEST_CASE("Admin log controls hydrate exact displayed proof across hidden UI",
+          "[admin][dialog][logs]") {
+  Controls controls;
+  controls.state.snapshots[2] = service_details_committed();
+  controls.state.active_target =
+      controls.state.snapshots[2]->observation.request.target;
+  controls.state.selection_generation = 7;
+  controls.state.log_consent = AdminLogConsentState::disabled;
+  adapters::AdminDialog dialog{controls};
+  dialog.set_toolbar_visible(false);
+  REQUIRE(dialog.on_event(key(U'd')));
+  REQUIRE(dialog.on_event(key(U'l')));
+  const auto& enabled =
+      std::get<AdminEnableDisplayedLogs>(controls.actions.back());
+  REQUIRE(enabled.displayed);
+  CHECK(enabled.displayed->observation_event.value() == "service-details");
+  const auto& source =
+      std::get<domain::LinuxServiceIdentity>(enabled.displayed->source);
+  CHECK(source.unit_name == "example.service");
+  REQUIRE(source.invocation_id);
+
+  REQUIRE(dialog.on_event(key(U'g')));
+  CHECK(
+      std::holds_alternative<AdminReadDisplayedLogs>(controls.actions.back()));
+  REQUIRE(dialog.on_event(key(U'o')));
+  CHECK(std::holds_alternative<AdminDisableDisplayedLogs>(
+      controls.actions.back()));
+}
+
+TEST_CASE("Admin reads newly enabled retained consent from the detail view",
+          "[admin][dialog][logs][revision]") {
+  Controls controls;
+  controls.advance_log_policy = true;
+  controls.state.snapshots[2] = service_details_committed();
+  controls.state.active_target =
+      controls.state.snapshots[2]->observation.request.target;
+  controls.state.selection_generation = 7;
+  controls.state.log_policy_revision = 1;
+  controls.state.log_consent = AdminLogConsentState::disabled;
+  adapters::AdminDialog dialog{controls};
+  dialog.set_toolbar_visible(false);
+  REQUIRE(dialog.on_event(key(U'd')));
+  REQUIRE(dialog.on_event(key(U'l')));
+  CHECK(controls.state.selection_generation == 8);
+  CHECK(controls.state.log_policy_revision == 2);
+  REQUIRE(dialog.on_event(key(U'g')));
+  const auto& read = std::get<AdminReadDisplayedLogs>(controls.actions.back());
+  REQUIRE(read.displayed);
+  CHECK(read.displayed->selection_generation == 8);
+  CHECK(read.displayed->log_policy_revision == 2);
+  CHECK(read.displayed->observation_event.value() == "service-details");
+}
+
+TEST_CASE("Admin log buttons and menus dispatch the same exact typed proof",
+          "[admin][dialog][logs][toolbar]") {
+  for (const auto choice : {0, 1, 2}) {
+    Controls controls;
+    controls.state.snapshots[2] = service_details_committed();
+    controls.state.active_target =
+        controls.state.snapshots[2]->observation.request.target;
+    controls.state.selection_generation = 7;
+    controls.state.log_policy_revision = 1;
+    if (choice == 1) {
+      const auto& snapshot = *controls.state.snapshots[2];
+      controls.state.log_consent = AdminLogConsentState::enabled;
+      controls.state.log_source = std::get<domain::LinuxServiceObservation>(
+                                      snapshot.observation.payload)
+                                      .identity;
+      controls.state.log_evidence_event = snapshot.observation_event_id;
+    }
+    adapters::AdminDialog dialog{controls};
+    REQUIRE(dialog.on_event(key(U'd')));
+    const std::string_view button = choice == 0   ? "[ Allow logs ]"
+                                    : choice == 1 ? "[ Revoke logs ]"
+                                                  : "[ Read logs ]";
+    REQUIRE(click(dialog, button));
+    REQUIRE_FALSE(controls.actions.empty());
+    const auto& action = controls.actions.back();
+    const AdminDisplayedLogSource* proof{};
+    if (choice == 0) {
+      const auto& typed = std::get<AdminEnableDisplayedLogs>(action);
+      REQUIRE(typed.displayed);
+      proof = &*typed.displayed;
+    } else if (choice == 1) {
+      const auto& typed = std::get<AdminDisableDisplayedLogs>(action);
+      REQUIRE(typed.displayed);
+      proof = &*typed.displayed;
+    } else {
+      const auto& typed = std::get<AdminReadDisplayedLogs>(action);
+      REQUIRE(typed.displayed);
+      proof = &*typed.displayed;
+    }
+    REQUIRE(proof);
+    CHECK(proof->observation_event.value() == "service-details");
+  }
+
+  for (const auto choice : {0, 1, 2}) {
+    Controls controls;
+    controls.state.snapshots[2] = service_details_committed();
+    controls.state.active_target =
+        controls.state.snapshots[2]->observation.request.target;
+    controls.state.selection_generation = 7;
+    controls.state.log_policy_revision = 1;
+    adapters::AdminDialog dialog{controls};
+    REQUIRE(dialog.on_event(key(U'd')));
+    REQUIRE(click(dialog, "Read"));
+    const std::string_view item = choice == 0   ? "Enable displayed logs"
+                                  : choice == 1 ? "Disable displayed logs"
+                                                : "Read displayed logs";
+    REQUIRE(click(dialog, item));
+    REQUIRE_FALSE(controls.actions.empty());
+    const bool typed =
+        choice == 0 ? std::holds_alternative<AdminEnableDisplayedLogs>(
+                          controls.actions.back())
+        : choice == 1 ? std::holds_alternative<AdminDisableDisplayedLogs>(
+                            controls.actions.back())
+                      : std::holds_alternative<AdminReadDisplayedLogs>(
+                            controls.actions.back());
+    CHECK(typed);
+  }
+}
+
+TEST_CASE("Admin Pod log controls bind the displayed container runtime proof",
+          "[admin][dialog][kubernetes][logs]") {
+  Controls controls;
+  controls.state.snapshots[4] = kube_pod_committed();
+  controls.state.active_target =
+      controls.state.snapshots[4]->observation.request.target;
+  controls.state.selection_generation = 9;
+  controls.state.log_policy_revision = 1;
+  adapters::AdminDialog dialog{controls};
+  REQUIRE(dialog.on_event(key(U'p')));
+  REQUIRE(dialog.on_event(key(U'l')));
+  const auto& action =
+      std::get<AdminEnableDisplayedLogs>(controls.actions.back());
+  REQUIRE(action.displayed);
+  const auto& source =
+      std::get<domain::KubernetesPodIdentity>(action.displayed->source);
+  CHECK(source.name == "broken-pod");
+  CHECK(source.uid == id<domain::OpsResourceUid>("pod-uid"));
+  REQUIRE(source.container);
+  CHECK(source.container->name == "app");
+  CHECK(source.container->runtime_identity == "containerd://app");
+}
+
+TEST_CASE(
+    "Admin requires an explicit container choice for multi-container Pods",
+    "[admin][dialog][kubernetes][logs]") {
+  Controls controls;
+  auto pod = kube_pod_committed();
+  std::get<domain::KubernetesPodObservation>(pod.observation.payload)
+      .containers.push_back(
+          {"sidecar", std::optional<std::string>{"containerd://sidecar"},
+           domain::OpsContainerState::running, domain::OpsReadiness::ready,
+           domain::OpsObservationReason::none, 0, 0});
+  REQUIRE(domain::validate_recorded_ops_observation(pod.observation));
+  controls.state.snapshots[4] = std::move(pod);
+  controls.state.active_target =
+      controls.state.snapshots[4]->observation.request.target;
+  controls.state.selection_generation = 9;
+  controls.state.log_policy_revision = 1;
+  adapters::AdminDialog dialog{controls};
+  REQUIRE(dialog.on_event(key(U'p')));
+  REQUIRE(click(dialog, "Container sidecar"));
+  REQUIRE(dialog.on_event(key(U'l')));
+  const auto& action =
+      std::get<AdminEnableDisplayedLogs>(controls.actions.back());
+  REQUIRE(action.displayed);
+  const auto& source =
+      std::get<domain::KubernetesPodIdentity>(action.displayed->source);
+  REQUIRE(source.container);
+  CHECK(source.container->name == "sidecar");
+  CHECK(source.container->runtime_identity == "containerd://sidecar");
+}
+
+TEST_CASE("Admin container command resolves only exact displayed Pod proof",
+          "[admin][dialog][kubernetes][logs][commands]") {
+  Controls controls;
+  auto pod = kube_pod_committed();
+  std::get<domain::KubernetesPodObservation>(pod.observation.payload)
+      .containers.push_back(
+          {"sidecar", std::optional<std::string>{"containerd://sidecar"},
+           domain::OpsContainerState::running, domain::OpsReadiness::ready,
+           domain::OpsObservationReason::none, 0, 0});
+  REQUIRE(domain::validate_recorded_ops_observation(pod.observation));
+  controls.state.snapshots[4] = std::move(pod);
+  controls.state.active_target =
+      controls.state.snapshots[4]->observation.request.target;
+  controls.state.selection_generation = 9;
+  controls.state.log_policy_revision = 1;
+  controls.require_current_log_proof = true;
+  adapters::AdminDialog dialog{controls};
+  REQUIRE(dialog.on_event(key(U'p')));
+
+  REQUIRE(dialog.enable_displayed_container_logs("sidecar"));
+  const auto& enabled =
+      std::get<AdminEnableDisplayedLogs>(controls.actions.back());
+  REQUIRE(enabled.displayed);
+  const auto& source =
+      std::get<domain::KubernetesPodIdentity>(enabled.displayed->source);
+  REQUIRE(source.container);
+  CHECK(source.container->name == "sidecar");
+  CHECK(source.container->runtime_identity == "containerd://sidecar");
+
+  const auto calls = controls.actions.size();
+  REQUIRE_FALSE(dialog.enable_displayed_container_logs("unknown"));
+  CHECK(controls.actions.size() == calls);
+
+  ++controls.state.selection_generation;
+  REQUIRE_FALSE(dialog.enable_displayed_container_logs("sidecar"));
+  CHECK(controls.actions.size() == calls + 1);
+}
+
+TEST_CASE("Admin container command rejects missing or ambiguous runtime proof",
+          "[admin][dialog][kubernetes][logs][commands][failure]") {
+  for (const bool duplicate : {false, true}) {
+    Controls controls;
+    auto pod = kube_pod_committed();
+    auto& containers =
+        std::get<domain::KubernetesPodObservation>(pod.observation.payload)
+            .containers;
+    if (duplicate) {
+      containers.push_back(containers.front());
+    } else {
+      containers.front().runtime_identity.reset();
+    }
+    controls.state.snapshots[4] = std::move(pod);
+    controls.state.active_target =
+        controls.state.snapshots[4]->observation.request.target;
+    controls.state.selection_generation = 9;
+    controls.state.log_policy_revision = 1;
+    adapters::AdminDialog dialog{controls};
+    REQUIRE(dialog.on_event(key(U'p')));
+    REQUIRE_FALSE(dialog.enable_displayed_container_logs("app"));
+    CHECK(controls.actions.empty());
+  }
+}
+
+TEST_CASE(
+    "Admin separates displayed log candidate from retained consent source",
+    "[admin][dialog][logs]") {
+  Controls controls;
+  auto candidate = service_details_committed();
+  auto& request = candidate.observation.request;
+  request.resource = domain::LinuxServiceIdentity{"beta.service", {}};
+  std::get<domain::LinuxServiceObservation>(candidate.observation.payload)
+      .identity = {"beta.service",
+                   id<domain::OpsResourceUid>("beta-invocation")};
+  REQUIRE(domain::validate_recorded_ops_observation(candidate.observation));
+  const auto target = request.target;
+  controls.state.snapshots[2] = std::move(candidate);
+  controls.state.active_target = target;
+  controls.state.selection_generation = 7;
+  controls.state.log_policy_revision = 1;
+  controls.state.log_consent = AdminLogConsentState::enabled;
+  controls.state.log_source = domain::LinuxServiceIdentity{
+      "alpha.service", id<domain::OpsResourceUid>("alpha-invocation")};
+  controls.state.log_evidence_event = id<domain::EventId>("alpha-details");
+  adapters::AdminDialog dialog{controls};
+  REQUIRE(dialog.on_event(key(U'd')));
+
+  REQUIRE(dialog.on_event(key(U'o')));
+  const auto& disabled =
+      std::get<AdminDisableDisplayedLogs>(controls.actions.back());
+  REQUIRE(disabled.displayed);
+  CHECK(std::get<domain::LinuxServiceIdentity>(disabled.displayed->source)
+            .unit_name == "alpha.service");
+
+  REQUIRE(dialog.on_event(key(U'l')));
+  const auto& enabled =
+      std::get<AdminEnableDisplayedLogs>(controls.actions.back());
+  REQUIRE(enabled.displayed);
+  CHECK(std::get<domain::LinuxServiceIdentity>(enabled.displayed->source)
+            .unit_name == "beta.service");
+}
+
+TEST_CASE("Admin repeats service and Pod log reads from retained exact consent",
+          "[admin][dialog][logs]") {
+  for (const bool kubernetes : {false, true}) {
+    Controls controls;
+    controls.state.log_consent = AdminLogConsentState::enabled;
+    controls.state.selection_generation = kubernetes ? 10 : 8;
+    controls.state.log_policy_revision = 2;
+    controls.state.log_evidence_event =
+        id<domain::EventId>(kubernetes ? "pod-health" : "service-health");
+    controls.state.active_target =
+        kubernetes ? kube_pod_committed().observation.request.target
+                   : service_details_committed().observation.request.target;
+    controls.state.log_source =
+        kubernetes
+            ? domain::OpsResourceIdentity{domain::KubernetesPodIdentity{
+                  "apps", "broken-pod", id<domain::OpsResourceUid>("pod-uid"),
+                  domain::KubernetesContainerIdentity{"app",
+                                                      "containerd://app"}}}
+            : domain::OpsResourceIdentity{domain::LinuxServiceIdentity{
+                  "example.service", id<domain::OpsResourceUid>("invocation")}};
+    AdminDisplayedLogSource active{*controls.state.session,
+                                   *controls.state.active_target,
+                                   controls.state.selection_generation,
+                                   controls.state.log_policy_revision,
+                                   *controls.state.log_evidence_event,
+                                   *controls.state.log_source};
+    adapters::AdminDialog dialog{controls};
+    REQUIRE(dialog.execute(AdminReadDisplayedLogs{active}));
+    REQUIRE(dialog.on_event(key(U'g')));
+    const auto& repeated =
+        std::get<AdminReadDisplayedLogs>(controls.actions.back());
+    REQUIRE(repeated.displayed);
+    CHECK(repeated.displayed->source == active.source);
+    CHECK(repeated.displayed->observation_event == active.observation_event);
+  }
+}
+
+TEST_CASE("Admin compact view exposes log consent and exact source",
+          "[admin][dialog][logs][compact]") {
+  Controls controls;
+  controls.state.snapshots[2] = service_details_committed();
+  controls.state.active_target =
+      controls.state.snapshots[2]->observation.request.target;
+  controls.state.selection_generation = 8;
+  controls.state.log_consent = AdminLogConsentState::enabled;
+  controls.state.log_source = domain::LinuxServiceIdentity{
+      "example.service", id<domain::OpsResourceUid>("invocation")};
+  controls.state.log_evidence_event = id<domain::EventId>("service-details");
+  adapters::AdminDialog dialog{controls};
+  REQUIRE(dialog.on_event(key(U'd')));
+  const auto tiny = render(dialog, 20, 5);
+  CHECK(tiny.find("log on") != std::string::npos);
+  CHECK(tiny.find("exampl") != std::string::npos);
 }

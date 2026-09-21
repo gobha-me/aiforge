@@ -23,8 +23,8 @@ infrastructure.
 
 The accepted implementation grows in bounded milestones from the neutral
 target/request contract. Each milestone below records its delivered boundary;
-remaining log consent, model explanation and diagnostic smoke journeys still
-gate completion of #226.
+the standalone Admin TUI and final diagnostic smoke journeys still gate
+completion of #226.
 
 ## Neutral binding and request authority
 
@@ -87,11 +87,11 @@ and query are closed and include the exact namespace, Pod, container, time, line
 and byte bounds; no follow, previous-container, selector or arbitrary option is
 accepted.
 
-This is a runtime and adapter foundation. It does not itself expose a command,
-dialog or controller action that asks the user for log consent. A later surface
-must start the activation-bound consent owner, apply an explicit user decision
-for one exact source and rebind the returned authority; constructing or loading
-a domain authority alone cannot enable broker effects.
+The runtime and adapter foundation does not enable collection by construction.
+The production integration recorded below starts the activation-bound consent
+owner, applies an explicit user decision for one exact source and rebinds the
+returned authority; constructing or loading a domain authority alone cannot
+enable broker effects.
 
 ## Source and credential custody
 
@@ -441,9 +441,12 @@ GetUnit's path and Unit.Id must match the exact canonical service name before
 other properties are read. Returned paths never select arbitrary endpoints.
 Properties use a closed schema and fixed neutral mappings. InvocationID is read
 before and after each retained service's state/details; an explicit selected
-invocation must match, while name-only health retains name-only result identity.
-Restart, disappearance and changed final transport binding return no evidence.
-These checks produce sampled facts, not an atomic freeze of systemd state.
+invocation must match, while name-only health returns the invocation proved by
+those two reads, or its proved absence. This lets a later explicit log-consent
+step bind the sampled invocation without treating the unit name as runtime
+identity. Restart, disappearance and changed final transport binding return no
+evidence. These checks produce sampled facts, not an atomic freeze of systemd
+state.
 
 Discovery describes loaded services and independently binds retained rows to
 their observed invocation. It validates the bounded whole list, admits an output
@@ -885,6 +888,46 @@ supported 20-by-5 boundary.
 This presentation milestone enables no log collection or model explanation.
 Application integrations retain the existing owner-thread session, policy,
 approval and physical worker lifecycle contracts.
+
+### Explicit production log-consent milestone
+
+The Admin controller starts one process-local consent owner for each attached
+broker activation when its first selected source is ready. The initial exact
+target authority contains that target kind's log operation but has an empty,
+disabled policy. Requesting another target immediately revokes and rebinds any
+enabled source. Once preparation finishes, the controller uses the consent
+owner's current counters and replaces the selection with a newer disabled
+snapshot before native binding. The controller retains the selected source only
+for consent rebinding.
+Detach, session replacement and destruction explicitly revoke the consent owner
+and release that source. Closing the view alone does not end the session.
+
+Enable, disable and read are separate typed actions. A service action carries a
+displayed committed service-health event whose payload proves the exact systemd
+invocation. A Pod action carries a displayed committed Pod-health event whose
+payload proves the exact Pod UID, container name and runtime identity. Session,
+full target binding, selection generation, event and source must all match.
+Missing or stale proof fails before consent or source access. Each policy change
+advances both revisions and is rebound to the same retained source. Disabling
+changes the activation before cancelling an in-flight read, so its late log text
+cannot publish. Any consent change or target replacement followed by native bind
+failure revokes the owner and leaves the controller fatally unbound.
+Any other fatal controller or manual-session failure also revokes the owner,
+releases its retained live source and exposes no current target authority;
+previously committed evidence remains available with its original provenance.
+
+Service and Pod log evidence use distinct cached slots. Toolbar, menus, hidden
+toolbar keys and slash commands send the same actions. For a multi-container
+Pod, `/admin logs enable <container>` resolves the name only within the currently
+displayed committed Pod-health proof and then sends the same exact-source enable
+action; missing, duplicate, stale or runtime-unattested identities fail closed.
+The compact 20-by-5 view keeps consent and selected source visible. None of
+these actions selects or invokes Explain. One-shot `service-logs` and `pod-logs`
+require the explicit
+`--allow-log-text` flag. They first perform one bounded health read to resolve
+the service invocation or container runtime identity, enable only that source,
+perform one finite log read, and revoke/close on every exit. The standalone path
+has no model or provider dependency.
 
 ## Configured Admin catalog milestone
 

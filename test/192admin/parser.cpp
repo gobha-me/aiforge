@@ -52,6 +52,12 @@ TEST_CASE(
       std::vector<std::string_view>{"admin", "pod", "broken-pod", "--uid",
                                     "uid", "extra"},
       std::vector<std::string_view>{"admin", "events", "--pod", "broken-pod"},
+      std::vector<std::string_view>{"admin", "service-logs", "a.service"},
+      std::vector<std::string_view>{"admin", "pod-logs", "pod", "--uid", "uid",
+                                    "--container", "app"},
+      std::vector<std::string_view>{"admin", "pod-logs", "pod", "--uid", "uid",
+                                    "--container", "App", "--allow-log-text"},
+      std::vector<std::string_view>{"admin", "health", "--allow-log-text"},
       std::vector<std::string_view>{"admin", "health", "extra"},
       std::vector<std::string_view>{"admin", "health", "--target"},
       std::vector<std::string_view>{"admin", "health", "--target", "local",
@@ -149,12 +155,37 @@ TEST_CASE("Admin schema IDs and help remain valid without service execution",
                std::vector<std::string_view>{"admin", "service", "--help"},
                std::vector<std::string_view>{"admin", "workloads", "--help"},
                std::vector<std::string_view>{"admin", "pod", "--help"},
+               std::vector<std::string_view>{"admin", "service-logs", "--help"},
+               std::vector<std::string_view>{"admin", "pod-logs", "--help"},
                std::vector<std::string_view>{"admin", "events", "--help"});
   Fixture f;
   CHECK(f.run(arguments) == 0);
   CHECK(f.admin.calls == 0);
   CHECK(f.output.str().find("admin") != std::string::npos);
   CHECK(f.error.str().empty());
+}
+
+TEST_CASE("Admin log leaves require explicit text consent and closed identity",
+          "[admin][cli][logs]") {
+  Fixture f;
+  REQUIRE(f.run({"admin", "service-logs", "a.service", "--target", "local",
+                 "--allow-log-text"}) == 0);
+  REQUIRE(f.admin.seen);
+  CHECK(f.admin.seen->operation == AdminCommand::Operation::service_logs);
+  CHECK(f.admin.seen->unit == "a.service");
+  CHECK(f.admin.seen->allow_log_text);
+  CHECK_FALSE(f.admin.seen->container);
+
+  f.admin.seen.reset();
+  REQUIRE(f.run({"admin", "pod-logs", "broken-pod", "--uid", "pod-uid",
+                 "--container", "app", "--target", "cluster",
+                 "--allow-log-text"}) == 0);
+  REQUIRE(f.admin.seen);
+  CHECK(f.admin.seen->operation == AdminCommand::Operation::pod_logs);
+  CHECK(f.admin.seen->pod == "broken-pod");
+  CHECK(f.admin.seen->pod_uid->value() == "pod-uid");
+  CHECK(f.admin.seen->container == "app");
+  CHECK(f.admin.seen->allow_log_text);
 }
 TEST_CASE(
     "Admin leaves dispatch exact closed requests without provider services",
